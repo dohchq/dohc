@@ -9,7 +9,7 @@ afterEach(cleanup);
 // What A DELETE PROMISES (#802, sweep blocker 3 and delta findings 5 and 8).
 //
 // An ordinary workspace's delete goes to a trash and can be restored from
-// there — from the system trash, or from `.dohc/trash` whenever the system
+// there — from the system trash, or from `.dohc/local/trash` whenever the system
 // trash refuses, which is any rejection and not only a drive that lacks one.
 //
 // A share view's delete removes the projection of a moment. There is no trash
@@ -40,7 +40,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     pinned: [],
     openEditorsHeight: 200,
     onOpenEditorsHeightChange: vi.fn(),
-    createRequest: null,
+    newFolderRequest: null,
+    onNewPage: vi.fn(),
     onOpenFile: vi.fn(),
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
@@ -77,7 +78,7 @@ describe("the delete confirmation states where the file goes", () => {
     render(<Explorer {...explorerProps()} />);
     const text = confirmText("one");
     expect(text).toContain("system trash");
-    expect(text).toContain(".dohc/trash");
+    expect(text).toContain(".dohc/local/trash");
     expect(text).toContain("restored from there");
     // The fallback fires on any trash rejection, not only a drive without one
     // — `deletePath` catches every `trashItem` error, and copy.md names this
@@ -97,7 +98,7 @@ describe("the delete confirmation states where the file goes", () => {
       text,
       "a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
     ).not.toContain("system trash");
-    expect(text).not.toContain(".dohc/trash");
+    expect(text).not.toContain(".dohc/local/trash");
     expect(text).not.toContain("restored from there");
     // And the irreversibility is stated, before the change runs. An
     // irreversible change the user is told about afterwards is the product

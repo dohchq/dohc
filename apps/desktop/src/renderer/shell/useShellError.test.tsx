@@ -5,20 +5,128 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { SyncedDeletionRevivalError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 const strict = ({ children }: { children: ReactNode }) => (
   <StrictMode>{children}</StrictMode>
 );
 
 describe("useShellError", () => {
+  it("drops a late History refusal from the previous workspace", () => {
+    const { result, rerender } = renderHook(({ workspaceId }) => useShellError(workspaceId), {
+      initialProps: { workspaceId: "before" },
+    });
+    const oldReport = result.current.reportShellError;
+    rerender({ workspaceId: "after" });
+    act(() => oldReport("Could not restore this file.", new SyncedDeletionRevivalError("old.txt")));
+    expect(result.current.shellErrors).toEqual([]);
+    act(() => result.current.reportShellError("Could not restore this file.", new SyncedDeletionRevivalError("current.txt")));
+    expect(result.current.shellErrors[0]!.title).toContain("current.txt");
+  });
+  it("keeps a History deletion refusal in the toast and Notices when the toast closes", () => {
+    const { result } = renderHook(() => useShellError("guard-history"));
+    const retry = vi.fn();
+    act(() => result.current.reportShellError("Could not restore this file.",
+      new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+    expect(notice.message).toBe("Copy its text from its History into a file with a new name.");
+    expect(notice.details).toContainEqual(["Reason", "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them."]);
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBeNull();
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true, message: notice.message });
+  });
+
+  it("toasts each copy once, restores its row on restart, and clears it on open", () => {
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"]] as const;
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies(copies, open));
+    const row = first.result.current.shellErrors[0]!;
+    expect(row).toMatchObject({ title: "Kept a copy of n.md", seen: false, retry: null,
+      message: "It changed outside dohc. That change is now in n (kept copy).md.", action: { label: "Open copy", ends: true } });
+    first.unmount();
+    const second = renderHook(() => useShellError("ws-a"));
+    act(() => second.result.current.showOutsideCopies(copies, open));
+    expect(second.result.current.shellErrors[0]).toMatchObject({ seen: true });
+    act(() => second.result.current.runShellErrorAction(second.result.current.shellErrors[0]!.id));
+    expect(open).toHaveBeenCalledWith("n (kept copy).md");
+    expect(second.result.current.shellErrors).toHaveLength(0);
+    second.unmount();
+    const third = renderHook(() => useShellError("ws-a"));
+    act(() => third.result.current.showOutsideCopies(copies, open));
+    expect(third.result.current.shellErrors).toHaveLength(0);
+  });
+
+  it("does not toast an older copy again when a newer copy disappears", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const first = ["n.md", "n (kept copy).md", "copy-n-1"] as const;
+    const second = ["n.md", "n (kept copy 2).md", "copy-n-2"] as const;
+    act(() => result.current.showOutsideCopies([first], open));
+    act(() => result.current.showOutsideCopies([first, second], open));
+    act(() => result.current.showOutsideCopies([first], open));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true });
+    expect(result.current.shellErrors[0]!.message).toContain(first[1]);
+  });
+
+  it("toasts a new receipt that reuses an older copy's file name", () => {
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "old"]], vi.fn()));
+    first.unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "new"]], vi.fn()));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.seen).toBe(false);
+  });
+
+  it("keeps one row per original, replaces it with the newest copy, and remembers dismissal", () => {
+    const { result, unmount } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"], ["m.md", "m (kept copy).md", "copy-m-1"]] as const;
+    act(() => result.current.showOutsideCopies(copies, open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    act(() => result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    const row = result.current.shellErrors.find(row => row.identity === "outside-copy:n.md")!;
+    expect(row.message).toContain("n (kept copy 2).md");
+    expect(row.seen).toBe(false);
+    act(() => result.current.dismissShellError(row.id));
+    unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.title).toBe("Kept a copy of m.md");
+  });
+
+  it("renders and stores nothing again when a status repeats its copies", () => {
+    let renders = 0;
+    const { result } = renderHook(() => { renders += 1; return useShellError("ws-a"); });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    // Each status answer carries a new array, so each call builds its own.
+    const repeat = (copies: () => (readonly [string, string, string])[]) => {
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      const rows = result.current.shellErrors, rendered = renders, writes = setItem.mock.calls.length;
+      act(() => result.current.showOutsideCopies(copies(), vi.fn()));
+      expect(result.current.shellErrors).toBe(rows);
+      expect(renders).toBe(rendered);
+      expect(setItem).toHaveBeenCalledTimes(writes);
+    };
+    repeat(() => []);
+    repeat(() => [["n.md", "n (kept copy).md", "copy-n-1"]]);
+    setItem.mockRestore();
+  });
+
   it("keeps a held source error in Notices with the repair words and retry", async () => {
-    const capture = { running: true, settled: true, degraded: false, heldFiles: [{
+    const capture = { deferredWrites: [], running: true, settled: true, degraded: false, heldFiles: [{
       workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
       observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
       observedAtMs: 1, attemptCount: 1, retryRequested: false,
@@ -32,13 +140,32 @@ describe("useShellError", () => {
     act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
       new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
     const notice = result.current.shellErrors[0]!;
-    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
     act(() => result.current.hideShellError(notice.id));
     expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
     act(() => result.current.shellErrors[0]!.retry!());
     expect(retry).toHaveBeenCalledOnce();
+  });
+  it("keeps one row for where schedules run: a warning while another computer runs them, an error with Try again while none does", () => {
+    const retry = vi.fn();
+    const takeOver = vi.fn();
+    const { result } = renderHook(() => useShellError("ws"));
+    act(() => result.current.showScheduleHostNotice({ message: "This workspace's schedules run on Ice's laptop, not this computer.", failed: false, retry, takeOver }));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ tone: "warning", retry: null, seen: false, action: { label: "Take over now", ends: true } });
+    act(() => result.current.showScheduleHostNotice({ message: "No computer runs this workspace's schedules.", failed: true, cause: "EACCES: permission denied", retry, takeOver }));
+    expect(result.current.shellErrors).toHaveLength(1);
+    const failed = result.current.shellErrors[0]!;
+    expect(failed.tone).toBeUndefined();
+    expect(failed.retry).toBe(retry);
+    expect(failed.details).toEqual([["Cause", "EACCES: permission denied"]]);
+    act(() => result.current.runShellErrorAction(failed.id));
+    expect(takeOver).toHaveBeenCalledOnce();
+    act(() => result.current.showScheduleHostNotice({ message: "No computer runs this workspace's schedules.", failed: true, retry, takeOver }));
+    act(() => result.current.showScheduleHostNotice(null));
+    expect(result.current.shellErrors).toEqual([]);
   });
   it("routes an additional Notice action independently of its primary action", () => {
     const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
@@ -205,6 +332,38 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
+  it("opens History when author names did not sync, instead of retrying sync", () => {
+    const retry = vi.fn();
+    const openHistory = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const reason = "dohc could not verify who changed this file. The file will share without author names.";
+    const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
+      body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.", detail: `${reason}\nWorkspace: ws-a`,
+      target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
+    expect(result.current.shellErrors[0]).toMatchObject({
+      title: notice.title, message: notice.body, tone: "warning", retry: null, action: { label: "Open History" },
+    });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(openHistory).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("copies a refused save's whole path, so two files with one name can be told apart", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const deep = "folder/".repeat(80);
+    const notice = (noticeId: string, path: string) => ({ noticeId, kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
+      body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
+      detail: "dohc could not verify who changed this file. The file will share without author names.\nWorkspace: ws-a",
+      target: { path }, createdAtMs: 1, readAtMs: null, postedHere: true });
+    act(() => result.current.showSyncRefusals([notice("a", `${deep}notes/n.md`), notice("b", `${deep}archive/n.md`)], vi.fn()));
+    const copied = result.current.shellErrors.map(error => errorDetails(error.details ?? []));
+    expect(copied[0]).toContain(`File: ${deep}notes/n.md\n`);
+    expect(copied[1]).toContain(`File: ${deep}archive/n.md\n`);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });
@@ -255,6 +414,41 @@ describe("useShellError", () => {
     act(report);
     act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
     expect(result.current.shellErrors.map((error) => error.message)).toEqual(["Could not load History."]);
+  });
+
+  it("offers to keep the Collections here, then retries what was refused, unless the person cancels", async () => {
+    const keepCollectionsHere = vi.fn(async () => ({ kept: true }));
+    vi.stubGlobal("dohcDesktop", { keepCollectionsHere });
+    try {
+      const retry = vi.fn();
+      const { result } = renderHook(() => useShellError("ws-a"));
+      const words = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-unclaimed]: ${words}`), retry));
+      const row = result.current.shellErrors[0]!;
+      expect(row.message).toBe(`Could not create the Collection. ${words}`);
+      expect(row.action?.label).toBe("Use this computer");
+      await act(async () => { result.current.runShellErrorAction(row.id); });
+      expect(keepCollectionsHere).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+      expect(retry).toHaveBeenCalledOnce();
+      expect(result.current.shellErrors).toEqual([]);
+      // Collections another computer keeps offer it too, behind main's question; a cancelled question retries nothing.
+      keepCollectionsHere.mockResolvedValueOnce({ kept: false });
+      act(() => result.current.reportShellError("Could not create the Collection.",
+        new Error("Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere] [computer=Laptop]: These Collections are on Laptop."), retry));
+      const elsewhere = result.current.shellErrors[0]!;
+      expect(elsewhere.action?.label).toBe("Use this computer");
+      await act(async () => { result.current.runShellErrorAction(elsewhere.id); });
+      expect(retry).toHaveBeenCalledOnce();
+      // A store that is gone, or a record that changed, offers no such step.
+      for (const code of ["collections-missing", "collections-changed"]) {
+        act(() => result.current.reportShellError("Could not create the Collection.",
+          new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]: Words.`)));
+        expect(result.current.shellErrors.at(-1)!.action).toBeUndefined();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {

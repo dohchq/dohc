@@ -7,6 +7,7 @@
 // mounted, and an operation guard pauses new acceptance without dropping a
 // racing edit.
 
+import { createHash } from "node:crypto";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -14,6 +15,7 @@ import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
+import type { RecordSourceCheck } from "./recordSourceCheck";
 import {
   abandonPendingCollectionFieldWrites,
   advanceCollectionWriteLineage,
@@ -46,6 +48,11 @@ vi.mock("../collab/useEngineDoc", () => ({
     return typeof current === "function" ? current(input) : current;
   },
 }));
+// The record's file check runs in a worker; these tests set its answer.
+const sourceMock = vi.hoisted(() => ({ current: null as RecordSourceCheck | null }));
+vi.mock("./recordSourceCheck", () => ({
+  useRecordSourceCheck: (): RecordSourceCheck => sourceMock.current ?? { state: "clear", contentHash: "c".repeat(64) },
+}));
 
 function engineDocState(
   partial: Partial<
@@ -69,6 +76,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   docMock.current = null;
+  sourceMock.current = null;
   resetCollectionFieldWritesForTests();
 });
 
@@ -273,6 +281,82 @@ describe("retained failures", () => {
       expect(collectionWriteFailures()[0]?.message).toContain("without rewriting the others");
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(markdown);
+      host.unmount();
+    } finally { doc.destroy(); }
+  });
+
+  const LOSSY_RECORD =
+    "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
+  const sessionsOpened = (enabled: boolean[], state: UseEngineDoc) => (input: unknown) => {
+    enabled.push((input as { enabled: boolean }).enabled);
+    return state;
+  };
+
+  it("refuses a field write to a lossy note before opening its session", () => {
+    sourceMock.current = { state: "lossy" };
+    const enabled: boolean[] = [];
+    docMock.current = sessionsOpened(enabled, engineDocState({}));
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    expect(collectionWriteFailures()[0]?.message).toBe(LOSSY_RECORD);
+    expect(enabled).not.toContain(true);
+  });
+
+  it("refuses a field write when its record can't be read to check, and opens no session", () => {
+    sourceMock.current = { state: "unreadable" };
+    const enabled: boolean[] = [];
+    docMock.current = sessionsOpened(enabled, engineDocState({}));
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    expect(collectionWriteFailures()[0]?.message).toBe(
+      "dohc did not save this change because it could not read this record to check it. Try again.",
+    );
+    expect(enabled).not.toContain(true);
+  });
+
+  it("keeps a field edit queued while its record is checked, then opens its session and applies it", () => {
+    sourceMock.current = { state: "checking" };
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", CHANGE.recordId);
+    const enabled: boolean[] = [];
+    docMock.current = (input: unknown) => {
+      const on = (input as { enabled: boolean }).enabled;
+      enabled.push(on);
+      return on ? engineDocState({ available: true, doc }) : engineDocState({});
+    };
+    const host = render(<CollectionFieldWriteHost />);
+    try {
+      enqueue();
+      expect(collectionWriteFailures()).toEqual([]);
+      expect(hasPendingCollectionFieldWrites()).toBe(true);
+      expect(enabled).not.toContain(true);
+      expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+
+      sourceMock.current = null;
+      host.rerender(<CollectionFieldWriteHost />);
+      expect(doc.getMap("frontmatter").get("status")).toBe("done");
+      settleHead(host, doc);
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+    } finally { host.unmount(); doc.destroy(); }
+  });
+
+  it("refuses a field write when its session holds a lossy note other than the bytes it checked", async () => {
+    const markdown = "---\nid: rec-1\nstatus: draft\n---\n\n<details>\n\nHidden.\n</details>\n";
+    // The record's live document as the desktop seeds it, with a witness of
+    // a file that changed after the check read it.
+    const doc = markdownToYDoc(markdown);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", markdown);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(markdown));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    const before = Y.encodeStateAsUpdate(doc);
+    try {
+      docMock.current = engineDocState({ available: true, doc });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      await waitFor(() => expect(collectionWriteFailures()[0]?.message).toBe(LOSSY_RECORD));
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       host.unmount();
     } finally { doc.destroy(); }
   });

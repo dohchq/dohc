@@ -77,19 +77,19 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     let service = Arc::new(EngineService::new());
     let mut notices = service.events().subscribe();
     let transport = InProcessTransport::new(service);
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
             "captureMode": "none", "projectCollections": true }),
-            ),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     call(
@@ -375,18 +375,18 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
     seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
-            ),
-        )
-        .await
-        .expect("open watched workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
+        ),
+    )
+    .await
+    .expect("open watched workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
 
@@ -758,21 +758,21 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -893,21 +893,21 @@ async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
     seed_schema(&scratch, &schema);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let response = transport
@@ -983,21 +983,21 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
     drop(connection);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -1050,21 +1050,21 @@ async fn assert_capture_authored_record_edit(human: bool) {
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -1307,21 +1307,21 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -1535,21 +1535,21 @@ async fn an_automation_write_names_its_run_in_record_history() {
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let session = call(
@@ -1784,21 +1784,21 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
 
         let service = Arc::new(EngineService::new());
         let transport = InProcessTransport::new(Arc::clone(&service));
-        let opened = transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    100,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": WORKSPACE_ID,
-                    }),
-                ),
-            )
-            .await
-            .expect("open device");
+        let opened = call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                100,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open device");
         let handle: WorkspaceHandle =
             serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
         let seeded = call(
@@ -1982,21 +1982,21 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2040,21 +2040,21 @@ async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2103,21 +2103,21 @@ async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() 
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2211,21 +2211,21 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2309,21 +2309,21 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2497,21 +2497,21 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2692,21 +2692,21 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2835,21 +2835,21 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -2928,21 +2928,21 @@ async fn collection_query_refuses_a_ninth_sort_clause() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "fields:\n  title:\n    type: text\n");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let sorts = (0..9)
@@ -3019,21 +3019,21 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let status_of = |query: &Value| {
@@ -3202,21 +3202,21 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let baseline = call(
@@ -3322,7 +3322,10 @@ struct ParkedRecordUpdate {
 
 const PARKED_REMOTE_ORIGIN: &str = "remote-parked-editor";
 
-async fn park_remote_status_update() -> ParkedRecordUpdate {
+async fn park_remote_status_update(
+    service: Option<Arc<EngineService>>,
+    base_relay_seq: i64,
+) -> ParkedRecordUpdate {
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -3367,23 +3370,23 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     drop(connection);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let service = Arc::new(EngineService::new());
+    let service = service.unwrap_or_else(|| Arc::new(EngineService::new()));
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                100,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            100,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -3442,7 +3445,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
             &key,
             ContentKind::Richdoc,
             &base,
-            &BaseRelayCoordinate::new(base_origin, base_seq, 10).expect("base coordinate"),
+            &BaseRelayCoordinate::new(base_origin, base_seq, base_relay_seq)
+                .expect("base coordinate"),
             &NoFaults,
             10,
         ),
@@ -3552,6 +3556,25 @@ async fn wait_for_record_events(
 }
 
 fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
+    assert_eq!(
+        notices.len(),
+        2,
+        "one field change and one update: {notices:?}"
+    );
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| notice.name == RECORD_UPDATED_EVENT)
+            .count(),
+        1,
+        "exactly one record update fires: {notices:?}"
+    );
+    for notice in notices {
+        assert_eq!(
+            notice.payload["source"],
+            json!({ "originId": PARKED_REMOTE_ORIGIN, "originSeq": 0 })
+        );
+    }
     assert!(
         notices
             .iter()
@@ -3610,7 +3633,7 @@ fn assert_no_automation_claims(scratch: &ScratchDir) {
 /// `workspace.close`, which skips the per-session drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_open_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     call(
         &parked.transport,
         &parked.handle,
@@ -3620,22 +3643,21 @@ async fn a_parked_update_drained_on_open_fires_record_events() {
     )
     .await;
 
-    let reopened = parked
-        .transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                301,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": parked.scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen workspace");
+    let reopened = call_with_busy_retry(
+        &parked.transport,
+        RequestContext::unbounded(),
+        request(
+            301,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": parked.scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("workspace handle");
     let mut events = parked.service.events().subscribe();
@@ -3664,7 +3686,7 @@ async fn a_parked_update_drained_on_open_fires_record_events() {
 /// its record events on the daemon event channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_close_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let mut events = parked.service.events().subscribe();
     call(
         &parked.transport,
@@ -3692,7 +3714,7 @@ async fn a_parked_update_drained_on_close_fires_record_events() {
 /// record events, whose queue rows the drain already consumed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     let mut events = parked.service.events().subscribe();
     let refused = parked
         .transport
@@ -3743,13 +3765,461 @@ fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
         .expect("count deferred updates")
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_parked_record_events_once_after_a_claim_mismatch() {
+    let parked = park_remote_status_update(None, 10).await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut events = parked.service.events().subscribe();
+    let connection = rusqlite::Connection::open(&db).expect("fixture connection");
+    let claim: String = connection
+        .query_row(
+            "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .expect("original claim");
+    // As in the lineage replacement tests, move the durable claim ahead of
+    // the session without letting that fixture write drain the queue.
+    let replacement_doc = Ydoc::wire();
+    replacement_doc
+        .rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n"),
+        )
+        .expect("replacement base");
+    let store = EngineStore::open(&db, 300).expect("open replacement store");
+    let replacement = store
+        .put_binary_blob(&replacement_doc.encode_full_state())
+        .expect("store replacement base");
+    drop(store);
+    assert_ne!(replacement, claim);
+    connection
+        .execute(
+            "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id=?2 AND path='tasks/alpha.md'",
+            rusqlite::params![replacement, WORKSPACE_ID],
+        )
+        .expect("replace claim");
+    let (state, _) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert_eq!(state["lineageClaimId"], json!(replacement));
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    connection
+        .execute(
+            "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id=?2 AND path='tasks/alpha.md'",
+            rusqlite::params![claim, WORKSPACE_ID],
+        )
+        .expect("restore original claim");
+    drop(connection);
+    // This handshake returns to the original claim without draining it.
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        301,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+
+    let (_, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        302,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).expect("resynced document");
+    assert!(
+        doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("status: remote")
+    );
+    assert_eq!(deferred_update_rows(&parked.scratch), 0);
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    call(
+        &parked.transport,
+        &parked.handle,
+        303,
+        "ydoc.settle",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    call(
+        &parked.transport,
+        &parked.handle,
+        304,
+        "ydoc.close",
+        json!({ "sessionId": parked.live_session_id, "settle": false }),
+    )
+    .await;
+    while let Ok(notice) = events.try_recv() {
+        assert!(
+            !notice.name.starts_with("record."),
+            "no repeated event: {notice:?}"
+        );
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_parked_record_events_before_overloaded_and_not_on_retry() {
+    let parked = park_remote_status_update(None, 10).await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    // Retain a real blob response that owns the whole shared egress budget.
+    let bytes = vec![7; dohc_engine_storage::MAX_BLOB_BYTES];
+    let sha = hex_sha256(&bytes);
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    VersionedTextStore::new(&mut store)
+        .write_binary(
+            &dohc_engine_domain::WriteBinary {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "egress-budget-object".to_owned(),
+                path: "budget.bin".to_owned(),
+                bytes,
+                moment_id: "egress-budget-moment".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 300,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed budget blob");
+    drop(store);
+    let held = service_call_with_busy_retry(
+        parked.service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            300,
+            "versionedBinary.readBlob",
+            Some(parked.handle.clone()),
+            json!({ "workspaceId": WORKSPACE_ID, "sha256": sha }),
+        ),
+    )
+    .await
+    .expect("hold egress budget");
+    assert_eq!(
+        held.blob_egress.as_ref().unwrap().bytes.len(),
+        dohc_engine_storage::MAX_BLOB_BYTES
+    );
+    let mut events = parked.service.events().subscribe();
+    let error = service_call_with_busy_retry(
+        parked.service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            301,
+            "ydoc.resync",
+            Some(parked.handle.clone()),
+            json!({ "sessionId": parked.live_session_id }),
+        ),
+    )
+    .await
+    .expect_err("resync has no blob egress budget");
+    assert_eq!(error.code, ErrorCode::Overloaded);
+    assert_eq!(error.message, "blob-egress-capacity");
+    assert_eq!(deferred_update_rows(&parked.scratch), 0);
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    drop(held);
+
+    let (_, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        302,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).expect("retried state");
+    assert!(
+        doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("status: remote")
+    );
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_record_events_only_for_the_same_claim_prefix() {
+    // The local base sits at relay 20, after the foreign base at relay 11, so
+    // the foreign base wins once the session ends. Until then, the live drain
+    // must leave it and its delta queued.
+    let parked = park_remote_status_update(None, 20).await;
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    let object_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("record object");
+    // The foreign base matches the prefix's result. Its next update changes
+    // the field, so draining it would emit a record fact.
+    let foreign = Ydoc::wire();
+    foreign
+        .rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {RECORD_ID}\nstatus: remote\n---\n\nAlpha\n"),
+        )
+        .expect("foreign base");
+    let base = store
+        .put_binary_blob(&foreign.encode_full_state())
+        .expect("foreign base blob");
+    let delta = foreign.frontmatter_set("status", "foreign").unwrap();
+    let delta_sha = store.put_binary_blob(&delta).expect("foreign delta blob");
+    for (seq, sha) in [(0, &base), (1, &delta_sha)] {
+        let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WORKSPACE_ID.to_owned(),
+            origin_id: "foreign-record-editor".to_owned(),
+            origin_seq: seq,
+            relay_seq: Some(11 + seq),
+            op_kind: "ydoc.update".to_owned(),
+            payload: json!({
+                "versionId": "main", "objectId": object_id, "path": "tasks/alpha.md",
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": base, "isBaseState": seq == 0,
+                "actorOriginId": "foreign-record-editor"
+            }),
+            recorded_at_ms: 300 + seq,
+        };
+        let applied = apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park foreign row behind the prefix");
+        assert!(matches!(
+            applied.primary,
+            ApplyDisposition::Applied(result) if result.deferred
+        ));
+    }
+    drop(store);
+    assert_eq!(deferred_update_rows(&parked.scratch), 3);
+    let mut events = parked.service.events().subscribe();
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let prefix = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&prefix);
+    // The foreign base and its delta stay queued, and send nothing.
+    assert_eq!(deferred_update_rows(&parked.scratch), 2);
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_emits_record_events_for_a_drain_but_not_an_owner_draft() {
+    use dohc_engine_collab::owner_outbox::draft::{
+        ObservedOwnerBinding, install_observed_binding_in_tx,
+    };
+
+    let config = serde_json::from_value(json!({
+        "ingress": {
+            "aggregateBytes": 1_000_000_000, "applicationWorkingReserveBytes": 1_000_000,
+            "maxUploads": 2, "uploadDeadlineMs": 30_000
+        },
+        "maxRegistrations": 2, "maxAdoptionBytes": 1_000_000, "maxAdoptionEvents": 100,
+        "maxApplicationsPerSettlement": 100,
+        "ownerOutbox": { "maxPendingBytes": 1_000_000, "maxPendingAgeMs": 100_000 }
+    }))
+    .expect("ordinary host config");
+    let (service, _connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+    let parked = park_remote_status_update(Some(service), 10).await;
+    let mut events = parked.service.events().subscribe();
+    call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        300,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+
+    let db = engine_db_path(&parked.scratch).expect("engine db");
+    let mut store = EngineStore::open(&db, 300).expect("fixture store");
+    let object_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM ydoc_docs WHERE workspace_id=?1 AND path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("record object");
+    let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap();
+    let checkpoint = persisted.doc.encode_full_state();
+    let claim = persisted.marker.lineage_claim_id.unwrap();
+    let update = persisted
+        .doc
+        .frontmatter_set("status", "still-parked")
+        .unwrap();
+    let sha = store.put_binary_blob(&update).expect("next update blob");
+    let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: PARKED_REMOTE_ORIGIN.to_owned(),
+        origin_seq: 1,
+        relay_seq: Some(11),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main", "objectId": object_id, "path": "tasks/alpha.md",
+            "contentKind": "richdoc", "updateBlobSha256": sha,
+            "lineageClaimId": claim, "isBaseState": false,
+            "actorOriginId": PARKED_REMOTE_ORIGIN
+        }),
+        recorded_at_ms: 300,
+    };
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park another record update");
+    assert!(matches!(
+        applied.primary,
+        ApplyDisposition::Applied(result) if result.deferred
+    ));
+    let observed = ObservedOwnerBinding {
+        binding: dohc_engine_collab::LiveObjectBinding {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            main_version_id: "main".to_owned(),
+            object_id,
+            lineage_claim_id: claim,
+            current_path: "tasks/alpha.md".to_owned(),
+            selector_paths: vec!["tasks/alpha.md".to_owned()],
+            restore_fence_generation: 0,
+        },
+        relay_database_namespace: "resync-owner-relay".to_owned(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: persisted.marker.head_update_seq,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        },
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(tx, WORKSPACE_ID, &observed, &checkpoint)
+        })
+        .expect("observe owner binding");
+    drop(store);
+    let (state, bytes) = call_ydoc_with_blob(
+        parked.service.as_ref(),
+        &parked.handle,
+        301,
+        "ydoc.resync",
+        json!({ "sessionId": parked.live_session_id }),
+    )
+    .await;
+    assert!(state["ownerDraft"].is_object());
+    assert_eq!(deferred_update_rows(&parked.scratch), 1);
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).unwrap();
+    assert!(
+        !doc.project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("still-parked")
+    );
+    while let Ok(notice) = events.try_recv() {
+        assert!(!notice.name.starts_with("record."), "{notice:?}");
+        assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    }
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
 /// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
 /// and settle must leave a parked synced update queued. The next `ydoc.open`
 /// drains it and fires the events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record_events() {
-    let parked = park_remote_status_update().await;
+    let parked = park_remote_status_update(None, 10).await;
     call(
         &parked.transport,
         &parked.handle,
@@ -3781,22 +4251,21 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
     let schema = std::fs::read_to_string(&schema_path).expect("read schema");
     std::fs::write(&schema_path, format!("{schema}# reconcile trigger\n")).expect("touch schema");
 
-    let reopened = parked
-        .transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                301,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": parked.scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("reopen workspace");
+    let reopened = call_with_busy_retry(
+        &parked.transport,
+        RequestContext::unbounded(),
+        request(
+            301,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": parked.scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("reopen workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("workspace handle");
     let mut events = parked.service.events().subscribe();
@@ -3881,21 +4350,21 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
     drop(connection);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -4007,21 +4476,21 @@ async fn collections_list_pages_with_the_exclusive_cursor() {
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -4134,21 +4603,21 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
@@ -4246,21 +4715,21 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     let params = json!({ "collectionPath": "negotiated", "limit": 1 });
@@ -4411,18 +4880,18 @@ automations: []
     drop(store);
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let page = call(
@@ -4597,18 +5066,18 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         text
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
+        ),
+    )
+    .await
+    .expect("open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     reconcile_capture(&transport, &handle, 10).await;
@@ -4801,18 +5270,18 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         settled
     );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                70,
-                "workspace.open",
-                None,
-                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
-            ),
-        )
-        .await
-        .expect("restart workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            70,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
+        ),
+    )
+    .await
+    .expect("restart workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("restart handle");
     reconcile_capture(&transport, &handle, 80).await;
@@ -4880,13 +5349,13 @@ async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned(
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let params =
         json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID });
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(1, "workspace.open", None, params.clone()),
-        )
-        .await
-        .expect("open watched workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(1, "workspace.open", None, params.clone()),
+    )
+    .await
+    .expect("open watched workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     let count = |query: &str| -> i64 {
@@ -4925,13 +5394,13 @@ async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned(
 
     let mut abandoning = params;
     abandoning["abandonOrdinaryPull"] = json!(true);
-    let reopened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(42, "workspace.open", None, abandoning),
-        )
-        .await
-        .expect("abandon on the open binding");
+    let reopened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(42, "workspace.open", None, abandoning),
+    )
+    .await
+    .expect("abandon on the open binding");
     assert_eq!(reopened.result["workspace"], json!(handle));
     assert_eq!(
         call(

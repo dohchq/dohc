@@ -1,0 +1,53 @@
+name: Report a bug
+description: Something in dohc doesn't work the way you expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        dohc is in alpha, so reports help a lot. Issues here are public. Leave out anything private, such as file contents, names, or keys.
+        For a security problem, use the private report linked from the new issue page instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: What you did, step by step, so someone else can see it too.
+      placeholder: |
+        1. Create a workspace
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dohc version
+      description: In dohc, open Settings. The version is in the Updates row.
+      placeholder: 0.1.1-nightly.20261030.42.1 · nightly
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Computer
+      description: Your operating system and its version. On Linux, also say whether you installed the .deb or the AppImage.
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error text
+      description: Paste the text of any error. Each error notice in dohc has a copy button beside its text.
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Screenshots, or whether it happens every time.

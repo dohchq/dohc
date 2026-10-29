@@ -362,18 +362,18 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
         .expect("materialize accepted response and schema");
     supervisor.close(&db).expect("close materializer");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({"rootDir": owner_scratch.path().to_string_lossy(), "workspaceId": "w"}),
-            ),
-        )
-        .await
-        .expect("open native owner workspace");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({"rootDir": owner_scratch.path().to_string_lossy(), "workspaceId": "w"}),
+        ),
+    )
+    .await
+    .expect("open native owner workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("owner handle");
     reconcile_until_settled(&transport, &handle, 10).await;

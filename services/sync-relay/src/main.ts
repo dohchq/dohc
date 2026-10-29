@@ -1,7 +1,6 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
@@ -64,7 +63,7 @@ import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
-import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
+import {createServiceHostEnrollmentRoutes, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
 import {TokenBucketLimiter} from "@dohc/service-http";
@@ -262,17 +261,6 @@ if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fata
 if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
 if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
 if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
-const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
-  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
-    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
-const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
-const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
-// Worker files are disposable materializations. The relay database retains authority and recovery history.
-const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
-const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
-  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
-}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -292,7 +280,8 @@ let lookupUserDisplayName: (
 ) => Promise<string | null> | string | null;
 const resolveAccountActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
-  : (() => {
+  : await (async () => {
+      const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
       });
@@ -310,6 +299,18 @@ const resolveAccountActor: ResolveActor = testAuthSeam
       });
       return createSessionActorResolver(auth);
   })();
+
+const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
+  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
+    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
+const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+// Worker files are disposable materializations. The relay database retains authority and recovery history.
+const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
+  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 const resolveActor = resolveAccountActor;
 if (automationsOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
@@ -414,7 +415,7 @@ const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (isServiceHostEnrollmentPath(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -542,7 +543,7 @@ const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
-    /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
+    isServiceHostEnrollmentPath(url.pathname) ? 16 * 1024 :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
@@ -609,6 +610,7 @@ const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startO
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
 const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
 server.once("close",stopOwnerAdmission);
+server.once("close",()=>relayApplication.dispose());
 process.once("SIGINT",stopOwnerAdmission);
 process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
@@ -658,8 +660,8 @@ if (namedLiveConfig) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission, sessionHostBlocked});
-    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, sessionHostBlocked});
+      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!, publicEditRelease}), tickets, captureNative, membership, admission, sessionHostBlocked});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, publicEditRelease, sessionHostBlocked});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
   if (desktopEditorLimits) {

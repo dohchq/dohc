@@ -21,13 +21,14 @@ function menu(platform: NodeJS.Platform) {
 }
 
 describe("shortcut menu contract", () => {
-  it.each(["win32", "darwin"] as const)("derives every explicit %s menu accelerator, including aliases", (platform) => {
+  it.each(["win32", "darwin", "linux"] as const)("derives every explicit %s menu accelerator, including aliases", (platform) => {
     const { items, sendCommand, stepZoom } = menu(platform);
     const expected: string[] = [];
     for (const [id, row] of Object.entries(SHORTCUTS)) {
       // macOS's Edit > Find also shows the editor's find keys.
       const findItem = platform === "darwin" && isEditorMenuCommand(id);
       if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native" && !findItem) continue;
+      if ("platforms" in row && !(row.platforms as readonly string[]).includes(platform)) continue;
       for (const [index, accelerator] of shortcutAccelerators(id as ShortcutId, platform).entries()) {
         expected.push(accelerator);
         const matches = items.filter((item) => item.accelerator === accelerator);
@@ -45,7 +46,7 @@ describe("shortcut menu contract", () => {
           item.click!(undefined!, undefined!, undefined!);
           expect(stepZoom).toHaveBeenCalledExactlyOnceWith(id === "zoom-in" ? "in" : id === "zoom-out" ? "out" : "reset");
         } else {
-          expect(item.role).toBe("close");
+          expect(item.role).toBe(id === "quit" ? "quit" : "close");
         }
         expect(item.visible === false).toBe(index > 0);
       }
@@ -94,7 +95,7 @@ describe("shortcut menu contract", () => {
       "command-palette": "Command palette", "quick-open": "Go to", "new-editor-group-right": "New editor group right",
       "toggle-sidebar": "Toggle sidebar", "toggle-about": "Toggle About", "show-chats": "Chats",
       "toggle-theme": "Toggle light/dark theme", "zoom-reset": "Reset zoom", "zoom-in": "Zoom in", "zoom-out": "Zoom out",
-      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Update and restart",
+      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Restart to update",
     });
   });
 
@@ -126,7 +127,7 @@ describe("shortcut menu contract", () => {
   it("uses B2 command ids for palette actions and keeps the existing non-palette owners explicit", () => {
     const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor" && row.owner !== "history-restore").map(([id]) => id);
     expect(nonPalette.sort()).toEqual([
-      "close-window", "command-palette", "dev-panel",
+      "close-window", "quit", "command-palette", "dev-panel",
       "find-close", "find-next", "find-previous", "find-again-next", "find-again-previous",
       "palette-accept", "palette-dismiss", "palette-move",
     ].sort());

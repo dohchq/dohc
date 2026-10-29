@@ -11,6 +11,7 @@ import { deferred } from "../../testing/deferred";
 import { probeShareViewLog } from "../../workspaces/shareViewInfo";
 import { createShareViewFiles, type ResolvedShareViewFilesTarget } from "../../workspaces/shareViewFiles";
 import { createShareViewDaemonHarness } from "../../testing/shareViewLoopbackTransport";
+import { readLocalStateFrom } from "../../workspaces/workspaceLocalState";
 import { automationPressRelay } from "../../automations/relayedPresses";
 import { useSentNotices } from "./useSentNotices";
 import { useSharedViewAccess } from "./useSharedViewAccess";
@@ -197,6 +198,8 @@ it("keeps the burst after a changed probe and delivers a failure after six secon
   const pullFetch = vi.fn<typeof globalThis.fetch>(async input => new URL(String(input)).pathname.endsWith("/log")
     ? Response.json({ ops, nextCursor: 43, hasMore: false }) : new Response(text));
   const daemon = createShareViewDaemonHarness({ baseUrl: "https://relay.example.test", token: "token", fetch: pullFetch });
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(daemon.sessions);
   const target: ResolvedShareViewFilesTarget = { kind: "standalone", workspaceId: "existing", storeWorkspaceId: "existing",
     rootPath, schedulingRootPath: rootPath, shareId: "share", granterEmail: "owner@test",
     grantedSelector: f.h.workspace.shareView!.grantedSelector, ended: false };

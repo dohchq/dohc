@@ -20,7 +20,9 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("links.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
-        || method.starts_with("liveApplication.")
+        // A recovery store has no capture to wait for.
+        || (method.starts_with("liveApplication.")
+            && method != "liveApplication.closeRecoveryStore")
         || method.starts_with("ydoc.ownerDelivery.")
         || method.starts_with("ydoc.ownerStop.")
         // The main bootstrap is idempotent, and the active version is metadata
@@ -53,6 +55,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "history.page"
                 | "history.operations"
                 | "history.undo"
+                | "history.rewriteLinks"
         )
 }
 
@@ -80,6 +83,21 @@ impl EngineService {
         request: &Request,
     ) -> Result<(), WireError> {
         let method = request.method.as_str();
+        // An earlier store open for recovery answers page reads and its own
+        // close to the configured host, and nothing else to anyone.
+        if self.is_recovery_handle(request.workspace.as_ref()) {
+            let allowed = matches!(
+                method,
+                "ydoc.ownerOutbox.readPending" | "liveApplication.closeRecoveryStore"
+            );
+            if allowed && self.configured_host_caller(ctx).is_ok() {
+                return Ok(());
+            }
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "a recovery store answers only page reads",
+            ));
+        }
         if matches!(
             method,
             "sync.claim"
@@ -95,6 +113,8 @@ impl EngineService {
                 | "liveApplication.checkFirstOpenCandidate"
                 | "ydoc.ownerOutbox.readPending"
                 | "ydoc.ownerOutbox.acknowledge"
+                | "ydoc.ownerOutbox.quarantine"
+                | "ydoc.ownerOutbox.retry"
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
@@ -121,6 +141,8 @@ impl EngineService {
                 "liveApplication.hosts"
                     | "liveApplication.attachWorkspace"
                     | "liveApplication.detachWorkspace"
+                    | "liveApplication.openRecoveryStore"
+                    | "liveApplication.closeRecoveryStore"
                     | "liveApplication.unloadDocument"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
@@ -343,6 +365,12 @@ impl EngineService {
             "liveApplication.detachWorkspace" => {
                 Box::pin(self.configured_detach_workspace(&ctx, request)).await?
             }
+            "liveApplication.openRecoveryStore" => {
+                Box::pin(self.configured_open_recovery_store(&ctx, request)).await?
+            }
+            "liveApplication.closeRecoveryStore" => {
+                Box::pin(self.configured_close_recovery_store(&ctx, request)).await?
+            }
             "liveApplication.unloadDocument" => {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
                     .await?
@@ -507,12 +535,20 @@ impl EngineService {
                 self.owner_ydoc_outbox_read_pending(&ctx, request.workspace, request.params, id)
                     .await?
             }
+            "ydoc.ownerOutbox.listRestoreFenced" => {
+                self.owner_ydoc_outbox_list_restore_fenced(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.ownerOutbox.acknowledge" => {
                 self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.ownerOutbox.quarantine" => {
                 self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.retry" => {
+                self.owner_ydoc_outbox_retry(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.adoptCollectionRecord" => {
@@ -583,6 +619,11 @@ impl EngineService {
                 self.kept_copies_save(request.workspace, request.params)
                     .await?
             }
+            "retainedCopies.list" => self.retained_copies_list(request.workspace).await?,
+            "retainedCopies.delete" => {
+                self.retained_copies_delete(request.workspace, request.params)
+                    .await?
+            }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.retryHeld" => {
@@ -603,6 +644,10 @@ impl EngineService {
             }
             "capture.release" => {
                 self.capture_release(request.workspace, request.params)
+                    .await?
+            }
+            "capture.duplicateFile" => {
+                self.capture_duplicate_file(request.workspace, request.params)
                     .await?
             }
             "capture.moveFile" => {
@@ -645,7 +690,8 @@ impl EngineService {
                 self.history_operation(&ctx, request.workspace, request.params)
                     .await?
             }
-            "history.undo" => self.history_undo(&ctx, request).await?,
+            "history.undo" => Box::pin(self.history_undo(&ctx, request)).await?,
+            "history.rewriteLinks" => Box::pin(self.history_rewrite_links(&ctx, request)).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?
@@ -760,6 +806,14 @@ impl EngineService {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.get" => {
+                self.chats_threads_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.stream.list" => {
+                self.chats_stream_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.threads.getProjection" => {
                 self.chats_threads_get_projection(&ctx, request.workspace, request.params)
                     .await?
@@ -807,6 +861,10 @@ impl EngineService {
                 self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.conversations.listLinks" => {
+                self.chats_conversations_list_links(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.attachments.listFileMentions" => {
                 self.chats_attachments_list_file_mentions(&ctx, request.workspace, request.params)
                     .await?
@@ -833,6 +891,14 @@ impl EngineService {
             }
             "chats.readState.listUnreadFileThreads" => {
                 self.chats_read_state_list_unread_file_threads(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
+            "chats.agentReadState.listUnreadRequests" => {
+                self.chats_agent_read_state_list_unread_requests(
                     &ctx,
                     request.workspace,
                     request.params,
@@ -919,14 +985,6 @@ impl EngineService {
             "chats.dispatch.enqueue" => {
                 self.chats_dispatch_enqueue(&ctx, request.workspace, request.params)
                     .await?
-            }
-            "chats.dispatch.recordEligibleTriggers" => {
-                self.chats_dispatch_record_eligible_triggers(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                )
-                .await?
             }
             "chats.dispatch.claimNextPending" => {
                 self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
@@ -1198,7 +1256,7 @@ impl EngineService {
         let open = self.open(Some(handle))?;
         let phase = lock(&open.capture)
             .as_ref()
-            .map(|driver| driver.status().snapshot().phase)
+            .map(|driver| driver.status_snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
         if !initial_capture_phase_requires_fence(phase) {
             return Ok(());
@@ -1325,16 +1383,26 @@ mod tests {
                 ErrorCode::Forbidden
             );
         }
-        request.method = "sync.pull".into();
+        // Only the configured host's own connection reaches an owner queue;
+        // the relay checks the owner's standing before it asks.
         let other = ConnectionOwner::authenticated();
         ctx.connection = Some(other.handle());
-        assert_eq!(
-            service
-                .ensure_configured_host_method(&ctx, &request)
-                .unwrap_err()
-                .code,
-            ErrorCode::Forbidden
-        );
+        for method in [
+            "sync.pull",
+            "ydoc.ownerOutbox.readPending",
+            "ydoc.ownerOutbox.retry",
+        ] {
+            request.method = method.into();
+            assert_eq!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden,
+                "{method}"
+            );
+        }
+        request.method = "sync.pull".into();
         ctx.connection = Some(owner.handle());
         owner.retire();
         assert_eq!(
@@ -1435,10 +1503,9 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
-    /// Every listed method is registered, and the three retired ones
-    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
-    /// not. A new arm added without a row here is not caught; that needs the
-    /// dispatch table as data.
+    /// Every listed method is registered, and the retired ones are not. A new
+    /// arm added without a row here is not caught; that needs the dispatch
+    /// table as data.
     ///
     /// Without a workspace handle a registered method fails on the missing
     /// handle or on its params; an unregistered one fails `MethodNotFound`.
@@ -1474,9 +1541,11 @@ mod tests {
             "capture.renew",
             "capture.setAuthor",
             "capture.clearRecovery",
+            "chats.agentReadState.listUnreadRequests",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
+            "chats.conversations.listLinks",
             "chats.attachments.listForThread",
             "chats.bookmarks.archive",
             "chats.bookmarks.find",
@@ -1510,7 +1579,6 @@ mod tests {
             "chats.dispatch.markFailureHandled",
             "chats.dispatch.openRuns",
             "chats.dispatch.recentCount",
-            "chats.dispatch.recordEligibleTriggers",
             "chats.dispatch.recordRunMessage",
             "chats.dispatch.requeueFailedTrigger",
             "chats.dispatch.runIdForMessage",
@@ -1530,8 +1598,10 @@ mod tests {
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
             "chats.readState.markThreadRead",
+            "chats.stream.list",
             "chats.threads.create",
             "chats.threads.findChannelId",
+            "chats.threads.get",
             "chats.threads.getProjection",
             "chats.threads.list",
             "chats.threads.listForChannel",
@@ -1550,6 +1620,8 @@ mod tests {
             "history.page",
             "keptCopies.list",
             "keptCopies.save",
+            "retainedCopies.delete",
+            "retainedCopies.list",
             "keys.download",
             "keys.upload",
             "moments.get",
@@ -1658,6 +1730,7 @@ mod tests {
             "share.view.push",
             "ydoc.apply",
             "chats.dispatch.reclaimRunning",
+            "chats.dispatch.recordEligibleTriggers",
         ] {
             assert!(
                 !registered(&service, retired).await,

@@ -13,6 +13,13 @@ const schema: CollectionSchema = {
 
 afterEach(cleanup);
 
+it("closes from its X", () => {
+  const onClose = vi.fn();
+  render(<ViewsDialog schema={schema} apply={vi.fn()} onClose={onClose} onRenamed={vi.fn()} onDeleted={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
 it("keeps keyboard focus on the delete control while it arms, then deletes", async () => {
   const apply = vi.fn(async (mutate: (schema: CollectionSchema) => CollectionSchema) => {
     mutate(schema);

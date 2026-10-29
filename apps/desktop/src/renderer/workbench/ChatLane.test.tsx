@@ -14,10 +14,12 @@ vi.mock("./chatFileMentions", { spy: true });
 let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
-function lane(id = "channel-1", workspaceId = "workspace-a") {
+const onAgentWaitsForTrust = vi.fn();
+function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel") {
   return <ReactionStoreProvider workspaceId={workspaceId}>
-    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
-      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0} />
+    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind })}
+      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
+      onAgentWaitsForTrust={onAgentWaitsForTrust} />
   </ReactionStoreProvider>;
 }
 function send(body: string) {
@@ -28,6 +30,7 @@ function send(body: string) {
 beforeEach(() => {
   onError.mockReset();
   onThreadRead.mockReset();
+  onAgentWaitsForTrust.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation(callback => { activity = callback; return vi.fn(); });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" })] });
@@ -190,6 +193,31 @@ describe("ChatLane", () => {
     expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false);
   });
 
+  it("asks for trust when the person's own send waits on Restricted Mode, and never for a stale or plain send", async () => {
+    const view = render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "plain", body: "Plain" }) });
+    send("Plain");
+    await screen.findByText("Plain");
+    expect(onAgentWaitsForTrust).not.toHaveBeenCalled();
+
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "held", body: "@agent plan" }), waitsForTrust: true });
+    send("@agent plan");
+    await waitFor(() => expect(onAgentWaitsForTrust).toHaveBeenCalledWith("workspace-a"));
+    expect(onAgentWaitsForTrust).toHaveBeenCalledOnce();
+
+    // A reply that lands after the lane moved on asks nothing.
+    const stale = deferred<{ message: ReturnType<typeof message>; waitsForTrust: true }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(stale.promise);
+    send("@agent again");
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-2", channelId: "channel-2" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", threadId: "thread-2", body: "Second channel" })] });
+    view.rerender(lane("channel-2"));
+    await screen.findByText("Second channel");
+    await act(async () => stale.resolve({ message: message({ id: "stale", body: "@agent again" }), waitsForTrust: true }));
+    expect(onAgentWaitsForTrust).toHaveBeenCalledOnce();
+  });
+
   it.each(["sent", "failed"] as const)("shows a slow send on the send control until it has %s", async (outcome) => {
     render(lane());
     await screen.findByText("Old message");
@@ -348,22 +376,36 @@ describe("ChatLane", () => {
     expect(bridgeMock.listChatMessages).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "old-a" });
   });
 
-  it("shows poll choices and sends the chosen answer before resolving", async () => {
+  it("shows poll choices and sends the chosen answer with its resolution", async () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", body: "Monday" }) });
-    bridgeMock.resolveChatDecision.mockImplementation(async () => {
+    bridgeMock.sendChatMessage.mockImplementation(async () => {
       const resolved = { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" };
       bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
-      return { decision: resolved };
+      return { message: message({ id: "answer", body: "Monday" }), resolved };
     });
     render(lane());
     fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
     await screen.findByTestId("chats-lane-decision-resolved");
-    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Monday" });
-    expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", messageId: "message-1", resolvedByMessageId: "answer", chosenOption: "Monday" });
-    expect(bridgeMock.sendChatMessage.mock.invocationCallOrder[0]).toBeLessThan(bridgeMock.resolveChatDecision.mock.invocationCallOrder[0]!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Monday",
+      resolves: { messageId: "message-1", chosenOption: "Monday" },
+    });
     await waitFor(() => expect(screen.getByRole("button", { name: "Monday" }).getAttribute("aria-pressed")).toBe("true"));
+  });
+
+  it("shows the posted answer and says why its poll stayed open", async () => {
+    const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "answer", body: "Monday" }),
+      resolveFailure: "Error: This poll changed. Try again.",
+    });
+    render(lane());
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("This poll changed. Try again.", "Error: This poll changed. Try again."));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
   function draftPoll(question: string, choices: string[]) {
@@ -430,6 +472,97 @@ describe("ChatLane", () => {
     await waitFor(() => expect(composer.value).toBe(""));
     fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
     expect(choiceValues()).toEqual(["", ""]);
+  });
+
+  const working = { liveRunId: "run-1", pendingCount: 0, paused: false };
+  const idle = { liveRunId: null, pendingCount: 0, paused: false };
+
+  it("stops the agent's run from its DM", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" });
+    bridgeMock.stopAgentRun.mockImplementationOnce(async () => {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    });
+    expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe("Agent working");
+    fireEvent.click(screen.getByRole("button", { name: "Stop agent run" }));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull());
+    expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe("");
+    expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", runId: "run-1" });
+  });
+
+  it("shows and announces a run that starts without a new message", async () => {
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+    // The region is already mounted, so a screen reader hears its text change.
+    const announcement = screen.getByTestId("chats-lane-dispatch-announcement");
+    expect(announcement.getAttribute("role")).toBe("status");
+    expect(announcement.textContent).toBe("");
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, pendingCount: 2 });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect((await screen.findByTestId("chats-lane-dispatch-status")).textContent).toBe("agent working · 2 queuedStop");
+    expect(screen.getByTestId("chats-lane-dispatch-announcement")).toBe(announcement);
+    expect(announcement.textContent).toBe("Agent working, 2 queued");
+  });
+
+  it("ignores a run answer from a workspace the reader left", async () => {
+    const stale = deferred<typeof working>();
+    bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(stale.promise);
+    const view = render(lane("agent-dm", "workspace-a", "agent"));
+    await waitFor(() => expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledOnce());
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", body: "Workspace B" })] });
+    view.rerender(lane("agent-dm", "workspace-b", "agent"));
+    await screen.findByText("Workspace B");
+    await act(async () => stale.resolve(working));
+    expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+  });
+
+  it("does not report a stop that finishes after the reader left the workspace", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    const stop = deferred<void>();
+    bridgeMock.stopAgentRun.mockReturnValueOnce(stop.promise);
+    const view = render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop agent run" }));
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    view.rerender(lane("agent-dm", "workspace-b", "agent"));
+    await act(async () => stop.reject(new Error("Run ended")));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("finishes a stop after the reader left the workspace without painting the new one", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    const stop = deferred<void>();
+    bridgeMock.stopAgentRun.mockReturnValueOnce(stop.promise);
+    const view = render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop agent run" }));
+    // Workspace B has its own run, and its Stop is pressed and still going.
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, liveRunId: "run-b" });
+    bridgeMock.stopAgentRun.mockReturnValueOnce(new Promise(() => undefined));
+    view.rerender(lane("agent-dm", "workspace-b", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop agent run" }));
+    const reads = bridgeMock.chatDispatchStateForThread.mock.calls.length;
+    await act(async () => stop.resolve());
+    expect(bridgeMock.chatDispatchStateForThread).toHaveBeenCalledTimes(reads);
+    expect((screen.getByRole("button", { name: "Stop agent run" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows the conversation without Stop when its run state can't be read, and Stop on the next read", async () => {
+    bridgeMock.chatDispatchStateForThread.mockRejectedValue(new Error("Dispatch unavailable"));
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(screen.queryByTestId("chats-lane-dispatch-status")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(await screen.findByTestId("chats-lane-stop-agent-run")).toBeTruthy();
+  });
+
+  it("reads no run state for a group's chat", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    expect(bridgeMock.chatDispatchStateForThread).not.toHaveBeenCalled();
   });
 
   it("drops the poll with the draft when the group changes", async () => {

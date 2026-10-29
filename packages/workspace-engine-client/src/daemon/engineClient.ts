@@ -13,6 +13,7 @@ import {validateUserWritePath} from "@dohc/workspace-core";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 import { firstOpenCandidateBinding, firstOpenCandidateUploadBytes, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
+import { keepEngineRunScope } from "./engineRunScope";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -25,6 +26,8 @@ const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 export const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 export const NATIVE_RESTORE_STATUS = { prepare: "prepared", apply: "applied", settle: "settled", resume: "resumed" } as const;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
+// The desktop's digest of the kept edits a Stop's release took.
+const KEPT_SNAPSHOT = /^[0-9a-f]{64}$/;
 // Global cap on chunks received by active streams. Unknown-length streams retain
 // those Buffers; known-length streams do not, but keep the same tiny-chunk flood
 // refusal until FIN.
@@ -822,19 +825,37 @@ export class EngineClient implements EngineTransport {
     if (rows.length !== 1 || (typeof target !== "string" && (rows[0]!.document.objectId !== target.objectId || rows[0]!.document.mainVersionId !== target.mainVersionId))) throw new TypeError("Invalid Stop response.");
     return rows[0]!;
   }
-  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], acceptedCursor: number, signal?: AbortSignal) {
-    if (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) throw new TypeError("Invalid retirement cursor.");
-    const rows = await this.ownerLiveStop(request, "release", {binding,acceptedCursor}, signal);
-    if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
-    return rows[0]!;
+  /**
+   * Releases a Stop at the relay's retirement cursor, recording the kept
+   * edits it takes when a snapshot is given. With only a snapshot it is a Try
+   * again: it settles a release that already took exactly those edits, and
+   * starts none.
+   */
+  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"],
+    release: {acceptedCursor: number; keptSnapshot?: string} | {keptSnapshot: string}, signal?: AbortSignal) {
+    const acceptedCursor = "acceptedCursor" in release ? release.acceptedCursor : undefined, keptSnapshot = release.keptSnapshot;
+    if (acceptedCursor !== undefined && (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0)) throw new TypeError("Invalid retirement cursor.");
+    if (keptSnapshot !== undefined && !KEPT_SNAPSHOT.test(keptSnapshot)) throw new TypeError("Invalid kept edits snapshot.");
+    const rows = await this.ownerLiveStop(request, "release", {binding,...(acceptedCursor === undefined ? {} : {acceptedCursor}),...(keptSnapshot === undefined ? {} : {keptSnapshot})}, signal);
+    const row = rows[0], materialized = row?.materialized;
+    if (rows.length !== 1 || !row || row.state !== "released" || materialized === undefined || JSON.stringify(row.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
+    return {...row, materialized};
   }
   async ownerYDocStopRetired(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal): Promise<void> {
     const rows=await this.ownerLiveStop(request,"retired",{document},signal);
     if (rows.length) throw new TypeError("Invalid retirement response.");
   }
-  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal): Promise<void> {
-    const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
-    if (rows.length) throw new TypeError("Invalid Stop cancellation response.");
+  /**
+   * Clears the document's Stop and returns it, whatever its state; undefined
+   * when it had none. It names the document, so another document that took
+   * its old path keeps its own Stop.
+   */
+  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "clear", {document}, signal);
+    if (rows.length > 1 || (rows[0] && (rows[0].document.objectId !== document.objectId || rows[0].document.mainVersionId !== document.mainVersionId))) {
+      throw new TypeError("Invalid Stop cancellation response.");
+    }
+    return rows[0];
   }
   async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {
     return this.ownerLiveStop(request, "list", {}, signal);
@@ -844,8 +865,12 @@ export class EngineClient implements EngineTransport {
     const value = response.result as {stops?: unknown};
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
-      if (!row || typeof row !== "object" || Object.keys(row).filter(key => key !== "deferred").sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown};
+      // Only a release says whether settlement wrote the file.
+      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized"] : ["deferred", "keptSnapshot"];
+      if (!row || typeof row !== "object" || Object.keys(row).filter(key => !optional.includes(key)).sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown};
+      if (r.materialized !== undefined && typeof r.materialized !== "boolean") throw new TypeError("Invalid Stop materialization.");
+      if (r.keptSnapshot !== undefined && (typeof r.keptSnapshot !== "string" || !KEPT_SNAPSHOT.test(r.keptSnapshot) || r.binding === null)) throw new TypeError("Invalid Stop kept edits.");
       if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
       const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
       if (!d || Object.keys(d).sort().join()!=="currentPath,mainVersionId,objectId" || typeof d.currentPath!=="string" || !validateUserWritePath(d.currentPath).ok) throw new TypeError("Invalid Stop document.");
@@ -858,7 +883,9 @@ export class EngineClient implements EngineTransport {
         if (!d || Object.keys(d).sort().join()!=="editable,unsentEdits" || !Number.isSafeInteger(d.unsentEdits) || d.unsentEdits<0 || typeof d.editable!=="boolean" || !binding || r.state!=="released" || r.retirementOwed) throw new TypeError("Invalid deferred Stop.");
         deferred={unsentEdits:d.unsentEdits,editable:d.editable};
       }
-      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {})};
+      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {}),
+        ...(typeof r.keptSnapshot === "string" ? {keptSnapshot:r.keptSnapshot} : {}),
+        ...(typeof r.materialized === "boolean" ? {materialized:r.materialized} : {})};
     });
   }
 
@@ -1159,14 +1186,16 @@ export class EngineClient implements EngineTransport {
    * method whose work reports (today `workspace.open`).
    *
    * Aborting `signal` rejects at once and drops the daemon's later answer, so
-   * the outcome is unknown. Use `cancelRequest` to learn what happened.
+   * the outcome is unknown. `cancelSignal` asks for cancellation and keeps
+   * waiting for the daemon's answer, bound to this request's wire id.
    */
   async sendRequest(
     request: Request,
     signal?: AbortSignal,
     onProgress?: () => void,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
-    return this.sendRequestWithInput(request, undefined, signal, undefined, true, onProgress);
+    return this.sendRequestWithInput(request, undefined, signal, undefined, true, onProgress, cancelSignal);
   }
 
   /** Whether this session negotiated PROGRESS_CAPABILITY with the engine. */
@@ -1184,6 +1213,7 @@ export class EngineClient implements EngineTransport {
     restoreOutput?: PrivateLiveOutput,
     ordinary = false,
     onProgress?: () => void,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
     const deadlineMs = request.deadlineMs ?? null;
     const expiresAt = deadlineMs === null ? null : performance.now() + deadlineMs;
@@ -1292,6 +1322,7 @@ export class EngineClient implements EngineTransport {
             });
           }, Math.max(0, expiresAt! - performance.now()))
         : undefined;
+    const cancel = () => { void this.cancelRequest(wireId).catch(() => undefined); };
     const response = new Promise<Response>((resolve, reject) => {
       this.pending.set(wireId, {
         callerId: request.id,
@@ -1312,6 +1343,8 @@ export class EngineClient implements EngineTransport {
         ...(progress ? { onProgress } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
+      cancelSignal?.addEventListener("abort", cancel, { once: true });
+      if (cancelSignal?.aborted) cancel();
       writeTask = this.writeFrame(() => {
         let payload = serializedEnvelope;
         if (expiresAt !== null) {
@@ -1360,6 +1393,7 @@ export class EngineClient implements EngineTransport {
     } finally {
       clearTimeout(deadlineTimer);
       signal?.removeEventListener("abort", abort);
+      cancelSignal?.removeEventListener("abort", cancel);
       if (ordinary) {
         this.ordinaryRequests--;
         this.ordinaryRequestBytes -= retainedBytes;
@@ -1594,6 +1628,7 @@ export class EngineClient implements EngineTransport {
     request: Omit<LiveApplicationRequest, "registrationId">,
     input: FirstOpenCandidateInput,
     signal?: AbortSignal,
+    cancelSignal?: AbortSignal,
   ): Promise<FirstOpenCandidateCheck> {
     const binding = firstOpenCandidateBinding(input);
     const byteLength = binding.candidateByteLength + binding.sourceByteLength;
@@ -1607,7 +1642,7 @@ export class EngineClient implements EngineTransport {
       if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
       return { params: { contractVersion: 1, binding: { ...binding }, streamId, byteLength, digest: bundleDigest },
         streams: [{ streamId, bytes: bundle, digest: bundleDigest }] };
-    }, signal);
+    }, signal, undefined, cancelSignal);
     return parseFirstOpenCandidateCheck(response.result, binding);
   }
 
@@ -1629,6 +1664,7 @@ export class EngineClient implements EngineTransport {
     prepare: () => LiveUpload,
     signal?: AbortSignal,
     restoreOutput?: PrivateLiveOutput,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
     if (
       !this.liveConfig ||
@@ -1723,6 +1759,9 @@ export class EngineClient implements EngineTransport {
         writeInput,
         signal,
         restoreOutput,
+        false,
+        undefined,
+        cancelSignal,
       );
     } finally {
       if (restoreOutput?.wireId !== undefined) {
@@ -1742,25 +1781,24 @@ export class EngineClient implements EngineTransport {
    * daemon's answer: `CANCELLED` or `DEADLINE_EXCEEDED` means the work did not
    * happen, and a result means the work landed before the daemon could stop it.
    * A live application acknowledgement (apply, settle, restore fence, native
-   * restore, owner activation capture) stopped after its work landed gets no
-   * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
-   * the outcome is unknown. A first-open candidate check is the exception: it
-   * stores nothing, so a cancel that arrives after its work finished still
-   * gets its answer. An upload's cancel follows its last input frame.
+   * restore, owner activation capture) stopped after its work landed, and
+   * before the daemon started to write it, gets no answer. It ends at its own
+   * deadline with `EngineRequestDeadlineError`, and the outcome is unknown.
+   * A first-open candidate check stores nothing and still answers after a late cancel.
+   * An upload's cancel follows its last input frame.
    */
-  async cancelRequest(callerId: number): Promise<void> {
-    const pending = [...this.pending.entries()].find(
-      ([, request]) => request.callerId === callerId,
-    );
+  private async cancelRequest(wireId: number): Promise<void> {
+    const pending = this.pending.get(wireId);
     if (!pending) return;
-    if (pending[1].cancelUnsent?.()) return;
-    if (pending[1].cancelAfterInput) return pending[1].cancelAfterInput();
-    await this.writeEnvelope({ type: "cancel", id: pending[0] });
+    if (pending.cancelUnsent?.()) return;
+    if (pending.cancelAfterInput) return pending.cancelAfterInput();
+    await this.writeEnvelope({ type: "cancel", id: wireId });
   }
 
   onEvent(handler: (event: Event) => void): () => void {
-    this.eventHandlers.add(handler);
-    return () => this.eventHandlers.delete(handler);
+    const scoped = keepEngineRunScope(handler);
+    this.eventHandlers.add(scoped);
+    return () => this.eventHandlers.delete(scoped);
   }
 
   onBlob(handler: (blob: CompletedBlob) => void): () => void {

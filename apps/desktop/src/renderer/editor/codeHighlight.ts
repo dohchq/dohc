@@ -127,7 +127,7 @@ export function computeCodeHighlightRanges(
 ): CodeHighlightRange[] {
   const ranges: CodeHighlightRange[] = []
   doc.descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return
+    if (!isCodeBlockNode(node)) return !node.isTextblock // inline content holds no codeBlock
     const language = normalizeLanguage(node.attrs.language)
     if (!isHighlightableLanguage(language)) return false
     const text = node.textContent

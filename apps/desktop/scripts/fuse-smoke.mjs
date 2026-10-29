@@ -53,7 +53,7 @@ export async function compilePackagedApp(resourcesRoot) {
 // electron-builder's unpacked output for each platform the smoke boots. A Mac
 // package is the .app bundle; @electron/fuses reads its Electron Framework.
 const PACKAGES = {
-  linux: { name: "Linux", directory: "release/linux-unpacked", binary: "dohc", asar: "resources/app.asar", fuses: "dohc" },
+  linux: { name: "Linux", directory: "release/linux-unpacked", binary: "dohc-desktop", asar: "resources/app.asar", fuses: "dohc-desktop" },
   darwin: {
     name: "macOS",
     directory: "release/mac-arm64/dohc.app",

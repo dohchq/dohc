@@ -1,6 +1,8 @@
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
+import {setTimeout as backoff} from "node:timers/promises";
+import {isOwnerDeliveryBackoff} from "./ownerDeliveryBackoff";
 import {connectOwnerLiveTransport, type OwnerLiveTransport} from "@dohc/sync-relay/owner-live-transport";
 import {createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, LiveFrameError,
   type LiveFrame, type LiveFrameBegin, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
@@ -233,7 +235,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.receipt = {deliveryId, updateDigest, journalCursor, acceptingHostEpoch};
             await this.finishReceipt(attempt);
           }
-          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
+          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused", "capacity-refused", "invalid-update"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
           else this.stop(attempt);
         }
         if (transfer && this.current(attempt)) {
@@ -263,7 +265,17 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
 
   private async finishReceipt(attempt: Attempt): Promise<void> {
     if (!attempt.receipt) return;
-    const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
-    if (applied) this.stop(attempt, {kind: "receipt", receipt: attempt.receipt});
+    let backoffMs = 25;
+    while (this.current(attempt)) {
+      try {
+        const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
+        if (applied) this.stop(attempt, {kind: "receipt", receipt: attempt.receipt});
+        return;
+      } catch (error) {
+        if (!isOwnerDeliveryBackoff(error)) throw error;
+        await backoff(backoffMs, undefined, {signal: attempt.signal, ref: false});
+        backoffMs = Math.min(backoffMs * 2, 250);
+      }
+    }
   }
 }

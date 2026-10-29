@@ -3,7 +3,7 @@ import * as z from "zod/v4";
 import { createSharedAutomationControls } from "./automationControls";
 import { readBoundedJson } from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {relayLinkRefusal} from "./linkRefusal";
+import {relayLinkRefusal, unavailableLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
@@ -43,6 +43,22 @@ const discussionPostSchema = z.object({
   idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u),
   claimedName: z.string().describe("A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes.").refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 }).refine(value => Buffer.byteLength(JSON.stringify(value)) <= MAX_DISCUSSION_ENVELOPE_BYTES, "The discussion request exceeds 16 KiB.");
+// A link on a Group share reads, and with read-write access posts in, the Group's channel.
+const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
+type LinkChannel = z.infer<typeof linkChannelSchema>;
+const LINK_CHAT_BODY_BYTES = 8_000;
+const POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
+  "Send it again with the same idempotencyKey and fields; it posts only once.";
+const channelPostSchema = z.object({
+  body: z.string().describe("Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed.")
+    .refine(value => {const body = value.replace(/\r\n?/gu, "\n").trimEnd(); return body.length > 0 && Buffer.byteLength(body) <= LINK_CHAT_BODY_BYTES;},
+      "The body must be nonempty and fit 8,000 UTF-8 bytes."),
+  idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u)
+    .describe("Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."),
+  threadId: z.string().min(1).max(256).optional().describe("A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread."),
+  claimedName: z.string().describe("Your display name. This link sets it once; later posts must send the same name or none.")
+    .refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
+});
 // Each file names its path and base, and its content as text or as base64: one or the other.
 const writtenFile = {
   path: z.string().min(1).max(1024).describe("The file's path exactly as dohc_list_files lists paths."),
@@ -106,6 +122,14 @@ const text = (value: unknown): CallToolResult => {
   return {content: [{type: "text", text: encoded}], ...(value && typeof value === "object" ? {structuredContent: value as Record<string, unknown>, ...("ok" in value && value.ok === false ? {isError: true} : {})} : {})};
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
+// A post whose answer was lost may have landed, so it answers null; its key makes a retry safe.
+const sentPost = async (send: () => Promise<Response>): Promise<Response | null> => {
+  const response = await send().catch(() => null);
+  if (response?.status !== 503) return response;
+  await response.body?.cancel().catch(() => {});
+  return null;
+};
+const postUnknown = (): CallToolResult => text({ok: false, code: "link_unavailable", error: POST_UNKNOWN});
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
   if (!response.ok) {
     const value = await readBoundedJson(response, 4096, signal).catch(() => null);
@@ -116,7 +140,7 @@ const json = async (response: Response, signal: AbortSignal): Promise<unknown> =
   return readBoundedJson(response, 1024 * 1024, signal);
 };
 
-function buildServer(options: RemoteOptions, metadata: Record<string, unknown>): McpServer {
+function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, channel: LinkChannel | null): McpServer {
   const jsonResponse = (response: Response) => json(response, options.signal);
   const server = new McpServer({ name: "dohc-share", version: "0.1.0" }, { capabilities: { tools: {} } });
   const controls = createSharedAutomationControls({ ...options, metadata });
@@ -158,7 +182,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of settled file content using a current hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded." +
+    description: "Read up to 256 KiB of current file content using a current hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded." +
       (metadata.access === "edit" ? " Edit links can also read an afterBlobSha256 from dohc_list_changes for an earlier revision still in the share. Earlier revisions use UTF-8 when their bytes decode, otherwise base64." : " History is unavailable with view or comment access."),
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
@@ -173,20 +197,55 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
       catch {return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});}
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
-  server.registerTool("dohc_read_discussion", {
+  // A Group link's conversation is the Group's channel, as in the viewer; any other link's is the share's discussion.
+  if (!channel) server.registerTool("dohc_read_discussion", {
     description: "Read the discussion attached to this shared link.", inputSchema: z.object({ cursor: z.string().optional(), limit: z.number().int().positive().max(100).optional() }),
   }, async ({ cursor, limit }) => {
     try { const query = new URLSearchParams(); if (cursor) query.set("cursor", cursor); if (limit) query.set("limit", String(limit)); return text(await jsonResponse(await options.request(`/api/view/discussion?${query}`))); }
     catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
-  if (metadata.access === "comment" || metadata.access === "edit") server.registerTool("dohc_post_discussion", {
+  if (!channel && (metadata.access === "comment" || metadata.access === "edit")) server.registerTool("dohc_post_discussion", {
     description: "Post a discussion message to this shared link when its permissions allow comments.",
     inputSchema: discussionPostSchema,
   }, async ({ body, idempotencyKey, claimedName }) => {
+    const response = await sentPost(() => options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) }));
+    if (!response) return postUnknown();
     try {
-      return text(await jsonResponse(await options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) })));
+      return text(await jsonResponse(response));
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
+  if (channel) {
+    const coordinates = {channelWireId: channel.channelWireId};
+    server.registerTool("dohc_read_channel", {
+      description: "Read the Group channel this link shares. Without since, messages come newest first: pass before=olderCursor for earlier ones. " +
+        "With since=nextCursor, messages come oldest first: keep each nextCursor and read again while hasMore is true. " +
+        "authorKind link marks a link holder's post: its name was chosen by that link holder and nobody verified it.",
+      inputSchema: z.object({before: z.number().int().nonnegative().optional(), since: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().max(100).optional()}).refine(value => value.before === undefined || value.since === undefined, "Send before or since, not both."),
+    }, async ({before, since, limit}) => {
+      try {
+        const query = new URLSearchParams({...coordinates, ...(before === undefined ? {} : {before: String(before)}),
+          ...(since === undefined ? {} : {since: String(since)}), ...(limit === undefined ? {} : {limit: String(limit)})});
+        return text(await jsonResponse(await options.request(`/api/view/chat/messages?${query}`)));
+      } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+    });
+    if (channel.access === "read-write") server.registerTool("dohc_post_channel", {
+      description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
+      inputSchema: channelPostSchema,
+    }, async ({body, idempotencyKey, threadId, claimedName}) => {
+      const response = await sentPost(() => options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
+        ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})}));
+      if (!response) return postUnknown();
+      try {
+        // A refusal the agent can act on arrives as a sentence.
+        if (!response.ok && response.status !== 404) {
+          const refusal = asRecord(await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null));
+          if (typeof refusal?.code === "string" && typeof refusal.error === "string") return text({ok: false, code: refusal.code, error: refusal.error});
+        }
+        return text(await jsonResponse(response));
+      } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+    });
+  }
   if (collectionWritesAllowed(metadata)) server.registerTool(COLLECTION_WRITE_TOOL, {
     description: "Change a Collection's own files through this Edit link: edit its collection.yaml, create or replace the automations.yaml beside it, " +
       "create one Markdown record in an existing document Collection, with a frontmatter id of rec_ followed by 26 lowercase base32 characters, " +
@@ -229,8 +288,13 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
     await metadataResponse.body?.cancel().catch(() => {});
     return {body: result.body, status: result.status, headers: result.headers};
   }
-  const metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;
+  // The share's answer names the tools, so one lost mid-body fails the request instead of dropping any.
+  let metadata: Record<string, unknown>;
+  try {metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;}
+  catch {const result = unavailableLinkRefusal(); return {body: result.body, status: result.status, headers: result.headers};}
   if (metadata.ok !== true) throw new Error("Share is unavailable.");
+  // Only a Group share's link has a channel.
+  const channel = metadata.channel === undefined ? null : linkChannelSchema.parse(metadata.channel);
   const body = request.method === "POST"
     ? await readRequestJson(request, options.signal, collectionWritesAllowed(metadata) ? options.admitLargeBody : null)
     : {value: undefined, release: () => {}};
@@ -250,7 +314,7 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
       const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
       return {body: result.body, status: result.status, headers: result.headers};
     }
-    const handler = createMcpHandler(() => buildServer(options, metadata));
+    const handler = createMcpHandler(() => buildServer(options, metadata, channel));
     try {
       const response = await handler.fetch(request, {parsedBody});
       return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };

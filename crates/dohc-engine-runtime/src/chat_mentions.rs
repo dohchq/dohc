@@ -30,15 +30,13 @@ fn invalid() -> RuntimeError {
     }
     .into()
 }
-fn encode(
+pub(crate) fn seal_cursor<T: Serialize>(
     ws: &str,
-    version: &str,
-    subject: &Value,
-    scope: &str,
-    pos: &Position,
+    purpose: &str,
+    payload: &T,
 ) -> Result<String, RuntimeError> {
-    let bytes = serde_json::to_vec(&(1, version, subject, scope, pos)).map_err(|_| invalid())?;
-    let sealed = seal(cursor_key()?, ws, PURPOSE, &bytes).map_err(|_| invalid())?;
+    let bytes = serde_json::to_vec(payload).map_err(|_| invalid())?;
+    let sealed = seal(cursor_key()?, ws, purpose, &bytes).map_err(|_| invalid())?;
     Ok(json!([
         sealed.iv_base64(),
         sealed.auth_tag_base64(),
@@ -46,6 +44,29 @@ fn encode(
         sealed.byte_length()
     ])
     .to_string())
+}
+pub(crate) fn unseal_cursor<T: for<'de> Deserialize<'de>>(
+    ws: &str,
+    purpose: &str,
+    cursor: &str,
+) -> Result<T, RuntimeError> {
+    if cursor.len() > 32768 {
+        return Err(invalid_cursor());
+    }
+    let (iv, tag, body, len): (String, String, String, usize) =
+        serde_json::from_str(cursor).map_err(|_| invalid_cursor())?;
+    let sealed = SealedSecret::from_base64(&iv, &tag, &body, len).map_err(|_| invalid_cursor())?;
+    let bytes = open(cursor_key()?, ws, purpose, &sealed).map_err(|_| invalid_cursor())?;
+    serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid_cursor())
+}
+fn encode(
+    ws: &str,
+    version: &str,
+    subject: &Value,
+    scope: &str,
+    pos: &Position,
+) -> Result<String, RuntimeError> {
+    seal_cursor(ws, PURPOSE, &(1, version, subject, scope, pos))
 }
 fn invalid_cursor() -> RuntimeError {
     DomainError::InvalidInput {
@@ -66,15 +87,8 @@ fn decode(
             ..Default::default()
         });
     };
-    if cursor.len() > 32768 {
-        return Err(invalid_cursor());
-    }
-    let (iv, tag, body, len): (String, String, String, usize) =
-        serde_json::from_str(&cursor).map_err(|_| invalid_cursor())?;
-    let sealed = SealedSecret::from_base64(&iv, &tag, &body, len).map_err(|_| invalid_cursor())?;
-    let bytes = open(cursor_key()?, ws, PURPOSE, &sealed).map_err(|_| invalid_cursor())?;
     let (format, v, s, a, pos): (u8, String, Value, String, Position) =
-        serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid_cursor())?;
+        unseal_cursor(ws, PURPOSE, &cursor)?;
     if format != 1 || s != *subject || pos.phase > 1 {
         return Err(invalid_cursor());
     }

@@ -16,6 +16,7 @@ import {
   EngineRequestDeadlineError,
   type EngineClientSpawnOptions,
 } from "./engineClient";
+import { keepEngineRunScope } from "./engineRunScope";
 
 export const ENGINE_LIFECYCLE_METHOD = {
   ping: "engine.ping",
@@ -128,9 +129,8 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient extends MinimalDaemonClient {
-  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void): Promise<Response>;
+  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response>;
   reportsProgress?(): boolean;
-  cancelRequest?(requestId: number): Promise<void>;
   onEvent?(handler: (event: Event) => void): () => void;
   // Kill a daemon that stopped answering. `close` reports a deliberate
   // shutdown, which retry-enabled callers must not retry through; a wedge kill
@@ -578,9 +578,10 @@ export class EngineDaemonLifecycle {
   // fanned out from every client this lifecycle launches, so a consumer never
   // has to know the daemon was replaced.
   onEvent(handler: (event: Event) => void): () => void {
-    this.eventHandlers.add(handler);
+    const scoped = keepEngineRunScope(handler);
+    this.eventHandlers.add(scoped);
     return () => {
-      this.eventHandlers.delete(handler);
+      this.eventHandlers.delete(scoped);
     };
   }
 
@@ -709,6 +710,7 @@ export class EngineDaemonLifecycle {
       !this.exitedGenerations.has(generation) &&
       (this.client === client || this.launchingClients.has(client));
     const controller = new AbortController();
+    const cancellation = new AbortController();
     const watch = this.watchRequestLiveness(client, method, controller.signal, bound.cancelOnStall ?? true);
     const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -728,7 +730,7 @@ export class EngineDaemonLifecycle {
           }
           const condemnOnCap = current() && !watch.responding() && bound.condemnOnCap();
           console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:condemnOnCap ? "kill-for-replacement" : "cancel-request"}));
-          void client.cancelRequest?.(request.id).catch(() => undefined);
+          cancellation.abort();
           const error = new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
           );
@@ -741,7 +743,7 @@ export class EngineDaemonLifecycle {
     const silent = watch.silent.catch((error: unknown) => {
       if (settled) return new Promise<never>(() => {});
       // A stalled open can fail while the rest of the daemon remains healthy.
-      void client.cancelRequest?.(request.id).catch(() => undefined);
+      cancellation.abort();
       if (current() && watch.daemonSilent()) this.condemn(client, asError(error));
       throw error;
     });
@@ -755,7 +757,7 @@ export class EngineDaemonLifecycle {
       if (!current()) throw new EngineDaemonUnavailableError("Rust engine request generation was retired.");
       const response = client.sendRequest(boundedRequest, controller.signal, method === "workspace.open" ? () => {
         if (!settled && current()) watch.progress();
-      } : undefined).catch((error: unknown) => {
+      } : undefined, cancellation.signal).catch((error: unknown) => {
         // The client deadline can win before our final frame drain. Keep the
         // lifecycle cap responsible for the daemon-health verdict.
         if (error instanceof EngineRequestDeadlineError) return deadline;

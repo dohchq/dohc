@@ -149,7 +149,6 @@ export const bridgeMock = {
   listChatMessages: vi.fn(),
   getChatThreadRevision: vi.fn(),
   listChatThreadDecisions: vi.fn(),
-  resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
   chatRunRecordsForThread: vi.fn(),
   sendChatMessage: vi.fn(),
@@ -165,6 +164,10 @@ export const bridgeMock = {
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
+  retryStoppedRun: vi.fn(),
+  readChatDispatchPaused: vi.fn(),
+  setChatDispatchPaused: vi.fn(),
+  onChatDispatchPaused: vi.fn(),
   listChatBookmarks: vi.fn(),
   saveChatBookmark: vi.fn(),
   archiveChatBookmark: vi.fn(),
@@ -232,6 +235,8 @@ export function shareListing(
 }
 
 export const workspaceActivityCallbacks = new Set<() => void>();
+// Main pushes each pause or resume of agent dispatch to every window.
+export const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
 
 export function emitWorkspaceActivity() {
   for (const callback of [...workspaceActivityCallbacks]) callback();
@@ -253,6 +258,7 @@ export function emitCloudSessionChanged(
 
 beforeEach(() => {
   workspaceActivityCallbacks.clear();
+  chatDispatchPausedCallbacks.clear();
   cloudSessionCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation((callback: () => void) => {
@@ -361,7 +367,16 @@ beforeEach(() => {
     paused: false,
   });
   bridgeMock.stopAgentRun.mockResolvedValue(undefined);
+  bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: false });
+  bridgeMock.onChatDispatchPaused.mockImplementation((listener: (event: { paused: boolean }) => void) => {
+    chatDispatchPausedCallbacks.add(listener);
+    return () => chatDispatchPausedCallbacks.delete(listener);
+  });
+  bridgeMock.setChatDispatchPaused.mockImplementation(async ({ paused }: { paused: boolean }) => {
+    for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
+  });
   bridgeMock.resumeThreadDispatch.mockResolvedValue(undefined);
+  bridgeMock.retryStoppedRun.mockResolvedValue({ queued: true });
   bridgeMock.markChatThreadRead.mockResolvedValue({
     lastReadSequence: 1,
     revision: 1,
@@ -475,6 +490,6 @@ export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: E
 }
 
 export const mentionRoster = [
-  { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Your agent", description: "your agent" },
+  { id: "agent:default", kind: "agent" as const, handle: "Nova", label: "Nova", description: "your agent" },
   { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
 ];

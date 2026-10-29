@@ -5,6 +5,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { killProcessTreePosix, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
@@ -36,6 +37,22 @@ export interface SiteProcessHandle {
   logs(): SiteLogEntry[];
   onExit(listener: () => void): void;
   stop(): Promise<void>;
+  // The command's processes still alive after a stop, as pids. Empty when
+  // everything stopped.
+  stillRunning(): Promise<number[]>;
+}
+
+// A stop that left some of an app command's processes running. `handle`
+// stops them again, so whoever holds it can keep it and try again. The pids
+// stay on `pids` for the console; the words are for a person.
+export const APP_STILL_RUNNING_MESSAGE =
+  "An app is still running because dohc could not stop it. Try again, or end the app in your system's task manager.";
+
+export class AppCommandStillRunningError extends Error {
+  override name = "AppCommandStillRunningError";
+  constructor(readonly handle: SiteProcessHandle, readonly pids: readonly number[]) {
+    super(APP_STILL_RUNNING_MESSAGE);
+  }
 }
 
 export interface StaticSitePreview {
@@ -188,13 +205,15 @@ function createDescendantCapture(
   const inFlightCaptures = new Set<Promise<void>>();
   const readDescendants = options.reader ?? defaultDescendantsReader;
   const captureOnce = (pid: number): Promise<void> => {
+    // A read that fails or times out found nothing, so every stop that waits
+    // for captures in flight still ends.
     const capture = readDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
       for (const capturedPid of capturedDescendantSet) {
         if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
       }
       capturedDescendants = [...capturedDescendantSet];
-    });
+    }, () => undefined);
     inFlightCaptures.add(capture);
     void capture.finally(() => inFlightCaptures.delete(capture));
     return capture;
@@ -210,8 +229,19 @@ function createDescendantCapture(
   child.once("exit", () => {
     if (timer) clearInterval(timer);
   });
+  // A pid seen dead leaves the set for good, so no later stop signals a
+  // number the system may have given to another program.
+  const captured = (): readonly number[] => {
+    if (capturedDescendants.some((pid) => !isPidAlive(pid))) {
+      for (const pid of capturedDescendantSet) {
+        if (!isPidAlive(pid)) capturedDescendantSet.delete(pid);
+      }
+      capturedDescendants = [...capturedDescendantSet];
+    }
+    return capturedDescendants;
+  };
   return {
-    captured: () => capturedDescendants,
+    captured,
     captureNow,
     awaitAll: () => Promise.all([...inFlightCaptures]).then(() => undefined),
   };
@@ -430,6 +460,10 @@ interface HostBindCandidate {
   unverifiableFlag?: string;
 }
 
+export function choosesHost(args: string[]): boolean {
+  return args.some((arg) => HOST_BIND_FLAG_PATTERN.test(arg));
+}
+
 function explicitHostBinds(args: string[]): HostBindCandidate[] {
   const hosts: HostBindCandidate[] = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -462,6 +496,9 @@ function explicitHostBinds(args: string[]): HostBindCandidate[] {
 // only the host-named ones, and stops at the first token that isn't an
 // assignment at all (the real command).
 const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+// The variable names that rebind a dev server's host. siteCommandEnvironment
+// keeps dohc's own values of them out of a site command's environment too.
+const HOST_ENVIRONMENT_NAME = /^host(name)?$/i;
 
 // GNU env's documented form is `env [OPTION]... [NAME=VALUE]... [COMMAND
 // [arg]...]` — its OPTIONs can precede the assignments this scanner is
@@ -557,7 +594,7 @@ function explicitHostEnvironmentAssignments(
     const assignment = ENV_ASSIGNMENT_PATTERN.exec(token);
     if (assignment) {
       const [, name, value] = assignment;
-      if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
       index += 1;
       continue;
     }
@@ -581,7 +618,7 @@ function explicitHostEnvironmentAssignments(
         const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
         if (operandAssignment) {
           const [, name, value] = operandAssignment;
-          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+          if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
         }
         index += 1;
       }
@@ -610,7 +647,7 @@ function explicitHostEnvironmentAssignments(
         const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
         if (exported && operandAssignment) {
           const [, name, value] = operandAssignment;
-          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+          if (name && HOST_ENVIRONMENT_NAME.test(name)) hosts.push(value ?? "");
         }
         index += 1;
       }
@@ -868,6 +905,116 @@ interface DescendantCaptureOverrides {
   descendantsReader?: (pid: number) => Promise<number[]>;
 }
 
+// A site's dev and build commands get the user's environment (PATH, HOME,
+// proxies, package-manager config), minus what could rebind the server or
+// belongs to dohc. A HOST or HOSTNAME inherited from dohc's own environment
+// would bind beyond loopback with no command for the validator above to
+// refuse: Docker exports HOSTNAME as the machine name, and Next.js's
+// standalone server binds to it. DOHC_* variables configure dohc itself, including where its owner
+// credentials live, and the Electron ones control dohc's own runtime.
+const DOHC_OWN_ENVIRONMENT_NAME = /^(?:DOHC_|ELECTRON_RUN_AS_NODE$|ELECTRON_RENDERER_URL$)/i;
+
+export function siteCommandEnvironment(
+  parent: NodeJS.ProcessEnv,
+  overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(parent)) {
+    if (!HOST_ENVIRONMENT_NAME.test(name) && !DOHC_OWN_ENVIRONMENT_NAME.test(name)) env[name] = value;
+  }
+  // dohc's own callers may set any variable, but not a host beyond loopback.
+  for (const [name, value] of Object.entries(overrides)) {
+    if (HOST_ENVIRONMENT_NAME.test(name) && value !== undefined && !isLoopbackHostname(value)) {
+      throw new Error(`App command environment must set ${name} to a loopback host, not ${value || "all interfaces"}.`);
+    }
+    env[name] = value;
+  }
+  return env;
+}
+
+// How long a stop waits for an exit the system has not reported yet before
+// it counts a process as still running.
+const STOP_CONFIRM_MS = 1_000;
+
+// The command's processes alive after a stop: the wrapper, while the system
+// has not seen it exit, and every descendant captured while it ran. A capture
+// still in flight lands first, so a helper it finds is counted.
+async function survivingProcesses(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+): Promise<number[]> {
+  await descendants.awaitAll();
+  const deadline = Date.now() + STOP_CONFIRM_MS;
+  for (;;) {
+    const wrapperAlive = child.pid !== undefined && child.exitCode === null &&
+      child.signalCode === null && isPidAlive(child.pid);
+    const left = [...(wrapperAlive ? [child.pid!] : []), ...descendants.captured()];
+    if (left.length === 0 || Date.now() >= deadline) return left;
+    await delay(50);
+  }
+}
+
+// What a start that was cancelled before it finished, and left processes
+// running, hands back so they can be stopped again.
+function leftoverHandle(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+): SiteProcessHandle {
+  return {
+    url: "",
+    command: command.command,
+    args: command.args,
+    cwd: command.cwd,
+    logs: () => [...command.logs],
+    onExit: (listener) => {
+      if (child.exitCode !== null || child.signalCode !== null) queueMicrotask(listener);
+      else child.once("exit", listener);
+    },
+    stop: () => stopChild(child, descendants.captured, undefined, descendants.awaitAll),
+    stillRunning: () => survivingProcesses(child, descendants),
+  };
+}
+
+// What is still running once a command's own processes should be gone, as an
+// error that holds them, or null when nothing is.
+async function leftRunning(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+): Promise<AppCommandStillRunningError | null> {
+  const left = await survivingProcesses(child, descendants);
+  return left.length > 0 ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left) : null;
+}
+
+// A start that ends without a ready preview: cancelled, timed out, or exited
+// first. Its answer is the path's own error, or still running when the stop
+// left processes behind.
+async function cancelledStart(
+  child: ChildProcess,
+  descendants: DescendantCapture,
+  command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
+  message: string,
+): Promise<Error> {
+  await stopChild(child, descendants.captured, undefined, descendants.awaitAll).catch(() => undefined);
+  return (await leftRunning(child, descendants, command)) ?? new Error(message);
+}
+
+// The last check before an app's own command starts. Nothing awaits between
+// it and spawn, so a cancel or a revoked trust that landed during the awaits
+// before it stops the command here.
+interface SpawnGate {
+  signal?: AbortSignal;
+  // Throws unless the command may still run, such as when the workspace lost
+  // its trust.
+  assertMayRun?: () => void;
+}
+
+function assertMayStart(input: SpawnGate): void {
+  if (input.signal?.aborted) throw new Error("The app command was cancelled before it started.");
+  input.assertMayRun?.();
+}
+
 export async function startSiteDevServer(input: {
   workspaceRoot: string;
   siteRoot: string;
@@ -875,16 +1022,16 @@ export async function startSiteDevServer(input: {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
-  signal?: AbortSignal;
-} & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
+} & SpawnGate & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
   const logs: SiteLogEntry[] = [];
-  const env = { ...process.env, ...(input.env ?? {}) };
+  const env = siteCommandEnvironment(process.env, input.env);
   // Package-manager commands are .cmd shims on Windows and cannot be spawned
   // directly; resolveSpawnCommand is a no-op on other platforms.
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
+  assertMayStart(input);
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
@@ -914,32 +1061,24 @@ export async function startSiteDevServer(input: {
       input.signal?.removeEventListener("abort", abortStart);
     }
 
-    function abortStart() {
+    // The one way a start ends without a ready preview. It brings the child
+    // and its captured descendants down before it answers, so a caller never
+    // sees the failure while the dev server still holds the site folder.
+    // stopChild also runs the Windows tree kill before the wrapper signal,
+    // so the taskkill cannot race a dead wrapper pid and orphan the server.
+    function endUnready(message: string) {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
-        reject(new Error("App dev server start was cancelled."));
-      });
+      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, message).then(reject);
+    }
+
+    function abortStart() {
+      endUnready("App dev server start was cancelled.");
     }
 
     const failTimer = setTimeout(() => {
-      if (resolved) return;
-      stopped = true;
-      // Bring the child fully down before rejecting. stopChild awaits before it
-      // delivers SIGTERM (non-win32) / completes the tree kill (win32), so
-      // rejecting first would let a caller observe the failure and delete or
-      // switch the workspace while the dev server is still alive, holding the
-      // site dir. stopChild also sequences the Windows tree kill before the
-      // wrapper signal; signalling first would let the taskkill race a dead
-      // wrapper pid and orphan the real dev server.
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
-        reject(
-          new Error(
-            `App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
-          ),
-        );
-      });
+      endUnready(`App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`);
     }, input.readyTimeoutMs ?? 15000);
 
     if (input.signal?.aborted) abortStart();
@@ -952,7 +1091,8 @@ export async function startSiteDevServer(input: {
       if (stream === "stdout") stdoutCarry = carry;
       else stderrCarry = carry;
       const url = detectDevUrl(combined);
-      if (!url || resolved) return;
+      // A ready line during a cancel's cleanup is too late: that start ended.
+      if (!url || resolved || stopped) return;
       resolved = true;
       clearTimers();
       // The immediate post-spawn snapshot (above) can race a wrapper that
@@ -985,6 +1125,7 @@ export async function startSiteDevServer(input: {
             },
             descendants.awaitAll,
           ),
+        stillRunning: () => survivingProcesses(child, descendants),
       });
     }
 
@@ -999,14 +1140,13 @@ export async function startSiteDevServer(input: {
       maybeResolve(text, "stderr");
     });
     child.once("error", (error) => {
+      if (resolved || stopped) return;
+      stopped = true;
       clearTimers();
-      if (!resolved) reject(error);
+      reject(error);
     });
     child.once("exit", (code, signal) => {
-      clearTimers();
-      if (!resolved && !stopped) {
-        reject(new Error(`App dev server exited before it was ready (code=${code}, signal=${signal}).`));
-      }
+      endUnready(`App dev server exited before it was ready (code=${code}, signal=${signal}).`);
     });
   });
 }
@@ -1045,16 +1185,15 @@ async function stopChild(
   if (alreadyExited && capturedDescendants().length === 0) return;
   beforeKill?.();
   if (process.platform === "win32") {
-    if (!alreadyExited) {
-      await killChildTreeWin32(child);
-    } else {
-      // The wrapper is already gone, so taskkill /PID <wrapper> /T has
-      // nothing live left to walk from — reach every descendant this
-      // session's periodic poll captured directly by pid instead, the same
-      // fallback POSIX takes below via capturedDescendants.
-      for (const descendantPid of capturedDescendants()) {
-        await killProcessTreeWin32(descendantPid, () => false);
-      }
+    if (!alreadyExited) await killChildTreeWin32(child);
+    // Each captured helper still alive gets its own tree kill: one whose
+    // parent died is outside the wrapper's tree, and once the wrapper is
+    // gone taskkill /PID <wrapper> /T has nothing live left to walk from.
+    // POSIX signals these through alsoSignal. Each pid is checked just
+    // before its taskkill, since an earlier one may have ended it and
+    // Windows reuses numbers quickly.
+    for (const descendantPid of capturedDescendants()) {
+      await killProcessTreeWin32(descendantPid, () => !isPidAlive(descendantPid));
     }
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
@@ -1076,26 +1215,39 @@ async function stopChild(
     if (!alreadyExited) child.kill("SIGTERM");
     return;
   }
+  const wrapperExited = () => child.exitCode !== null || child.signalCode !== null;
   const exited = alreadyExited
     ? Promise.resolve()
     : new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  let captured: number[] = [...capturedDescendants()];
-  try {
-    captured = await killProcessTreePosix(pid, "SIGTERM", { alsoSignal: captured });
-  } catch {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-  }
+  // Node reaped a wrapper it saw exit, so its pid may name another program
+  // by now. A round's roots are the wrapper only while it runs, and the
+  // captured pids still alive.
+  const signalRound = async (signal: NodeJS.Signals, helpers: readonly number[]): Promise<number[]> => {
+    const roots = [...(wrapperExited() ? [] : [pid]), ...helpers.filter((each) => each !== pid && isPidAlive(each))];
+    const [root, ...alsoSignal] = roots;
+    if (root === undefined) return [];
+    try {
+      return await killProcessTreePosix(root, signal, {
+        alsoSignal,
+        // The table read waits on ps, and Node can reap the wrapper meanwhile.
+        sendSignal: (each, eachSignal) => {
+          if (each === pid && wrapperExited()) return;
+          process.kill(each, eachSignal);
+        },
+      });
+    } catch {
+      if (!wrapperExited()) child.kill(signal);
+      return roots;
+    }
+  };
+  const signalled = await signalRound("SIGTERM", capturedDescendants());
   let graceTimer: NodeJS.Timeout | undefined;
   const grace = new Promise<void>((resolve) => {
     graceTimer = setTimeout(resolve, BUILD_HARD_KILL_GRACE_MS);
   });
   await Promise.race([exited, grace]);
   if (graceTimer) clearTimeout(graceTimer);
-  try {
-    await killProcessTreePosix(pid, "SIGKILL", { alsoSignal: captured });
-  } catch {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  }
+  await signalRound("SIGKILL", signalled);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -1156,14 +1308,14 @@ export async function buildSite(input: {
   output?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
-  signal?: AbortSignal;
-} & DescendantCaptureOverrides): Promise<BuildSiteResult> {
+} & SpawnGate & DescendantCaptureOverrides): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
-  const env = { ...process.env, ...(input.env ?? {}) };
+  const env = siteCommandEnvironment(process.env, input.env);
   const spawnSpec = resolveSpawnCommand(input.command, args, { env, cwd });
+  assertMayStart(input);
   const child = spawn(spawnSpec.command, spawnSpec.args, {
     cwd,
     env,
@@ -1184,49 +1336,62 @@ export async function buildSite(input: {
     reader: input.descendantsReader,
   });
 
-  const exitCode = await new Promise<number | null>((resolve) => {
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const command = { command: input.command, args, cwd, logs };
     let settled = false;
-    let timedOut = false;
+    // A cancelled or timed-out build answers once its stop is confirmed,
+    // not at the exit its own stop causes.
+    let ending = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    function finish(code: number | null) {
+    function settle(answer: () => void) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       input.signal?.removeEventListener("abort", abortBuild);
-      resolve(code);
+      answer();
+    }
+    const finish = (code: number | null) => settle(() => resolve(code));
+    // Processes left running fail the build, whatever its exit code.
+    const answerWith = (left: AppCommandStillRunningError | null, code: number | null) =>
+      left ? settle(() => reject(left)) : finish(code);
+
+    // The one way a build ends early, for a cancel and a timeout alike.
+    function endEarly(reason: string) {
+      if (settled || ending) return;
+      ending = true;
+      if (timer) clearTimeout(timer);
+      pushLog(logs, "system", reason);
+      void cancelledStart(child, descendants, command, reason).then((error) =>
+        answerWith(error instanceof AppCommandStillRunningError ? error : null, null));
     }
 
     function abortBuild() {
-      if (settled) return;
-      pushLog(logs, "system", "Build cancelled.");
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
+      endEarly("Build cancelled.");
     }
 
-    timer = setTimeout(() => {
-      timedOut = true;
-      pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
-      // stopChild sequences the Windows tree kill before the wrapper signal
-      // and resolves once the child exits (or the kill grace lapses).
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
-    }, timeoutMs);
+    timer = setTimeout(() => endEarly(`Build timed out after ${timeoutMs}ms.`), timeoutMs);
     if (input.signal?.aborted) abortBuild();
     else input.signal?.addEventListener("abort", abortBuild, { once: true });
     child.stdout.on("data", (chunk) => pushLog(logs, "stdout", String(chunk)));
     child.stderr.on("data", (chunk) => pushLog(logs, "stderr", String(chunk)));
     child.once("error", (error) => {
       pushLog(logs, "system", error.message);
-      finish(null);
+      if (!ending) finish(null);
     });
     child.once("exit", (code) => {
-      // A timed-out build reports exitCode null regardless of how the kill
-      // is delivered (taskkill termination surfaces as a plain exit code).
+      // An early end answers on its own path, with exitCode null.
+      if (ending) return;
       // The wrapper itself has already exited here — stopChild's own guard
       // (and its awaiting every in-flight capture) makes this a no-op
       // unless a descendant was actually captured while the wrapper was
       // alive.
-      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() =>
-        finish(timedOut ? null : code),
-      );
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll)
+        .then(() => leftRunning(child, descendants, command))
+        .then((left) => {
+          // A cancel or a timeout that arrived during this cleanup answers
+          // instead: its error outranks the build's own exit.
+          if (!ending) answerWith(left, code);
+        });
     });
   });
 

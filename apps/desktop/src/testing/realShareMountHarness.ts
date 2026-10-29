@@ -26,6 +26,7 @@ import { fetchShareViewInfo } from "../workspaces/shareViewInfo";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiveStore";
 import { createWorkspaceFileMutationOwner } from "../workspaces/workspaceFileMutationOwner";
+import { readLocalStateFrom } from "../workspaces/workspaceLocalState";
 
 // Registry persistence and renderer notifications are local ports. Mount commands,
 // projection, file admission, relay requests, and engine storage use their owners.
@@ -38,6 +39,8 @@ export function createRealShareMountHarness(input: {
     ...input.daemon.workspace,
     shareMounts: [] as ShareMountRecord[],
   };
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(input.daemon.sessions);
   const received = createReceivedShareEngineAccess({
     sessions: () => input.daemon.sessions,
     relayClient: () => input.daemon.relay,
@@ -100,7 +103,7 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
-    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({ resolveFiles: async () => {throw new Error("Unexpected file resolution");}, readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
@@ -130,7 +133,15 @@ export function createRealShareMountHarness(input: {
     relayShareErrorCopy: unexpected,
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
     ownerLiveStop: unexpected,
+    pushRecorded: unexpected,
+    liveDocument: unexpected,
+    withoutEditors: unexpected,
     listOwnerLiveStops: unexpected,
+    ownerLiveQuarantines: unexpected,
+    unwrittenOwnerLiveReleases: unexpected,
+    retryOwnerLiveQuarantine: unexpected,
+    retryOwnerLiveRelease: unexpected,
+    saveOwnerLiveRecoveryCopy: unexpected,
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });

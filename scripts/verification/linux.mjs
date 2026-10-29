@@ -1,6 +1,7 @@
 // Rust on Linux. On the shared Windows host, a PR run that selects Rust also runs the gate's
 // clippy command in the host's WSL distro, so a change that breaks only the Linux build fails
-// before merge. A full run, such as the nightly, runs the whole Rust job there, tests included.
+// before merge, then the app compiler owner's tests, which only Linux runs. A full run, such as the
+// nightly, runs the whole Rust job there, tests included.
 // A full Rust job on every PR would take as long as the Windows one, one at a time for every lane.
 // `verification-linux` beside the build slots names the distro. Without it, nothing runs on Linux.
 
@@ -10,7 +11,12 @@ import { freemem } from "node:os";
 import { join, win32 } from "node:path";
 import { acquireBuildSlot, acquireLinuxSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { clippy } from "../../tools/rust-engine-program/gate-commands.mjs";
+import { nextestFailures, nextestFlaky, readLog } from "./flaky.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
+
+// The app compiler owner's Landlock and seccomp rules and its /proc process table compile only on Linux,
+// so the Windows and Mac gates never run their tests.
+const linuxTests = ["nextest", "run", "--locked", "--package", "dohc-compiler-owner"];
 
 // Runs take turns in one checkout, so the distro holds one build's output.
 const home = "$HOME/.dohc-verification";
@@ -54,6 +60,22 @@ export function wslPath(path) {
 }
 
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+// The curl errors cargo retries as spurious: a proxy or host it could not resolve or reach, a timeout, a failed
+// send or receive, an HTTP/2 or TLS connection error, or a partial file (`maybe_spurious` in cargo's `src/cargo/util/network/retry.rs`).
+const spuriousCurlErrors = new Set([5, 6, 7, 16, 18, 28, 35, 55, 56, 92]);
+
+/**
+ * Whether cargo's last error is a download that failed for a reason cargo retries: one of those curl errors, a server error
+ * or rate limit, or a transfer too slow. Once its retries run out, cargo ends with that error. A missing crate, a certificate,
+ * or a lockfile that needs an update ends with another one, even after a retry that worked.
+ */
+export function networkFailed(log) {
+  const lines = log.split(/\r?\n/u);
+  const last = lines.findLastIndex(line => line.startsWith("error:"));
+  return last !== -1 && lines.slice(last).some(line => spuriousCurlErrors.has(Number(/^(?:error:)?\s*\[(\d+)\] /u.exec(line)?.[1]))
+    || /^(?:error:)?\s*failed to get successful HTTP response from .*, got (?:5\d\d|429)$/u.test(line) || /transfer too slow: /u.test(line));
+}
 
 /** Prints the commits the Linux checkout keeps, then `head` and `base` if it has them. Creates the checkout on first use. */
 export const tipsScript = ({ head, base }) => `set -euo pipefail
@@ -108,20 +130,28 @@ awk '$1 == "Cached:" {print "cached", $2}' /proc/meminfo
 }
 
 /**
- * Runs the job in a user scope: with `full`, it installs dependencies, as the queue prepares a Windows lane,
- * then runs the verifier's Rust job; otherwise it runs the gate's clippy command.
+ * Runs the job in a user scope. It first downloads every crate the lockfile names, for every platform, because a full run's
+ * cargo-deny reads them all. Then, with `full`, it installs dependencies,
+ * as the queue prepares a Windows lane, and runs the verifier's Rust job; otherwise it runs the gate's clippy command,
+ * then the compiler owner's tests.
  * A watchdog in the scope stops it when the launcher ends, so a run whose Windows side was killed leaves nothing behind.
- * Afterwards the scope's peak memory and out-of-memory kills go to `scope.json`.
+ * Afterwards the scope's peak memory, out-of-memory kills, and whether the download worked go to `scope.json`.
  */
 export function runScript({ unit, base, grant, output, jobs, full }) {
   const verify = `launcher=$$
 setsid bash -c "while kill -0 $launcher 2>/dev/null; do sleep 5; done; systemctl --user stop ${unit}.scope" </dev/null >/dev/null 2>&1 &
-${full ? `pnpm install --frozen-lockfile --config.confirm-modules-purge=false && node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")}`}
-status=$?
+if cargo fetch --locked; then
+  fetched=true
+  ${full ? `pnpm install --frozen-lockfile --config.confirm-modules-purge=false && node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")} && cargo ${linuxTests.join(" ")}`}
+  status=$?
+else
+  status=$?
+  fetched=false
+fi
 cgroup=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
 peak=$(cat "$cgroup/memory.peak" 2>/dev/null || true)
 kills=$(awk '$1 == "oom_kill" {print $2}' "$cgroup/memory.events" 2>/dev/null || true)
-printf '{"memoryPeak":%s,"oomKills":%s}\\n' "\${peak:-null}" "\${kills:-null}" > "$DOHC_VERIFICATION_OUTPUT/scope.json"
+printf '{"memoryPeak":%s,"oomKills":%s,"fetched":%s}\\n' "\${peak:-null}" "\${kills:-null}" "$fetched" > "$DOHC_VERIFICATION_OUTPUT/scope.json"
 exit $status`;
   return `set -euo pipefail
 cd "${home}/linux"
@@ -145,7 +175,8 @@ exit 1
 
 /**
  * Check `head` against `base` in `distro`: with `full`, the whole Rust job; otherwise the gate's clippy command,
- * which builds every target. Returns a receipt, the Linux verifier's when `full`, and the scope's memory use.
+ * which builds every target, then the compiler owner's tests. Returns a receipt, the Linux verifier's when `full`
+ * and the crates downloaded, and the scope's memory use.
  * `output` is a Windows folder for its evidence.
  * A check's failure comes back as a FAIL receipt. Everything thrown is a stop, which keeps its reason,
  * or a machine failure, which carries `environment` so the queue retries it instead of failing the change.
@@ -167,7 +198,7 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
   const run = randomUUID().slice(0, 8);
   const unit = `${scopePrefix}${run}`;
   const ref = `refs/verification-linux/${run}`;
-  const metadata = { purpose: full ? "Linux Rust gate" : "Linux clippy", checkout: repoRoot, commit: head, phase: request };
+  const metadata = { purpose: full ? "Linux Rust gate" : "Linux PR checks", checkout: repoRoot, commit: head, phase: request };
   try { mkdirSync(output, { recursive: true }); } catch (error) { environment("linux host")(error); }
   const slot = await acquireLinuxSlot({ root: budget.root, metadata, signal, waitMs: remaining() }).catch(environment("linux slot"));
   let cargo;
@@ -211,17 +242,24 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
     // The scope writes this after its command, so without it the command never ran.
     const scope = readJson(join(output, "scope.json"));
     if (!scope) throw exit ?? new Error("The Linux scope recorded nothing.");
+    const log = join(output, "wsl-run.log");
+    const text = readLog(log);
+    // Any other failed fetch, such as one whose lockfile needs an update, fails the change.
+    if (scope.fetched === false && networkFailed(text)) throw Object.assign(new Error(`The Linux job could not download its crates. Read ${log}.`), { environment: "linux network" });
     let receipt;
-    if (full) {
+    if (full && scope.fetched !== false) {
       receipt = readJson(join(output, "result.json"));
       if (!receipt?.final) throw exit ?? new Error("The Linux verifier wrote no final receipt.");
       if (receipt.failure?.kind === "environment") throw Object.assign(new Error(receipt.error ?? "The Linux host failed."), { environment: `linux ${receipt.failure.cause}` });
       if (receipt.commit !== head || receipt.baseCommit !== base) throw new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"} against ${receipt.baseCommit ?? "no base"}, not ${head} against ${base}.`);
     } else {
-      // cargo exits 101 on a build error or warning. 126 and 127, or wsl.exe's own failure, mean the shell could not run it.
+      // cargo exits 101 on a build error or warning, and nextest 100 on a failed test. 126 and 127, or wsl.exe's own
+      // failure, mean the shell could not run it.
       if (exit && !(exit.exitCode >= 1 && exit.exitCode <= 125)) throw exit;
-      receipt = { version: 1, mode: "clippy", final: true, commit: head, baseCommit: base, verdict: exit ? "FAIL" : "PASS",
-        ...(exit ? { error: `cargo clippy failed on Linux. Read ${join(output, "wsl-run.log")}.` } : {}), failed: [], flaky: [] };
+      const tests = names => names(text).map(test => ({ step: "rust", test }));
+      const checks = scope.fetched === false ? "cargo fetch" : "cargo clippy or the compiler owner's tests";
+      receipt = { version: 1, mode: full ? "gate" : "pr", final: true, commit: head, baseCommit: base, verdict: exit ? "FAIL" : "PASS",
+        ...(exit ? { error: `${checks} failed. Read ${log}.` } : {}), failed: tests(nextestFailures), flaky: tests(nextestFlaky) };
       writeFileSync(join(output, "result.json"), JSON.stringify(receipt, null, 2) + "\n");
     }
     // A compiler or test killed at the run's memory limit says nothing about the change.

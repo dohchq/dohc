@@ -100,8 +100,8 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     const tickets = createLiveTickets({storage, audience, key: ticketKey, hostReports: createLiveHostReports({storage, captureNative})});
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: {maxClientVectorBytes: 100000, maxSyncOutputBytes: 1000000, maxAppliedUpdateBytes: 1000000, maxSubmissionBytes: 1000000, maxAdmissionBytes: 4000000},
-      validate, sessions: createLinkLiveBrowserResolver({storage, linkKey}), tickets, captureNative});
-    linkHttp = createLinkLiveHttp({storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
+      validate, sessions: createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage, linkKey}), tickets, captureNative});
+    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
     closes.push(async () => routes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push(routes.handleUpgrade(request, socket, head));});
     const application = createShareWebApplication({publicEditRelease: {version: 1}, relayUrl, publicRelayUrl: audience,

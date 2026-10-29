@@ -59,6 +59,8 @@ describe("CLI, MCP, and app channel reference", () => {
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       // dohc_workspace_status reports it as its `collectionsWaiting` field.
       "collectionsWaiting",
+      // dohc document kept-edits prints it; dohc_workspace_status reports it as `keptEdits`.
+      "liveKeptEdits",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);
@@ -102,7 +104,7 @@ describe("CLI, MCP, and app channel reference", () => {
             throw new Error("parsed");
           },
         });
-        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: verb === "file-mentions" ? "chatFileMentions" : verb });
+        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: verb === "links" ? "chatLinks" : verb === "file-mentions" ? "chatFileMentions" : verb });
       }
       for (const flag of spec.flags ?? []) {
         expect(examples.flat(), `${verb} examples`).toContain(flag.name);

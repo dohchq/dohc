@@ -78,6 +78,7 @@ export function CommandPalette(props: {
   return (
     <Overlay
       onClose={props.onClose}
+      closeOnBackdrop
       panelProps={{
         onKeyDown: (event) => {
           if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {
@@ -115,7 +116,11 @@ export function CommandPalette(props: {
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 moveSelection(-1);
-              } else if (event.key === "Enter") runCommand(matches[selected]);
+              } else if (event.key === "Enter") {
+                // Its keypress would press whatever the command focused.
+                event.preventDefault();
+                runCommand(matches[selected]);
+              }
             }}
             // Intentional focus treatment (the input autofocuses on open): no
             // ring — the framing row and caret carry focus, and the global
@@ -127,7 +132,7 @@ export function CommandPalette(props: {
           ref={listRef}
           role="listbox"
           aria-label="Commands"
-          className="m-0 max-h-72 list-none overflow-y-auto p-1.5"
+          className="m-0 max-h-72 list-none overflow-y-auto p-1"
         >
           {matches.length === 0 ? (
             <li className="px-3 py-2.5 text-xs text-subtle">No matching commands</li>
@@ -137,7 +142,7 @@ export function CommandPalette(props: {
                 <button
                   type="button"
                   onClick={() => runCommand(command)}
-                  className={`flex h-8 w-full items-center rounded-md px-2.5 text-left text-[13px] transition-colors duration-75 ${
+                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                     // Keyboard selection stays stronger than hover.
                     index === selected
                       ? "bg-selected text-ink"
@@ -152,15 +157,15 @@ export function CommandPalette(props: {
         </ul>
         <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-move", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-move", window.dohcDesktop?.platform)}</kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-accept", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-accept", window.dohcDesktop?.platform)}</kbd>
             open
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-dismiss", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-dismiss", window.dohcDesktop?.platform)}</kbd>
             dismiss
           </span>
         </div>

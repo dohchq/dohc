@@ -2,7 +2,7 @@ import {createHash} from "node:crypto";
 import {prepareSharePath, visibleSharePath} from "@dohc/security-contract/share-selector";
 import type {ReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import {createAccountlessPathProjection} from "./accountlessPathProjection";
-import {authorizeShareGrantAction} from "./shareAuthorization";
+import {authorizeShareGrantAction, type AuthorizedShareAction} from "./shareAuthorization";
 import {fileSideOf, targetVersionId} from "./shareFilter";
 import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
@@ -14,7 +14,7 @@ import {ReplicaMap} from "./replicaMap";
 export interface ReplicaCurrentViewReadInput {
   readonly grantId: string;
   readonly generation: number;
-  readonly principal: CurrentShareGrantPrincipal;
+  readonly principal: Extract<CurrentShareGrantPrincipal, {kind:"user"}> | {kind:"link"; requireSession:()=>{grantId:string;generation:number}};
 }
 export interface ReplicaCurrentViewSource {
   currentReadView(workspaceId: string, readStored?:()=>ReplicaCurrentView|null): {view: ReplicaCurrentView; previous?: ReplicaCurrentView} | null;
@@ -256,11 +256,14 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     files: ReplicaCurrentViewFile[];
     rows: Map<string, ViewFile>;
     workspace: string;
+    authorized: AuthorizedShareAction;
+    view: ReplicaCurrentView;
     floor: ReturnType<typeof replicaGrantFloor>;
     visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
   }) => T, requestedPath?: string, includeRows = false,
+  authority?:{history?:boolean;onStanding?:(authorized:AuthorizedShareAction)=>void},
 ): T | Unavailable {
   try {return storage.readTx(() => {
     if (!Number.isSafeInteger(input.generation) || input.generation < 1) return {status:"denied"};
@@ -268,10 +271,16 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     if (!authorized.ok) return {status:"denied"};
     const selector = fileSideOf(authorized.effectiveSelector);
     if (!selector) return {status:"denied"};
+    if (authority?.history && selector.access !== "edit") return {status:"denied"};
+    if (input.principal.kind === "link") {
+      const session = input.principal.requireSession();
+      if (session.grantId !== input.grantId || session.generation !== input.generation) return {status:"denied"};
+    }
     const workspace = authorized.share.workspaceId;
     const standing = storage.readReplicaStanding(workspace);
     if (!standing) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     if (standing.ownerUserId !== authorized.share.granterUserId) return {status:"denied"};
+    authority?.onStanding?.(authorized);
     const projection = input.principal.kind === "link" ? createAccountlessPathProjection(selector) : null;
     const realPath = requestedPath === undefined ? undefined : projection ? projection.resolvePath(requestedPath) ?? "" : requestedPath;
     const stored = readReplicaCurrentViewHead(storage,workspace);
@@ -358,7 +367,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, workspace, floor,
+    return read({files:sorted, rows, workspace, authorized, view, floor,
       visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);

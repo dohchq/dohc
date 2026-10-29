@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import { workspaceCreateOffers, type ShareViewWriteScope } from "../../workspaces/shareWriteGate";
 import { APP_VIEW_ID_PREFIX, appViewId, type AppViewId } from "../workbench/workbenchState";
 
@@ -6,7 +7,10 @@ export interface CommandContext {
   // The share view this workspace is, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
   activeDocumentKind: string | null;
+  // Whether the active editor's file has a Share button.
+  activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
+  updateStatus: UpdateStateEvent["status"] | null;
 }
 
 export const COMMAND_AVAILABILITY = {
@@ -15,7 +19,10 @@ export const COMMAND_AVAILABILITY = {
   folderCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).folder,
   collectionCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
+  activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,
+  updateAvailable: (context: CommandContext) => context.updateStatus === "available",
+  updateReady: (context: CommandContext) => context.updateStatus === "ready",
   pinnedApp: (context: CommandContext, id: PinnedAppCommandId) =>
     context.pinnedApps.some((app) => pinnedAppCommandId(app.root) === id),
 };
@@ -28,6 +35,7 @@ interface StaticRow {
 
 export const COMMAND_ROWS = {
   "new-file": { label: "New file", availability: "workspaceWritable" },
+  "new-file-at-path": { label: "New file…", availability: "workspaceWritable" },
   "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
   "new-folder": { label: "New folder", availability: "folderCreatable", capabilityId: "folder.create" },
   "new-collection": { label: "New collection", availability: "collectionCreatable" },
@@ -41,6 +49,7 @@ export const COMMAND_ROWS = {
   "previous-tab": { label: "Show previous tab", availability: "always" },
   "new-editor-group-right": { label: "New editor group right", availability: "always" },
   "toggle-markdown-source": { label: "Toggle markdown source view", availability: "activeMarkdown" },
+  "share-file": { label: "Share…", availability: "activeShareable" },
   "toggle-about": { label: "Toggle About", availability: "always" },
   "show-explorer": { label: "View: Explorer", availability: "always" },
   "show-chats": { label: "View: Chats", availability: "localWorkspace" },
@@ -53,7 +62,8 @@ export const COMMAND_ROWS = {
   "settings-appearance": { label: "Settings: Open Appearance", availability: "always" },
   "settings-agents": { label: "Settings: Open Agents (MCP)", availability: "always" },
   "check-updates": { label: "Check for updates", availability: "always" },
-  "install-update": { label: "Update and restart", availability: "always" },
+  "download-update": { label: "Update dohc", availability: "updateAvailable" },
+  "install-update": { label: "Restart to update", availability: "updateReady" },
   "toggle-theme": { label: "Toggle light/dark theme", availability: "always" },
   "zoom-in": { label: "Zoom in", availability: "always" },
   "zoom-out": { label: "Zoom out", availability: "always" },

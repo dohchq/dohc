@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
 
 export const SECRET_FILE_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
@@ -17,6 +17,61 @@ export class SecretFileStoreError extends Error {
     super(message);
     this.name = "SecretFileStoreError";
     this.code = code;
+  }
+}
+
+function hardLinksUnsupported(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, syscall } = error as NodeJS.ErrnoException;
+  // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and ERROR_NOT_SUPPORTED (50) to ENOTSUP.
+  // Off Windows, match materialize.rs::hard_links_unsupported; Windows EPERM remains a permissions failure.
+  return syscall === "link" && (
+    code === "ENOTSUP" || code === "ENOSYS" ||
+    (process.platform === "win32"
+      ? code === "EISDIR"
+      : code === "EPERM" || code === "EOPNOTSUPP")
+  );
+}
+
+// exFAT and FAT32 have no hard links. Off Windows, an empty file claims the
+// key's name there and the flushed copy is renamed over it, so the key still
+// appears whole or not at all and never replaces another. Windows can't make
+// the renamed name durable, and the engine refuses a key other users can
+// read, so those drives are still refused.
+async function publishKey(temporary: string, destination: string): Promise<void> {
+  try {
+    return await link(temporary, destination);
+  } catch (error) {
+    if (process.platform === "win32" || !hardLinksUnsupported(error)) throw error;
+    if (((await lstat(temporary)).mode & 0o077) !== 0) throw error;
+  }
+  await (await open(destination, "wx", 0o600)).close();
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    // An empty claim holds no key, so it can go.
+    if ((await stat(destination).catch(() => null))?.size === 0) await rm(destination, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+// Flush the key file, then its folder, after reading the key and before it is
+// used. On Linux FAT32 only a flush of the renamed file writes its entry, and
+// a creator that lost the claim can read a key renamed over that claim after
+// atomicCreateFile flushed the folder. Node can't open a folder on Windows.
+async function flushKey(path: string, message: string): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    for (const target of [path, dirname(path)]) {
+      const handle = await open(target, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }
+  } catch {
+    throw new SecretFileStoreError("key-corrupt", message);
   }
 }
 
@@ -50,23 +105,66 @@ function parseKeyFile(content: string): Buffer {
   return key;
 }
 
+// Match the Rust key directory check: aliases above the workspace are allowed,
+// but the key folder must be the workspace's own real .dohc/engine.
+async function verifyKeyDir(rootDir: string, path: string): Promise<void> {
+  let realParent: string;
+  let expected: string;
+  try {
+    realParent = await realpath(dirname(path));
+    expected = join(await realpath(rootDir), ".dohc", "engine");
+  } catch (error) {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again."
+        : "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+    );
+  }
+  if (realParent !== expected) {
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
+    );
+  }
+}
+
+// Windows can follow a dangling file link even with "wx". Only an absent
+// entry is a missing key; inspect before every read, including an EEXIST retry.
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isFile()) {
+      throw new SecretFileStoreError(
+        "key-corrupt",
+        "dohc didn't use .dohc/engine/secret.key because it isn't a regular file. Replace it with this workspace's key file.",
+      );
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export async function loadSecretDataKey(
   rootDir: string,
   options: { createIfMissing: boolean },
 ): Promise<Buffer> {
   const path = keyFilePath(rootDir);
   try {
-    const content = await readFile(path, "utf8");
-    await chmod(path, 0o600).catch(() => undefined);
-    return parseKeyFile(content);
+    await verifyKeyDir(rootDir, path);
+    if (await fileExists(path)) {
+      const content = await readFile(path, "utf8");
+      await chmod(path, 0o600).catch(() => undefined);
+      return parseKeyFile(content);
+    }
   } catch (error) {
     if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new SecretFileStoreError(
-        "key-corrupt",
-        "The workspace secret key file could not be read; refusing to touch protected files.",
-      );
-    }
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to touch protected files.",
+    );
   }
   if (!options.createIfMissing) {
     throw new SecretFileStoreError(
@@ -74,23 +172,20 @@ export async function loadSecretDataKey(
       "The workspace secret key file is missing but protected data exists; failing closed.",
     );
   }
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // The engine creates and protects `.dohc/engine` when it opens the
+  // workspace, which callers do first. Writing here never creates it.
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  const createFailed = "The workspace secret key file could not be created; refusing to store protected files.";
+  let created: boolean;
   try {
-    await writeFile(path, payload, { flag: "wx", mode: 0o600 });
-    return key;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      const content = await readFile(path, "utf8");
-      await chmod(path, 0o600).catch(() => undefined);
-      return parseKeyFile(content);
-    }
-    throw new SecretFileStoreError(
-      "key-corrupt",
-      "The workspace secret key file could not be created; refusing to store protected files.",
-    );
+    created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });
+  } catch {
+    throw new SecretFileStoreError("key-corrupt", createFailed);
   }
+  const published = created ? key : await loadSecretDataKey(rootDir, { createIfMissing: false });
+  await flushKey(path, createFailed);
+  return published;
 }
 
 export async function installWorkspaceDataKey(
@@ -103,33 +198,40 @@ export async function installWorkspaceDataKey(
   }
   const path = keyFilePath(rootDir);
   try {
-    const existing = parseKeyFile(await readFile(path, "utf8"));
-    await chmod(path, 0o600).catch(() => undefined);
-    if (existing.equals(key)) return;
-    throw new SecretFileStoreError(
-      "key-corrupt",
-      "A different workspace secret key already exists locally; refusing to overwrite protected state.",
-    );
-  } catch (error) {
-    if (error instanceof SecretFileStoreError) throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    await verifyKeyDir(rootDir, path);
+    if (await fileExists(path)) {
+      const existing = parseKeyFile(await readFile(path, "utf8"));
+      await chmod(path, 0o600).catch(() => undefined);
+      if (existing.equals(key)) return;
       throw new SecretFileStoreError(
         "key-corrupt",
-        "The workspace secret key file could not be read; refusing to install a replacement.",
+        "A different workspace secret key already exists locally; refusing to overwrite protected state.",
       );
     }
-  }
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
-  try {
-    await writeFile(path, payload, { flag: "wx", mode: 0o600 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return installWorkspaceDataKey(rootDir, key);
+    if (error instanceof SecretFileStoreError) throw error;
+    throw new SecretFileStoreError(
+      "key-corrupt",
+      "The workspace secret key file could not be read; refusing to install a replacement.",
+    );
+  }
+  // As above, the engine has already created `.dohc/engine`.
+  const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  let created: boolean;
+  try {
+    created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });
+  } catch (error) {
+    if (hardLinksUnsupported(error)) {
+      throw new SecretFileStoreError(
+        "key-install-unsupported",
+        "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.",
+      );
     }
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",
     );
   }
+  if (!created) await installWorkspaceDataKey(rootDir, key);
+  await flushKey(path, "The workspace secret key file could not be installed.");
 }

@@ -110,7 +110,8 @@ body {
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 32px;
+  /* Narrower windows tighten the gaps, so the alpha tag still fits. */
+  gap: clamp(16px, 3vw, 32px);
   min-height: 60px;
   padding: 8px clamp(20px, 5vw, 56px);
   border-bottom: 1px solid var(--line);
@@ -138,7 +139,7 @@ body {
 
 .nav-links {
   display: flex;
-  gap: 32px;
+  gap: clamp(16px, 3vw, 32px);
   margin-left: auto;
 }
 
@@ -216,18 +217,28 @@ body {
 }
 
 .nav-github {
-  padding: 4px 2px;
-  border-bottom: 1px solid transparent;
-  color: var(--subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 12px;
   text-decoration: none;
   transition: color 0.14s ease-out, border-color 0.14s ease-out;
 }
 
-.nav-github:hover {
-  color: var(--ink);
-  border-bottom-color: var(--ink);
+.nav-github:hover { color: var(--ink); border-color: var(--ink); }
+.nav-github:focus-visible { border-radius: 10px; }
+.nav-github svg { width: 15px; height: 15px; flex: none; fill: currentColor; }
+
+/* A narrower header has room for only the mark. */
+@media (max-width: 840px) {
+  .nav-github { padding: 0 10px; }
+  .nav-github-label { display: none; }
 }
 
 @media (max-width: 640px) {
@@ -235,10 +246,10 @@ body {
   .nav-links { display: flex; gap: 10px; margin-left: auto; }
   .nav-links a { font-size: 11px; }
   .nav-end { padding-left: 0; border-left: 0; gap: 8px; }
-  .nav-github { font-size: 11px; }
 }
 
-@media (max-width: 360px) {
+/* Below 380px the logo and the alpha tag leave no room for the wordmark. */
+@media (max-width: 380px) {
   .nav-brand .wordmark { display: none; }
 }
 
@@ -279,6 +290,9 @@ body {
 .download-control { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .download-primary { min-width: 194px; gap: 9px; }
 .download-primary[aria-busy='true'], .download-card[aria-busy='true'] { cursor: progress; }
+/* A build GitHub has not published: the control stays, quiet, and goes nowhere. */
+.download-primary[data-unavailable], .download-card[data-unavailable] .download-card-action { opacity: 0.55; cursor: default; }
+.download-card[data-unavailable] .download-card-action svg { display: none; }
 .download-os-icon { width: 18px; height: 18px; flex: none; fill: currentColor; stroke: none; }
 .download-primary .download-os-icon { width: 17px; height: 17px; }
 .download-other {
@@ -291,8 +305,9 @@ body {
 }
 
 .download-other:hover { color: var(--ink); }
-.download-stage { margin: 0; color: var(--muted); font: 400 12.5px/1.5 var(--font-mono); }
-.hero-cta .download-stage { flex-basis: 100%; }
+/* Every build is an alpha. Drawn like Drive's "Coming soon", one size down. */
+.nav-start { display: flex; align-items: center; gap: 12px; }
+.alpha-tag { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, var(--bg)); color: var(--ink); font: 600 11px/1.4 var(--font-sans); }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -1172,11 +1187,16 @@ main::before {
 .sync-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
 
 .sync-switch .theme-track { --switch-travel: 32px; flex: none; }
-.sync-switch input:not(:checked) + .sync-switch-track { --switch-travel: 0px; }
+.sync-switch input:not(:checked) ~ .sync-switch-track { --switch-travel: 0px; }
 .sync-off { opacity: 0; }
-.sync-switch input:not(:checked) + .sync-switch-track .sync-on { opacity: 0; }
-.sync-switch input:not(:checked) + .sync-switch-track .sync-off { opacity: 1; }
-.sync-switch input:focus-visible + .sync-switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sync-switch input:not(:checked) ~ .sync-switch-track .sync-on { opacity: 0; }
+.sync-switch input:not(:checked) ~ .sync-switch-track .sync-off { opacity: 1; }
+.sync-switch input:focus-visible ~ .sync-switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The word beside the knob is the current state. */
+.sync-switch-side { color: var(--subtle); }
+.sync-switch input:checked ~ [data-sync-side='online'],
+.sync-switch input:not(:checked) ~ [data-sync-side='offline'] { color: var(--ink); cursor: default; }
 
 .sync-hint {
   min-height: 1.5em;
@@ -1547,6 +1567,9 @@ main::before {
 .waitlist-field input::placeholder { color: var(--subtle); }
 .waitlist-field .btn { flex: none; padding: 10px 16px; font-size: 13px; }
 .waitlist-field .btn[aria-disabled='true'] { cursor: progress; }
+.waitlist-note { margin-top: 2px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
+.waitlist-note a { color: inherit; text-underline-offset: 3px; }
+.waitlist[data-state='joined'] .waitlist-note { display: none; }
 .waitlist-status:focus { outline: none; }
 .waitlist-status { min-height: 1.5em; margin-top: 10px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
@@ -2033,6 +2056,11 @@ p { text-wrap: pretty; }
   .nav-end .nav-download { display: none; }
 }
 
+/* The alpha tag beside the logo leaves a phone room for one section link. */
+@media (max-width: 420px) {
+  .nav-links a[href='#drive'] { display: none; }
+}
+
 /* ---------- buttons ---------- */
 
 .btn {
@@ -2171,3 +2199,24 @@ p { text-wrap: pretty; }
   .download-card:active .download-card-action { transform: none; }
   .agent-chip:active, .app-person:active, .app-settle:active { transform: none; }
 }
+
+/* ---------- privacy ---------- */
+
+.privacy {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: clamp(104px, 14vw, 140px) 24px 96px;
+}
+.privacy h1 {
+  font: 500 clamp(44px, 7vw, 72px)/1 var(--font-serif);
+  letter-spacing: -0.028em;
+}
+.privacy-lede { margin-top: 18px; color: var(--muted); font-size: 19px; }
+.privacy h2 {
+  margin-top: 44px;
+  font: 500 26px/1.25 var(--font-serif);
+  letter-spacing: -0.01em;
+}
+.privacy p { margin-top: 10px; }
+.privacy a { color: inherit; text-underline-offset: 3px; }
+.privacy-updated { margin-top: 48px; color: var(--subtle); font-size: 14px; }

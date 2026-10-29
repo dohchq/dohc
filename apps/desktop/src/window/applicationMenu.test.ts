@@ -219,7 +219,8 @@ describe("application menu template", () => {
   it.each(["win32", "linux"] as const)("%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate", (platform) => {
     const { template, sendCommand } = build(false, platform);
     const file = items(template, "File");
-    expect(file.map((entry) => entry.label ?? entry.role).slice(-6)).toEqual([
+    const quit = platform === "linux" ? 2 : 0;
+    expect(file.map((entry) => entry.label ?? entry.role).slice(-6 - quit, file.length - quit)).toEqual([
       "Show next tab", "Show next tab (alternate)",
       "Show previous tab", "Show previous tab (alternate)",
       "Close tab", "Close window",
@@ -267,6 +268,17 @@ describe("application menu template", () => {
     expect(closeWindow?.accelerator).toBe("CommandOrControl+Shift+W");
   });
 
+  it("linux: File ends with Quit on Ctrl+Q, the way Linux apps quit; Windows keeps Close window last", () => {
+    const linuxFile = items(build(false, "linux").template, "File");
+    expect(linuxFile.slice(-3).map((i) => i.role ?? i.type)).toEqual(["close", "separator", "quit"]);
+    expect(linuxFile.at(-1)).toMatchObject({ role: "quit", label: "Quit", accelerator: "CommandOrControl+Q" });
+    const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
+      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+    expect(all(build(false, "win32").template).some((entry) => entry.role === "quit")).toBe(false);
+    const macQuit = all(build(false, "darwin").template).filter((entry) => entry.role === "quit");
+    expect(macQuit).toEqual([{ role: "quit", label: "Quit dohc", accelerator: "CommandOrControl+Q" }]);
+  });
+
   it("devtools is present in dev and absent in packaged builds", () => {
     const roles = (isDev: boolean) =>
       items(build(isDev).template, "View").map((i) => i.role);
@@ -289,7 +301,7 @@ describe("application menu template", () => {
     expect((appMenu.submenu as MenuItemConstructorOptions[]).map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
       "about",
       "Check for updates",
-      "Update and restart",
+      "Restart to update",
       "separator",
       "Settings…",
       "separator",
@@ -375,7 +387,7 @@ describe("application menu template", () => {
     ]);
     expect(template.at(-1)?.role).toBe("help");
     expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
-      "Check for updates", "Update and restart", "separator", "About dohc",
+      "Check for updates", "Restart to update", "separator", "About dohc",
     ]);
     expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(false);
   });
@@ -392,7 +404,7 @@ describe("application menu template", () => {
     const { template, sendCommand } = build(false, "linux", true);
     const helpItems = items(template, "Help");
     const check = helpItems.find((i) => i.label === "Check for updates");
-    const install = helpItems.find((i) => i.label === "Update and restart");
+    const install = helpItems.find((i) => i.label === "Restart to update");
     const fakeWindow = { id: 5 };
 
     (check?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
@@ -405,7 +417,7 @@ describe("application menu template", () => {
   it("disables Help restart when no update is installable", () => {
     const { template } = build();
     const install = items(template, "Help").find(
-      (i) => i.label === "Update and restart",
+      (i) => i.label === "Restart to update",
     );
 
     expect(install?.enabled).toBe(false);

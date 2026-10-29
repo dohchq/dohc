@@ -34,7 +34,7 @@ import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { closeHistory } from "@tiptap/pm/history";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -149,6 +149,7 @@ export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
   getMarkdown: () => string;
   replaceMarkdown: (markdown: string) => void;
+  insertTypedText: (text: string, caret: number) => void;
 };
 
 type MarkdownEditorCollab = {
@@ -1212,6 +1213,25 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             .map(documentReplacementMap(documentBefore, documentAfter))
             .resolve(documentAfter);
           editor.view.dispatch(editor.state.tr.setSelection(mappedSelection));
+        },
+        // What a new page held while this editor loaded: each line becomes a
+        // paragraph at the start, and the caret lands where it stood in
+        // `text` (a UTF-16 offset, as a textarea counts).
+        insertTypedText(text, caret) {
+          if (!editor || editor.isDestroyed || text === "") return;
+          const { view } = editor;
+          const { doc, schema, tr } = view.state;
+          const paragraphs = text
+            .split("\n")
+            .map((line) => schema.nodes.paragraph!.create(null, line ? schema.text(line) : null));
+          // An empty document's one empty paragraph gives way to the text.
+          const empty = doc.childCount === 1 && doc.firstChild!.isTextblock && doc.firstChild!.content.size === 0;
+          tr.replaceWith(0, empty ? doc.content.size : 0, paragraphs);
+          // Each paragraph before the caret's line is its text plus its two
+          // boundaries; 1 enters the first paragraph.
+          const lines = text.slice(0, caret).split("\n");
+          const position = lines.reduce((sum, line) => sum + line.length + 2, 1) - 2;
+          view.dispatch(tr.setSelection(TextSelection.create(tr.doc, position)));
         },
       }),
       [collabActive, editor, value],

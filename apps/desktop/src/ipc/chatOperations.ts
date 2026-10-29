@@ -13,8 +13,6 @@ import {
   GetChatThreadRevisionResult,
   ListChatThreadDecisionsPayload,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionPayload,
-  ResolveChatDecisionResult,
   ListChatThreadAttachmentsPayload,
   ListChatThreadAttachmentsResult,
   ListChatChannelsPayload,
@@ -32,6 +30,7 @@ import {
   ListChatReactionsResult,
   SetChatReactionPayload,
   SetChatReactionResult,
+  ChatLinksPayload, ChatLinksResult,
   ChatFileMentionsPagePayload,
   ChatFileMentionsPageResult,
   ListChatMessagesPayload,
@@ -90,12 +89,6 @@ export const chatOperations = {
     inactiveMessage: "This workspace is no longer active.",
     payload: ListChatThreadDecisionsPayload, result: ListChatThreadDecisionsResult,
   },
-  resolveChatDecision: {
-    capabilityId: "chat.decision.resolve", channel: "desktop:resolve-chat-decision",
-    scope: "workspace", guard: "active-workspace",
-    inactiveMessage: "This workspace is no longer active.",
-    payload: ResolveChatDecisionPayload, result: ResolveChatDecisionResult,
-  },
   listChatThreadAttachments: {
     capabilityId: "chat.attachments.list", channel: "desktop:list-chat-thread-attachments",
     scope: "workspace", guard: "active-workspace",
@@ -149,6 +142,12 @@ export const chatOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "This workspace is no longer active.",
     payload: SetChatReactionPayload, result: SetChatReactionResult,
+  },
+  chatLinks: {
+    capabilityId: "chat.read", channel: "desktop:chat-links",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Chats stopped because this window changed workspaces.",
+    payload: ChatLinksPayload, result: ChatLinksResult,
   },
   chatFileMentionsPage: {
     capabilityId: "chat.read", channel: "desktop:chat-file-mentions-page",

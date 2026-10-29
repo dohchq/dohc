@@ -113,7 +113,7 @@ describe("ChatComposer Enter-to-send", () => {
 
 describe("chat authorship display", () => {
   it("does not infer self or colours from a settings display name", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" });
+    setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" } });
     const messages: ChatMessageRecord[] = [{ presentation: { group: "fixture", hue: null, self: false },
       id: "m1", threadId: "thread", authorKind: "human", authorDisplayName: "Ada",
       body: "Hello", createdAtMs: new Date(2026, 8, 17, 12).getTime(),
@@ -135,7 +135,7 @@ describe("chat authorship display", () => {
 
     rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
-    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+    setChosenColors(DEFAULT_USER_SETTINGS);
   });
 
   it.each([
@@ -266,6 +266,39 @@ describe("chat authorship display", () => {
     expect(screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open automation" }));
     expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
+  });
+
+  it("shows a link holder's chosen name in a share link's ring and marks it as a link holder", () => {
+    render(
+      <AgentSettingsProvider settings={DEFAULT_USER_SETTINGS}>
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            { presentation: { group: "7", hue: null, self: false },
+              id: "message-link",
+              threadId: "thread-1",
+              authorKind: "link",
+              authorDisplayName: "You",
+              body: "Count me in",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />
+      </AgentSettingsProvider>,
+    );
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("You");
+    expect(author.dataset.authorKind).toBe("link");
+    expect(screen.getByTestId("test-chat-message-link-holder").textContent).toBe("Link holder");
+    expect(screen.queryByTestId("test-chat-agent-badge")).toBeNull();
+    const avatar = screen.getByTitle("You");
+    expect(avatar.textContent).toBe("Y");
+    expect(avatar.className).toMatch(/\brounded-full\b/u);
+    expect(avatar.className).toContain("border-dashed");
+    expect(avatar.className).not.toMatch(/hue/u);
   });
 
   it("renders file chips without requiring a person or agent roster", () => {

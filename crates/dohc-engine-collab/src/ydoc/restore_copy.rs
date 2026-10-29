@@ -49,6 +49,8 @@ impl Budget {
 }
 
 pub(super) fn copy(point: &Ydoc, staged: &Ydoc, max_bytes: usize) -> Result<(), CollabError> {
+    let reader = point.has_reader_source();
+    let clear_reader = !reader && staged.has_reader_source();
     let source_body = point.doc.get_or_insert_xml_fragment(ROOT_BODY);
     let source_frontmatter = point.doc.get_or_insert_map(ROOT_FRONTMATTER);
     let source_meta = point.doc.get_or_insert_map(ROOT_META);
@@ -78,6 +80,23 @@ pub(super) fn copy(point: &Ydoc, staged: &Ydoc, max_bytes: usize) -> Result<(), 
             meta.remove(&mut target, MARKDOWN_CRLF_META_KEY);
         }
         _ => return Err(unsupported()),
+    }
+    if reader || clear_reader {
+        for key in [
+            MARKDOWN_SOURCE_READER_META_KEY,
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ] {
+            match source_meta.get(&source, key) {
+                Some(Out::Any(value)) if reader => {
+                    meta.insert(&mut target, key, value);
+                }
+                _ => {
+                    meta.remove(&mut target, key);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -236,7 +255,7 @@ mod tests {
         frozen.richdoc_append_paragraph("later");
         let before = frozen.state_vector();
         let delta = frozen
-            .rewrite_richdoc_preserving_source_bounded(&markdown, &point, 2_000_000)
+            .rewrite_richdoc_preserving_source_bounded(&markdown, &point, 2_000_000, None)
             .unwrap();
         assert_eq!(
             frozen.canonical_content()[ROOT_BODY],
@@ -293,7 +312,7 @@ mod tests {
                 .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\r\n")
                 .unwrap();
             frozen
-                .rewrite_richdoc_preserving_source_bounded(source, &point, 2_000_000)
+                .rewrite_richdoc_preserving_source_bounded(source, &point, 2_000_000, None)
                 .unwrap();
             let projection = frozen.project(ContentKind::Richdoc).unwrap().content;
             assert_eq!(
@@ -328,7 +347,7 @@ mod tests {
         frozen.richdoc_append_paragraph("unchanged");
         let before = frozen.encode_full_state();
         assert!(matches!(
-            frozen.rewrite_richdoc_preserving_source_bounded(&source,&point,2_000_000),
+            frozen.rewrite_richdoc_preserving_source_bounded(&source,&point,2_000_000,None),
             Err(CollabError::MalformedUpdate {reason}) if reason == "unsupported restore point value"
         ));
         assert_eq!(before, frozen.encode_full_state());
@@ -371,7 +390,7 @@ mod tests {
             let before = frozen.encode_full_state();
             assert!(
                 frozen
-                    .rewrite_richdoc_preserving_source_bounded("point\n", &point, 2_000_000)
+                    .rewrite_richdoc_preserving_source_bounded("point\n", &point, 2_000_000, None)
                     .is_err(),
                 "case {case}"
             );

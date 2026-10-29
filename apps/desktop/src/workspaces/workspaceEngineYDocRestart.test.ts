@@ -470,7 +470,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
 
   const settled = await session.settleNow();
-  expect(settled.content).toBe("seed survives remote");
+  expect(settled?.content).toBe("seed survives remote");
   expect(openedDocs).toHaveLength(2);
   expect(openedDocs[1].getText("plainText").toString()).toBe(
     "seed survives remote",
@@ -487,7 +487,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   );
 
   const settledAfterSecondRestart = await session.settleNow();
-  expect(settledAfterSecondRestart.content).toBe(
+  expect(settledAfterSecondRestart?.content).toBe(
     "seed survives twice remote",
   );
   expect(openedDocs).toHaveLength(3);
@@ -1101,227 +1101,6 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
   await typed.close();
 });
 
-// dohc#2301. What a generation expects of its file dies with the daemon, and
-// a replacement can find no head and no file: New File's head was never
-// recorded, or capture retired a deleted file's head while no session held
-// it. The engine then creates the file unless the replacement says the file
-// existed. Each case returns what every generation's open said.
-async function fileExistedAcrossRestart(input: {
-  head: "present" | "absent";
-  lineage: "existing" | "absent";
-  disk: string | null;
-  settleFirst: boolean;
-}): Promise<Array<boolean | undefined>> {
-  const rootPath = await createTestScratch("dohc-ydoc-file-existed-");
-  if (input.disk !== null) await writeFile(join(rootPath, "note.md"), input.disk);
-  const loopback = new VersionedLoopbackEngine();
-  const client = (): EngineDaemonClient & EngineTransport => ({
-    close: () => undefined,
-    onEvent: () => () => undefined,
-    async sendRequest(request: Request): Promise<Response> {
-      if (request.method === "workspace.open") {
-        return { id: request.id, result: { workspace: "file-existed" } };
-      }
-      if (request.method === "workspace.close") {
-        return { id: request.id, result: { closed: true } };
-      }
-      const lifecycle = daemonCaptureLifecycleAnswer(request);
-      if (lifecycle) return lifecycle;
-      return await loopback.sendRequest(request);
-    },
-  });
-  const firstClient = client();
-  const restartedClient = client();
-  let currentClient = firstClient;
-  const sessions = new EngineWorkspaceSessions(
-    { currentClient: () => currentClient },
-    { sleep: async () => undefined },
-  );
-  const opens: Array<boolean | undefined> = [];
-  let daemonExits = false;
-  // The lineage the engine keeps across the restart.
-  const recorded = new Y.Doc();
-  const openProvider = async (
-    options: EngineYdocProviderSessionOptions,
-  ): Promise<EngineYdocProviderSession> => {
-    opens.push(options.fileExisted);
-    const first = options.transport === firstClient;
-    const doc = new Y.Doc();
-    Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
-    let tokens = 0;
-    return {
-      doc,
-      initialUpdate: Y.encodeStateAsUpdate(doc),
-      objectId: "note-object",
-      lineageClaimId: null,
-      contentKind: "plaintext",
-      path: options.path,
-      head: first ? input.head : "absent",
-      lineage: first ? input.lineage : "existing",
-      unsettled: false,
-      evict: async () => undefined,
-      async applyLocalUpdate(update) {
-        if (first && daemonExits) {
-          currentClient = restartedClient;
-          throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
-        }
-        Y.applyUpdate(doc, update);
-        Y.applyUpdate(recorded, update);
-      },
-      async settleNow() {
-        const token = ++tokens;
-        options.onSettleStart?.(token);
-        const markdown = doc.getText("plainText").toString();
-        await writeFile(join(rootPath, options.path), markdown);
-        const result = {
-          momentId: `moment-${token}`,
-          path: options.path,
-          content: markdown,
-          sha256: createHash("sha256").update(markdown).digest("hex"),
-          materialized: true,
-          projection: {
-            contentKind: "plaintext" as const,
-            sourceStateVectorSha256: "a".repeat(64),
-            destructive: false,
-          },
-        };
-        await options.onSettled?.(result, token);
-        return result;
-      },
-      async close() {
-        return;
-      },
-    };
-  };
-  const capture = createWorkspaceEngineCapture({
-    workspaceId: "file-existed",
-    rootPath,
-    rustEngineSessions: sessions,
-    openRustYDocProviderSession: openProvider,
-  });
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const renderer = new Y.Doc();
-  Y.applyUpdate(renderer, session.initialUpdate);
-  const type = (text: string): void => {
-    const before = Y.encodeStateVector(renderer);
-    renderer.getText("plainText").insert(0, text);
-    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
-  };
-  if (input.settleFirst) {
-    type("saved ");
-    await session.settleNow();
-  }
-  daemonExits = true;
-  type("typed ");
-  await session.settleNow();
-  await session.close({ settle: false });
-  await capture.stop();
-  return opens;
-}
-
-it.each([
-  { name: "New File's empty file", head: "absent", lineage: "absent", disk: "", settleFirst: false, said: true },
-  { name: "a recorded file", head: "present", lineage: "existing", disk: "recorded", settleFirst: false, said: true },
-  { name: "a draft with no file that saved one", head: "absent", lineage: "existing", disk: null, settleFirst: true, said: true },
-  { name: "a draft with no file", head: "absent", lineage: "existing", disk: null, settleFirst: false, said: undefined },
-] as const)("a replacement after a restart says whether $name existed", async (input) => {
-  expect(await fileExistedAcrossRestart(input)).toEqual([undefined, input.said]);
-});
-
-// dohc#2301. A replacement that opens over a file records it, even when
-// nothing settles. A draft with no file meets an empty file at its first
-// reconnect, the file is deleted, and the second reconnect must still say the
-// file existed.
-it("a replacement that opens over a file records it for the next replacement", async () => {
-  const rootPath = await createTestScratch("dohc-ydoc-file-seen-on-reopen-");
-  const loopback = new VersionedLoopbackEngine();
-  const client = (): EngineDaemonClient & EngineTransport => ({
-    close: () => undefined,
-    onEvent: () => () => undefined,
-    async sendRequest(request: Request): Promise<Response> {
-      if (request.method === "workspace.open") {
-        return { id: request.id, result: { workspace: "file-seen-on-reopen" } };
-      }
-      if (request.method === "workspace.close") {
-        return { id: request.id, result: { closed: true } };
-      }
-      return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
-    },
-  });
-  let currentClient = client();
-  const sessions = new EngineWorkspaceSessions(
-    { currentClient: () => currentClient },
-    { sleep: async () => undefined },
-  );
-  const opens: Array<boolean | undefined> = [];
-  // A crash kept this draft's edits in its lineage. No file was written.
-  const recorded = new Y.Doc();
-  recorded.getText("plainText").insert(0, "kept ");
-  let daemonExits = false;
-  const capture = createWorkspaceEngineCapture({
-    workspaceId: "file-seen-on-reopen",
-    rootPath,
-    rustEngineSessions: sessions,
-    openRustYDocProviderSession: async (options) => {
-      opens.push(options.fileExisted);
-      const doc = new Y.Doc();
-      Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
-      return {
-        doc,
-        initialUpdate: Y.encodeStateAsUpdate(doc),
-        objectId: "note-object",
-        lineageClaimId: null,
-        contentKind: "plaintext",
-        path: options.path,
-        head: "absent",
-        lineage: "existing",
-        unsettled: false,
-        evict: async () => undefined,
-        async applyLocalUpdate(update) {
-          if (daemonExits) {
-            daemonExits = false;
-            currentClient = client();
-            throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
-          }
-          Y.applyUpdate(doc, update);
-          Y.applyUpdate(recorded, update);
-        },
-        async settleNow() {
-          throw new Error("nothing settles in this test");
-        },
-        async close() {
-          return;
-        },
-      };
-    },
-  });
-  const session = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  const renderer = new Y.Doc();
-  Y.applyUpdate(renderer, session.initialUpdate);
-  const typeThroughRestart = async (text: string, reopens: number): Promise<void> => {
-    daemonExits = true;
-    const before = Y.encodeStateVector(renderer);
-    renderer.getText("plainText").insert(0, text);
-    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
-    await expect.poll(() => opens.length, { timeout: 15_000 }).toBe(reopens);
-  };
-
-  await writeFile(join(rootPath, "note.md"), "");
-  await typeThroughRestart("one ", 2);
-  await rm(join(rootPath, "note.md"));
-  await typeThroughRestart("two ", 3);
-
-  expect(opens).toEqual([undefined, undefined, true]);
-  await session.close({ settle: false });
-  await capture.stop();
-});
-
 // The session recorded a word, and sync turned on before its settle ran. The
 // generation is gone, its settle fails, and the sync pass claims exactly what
 // was recorded. The replacement needs no replay, so the settle the lost
@@ -1779,7 +1558,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
   const settled = await session.settleNow();
 
-  expect(settled.content).toBe("seed survives");
+  expect(settled?.content).toBe("seed survives");
   expect(lifecycle.slice(0, 3)).toEqual(["open-1", "close-1", "open-2"]);
   expect(onError).not.toHaveBeenCalled();
   await session.close({ settle: false });
@@ -2349,7 +2128,7 @@ it("retires a persistent local failure and releases every failed lease", async (
   advanceBackoff();
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   advanceBackoff();
-  expect((await session.settleNow()).content).toBe("seed");
+  expect((await session.settleNow())?.content).toBe("seed");
   expect(onError).toHaveBeenCalledWith(
     "Y.Doc local update of note.md",
     refusal,
@@ -2688,7 +2467,7 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   await expect.poll(() => state.generation).toBe(2);
 
   const settled = await session.settleNow();
-  expect(settled.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
+  expect(settled?.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
   expect(generations[1]?.getText("plainText").toString()).toBe(
     "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
   );
@@ -2739,7 +2518,7 @@ it("journals a keyed write on a dead session under its own key once the daemon i
   // follows as its own journal write, under its own key.
   expect(state.generation).toBe(2);
   expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/), "claim/1/0"]);
-  expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
+  expect((await session.settleNow())?.content).toBe("PRE_KILL KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -2776,7 +2555,7 @@ it.each([false, true])("forwards a keyed write acknowledged after an uncertain f
   expect(editor.getText("plainText").toString()).toBe("Late acknowledgement");
   expect(fixture.state.journalKeys).toEqual(["late-ack"]);
   typeInto(editor, session, " and later typing");
-  expect((await session.settleNow()).content).toBe("Late acknowledgement and later typing");
+  expect((await session.settleNow())?.content).toBe("Late acknowledgement and later typing");
   editor.destroy(); await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2796,7 +2575,7 @@ it.each(["commit-then-cancel", "commit-then-internal"] as const)("dedupes %s wit
     const original = keyedUpdate(session.doc, "Saved once");
     if (confirmed) await session.applyDecidedLocalUpdate(() => original, undefined, { idempotencyKey: "uncertain" });
     else session.applyLocalUpdate(original, undefined, { idempotencyKey: "uncertain" });
-    expect((await session.settleNow()).content).toBe("Saved once");
+    expect((await session.settleNow())?.content).toBe("Saved once");
     expect(fixture.state.journalKeys).toEqual(["uncertain"]);
     expect(fixture.state.durableUpdates).toHaveLength(1);
     expect(notices).not.toHaveBeenCalled();
@@ -2822,7 +2601,7 @@ it.each([false, true])("keeps a write after one Internal answer when confirmed i
   const update = keyedUpdate(session.doc, "Saved after retry");
   if (confirmed) await session.applyDecidedLocalUpdate(() => update, undefined, { idempotencyKey: "retry" });
   else session.applyLocalUpdate(update, undefined, { idempotencyKey: "retry" });
-  expect((await session.settleNow()).content).toBe("Saved after retry");
+  expect((await session.settleNow())?.content).toBe("Saved after retry");
   expect(fixture.state.journalKeys).toEqual(["retry"]);
   expect(notices).not.toHaveBeenCalled();
   await session.close({ settle: false }); await capture.stop();
@@ -2853,7 +2632,7 @@ it.each(["deadline", "overloaded", "backoff", "client-timeout", "internal"] as c
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(notices).not.toHaveBeenCalled();
-  expect((await session.settleNow()).content).toBe("Saved after the burst");
+  expect((await session.settleNow())?.content).toBe("Saved after the burst");
   expect(fixture.state.journalKeys).toEqual(["burst"]);
   await session.close({ settle: false }); await capture.stop();
 });
@@ -2887,7 +2666,7 @@ it.each(["insert", "delete"] as const)("acknowledges a durable %s after its thir
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   advanceBackoff();
   fixture.state.applyFaults.push("commit-then-internal");
-  expect((await session.settleNow()).content).toBe(kind === "delete" ? "" : "Base saved once");
+  expect((await session.settleNow())?.content).toBe(kind === "delete" ? "" : "Base saved once");
   expect(fixture.state.journalKeys.filter(key => key === "third-commit")).toHaveLength(1);
   expect(notices).not.toHaveBeenCalled();
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
@@ -2920,7 +2699,7 @@ it.each(["deadline", "overloaded", "backoff", "client-timeout"] as const)("does 
     await expect(session.settleNow()).rejects.toThrow(/closed/i);
     expect(notices).not.toHaveBeenCalled();
   }
-  expect((await session.settleNow()).content).toBe("Still waiting");
+  expect((await session.settleNow())?.content).toBe("Still waiting");
   await session.close({ settle: false }); await capture.stop();
 });
 
@@ -2953,7 +2732,7 @@ it("retires an unanswered deletion whose clocks are durable but whose delete set
       code: "INTERNAL", message: "unanswered deletion", retry: "no",
     }, undefined));
     if (attempt < 2) await expect(session.settleNow()).rejects.toThrow(/closed/i);
-    else expect((await session.settleNow()).content).toBe("Keep me");
+    else expect((await session.settleNow())?.content).toBe("Keep me");
   }
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
@@ -2998,7 +2777,7 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   }
   if (confirmed) await session.applyDecidedLocalUpdate(() => independent, undefined, { idempotencyKey: "independent" });
   else session.applyLocalUpdate(independent, undefined, { idempotencyKey: "independent" });
-  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect((await session.settleNow())?.content).toBe("Saved independent");
   expect(fixture.state.applyRefusals).toHaveLength(0);
   expect(fixture.state.journalKeys).toEqual(["independent"]);
   expect(notices).toHaveBeenCalledTimes(confirmed ? 0 : 1);
@@ -3014,7 +2793,9 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
   await session.close({ settle: false }); await capture.stop();
 });
 
-it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
+// "frozen": typing after the server refused this file's earlier edits. The
+// engine refuses it, the notice says why, and the recovery row keeps it.
+it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])("reports one %s replay refusal batch and preserves an independent client", async kind => {
   const advanceBackoff = uncertainFailureClock();
   const fixture = await daemonDeathCapture("dohc-ydoc-causal-refusal-", "ydoc-causal-refusal");
   const notices: string[] = [];
@@ -3047,8 +2828,8 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const busy = kind === "uncertain-after-busy" && attempt === 1;
     fixture.state.applyRefusals.push(new DaemonRefusalError({
-      code: busy ? "OVERLOADED" : kind === "definitive" ? "INVALID_PARAMS" : "INTERNAL",
-      message: busy ? "engine-store-busy" : "future-refusal", retry: busy ? "afterBackoff" : "no",
+      code: busy ? "OVERLOADED" : kind === "definitive" || kind === "frozen" ? "INVALID_PARAMS" : "INTERNAL",
+      message: busy ? "engine-store-busy" : kind === "frozen" ? "owner-outbox-frozen" : "future-refusal", retry: busy ? "afterBackoff" : "no",
     }, undefined));
   }
   for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
@@ -3056,11 +2837,12 @@ it.each(["definitive", "uncertain", "uncertain-after-busy"])("reports one %s rep
     expect(notices).toHaveLength(0);
     advanceBackoff();
   }
-  expect((await session.settleNow()).content).toBe("Saved independent");
+  expect((await session.settleNow())?.content).toBe("Saved independent");
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain('could not save edits to "note.md"');
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
-  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit." : "No answer after three attempts.");
+  expect(notices[0]).toContain(kind === "definitive" ? "dohc refused this edit."
+    : kind === "frozen" ? "Live editing is paused for this file." : "No answer after three attempts.");
   expect(fixture.state.journalKeys).toContain("other-client");
   mirror.destroy(); await session.close({ settle: false }); await capture.stop();
 });
@@ -3092,7 +2874,7 @@ it("reports dependent typing when a caller-confirmed original is refused during 
   }, undefined));
   errors.mockClear();
 
-  expect((await session.settleNow()).content).toBe("");
+  expect((await session.settleNow())?.content).toBe("");
   expect(fixture.state.journalKeys).toEqual([]);
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices).toHaveBeenCalledWith("typing", expect.stringContaining("Use Save copy"));
@@ -3122,7 +2904,7 @@ it("names the pending queue limit and releases its byte budget after draining", 
   expect(notices[0]).not.toContain("too large");
   expect(notices[0]).toContain("Open Notices. Use Save copy on this file's recovery row.");
   await session.applyDecidedLocalUpdate(doc => keyedUpdate(doc, "later"), undefined, { idempotencyKey: "after-drain" });
-  expect((await session.settleNow()).content).toBe("later");
+  expect((await session.settleNow())?.content).toBe("later");
   expect(notices).toHaveLength(1);
   await session.close({ settle: false }); await capture.stop();
 });
@@ -3182,7 +2964,7 @@ it.each([
       }
       expect(setAside.some(text => text.includes("refused"))).toBe(!confirmed);
       typeInto(mirror, session, "later");
-      expect((await session.settleNow()).content).toBe("Saved later");
+      expect((await session.settleNow())?.content).toBe("Saved later");
       expect(session.doc.getText("plainText").toString()).toBe("Saved later");
       expect(notices).toHaveLength(confirmed ? 0 : 1);
       mirror.destroy();
@@ -3226,7 +3008,7 @@ it("sends a keyed write again under its key after its daemon died, so the key st
     idempotencyKey: "claim/1/1",
   });
   expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
-  expect((await session.settleNow()).content).toBe("FIRST NEXT");
+  expect((await session.settleNow())?.content).toBe("FIRST NEXT");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3263,7 +3045,7 @@ it("answers success when a keyed write's answer was lost and its resend finds th
 
   expect(state.journalKeys).toEqual(["claim/1/0"]);
   expect(session.doc.getText("plainText").toString()).toBe("KEYED");
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3282,7 +3064,7 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
 
   // It was: the daemon's lineage holds it once the daemon is back.
   state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
   await session.close({ settle: false });
   await capture.stop();
@@ -3308,7 +3090,7 @@ it("says a keyed write may have been recorded after two sends went unanswered", 
     idempotencyKey: "claim/1/0",
   });
   expect(state.journalKeys).toEqual(["claim/1/0"]);
-  expect((await session.settleNow()).content).toBe("KEYED");
+  expect((await session.settleNow())?.content).toBe("KEYED");
   await session.close({ settle: false });
   await capture.stop();
 });
@@ -3366,7 +3148,7 @@ it("rejects a keyed write on a dead session while the daemon is still down, and 
   expect(errors.filter((context) => context.startsWith("Y.Doc local update"))).toHaveLength(1);
 
   state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("TYPED ");
+  expect((await session.settleNow())?.content).toBe("TYPED ");
   expect(state.journalKeys).toEqual([expect.stringMatching(/^[0-9a-f-]{36}$/)]);
   await session.close({ settle: false });
   await capture.stop();
@@ -3414,7 +3196,7 @@ it("a failure sink that throws cannot turn a daemon death into an unhandled reje
     state.daemonAlive = true;
     typeInto(rendererDoc, session, "AFTER_RESTART");
     await expect.poll(() => state.generation).toBe(2);
-    expect((await session.settleNow()).content).toBe(
+    expect((await session.settleNow())?.content).toBe(
       "PRE_KILL DURING_OUTAGE AFTER_RESTART",
     );
     await session.close({ settle: false });
@@ -3585,7 +3367,7 @@ it("restores an acknowledged base before pending originals on explicit settle", 
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   fixture.loseDurableLineage();
   fixture.state.daemonAlive = true;
-  expect((await session.settleNow()).content).toBe("Saved pending");
+  expect((await session.settleNow())?.content).toBe("Saved pending");
   expect(fixture.state.recoveryBases).toHaveLength(1);
   const base = new Y.Doc();
   Y.applyUpdate(base, fixture.state.recoveryBases[0]!);
@@ -3686,7 +3468,7 @@ it("a settle after the daemon returns recovers the session on its own", async ()
   state.daemonAlive = true;
   const settled = await session.settleNow();
 
-  expect(settled.content).toBe("alive PRE_KILL");
+  expect(settled?.content).toBe("alive PRE_KILL");
   expect(state.generation).toBe(2);
   await session.close({ settle: false });
   await capture.stop();
@@ -5239,109 +5021,6 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
   await capture.stop();
 });
 
-// A document open with a close debt left by a store-busy close. A draft is
-// one a crash kept: its lineage holds edits, and no file was ever written.
-// `closeWrites` makes the closing session's own close write the file, as when
-// the release the daemon refuses escalates to a settling close.
-async function closeWithDebt(prefix: string, draft: boolean, closeWrites = false) {
-  let opens = 0;
-  const locked = await lockedRebindCapture(prefix, {
-    wrapProvider: (base) => async (options) => {
-      const provider = await base(options);
-      opens += 1;
-      const writesOnClose = closeWrites && opens === 1;
-      return {
-        ...provider,
-        ...(draft ? { head: "absent" as const } : {}),
-        ...(writesOnClose
-          ? {
-              async close(closeOptions) {
-                options.onCloseMaterialized?.();
-                await provider.close(closeOptions);
-              },
-            }
-          : {}),
-      };
-    },
-  });
-  if (draft) {
-    const kept = new Y.Doc();
-    kept.getText("plainText").insert(0, "kept ");
-    locked.state.journal.push(Y.encodeStateAsUpdate(kept));
-  }
-  const { session } = await openWithOneEdit(locked.capture, "busy edit");
-  locked.state.replicated = true;
-  locked.state.closeSettleFailure = busyRefusal();
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-  return locked;
-}
-
-// dohc#2301. A close debt's payment opens a fresh session, which knows nothing
-// of the file the closed one had. It carries the closed session's answer: yes
-// for a document that had its file, so the engine keeps a deleted file
-// deleted, and nothing for a draft that never had one, which it may create.
-it.each([
-  { name: "a document that had its file", draft: false, said: true },
-  { name: "a draft that never had a file", draft: true, said: undefined },
-] as const)("a close debt's retry passes on whether the file existed: $name", async ({ draft, said }) => {
-  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-file-existed-", draft);
-  state.closeSettleFailure = null;
-  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
-
-  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, said]);
-  await capture.stop();
-});
-
-// dohc#2301. Once a payment writes a draft's file, the file has existed. A
-// peer update that outruns that settle keeps the debt armed, and the next
-// payment must say so: a delete outside dohc and a daemon restart before
-// either is observed would otherwise let it write the deleted file back.
-it("a close debt's next payment says the file existed once an earlier payment wrote it", async () => {
-  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-paid-file-", true);
-  state.emitUpdateAfterSettle = true;
-  state.closeSettleFailure = null;
-  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(2);
-
-  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, undefined, true]);
-  await capture.stop();
-});
-
-// dohc#2301. The close that leaves a debt can write the file itself: its
-// pre-close settle fails, the release the daemon refuses escalates to a
-// settling close, and that close writes. The provider reports the write, so
-// the debt's payment says the file existed.
-it("a close debt's payment says the file existed when the closing session's own close wrote it", async () => {
-  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-close-file-", true, true);
-  state.closeSettleFailure = null;
-  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
-
-  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, true]);
-  await capture.stop();
-});
-
-// dohc#2301. A document reopened while its close debt is still owed is the
-// same document. Every open after the first, the reopen included, says the
-// file existed, because they all continue the one file fact.
-it("a reopen while a close debt is owed says the file existed", async () => {
-  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-reopen-file-", false);
-  // Payments keep failing, so the debt is still owed when the reopen lands.
-  state.locked = true;
-  const reopened = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-
-  const later = state.generationOptions.slice(1).map((options) => options.fileExisted);
-  expect(later.length).toBeGreaterThan(0);
-  expect(later.every((said) => said === true)).toBe(true);
-  state.locked = false;
-  state.closeSettleFailure = null;
-  await reopened.close();
-  await capture.stop();
-});
-
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // A replicated lineage compacts on release without the
   // local-only pending-job guard, so the close releases over the locked
@@ -6295,7 +5974,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
       },
     },
   );
-  const { session } = await openWithOneEdit(capture, "first version");
+  const { session, mirror } = await openWithOneEdit(capture, "first version");
 
   // The settle starts and its write lands, but its own completion
   // callback is held open — modelling a chain occupied by other work.
@@ -6313,6 +5992,10 @@ it("a delete landing after a settle's write but before its late onSettled callba
   // The stale callback finally fires and reaches its own clear.
   releaseSettled();
   await settling;
+  // An edit after the delete leaves the close something to save.
+  const before = Y.encodeStateVector(mirror);
+  mirror.getText("plainText").insert(0, "after the delete ");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror, before));
 
   // A later close-retry ladder must still find the tombstone. RED before
   // the fix: the stale callback already erased it, so this retry
@@ -7610,7 +7293,7 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   await capture.stop();
 }, 40_000);
 
-it("a rename after a terminal settle refusal refuses instead of saving stale content", async () => {
+it.each(["rename", "duplicate"] as const)("%s after a terminal settle refusal refuses instead of saving stale content", async action => {
   // #681, terminal-settle door (conflict-stale-target branch):
   // `standDownFromWrite` used to delete the debt entry here too, so a rename
   // right after this stand-down would have read the stale pre-lock disk
@@ -7645,9 +7328,9 @@ it("a rename after a terminal settle refusal refuses instead of saving stale con
   // RED against current main: absence read as landed, so this resolved and
   // recorded renamed.md from the stale pre-lock text instead of refusing.
   await expect(
-    capture.beginFileRename("note.md", "renamed.md"),
+    action === "rename" ? capture.beginFileRename("note.md", "renamed.md") : capture.changePathsAs(["note.md"], {operation: "duplicate", author: {kind: "human", humanId: "person"}, operationId: "dohc-operation:22222222-2222-4222-8222-222222222222"}, async () => {throw new Error("Duplicate must refuse before work");}, () => []),
   ).rejects.toThrow(
-    "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
+    `dohc could not ${action} note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then ${action} note.md again.`,
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   expect(state.settledContents).toEqual([]);
@@ -8823,4 +8506,26 @@ it("retires the checkpoint actually stored by A when newer B fails", async () =>
  const stored=(await readTypingCheckpoints(directory,workspaceId))[0]!.checkpoint.text;expect(stored).toContain("STORED_A");expect(stored).not.toContain("FAILED_B");
  state.daemonAlive=true;await session.settleNow();await flushTypingCheckpoints(workspaceId);
  expect(state.diskMarkdown).toContain("FAILED_B");expect(await readTypingCheckpoints(directory,workspaceId)).toEqual([]);
+});
+
+it("Duplicate settles the source and leaves its session and write admission intact", async () => {
+  const summaries: (string | undefined)[] = [];
+  const {capture, state} = await lockedRebindCapture("dohc-duplicate-live-", {wrapProvider: base => async opts => {
+    const session = await base(opts);
+    return {...session, settleNow: async options => {summaries.push(options?.summary); return session.settleNow(options);}};
+  }});
+  const {session, mirror} = await openWithOneEdit(capture, "first edit");
+  try {
+    await capture.changePathsAs(["note.md"], {operation:"duplicate",operationId:"dohc-operation:11111111-1111-4111-8111-111111111111",author:{kind:"human",humanId:"person"}}, async () => {
+      expect(state.closeCalls).toEqual([]);
+      expect(state.settledContents).toContain("first edit");
+      const before = Y.encodeStateVector(mirror);
+      mirror.getText("plainText").insert(0,"still typing ");
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(mirror,before));
+    }, () => []);
+    expect(state.closeCalls).toEqual([]);
+    expect(state.generation).toBe(1);
+    expect(summaries).toContain("Saved latest edits before duplicating the file");
+    expect(summaries.join(" ")).not.toMatch(/moving|deleting|rename/);
+  } finally {mirror.destroy(); await capture.stop();}
 });

@@ -22,10 +22,13 @@
   --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
-  /* The editor's type. The settings file sets both (theme.ts); these are its
-   * defaults, and the editor's other sizes keep their ratio to the body. */
+  /* The editor's type. The settings file sets these (theme.ts); these are its
+   * defaults, and the editor's other sizes keep their ratio to the body. The
+   * suffix is how wide a list number's period and space are, in ch: 2 in a
+   * monospaced font. */
   --dohc-editor-font: var(--font-sans);
   --dohc-editor-font-size: 15px;
+  --dohc-editor-number-suffix: 1;
 
   --dohc-bg: #faf9f5;
   --dohc-panel: #f3f1ea;
@@ -587,13 +590,6 @@ body {
   padding-left: 0;
 }
 
-/* Hanging markers live in the gutter, so nudge the hover +/⋮ cluster further
- * left to stay clear of them. -56px still fits inside the editor's 56px
- * horizontal padding at every pane width. */
-.dohc-notion-editor > :is(ul, ol) .dohc-block-affordance {
-  left: -56px;
-}
-
 /* Task lists exist in two DOM shapes: TipTap's TaskList/TaskItem attrs
  * (data-type) and the markdown-parsed form where the li carries only
  * data-checked. --dohc-task-ul/-li match BOTH so the styling can never go
@@ -626,9 +622,8 @@ body {
 }
 
 /* Top-level task lists: text on the content edge, checkbox hanging in the
- * gutter (task lists carry no block affordance, so nothing collides there).
- * Repeated with the attribute selectors because the plain `> ul` rule above
- * loses specificity to the base task-list rule. */
+ * gutter. Repeated with the attribute selectors because the plain `> ul`
+ * rule above loses specificity to the base task-list rule. */
 .dohc-notion-editor > ul[data-type="taskList"],
 .dohc-notion-editor > ul:has(> li[data-checked]) {
   padding-left: 0;
@@ -703,8 +698,7 @@ body {
 
 /* Top-level quotes: text on the content edge, the accent bar hanging in the
  * gutter as a ::before (a negative margin would defeat the `> *` auto-margin
- * centering). Its -12px offset keeps it clear of the hover ⋮ handle, whose
- * right edge sits at -10px. Nested quotes keep the classic inside bar. */
+ * centering). Nested quotes keep the classic inside bar. */
 .dohc-notion-editor > blockquote {
   position: relative;
   border-left: 0;
@@ -907,24 +901,76 @@ body {
   position: relative;
 }
 
+/* The hover +/⋮ cluster ends 10px left of the text edge, or 6px left of
+ * --dohc-block-hang, how far the next block reaches left of its text into
+ * the gutter. Where the gutter has no room for both buttons side by side
+ * and 8px beside the pane's edge, + stacks above ⋮. Where it has no room
+ * for the stack either, the cluster stays inside the pane. */
 .dohc-block-affordance {
+  --dohc-block-hang: 0px;
+  --dohc-block-gutter: max(56px, 50% - var(--dohc-editor-measure) / 2);
+  --dohc-block-gap: min(
+    max(10px, var(--dohc-block-hang) + 6px),
+    var(--dohc-block-gutter) - 18px
+  );
   position: absolute;
   top: auto;
-  left: max(
-    8px,
-    calc(50% - (var(--dohc-editor-measure) / 2) - 48px)
-  );
+  right: calc(100% - var(--dohc-block-gutter) + var(--dohc-block-gap));
+  width: clamp(18px, var(--dohc-block-gutter) - 8px - var(--dohc-block-gap), 38px);
   transform: translateY(0.2em);
   z-index: 3;
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 2px;
   opacity: 0;
   transition: opacity 120ms ease;
 }
 
+/* Each hang, named by blockControls.tsx, is where the block's first-line mark
+ * starts. A bullet reaches about 0.7em + 7.5px in every editor font. A
+ * number reaches one ch per digit of the list's first number, plus its
+ * period and space (theme.ts). The checkbox and the quote bar sit at fixed
+ * offsets. */
+.dohc-block-affordance[data-hang="bullet"] {
+  --dohc-block-hang: calc(0.7em + 7.5px);
+}
+
+.dohc-block-affordance[data-hang="number"] {
+  --dohc-block-hang: calc(
+    (var(--dohc-block-digits) + var(--dohc-editor-number-suffix)) * 1ch
+  );
+}
+
+.dohc-block-affordance[data-hang="checkbox"] {
+  --dohc-block-hang: 23px;
+}
+
+.dohc-block-affordance[data-hang="bar"] {
+  --dohc-block-hang: 12px;
+}
+
+/* Framed blocks reach one block inset past the text edge once the gutter is
+ * wider than the editor's 56px padding. A table's wrapper reaches 22px
+ * further, for its row grips and ⋯ button. */
+.dohc-block-affordance[data-hang="frame"] {
+  --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, var(--dohc-editor-block-inset));
+}
+
+.dohc-block-affordance[data-hang="table"] {
+  --dohc-block-hang: clamp(
+    0px,
+    var(--dohc-block-gutter) - 56px,
+    var(--dohc-editor-block-inset) + 22px
+  );
+}
+
+/* The shown cluster sits above the others: a stacked one can run past its
+ * block, under the next block's hidden cluster. */
 .dohc-block-affordance.is-visible,
 .dohc-block-affordance:hover,
 .dohc-block-affordance:focus-within {
+  z-index: 4;
   opacity: 1;
 }
 
@@ -2802,168 +2848,6 @@ mark.dohc-highlight,
   color: var(--dohc-muted);
 }
 
-/* ===================================================================== *
- * Linked mentions (BacklinksPanel.tsx) — the inbound-link "backlinks"
- * section at the bottom of a document. Quiet chrome aligned to the shared
- * editor reading measure (like page identity above the body): a serif
- * section title per brand, a hairline separator, and muted source/snippet
- * rows that warm on hover. Colors ride the theme tokens so both themes come
- * for free.
- * ===================================================================== */
-.dohc-backlinks {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 8px 56px 48px;
-  background: var(--dohc-bg);
-}
-
-.dohc-backlinks__inner {
-  max-width: 720px;
-  margin: 0 auto;
-  border-top: 1px solid var(--dohc-line);
-  padding-top: 12px;
-}
-
-.dohc-backlinks__header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  border: 0;
-  background: transparent;
-  padding: 4px 0;
-  color: var(--dohc-muted);
-  cursor: pointer;
-  text-align: left;
-}
-
-.dohc-backlinks__header:hover {
-  color: var(--dohc-ink);
-}
-
-.dohc-backlinks__chevron {
-  flex-shrink: 0;
-  color: var(--dohc-subtle);
-  transition: transform 120ms ease-out;
-}
-
-.dohc-backlinks__chevron[data-open='true'] {
-  transform: rotate(90deg);
-}
-
-.dohc-backlinks__header-icon {
-  flex-shrink: 0;
-  color: var(--dohc-subtle);
-}
-
-.dohc-backlinks__title {
-  font-family: var(--font-serif);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--dohc-ink);
-}
-
-.dohc-backlinks__count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--dohc-panel-2);
-  color: var(--dohc-subtle);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.dohc-backlinks__list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dohc-backlinks__source {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.dohc-backlinks__source-link {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  border: 0;
-  background: transparent;
-  padding: 2px 6px;
-  margin: 0 -6px;
-  border-radius: 6px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.dohc-backlinks__source-link:hover {
-  @apply bg-hover;
-}
-
-.dohc-backlinks__source-title {
-  color: var(--dohc-ink);
-  font-size: 13.5px;
-  font-weight: 550;
-}
-
-.dohc-backlinks__source-path {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dohc-subtle);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10.5px;
-}
-
-.dohc-backlinks__snippets {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.dohc-backlinks__snippet {
-  display: block;
-  width: 100%;
-  border: 0;
-  border-left: 2px solid var(--dohc-line);
-  background: transparent;
-  padding: 2px 8px;
-  color: var(--dohc-muted);
-  font-size: 12.5px;
-  line-height: 1.5;
-  text-align: left;
-  cursor: pointer;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.dohc-backlinks__snippet:hover {
-  border-left-color: var(--dohc-subtle);
-  color: var(--dohc-ink);
-}
-
-.dohc-backlinks__mark {
-  background: color-mix(in srgb, var(--dohc-accent) 22%, transparent);
-  color: inherit;
-  border-radius: 3px;
-  padding: 0 1px;
-  font-weight: 600;
-}
-
 /* Where the `:shortcode:` emoji picker sits. Its frame and options are the
  * Menu part's recipe (EmojiPicker.tsx). */
 .dohc-emoji-picker {
@@ -3087,5 +2971,5 @@ input.dohc-math__source {
 }
 
 @utility dohc-section-label {
-  @apply text-[10px] font-semibold uppercase tracking-wide text-subtle;
+  @apply text-[12px] font-medium text-subtle;
 }

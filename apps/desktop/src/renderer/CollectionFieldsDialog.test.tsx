@@ -126,3 +126,12 @@ it("offers no button for an action a field is already named for", () => {
   setup({ dataset: named, onButtonAdded: vi.fn() });
   expect(screen.queryByRole("button", { name: /^Add as button/ })).toBeNull();
 });
+
+it("opens on a new field of the type it is given", async () => {
+  const { props } = setup({ addType: "date" });
+  expect(document.activeElement).toBe(screen.getByLabelText("Name"));
+  expect((screen.getByLabelText("Type") as HTMLSelectElement).value).toBe("date");
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Visit on" } });
+  fireEvent.click(screen.getByRole("button", { name: "Review change" }));
+  await waitFor(() => expect(props.onPrepare).toHaveBeenCalledWith({ kind: "addField", tableId: id(2), field: { name: "Visit on", type: "date", required: false, unique: false } }, expect.any(AbortSignal)));
+});

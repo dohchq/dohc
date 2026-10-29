@@ -58,8 +58,23 @@ function liveDeliveryLabel(
   // unnamed one is a connection dohc is still dialling.
   if (reason === "session-host-refused" || reason === "session-host-diverged") return "Live editing stopped";
   if (reason === "live-document-without-lineage") return "Live editing can't start";
-  if (reason === "live-edit-unadmitted") return "Live editing can't resume";
+  if (reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld") return "Live editing can't resume";
   return reason ? "Live editing paused" : "Live editing retrying";
+}
+
+// The sync state names the server as the problem.
+function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+  return syncStatus?.state === "cloud-disconnected" ||
+    (syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable");
+}
+
+// The title bar says "Server unreachable" or "Server disconnected". Features
+// that need the server then add no indicator, toast or row of their own,
+// since the server's report covers them. A failed save or a required update
+// takes the title bar's words, and then they show again.
+export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefined, failedSaves: number): boolean {
+  return syncNamesServer(syncStatus) && !syncStatus?.updateRequired &&
+    saveFailedLabel(syncStatus ?? null, failedSaves) === null;
 }
 
 // A file that couldn't save outranks every state but those that stop sync
@@ -82,8 +97,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
   // A failed sync names the server when the server is what failed.
   const stateLabel =
-    state === "sync-failed" &&
-    syncStatus?.syncFailure?.cause === "server-unreachable"
+    state === "sync-failed" && syncNamesServer(syncStatus)
       ? "Server unreachable"
       : state
         ? SYNC_LABEL[state]
@@ -105,11 +119,14 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   // A state that needs the person says so in words beside the dot.
   const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
   // Absent means this workspace has nothing to say about live delivery, so
-  // the title bar says nothing either.
-  const liveDelivery = syncStatus?.ownerLiveDelivery;
+  // the title bar says nothing either. Live editing waits on a server the
+  // title bar already names.
+  const liveDelivery = titleBarNamesServer(syncStatus, failedSaves) ? undefined : syncStatus?.ownerLiveDelivery;
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;
+  // A retry with no reason is dohc still dialling by itself, so it is a ring.
+  const liveDialling = liveDelivery === "retrying" && !syncStatus?.ownerLiveDeliveryReason;
   return (
     <>
       <span
@@ -134,12 +151,16 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
           // Shorten live delivery before local save status; retain its full tooltip.
           className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted"
         >
-          <span
-            aria-hidden
-            className={`inline-block size-1.5 shrink-0 rounded-full ${
-              liveDelivery === "active" ? "bg-success" : "bg-warning"
-            }`}
-          />
+          {liveDialling ? (
+            <Dot kind="working" />
+          ) : (
+            <span
+              aria-hidden
+              className={`inline-block size-1.5 shrink-0 rounded-full ${
+                liveDelivery === "active" ? "bg-success" : "bg-warning"
+              }`}
+            />
+          )}
           <span className="truncate">{liveLabel}</span>
         </span>
       ) : null}

@@ -1,15 +1,18 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { DOHC_AGENT_RUNS_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { UNNAMED_AGENT_ID, type ActiveAgentRun } from "./activeAgentRun";
 
-// Local agent runs. An agent run is a LOCAL concept: a small record in
-// .dohc/agent-runs.json (id, startedAt, agentId, status). While a run is
-// active, the workspace activity slot is set so the watcher attributes the
-// run's writes to the agent. The user's AI tool launches its own MCP server
-// from the config snippet in Settings; the desktop never runs one.
+// Local agent runs. An agent run is a LOCAL concept: a small record in this
+// installation's file under .dohc/agent-runs (id, startedAt, agentId, status).
+// While a run is active, the workspace activity slot is set so the watcher
+// attributes the run's writes to the agent. The user's AI tool launches its
+// own MCP server from the config snippet in Settings; the desktop never runs
+// one.
 
 export interface AgentRunRecord {
   id: string;
@@ -18,11 +21,9 @@ export interface AgentRunRecord {
   agentId: string;
   onBehalfOf: string;
   status: "running" | "complete" | "failed" | "interrupted";
-  // The app process and the installation that started the run. A process
-  // that quits mid-run leaves "running" behind; the next one marks it
-  // interrupted. Another installation's runs are its own to settle.
-  incarnation?: string;
-  installId?: string;
+  // The app process that started the run. A process that quits mid-run leaves
+  // "running" behind; the next one marks it interrupted.
+  incarnation: string;
 }
 
 interface AgentRunStatus {
@@ -53,7 +54,7 @@ export interface AgentIntegrationOptions {
   agentId?: string;
   // The person this computer's agent runs work for, read when a run starts.
   localPersonId(): string;
-  // This installation's stable id, stamped on each run it starts.
+  // This installation's stable id. It names the file that holds its runs.
   installId(): string;
   // This process's id. Omitted ⇒ a new randomUUID per integration, which main
   // creates once per process.
@@ -65,7 +66,7 @@ export interface AgentIntegrationOptions {
   // Fired after a known run's terminal status is durably recorded.
   // endAgentRun is the single funnel every terminal path goes through
   // (a Settings stop, the endAgentRun IPC),
-  // so run-completion consumers (the try-in-version review card) hook here.
+  // so run-completion consumers (the post-run dispatch scan) hook here.
   onRunEnded?: (input: {
     attachmentId: symbol;
     workspaceId: string;
@@ -74,7 +75,14 @@ export interface AgentIntegrationOptions {
   }) => void;
 }
 
-const RUNS_FILE = "agent-runs.json";
+// Each installation writes only its own file, so two computers that sync one
+// workspace through a file-sync service such as iCloud Drive never replace
+// each other's records, and an installation never settles another's runs.
+// The name hashes the installation id, which can hold characters a file name
+// cannot.
+export function agentRunsFileName(installId: string): string {
+  return `${sha256Hex(installId).slice(0, 32)}.json`;
+}
 
 function isAgentRunRecord(value: unknown): value is AgentRunRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -91,25 +99,48 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     record.onBehalfOf.length > 0 &&
     (record.status === "running" || record.status === "complete" || record.status === "failed" ||
       record.status === "interrupted") &&
-    (record.incarnation === undefined || (typeof record.incarnation === "string" && record.incarnation.length > 0)) &&
-    (record.installId === undefined || (typeof record.installId === "string" && record.installId.length > 0))
+    typeof record.incarnation === "string" &&
+    record.incarnation.length > 0
   );
 }
 
-// Both paths resolve .dohc through resolveWorkspaceMetadataDir — a symlinked.
-// Dohc (malicious attached workspace) is refused, never followed, so the run
-// log can't be planted outside the workspace boundary.
-async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
-  const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
+interface RunsFile {
+  path: string;
+  // The path as the user sees it, for the messages that name it.
+  shown: string;
+}
+
+// .dohc resolves through resolveWorkspaceMetadataDir, and .dohc/agent-runs
+// must be a real folder, so a planted link cannot send run records outside
+// the workspace. Only a write makes the folder.
+async function runsFile(rootPath: string, installId: string, create: boolean): Promise<RunsFile> {
+  const folder = join(await resolveWorkspaceMetadataDir(rootPath), "agent-runs");
+  let stats = await lstat(folder).catch((cause: NodeJS.ErrnoException) => {
+    if (cause.code === "ENOENT") return null;
+    throw cause;
+  });
+  if (stats === null && create) {
+    await mkdir(folder, { recursive: true });
+    stats = await lstat(folder);
+  }
+  if (stats !== null && (stats.isSymbolicLink() || !stats.isDirectory())) {
+    throw new Error(notARealFolderRefusal(DOHC_AGENT_RUNS_GUARD, stats));
+  }
+  const name = agentRunsFileName(installId);
+  return { path: join(folder, name), shown: `${DOHC_AGENT_RUNS_GUARD.path}/${name}` };
+}
+
+async function readRuns(rootPath: string, installId: string): Promise<AgentRunRecord[]> {
+  const file = await runsFile(rootPath, installId, false);
   let source: string;
   try {
-    source = await readFile(path, "utf8");
+    source = await readFile(file.path, "utf8");
   } catch (cause) {
     if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT") {
       return [];
     }
     throw new Error(
-      "dohc could not read this workspace's agent run history. Check .dohc/agent-runs.json, then try again.",
+      `dohc could not read this workspace's agent run history. Check ${file.shown}, then try again.`,
       { cause },
     );
   }
@@ -118,24 +149,24 @@ async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
     parsed = JSON.parse(source);
   } catch (cause) {
     throw new Error(
-      "This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.",
+      `This workspace's agent run history contains invalid JSON. Repair ${file.shown}, then try again.`,
       { cause },
     );
   }
   if (!Array.isArray(parsed) || !parsed.every(isAgentRunRecord)) {
     throw new Error(
-      "This workspace's agent run history contains invalid run records. Repair .dohc/agent-runs.json, then try again.",
+      `This workspace's agent run history contains invalid run records. Repair ${file.shown}, then try again.`,
     );
   }
   return parsed;
 }
 
-async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void> {
-  const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
+async function writeRuns(rootPath: string, installId: string, runs: AgentRunRecord[]): Promise<void> {
+  const file = await runsFile(rootPath, installId, true);
   // Atomic temp+rename so a crash never truncates the run log. A unique suffix
   // (not just pid) means a leftover temp from a crashed run can never be
   // reused/clobbered by a later write.
-  await atomicReplaceFile(path, (tmp) => writeFile(tmp, `${JSON.stringify(runs, null, 2)}\n`));
+  await atomicReplaceFile(file.path, (tmp) => writeFile(tmp, `${JSON.stringify(runs, null, 2)}\n`));
 }
 
 export function createAgentIntegration(options: AgentIntegrationOptions) {
@@ -143,6 +174,8 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   const createId = options.createId ?? (() => randomUUID());
   const agentId = options.agentId ?? UNNAMED_AGENT_ID;
   const incarnation = options.incarnation ?? randomUUID();
+  const ownRuns = (root: string) => readRuns(root, options.installId());
+  const saveOwnRuns = (root: string, runs: AgentRunRecord[]) => writeRuns(root, options.installId(), runs);
 
   function serialize<T>(
     state: AgentIntegrationState,
@@ -163,18 +196,16 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     if (state.swept) return;
     await serialize(state, async () => {
       if (state.swept) return;
-      const runs = await readRuns(root);
-      const installId = options.installId();
+      const runs = await ownRuns(root);
       const endedAt = now();
       let changed = false;
       for (const run of runs) {
         if (run.status !== "running" || run.incarnation === incarnation) continue;
-        if (run.installId !== undefined && run.installId !== installId) continue;
         run.status = "interrupted";
         run.endedAt = endedAt;
         changed = true;
       }
-      if (changed) await writeRuns(root, runs);
+      if (changed) await saveOwnRuns(root, runs);
       state.swept = true;
     }).catch((error: unknown) => {
       console.error("[desktop] Could not settle interrupted agent runs", error);
@@ -196,12 +227,11 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         onBehalfOf: options.localPersonId(),
         status: "running",
         incarnation,
-        installId: options.installId(),
       };
       await serialize(state, async () => {
-        const runs = await readRuns(root);
+        const runs = await ownRuns(root);
         runs.push(record);
-        await writeRuns(root, runs);
+        await saveOwnRuns(root, runs);
       });
       try {
         authority.assertCurrent();
@@ -219,14 +249,14 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         record.endedAt = now();
         try {
           await serialize(state, async () => {
-            const runs = await readRuns(root);
+            const runs = await ownRuns(root);
             const persisted = runs.find(
               (candidate) => candidate.id === record.id,
             );
             if (persisted) {
               persisted.status = record.status;
               persisted.endedAt = record.endedAt;
-              await writeRuns(root, runs);
+              await saveOwnRuns(root, runs);
             }
           });
         } catch (historyError) {
@@ -261,12 +291,12 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       }
       await sweepInterrupted(state, root);
       const recorded = await serialize(state, async () => {
-        const runs = await readRuns(root);
+        const runs = await ownRuns(root);
         const record = runs.find((r) => r.id === runId);
         if (!record) return false;
         record.status = status;
         record.endedAt = now();
-        await writeRuns(root, runs);
+        await saveOwnRuns(root, runs);
         return true;
       });
       if (recorded) {
@@ -297,7 +327,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       await sweepInterrupted(state, root);
       let runs: AgentRunRecord[];
       try {
-        runs = await readRuns(root);
+        runs = await ownRuns(root);
       } catch {
         runs = state.activeRun ? [state.activeRun] : [];
       }

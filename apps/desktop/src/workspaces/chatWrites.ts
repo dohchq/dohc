@@ -1,5 +1,5 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
-import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
@@ -24,11 +24,14 @@ import {
 // `agentName` is the name an agent gave for itself, such as an MCP client's
 // handshake name. It is provenance, like a document edit's author; without
 // it the message carries the agent name from the person's settings.
+// `agentId` names the agent of a run dohc dispatched, which main knows; the
+// message carries that agent's id and settings name.
+// A person's own message in the app wakes each of their agents it names.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent"; agentName?: string }
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string }
   // `local` marks a message that stays on this computer, such as a wake in
-  // "My agent", so it never waits for a session.
+  // an agent's chat, so it never waits for a session.
   | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
 // A person or their agent: only they react.
 export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
@@ -81,7 +84,10 @@ export function createChatWrites(dependencies: {
   // Changes whenever the credential cache sets, clears, or reloads a session.
   currentCredentialGeneration(): number;
   localUserDisplayName(): string;
-  agentDisplayName(): Promise<string>;
+  // The name of the agent with this id, or of the first agent.
+  agentDisplayName(agentId?: string): Promise<string>;
+  // The person's agents a message names.
+  agentIdsNamedIn(body: string): Promise<string[]>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -90,13 +96,17 @@ export function createChatWrites(dependencies: {
     workspaceId: string, target: ChatRelayIdentityTarget,
   ): Promise<unknown>;
   scanChatDispatch(workspaceId: string): Promise<unknown>;
+  // Runs a write of several rows where no dispatch scan of the workspace
+  // reads it half done.
+  betweenDispatchScans<Result>(workspaceId: string, write: () => Promise<Result>): Promise<Result>;
   // Tells open windows the workspace's chats changed, for writes they did not make.
   notifyRenderer(workspaceId: string): void;
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, localInstallationId, projectChatBookmarks,
-    queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, notifyRenderer,
+    localUserDisplayName, agentDisplayName, agentIdsNamedIn, localInstallationId, projectChatBookmarks,
+    queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
+    notifyRenderer,
   } = dependencies;
 
   // Every received file share is read-only for chat, whatever its cached relay
@@ -206,8 +216,9 @@ export function createChatWrites(dependencies: {
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName() },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName(writer.agentId) },
           authorOwnerDisplayName: localUserDisplayName(),
+          ...(writer.agentId ? { authorAgentId: writer.agentId } : {}),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }
@@ -232,6 +243,7 @@ export function createChatWrites(dependencies: {
       throw new AutomationChatSessionWait();
     }
     const actor = await actorFor(input.writer);
+    const namedAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
@@ -247,6 +259,7 @@ export function createChatWrites(dependencies: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
+      ...(namedAgentIds.length > 0 ? { namedAgentIds } : {}),
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
@@ -304,20 +317,26 @@ export function createChatWrites(dependencies: {
     return where ? sent : null;
   }
 
-  async function sendMessage(place: ChatWritePlace, input: ChatMessageInput & {
-    threadId: string;
-    parentMessageId?: string;
-  }) {
+  type ReplyInput = ChatMessageInput & { threadId: string; parentMessageId?: string };
+
+  function commitReply(
+    place: ChatWritePlace,
+    { admission, fields }: Awaited<ReturnType<typeof prepareMessage>>,
+    input: ReplyInput,
+  ) {
+    return commit(place, admission, () => place.store.sendMessage({
+      workspaceId: place.workspaceId,
+      threadId: input.threadId,
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
+      ...fields,
+    }), admission, input.signal);
+  }
+
+  async function sendMessage(place: ChatWritePlace, input: ReplyInput) {
     const target = { threadId: input.threadId };
     let message;
     try {
-      const { admission, fields } = await prepareMessage(place, target, input);
-      message = await commit(place, admission, () => place.store.sendMessage({
-        workspaceId: place.workspaceId,
-        threadId: input.threadId,
-        ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
-        ...fields,
-      }), admission, input.signal);
+      message = await commitReply(place, await prepareMessage(place, target, input), input);
     } catch (error) {
       const sent = await replayedMessage(place, input, target);
       if (!sent) throw error;
@@ -333,6 +352,8 @@ export function createChatWrites(dependencies: {
     title?: string;
     // The thread a new post starts; a Group's chat lane keeps its running one.
     threadId?: string;
+    // Desktop's own thread in an agent DM; see LinkedChatStore.startChannelThread.
+    ownThread?: true;
   }) {
     const target = { channelId: input.channelId };
     let started;
@@ -344,6 +365,7 @@ export function createChatWrites(dependencies: {
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.title ? { title: input.title } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         ...fields,
       }), admission, input.signal);
     } catch (error) {
@@ -409,29 +431,38 @@ export function createChatWrites(dependencies: {
     return reaction;
   }
 
-  // A caller that just wrote the resolving reply passes it, so the decision
-  // lands under the session the reply did.
-  async function resolveDecision(place: ChatWritePlace, input: {
-    threadId: string;
-    messageId: string;
-    resolvedByMessageId: string;
-    chosenOption?: string;
-    reply?: { authorUserId?: string };
-  }) {
+  // A reply that answers a question or poll. The reply and the answer land
+  // between dispatch scans, so no agent reads the reply while its question
+  // still looks open. When the answer fails after the reply landed, the
+  // question stays open and `failure` says why.
+  async function answer(place: ChatWritePlace, input: ReplyInput & {
+    resolves: { messageId: string; chosenOption?: string };
+  }): Promise<
+    | { message: ChatMessage; decision: Awaited<ReturnType<ChatWriteStore["resolveChatDecision"]>> }
+    | { message: ChatMessage; failure: unknown }
+  > {
     const target = { threadId: input.threadId };
-    const admission = await admit(place, target);
-    const decision = await commit(place, admission, () => place.store.resolveChatDecision({
-      workspaceId: place.workspaceId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      resolvedByMessageId: input.resolvedByMessageId,
-      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-    }), input.reply ?? admission);
-    afterWrite(place.workspaceId, target, false);
-    return decision;
+    const prepared = await prepareMessage(place, target, input);
+    const answered = await betweenDispatchScans(place.workspaceId, async () => {
+      const message = await commitReply(place, prepared, input);
+      try {
+        const decision = await commit(place, prepared.admission, () => place.store.resolveChatDecision({
+          workspaceId: place.workspaceId,
+          threadId: input.threadId,
+          messageId: input.resolves.messageId,
+          resolvedByMessageId: message.id,
+          ...(input.resolves.chosenOption !== undefined ? { chosenOption: input.resolves.chosenOption } : {}),
+        }));
+        return { message, decision };
+      } catch (failure) {
+        return { message, failure };
+      }
+    });
+    afterWrite(place.workspaceId, target, true, input.writer);
+    return answered;
   }
 
-  return { createFileThread, sendMessage, startThread, setReaction, resolveDecision };
+  return { createFileThread, sendMessage, answer, startThread, setReaction };
 }
 
 // Use captured admission credentials, including for a DM's opening message.
@@ -454,7 +485,7 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentName }
+          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,

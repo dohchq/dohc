@@ -444,13 +444,13 @@ it("rechecks revocation after asynchronous validation and never commits its stal
 });
 
 
-it("terminally refuses an oversized submission before validation or journal admission", async () => {
+it("terminally refuses an oversized submission as a capacity refusal before validation or journal admission", async () => {
   const f = await setup();
   const commit = journal(f);
   const oversized = new Uint8Array(f.bounds.maxSubmissionBytes + 1);
   const capture = ownerCapture(f);
   expect(await capture.submit({deliveryId: "oversized", updateDigest: hash(oversized), updateBytes: oversized}, new AbortController().signal))
-    .toEqual({result: "refused", reason: "invalid-update"});
+    .toEqual({result: "refused", reason: "capacity-refused"});
   expect(commit).not.toHaveBeenCalled();
   expect(f.validate).not.toHaveBeenCalled();
 });

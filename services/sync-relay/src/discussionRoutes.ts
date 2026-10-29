@@ -1,5 +1,4 @@
 import { jsonResponse, type TokenBucketLimiter } from "@dohc/service-http";
-import type {PublicEditRelease} from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
@@ -18,7 +17,6 @@ import {
 } from "./errors";
 import {
   hashLinkProfileSecret,
-  isPublicLinkAccess,
   type ValidatedLinkCapability,
 } from "./linkSecurity";
 import { cursorCodec, parseWorkspaceId, readJsonObject } from "./requestInputs";
@@ -83,7 +81,6 @@ export function createDiscussionRoutes(
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
   discussionActivity: Pick<DiscussionActivityHub, "wait" | "wake">,
-  publicEditRelease?: PublicEditRelease,
 ) {
   type DiscussionViewer = "public" | "named" | "owner";
 
@@ -439,7 +436,6 @@ export function createDiscussionRoutes(
           ? "blocked"
           : "available";
       const fresh = requireFreshLinkRead(capabilityToken, capability);
-      if (!isPublicLinkAccess(fresh.access, publicEditRelease)) return privateRefused();
       return privateResponse(
         linkJsonResponse(
           capability.shareId,

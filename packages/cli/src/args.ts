@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -21,6 +21,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
   | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
   | ({ verb: "linksIn" } & InInput)
@@ -33,6 +34,9 @@ type CliCommandBody =
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "saveRecoveryCopy"; path: string; incident?: string }
+  | { verb: "liveKeptEdits" }
+  | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
@@ -41,7 +45,7 @@ type CliCommandBody =
   | { verb: "groups" }
   | { verb: "threads"; group: string }
   | { verb: "inbox" }
-  | { verb: "show"; target: string; peek: boolean }
+  | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
       verb: "post";
       group: string;
@@ -79,12 +83,19 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
+  | { verb: "versionList" }
+  | { verb: "versionCompare"; version: string; afterPath?: string }
+  | { verb: "versionConflicts"; afterConflictId?: string }
+  | { verb: "versionCreate"; name: string }
+  | { verb: "versionSwitch" | "versionMerge"; version: string }
+  | { verb: "versionResolve"; conflictId: string; keep: "current" | "incoming" | "combined"; text: string; stdin: boolean }
   | { verb: "historyUndo"; operationId: string }
+  | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
-  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
+  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string; server?: true }
   | { verb: "automationList"; collectionPath: string }
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
-  | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
+  | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
@@ -171,6 +182,13 @@ function integerFlag(value: string, flag: string, options: { allowZero: boolean 
   return parsed;
 }
 
+// A stream position prints as <ms>:<lane>:<id>.
+function streamPosition(value: string): CliStreamPosition {
+  const match = /^(\d+):(posts|chat):(.+)$/u.exec(value);
+  if (!match) fail("--before requires a position such as 1730000000000:posts:th_1");
+  return { createdAtMs: Number(match[1]), lane: match[2] as CliStreamPosition["lane"], id: match[3]! };
+}
+
 function noExtraArgs(tokens: readonly string[], verb: string): void {
   if (tokens.length > 0) fail(`${verb} does not accept '${tokens[0]}'`);
 }
@@ -228,6 +246,13 @@ const documentTextFlags: readonly CliFlag[] = [
   { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
 
+function versionOperand({ operands }: VerbInput, name: string): string {
+  const [version, ...extra] = operands;
+  if (!version) fail(`${name} requires a version name or id`);
+  noExtraArgs(extra, name);
+  return version;
+}
+
 function parsePath({ operands }: VerbInput, name: string): string {
   const [path, ...extra] = operands;
   if (!path) fail(`${name} requires a path`);
@@ -271,7 +296,7 @@ const DOCUMENT_VERBS = {
     ],
     notes: [stdinNote, "Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8.",
       "Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind.",
-      "Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
+      "A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
     parse: (input) => documentWrite(input, "documentEdit"),
   },
   create: {
@@ -323,6 +348,71 @@ const DOCUMENT_VERBS = {
         ...(runId === undefined ? {} : { runId }) };
     },
   },
+  "kept-edits": {
+    capabilityId: "workspace.status",
+    summary: "List live documents whose edits the server refused, and where dohc keeps those edits.",
+    operands: "",
+    notes: ["storedOn is this-computer, or server for a document the server hosts.",
+      "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again.",
+      "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
+      "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
+      "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
+      "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
+      "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them."],
+    parse: input => {
+      noExtraArgs(input.operands, "document kept-edits");
+      return { verb: "liveKeptEdits" };
+    },
+  },
+  "save-recovery-copy": {
+    capabilityId: "share.live.document.recovery.save",
+    summary: "Save a document's kept edits next to it.",
+    operands: "<path> [<incident>]",
+    notes: ["Accepts every recovery but unreadable.",
+      "With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first.",
+      "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
+      "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
+      "keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them.",
+      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them.",
+      "dohc writes these files itself, not as the agent that asked."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path) fail("document save-recovery-copy requires a path");
+      noExtraArgs(extra, "document save-recovery-copy");
+      return { verb: "saveRecoveryCopy", path, ...(incident ? { incident } : {}) };
+    },
+  },
+  "retry-kept-edits": {
+    capabilityId: "share.live.document.retry",
+    summary: "Send a document's kept edits to the server once more.",
+    operands: "<path> <incident>",
+    notes: ["Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps.",
+      "For unreadable, dohc reads the kept edits again. It fails with the reason while it still cannot read them.",
+      "A not-written or stopping document needs stop-again instead.",
+      "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path || !incident) fail("retry-kept-edits requires a path and an incident");
+      noExtraArgs(extra, "document retry-kept-edits");
+      return { verb: "retryKeptEdits", path, incident };
+    },
+  },
+  "stop-again": {
+    capabilityId: "share.live.document.stop",
+    summary: "Stop live editing again for a document whose Stop kept its edits.",
+    operands: "<path> <incident>",
+    notes: ["Take the incident from kept-edits. Accepts a recovery of not-written or stopping.",
+      "For not-written, dohc writes the kept edits into the file. For stopping, it asks the server again to stop live editing.",
+      "keptEdits is recovered once the file holds the edits, kept while dohc still keeps them, and none when it kept none.",
+      "dohc refuses while the document is open in an editor. Run kept-edits again to follow it."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path || !incident) fail("stop-again requires a path and an incident");
+      noExtraArgs(extra, "document stop-again");
+      return { verb: "stopAgain", path, incident };
+    },
+  },
 } satisfies Record<string, CliVerbSpec>;
 
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
@@ -365,16 +455,26 @@ const CHAT_VERBS = {
   },
   show: {
     capabilityId: "chat.show",
-    summary: "Show a thread or message and mark the thread read.",
-    operands: "<thread-or-message>",
+    summary: "Show a thread or message and mark the thread read, or show a group's posts and conversation.",
+    operands: "<thread-message-or-group>",
     flags: [
       { name: "--peek", text: "Show it without changing what is marked read. A read-only shared view requires it." },
+      { name: "--before", value: "position", text: "For a group, show the page older than this position, as printed after older:." },
+      { name: "--limit", value: "count", text: "For a group, show at most this many items. The default is 50, the most 100." },
     ],
     parse: (input) => {
       const [target, ...extra] = input.operands;
-      if (!target) fail("show requires a thread or message id");
+      if (!target) fail("show requires a thread, message or group");
       noExtraArgs(extra, "show");
-      return { verb: "show", target, peek: input.flags.has("--peek") };
+      const before = lastValue(input, "--before");
+      const limit = lastValue(input, "--limit");
+      return {
+        verb: "show",
+        target,
+        peek: input.flags.has("--peek"),
+        ...(before === undefined ? {} : { before: streamPosition(before) }),
+        ...(limit === undefined ? {} : { limit: Math.min(integerFlag(limit, "--limit", { allowZero: false }), 100) }),
+      };
     },
   },
   post: {
@@ -619,7 +719,10 @@ const AUTOMATION_VERBS = {
     capabilityId: "automation.runs.list",
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
-    flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
+    flags: [
+      { name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." },
+      { name: "--server", text: "List the runs of the workspace's self-hosted server instead." },
+    ],
     notes: [
       "Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID.",
       "When older runs remain, the last line gives the --page value that lists them.",
@@ -627,19 +730,20 @@ const AUTOMATION_VERBS = {
     parse: (input) => {
       const { collectionPath, automation } = automationOperands(input, "runs", false);
       const page = lastValue(input, "--page");
-      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }) };
+      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }), ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   run: {
     capabilityId: "automation.run.read",
     summary: "Show one run: what started it, what each step changed, and why it failed.",
     operands: "<collection> <automation> <run>",
+    flags: [{ name: "--server", text: "Show a run of the workspace's self-hosted server. It lists what the run changed, without steps." }],
     notes: [
       "Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
     ],
     parse: (input) => {
       const { collectionPath, automation, run } = automationOperands(input, "run", true);
-      return { verb: "automationRun", collectionPath, automation, run };
+      return { verb: "automationRun", collectionPath, automation, run, ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   retry: {
@@ -791,7 +895,10 @@ const migrationApproval = "Review the result, then approve it with approveMigrat
 const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
-  list: { summary: "List Collections." },
+  list: {
+    summary: "List Collections.",
+    notes: ["On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others."],
+  },
   describe: {
     summary: "Show a Collection's tables, fields, and operations.",
     notes: ["Use describe to find approved operation IDs."],
@@ -1115,7 +1222,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,
@@ -1126,7 +1233,16 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: { ...CHAT_VERBS, "file-mentions": {
+    verbs: { ...CHAT_VERBS, links: {
+      capabilityId: "chat.read", summary: "Read one page of files mentioned in a chat.", operands: "<group>",
+      flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+      parse: input => {
+        const [group, ...extra] = input.operands;
+        if (!group) fail("links requires a group");
+        noExtraArgs(extra, "chat links");
+        return { verb: "chatLinks", ...chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") }) };
+      },
+    }, "file-mentions": {
       capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
       operands: "", flags: [
         { name: "--subject", value: "subject", text: "A file path or objectId as JSON." },
@@ -1150,10 +1266,90 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: [workspaceNote],
     verbs: APP_VERBS,
   },
+  file: {
+    summary: "Change workspace files.", notes: ["Undo removes the copy while it is unchanged."],
+    verbs: {duplicate: {capabilityId: "file.duplicate", summary: "Duplicate one file beside its source.", operands: "<path>",
+      parse: input => {const [path, ...extra] = input.operands; if (!path) fail("file duplicate requires a path"); noExtraArgs(extra, "file duplicate"); return {verb: "fileDuplicate", path};}}},
+  },
   history: {
     summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
+  },
+  version: {
+    summary: "Read and change the workspace's versions and their open conflicts.",
+    notes: [
+      "Versions belong to the owning workspace.",
+      "A change first saves the edits open in dohc, or refuses when dohc can't.",
+    ],
+    verbs: {
+      list: {
+        capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
+        parse: input => { noExtraArgs(input.operands, "version list"); return { verb: "versionList" }; },
+      },
+      compare: {
+        capabilityId: "version.compare", summary: "List the files that differ between Main and a version.", operands: "<version>",
+        flags: [{ name: "--after", value: "path", text: "Continue after this path from the previous page." }],
+        notes: ["Name a version by its name or ID, as version list prints them. With --json, print both sides' text."],
+        parse: input => {
+          const version = versionOperand(input, "version compare");
+          const afterPath = lastValue(input, "--after");
+          return { verb: "versionCompare", version, ...(afterPath ? { afterPath } : {}) };
+        },
+      },
+      conflicts: {
+        capabilityId: "version.conflicts.list", summary: "List open conflicts from merges and from sync.", operands: "",
+        flags: [{ name: "--after", value: "conflict", text: "Continue after this conflict ID from the previous page." }],
+        notes: ["With --json, print each conflict's sides."],
+        parse: input => {
+          noExtraArgs(input.operands, "version conflicts");
+          const afterConflictId = lastValue(input, "--after");
+          return { verb: "versionConflicts", ...(afterConflictId ? { afterConflictId } : {}) };
+        },
+      },
+      create: {
+        capabilityId: "version.create", summary: "Create a version from the active one and switch to it.", operands: "<name>",
+        parse: input => {
+          const [name, ...extra] = input.operands;
+          if (!name?.trim()) fail("version create requires a name");
+          noExtraArgs(extra, "version create");
+          if (name.trim().length > MAX_VERSION_NAME_LENGTH) fail(`a version name has at most ${MAX_VERSION_NAME_LENGTH} characters`);
+          return { verb: "versionCreate", name: name.trim() };
+        },
+      },
+      switch: {
+        capabilityId: "version.switch", summary: "Switch the workspace folder to a version.", operands: "<version>",
+        notes: ["Name a version by its name or ID, as version list prints them."],
+        parse: input => ({ verb: "versionSwitch", version: versionOperand(input, "version switch") }),
+      },
+      merge: {
+        capabilityId: "version.merge", summary: "Merge a version into Main.", operands: "<version>",
+        notes: ["Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves."],
+        parse: input => ({ verb: "versionMerge", version: versionOperand(input, "version merge") }),
+      },
+      resolve: {
+        capabilityId: "version.conflict.resolve", summary: "Resolve an open conflict.", operands: "<conflict> [-]",
+        flags: [
+          { name: "--keep", value: "side", text: "Keep current or incoming, as version conflicts names the sides." },
+          { name: "--text", value: "text", text: "Replace both sides with this combined text." },
+        ],
+        notes: [
+          "Use - to read the combined text from stdin. Give exactly one of --keep, --text or -.",
+          "In a merge, current is Main and incoming is the version. In sync, current is this computer.",
+        ],
+        parse: input => {
+          const [conflictId, body, ...extra] = input.operands;
+          if (!conflictId) fail("version resolve requires a conflict ID");
+          noExtraArgs(extra, "version resolve");
+          if (body !== undefined && body !== "-") fail("version resolve takes - to read combined text from stdin");
+          const keep = lastValue(input, "--keep");
+          const text = lastValue(input, "--text");
+          if ([keep, text, body].filter(value => value !== undefined).length !== 1) fail("use exactly one of --keep <side>, --text <text> or -");
+          if (keep !== undefined && keep !== "current" && keep !== "incoming") fail("--keep takes current or incoming");
+          return { verb: "versionResolve", conflictId, keep: keep ?? "combined", text: text ?? "", stdin: body === "-" };
+        },
+      },
+    },
   },
   automation: {
     summary: "Press Button fields, read an automation's runs, and try a failed run again.",
@@ -1235,7 +1431,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

@@ -33,8 +33,8 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
 
     const filesHeader = page.getByTestId("explorer-files-header");
     await page.keyboard.press("ControlOrMeta+n");
-    await page.getByRole("textbox", { name: "File name" }).fill("Welcome.md");
-    await page.getByRole("button", { name: "Create file" }).click();
+    await page.getByLabel("Page title").fill("Welcome");
+    await page.getByLabel("Page title").press("Enter");
     await expect(explorerRow(page, "Welcome.md")).toBeVisible();
     await expect.poll(() => pathExists(join(temp.rootPath, "Welcome.md"))).toBe(true);
     const welcomeTab = page.getByTestId(editorTabTestId("Welcome.md"));
@@ -50,33 +50,33 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
 
     await explorerRow(page, "Research").click();
     await filesHeader.getByRole("button", { name: "New file" }).click();
-    await page.getByRole("textbox", { name: "New file name" }).fill("notes.txt");
-    await page.getByRole("textbox", { name: "New file name" }).press("Enter");
-    await expect(explorerRow(page, "Research/notes.txt")).toBeVisible();
+    await page.getByLabel("Page title").fill("notes");
+    await page.getByLabel("Page title").press("Enter");
+    await expect(explorerRow(page, "Research/notes.md")).toBeVisible();
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
       .toBe(true);
 
-    const created = explorerRow(page, "Research/notes.txt");
+    const created = explorerRow(page, "Research/notes.md");
     await created.click();
     await created.press("F2");
     const rename = page.getByRole("textbox", { name: "New name" });
-    await rename.fill("plan.txt");
+    await rename.fill("plan.md");
     await rename.press("Enter");
-    const renamed = explorerRow(page, "Research/plan.txt");
+    const renamed = explorerRow(page, "Research/plan.md");
     await expect(renamed).toBeVisible();
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
       .toBe(false);
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(true);
 
     await renamed.click();
     await renamed.press("Delete");
     const confirmation = page.getByTestId("delete-confirm");
     await expect(confirmation).toContainText(
-      "It moves to the system trash, or to this workspace's .dohc/trash folder",
+      "It moves to the system trash, or to this workspace's .dohc/local/trash folder",
     );
     await confirmation.getByRole("button", { name: "Cancel" }).click();
     await expect(renamed).toBeVisible();
@@ -86,7 +86,7 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await page.getByTestId("confirm-delete").click();
     await expect(renamed).toHaveCount(0);
     await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
       .toBe(false);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -210,19 +210,25 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
       await cdp.detach();
     };
 
+    // The Explorer shows what landed, so the drop selects it instead of a toast.
     await dropFromOs(trip);
-    await expect(page.getByText("Imported 2 files.").first()).toBeVisible();
+    await expect(explorerRow(page, "Trip")).toHaveAttribute("aria-selected", "true");
+    await expect(explorerRow(page, "Trip")).toBeFocused();
+    await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "Trip/photos/beach.txt");
     await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
     expect(await readFile(join(temp.rootPath, "Trip", "photos", "beach.txt"), "utf8")).toBe("sand\n");
     expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
 
-    // A drop of empty folders lands no file, and says how many folders it made.
+    // A drop of empty folders lands no file, and the folder it landed is
+    // selected all the same.
     await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
     await dropFromOs(join(outside, "Empty"));
-    await expect(page.getByText("Created 2 folders.").first()).toBeVisible();
+    await expect(explorerRow(page, "Empty")).toHaveAttribute("aria-selected", "true");
+    await expect(explorerRow(page, "Empty")).toBeFocused();
     await revealExplorerPath(page, "Empty/Inner");
+    await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("empty-folder-drop.png") });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

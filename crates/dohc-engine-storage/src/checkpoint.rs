@@ -13,6 +13,30 @@ const MAX_WRITER_BACKFILL_FRAMES: i64 = 1000;
 const MAX_PENDING_WAL_FRAMES: i64 = 6000;
 const MAX_CHECKPOINT_HANDOFF_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// The outcome of a bounded wait for checkpoint work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointWait {
+    /// The same cycle is still doing checkpoint work.
+    Running,
+    /// A cycle completed, or the worker is idle.
+    Finished,
+}
+
+struct CheckpointRun<'a>(&'a AtomicBool);
+
+impl<'a> CheckpointRun<'a> {
+    fn start(running: &'a AtomicBool) -> Self {
+        running.store(true, Ordering::Release);
+        Self(running)
+    }
+}
+
+impl Drop for CheckpointRun<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// PASSIVE checkpoints use a separate connection, including during capture.
 #[derive(Debug)]
 pub(crate) struct Checkpoints {
@@ -20,11 +44,16 @@ pub(crate) struct Checkpoints {
     thread: Option<JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
     full_requested: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     completed: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
     #[cfg(test)]
     writer_max: std::sync::atomic::AtomicI64,
     #[cfg(test)]
     writer_calls: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    startup_max: std::sync::atomic::AtomicI64,
+    #[cfg(test)]
+    startup_calls: std::sync::atomic::AtomicU64,
 }
 
 fn frames(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
@@ -37,7 +66,7 @@ impl Checkpoints {
     /// The background connection. It never waits for a lock, and it syncs
     /// copied pages as the writer's connection does.
     pub(crate) fn connection(path: &Path) -> Result<Connection, crate::StorageError> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        let conn = crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(crate::StorageError::persist)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(crate::StorageError::persist)?;
@@ -54,12 +83,15 @@ impl Checkpoints {
         let worker_stopped = Arc::clone(&stopped);
         let full_requested = Arc::new(AtomicBool::new(false));
         let worker_full = full_requested.clone();
+        let running = Arc::new(AtomicBool::new(false));
+        let worker_running = running.clone();
         let completed = Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
         let worker_completed = Arc::clone(&completed);
         let thread = std::thread::Builder::new()
             .name("dohc-wal-checkpoint".into())
             .spawn(move || {
                 while rx.recv().is_ok() {
+                    let run = CheckpointRun::start(&worker_running);
                     #[cfg(feature = "fault-injection")]
                     let mut phase =
                         crate::capture_phase::Phase::new("checkpoint_request_cycle", None, 0, true);
@@ -77,6 +109,7 @@ impl Checkpoints {
                     }) {
                         catch_up(&conn, &worker_stopped, full);
                     }
+                    drop(run);
                     let (sequence, signal) = &*worker_completed;
                     *sequence.lock().unwrap() += 1;
                     signal.notify_all();
@@ -99,27 +132,23 @@ impl Checkpoints {
             thread: Some(thread),
             stopped,
             full_requested,
+            running,
             completed,
             #[cfg(test)]
             writer_max: std::sync::atomic::AtomicI64::new(0),
             #[cfg(test)]
             writer_calls: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            startup_max: std::sync::atomic::AtomicI64::new(0),
+            #[cfg(test)]
+            startup_calls: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    pub(crate) fn next_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub(crate) fn next_cycle(&self) -> impl Fn() -> CheckpointWait + Send + Sync + use<> {
         let completed = self.completed.clone();
-        move || {
-            let before = *completed.0.lock().unwrap();
-            let (sequence, signal) = &*completed;
-            let _wait = signal
-                .wait_timeout_while(
-                    sequence.lock().unwrap(),
-                    std::time::Duration::from_millis(100),
-                    |s| *s <= before,
-                )
-                .unwrap();
-        }
+        let running = self.running.clone();
+        move || wait_for_cycle(&completed, &running)
     }
 
     pub(crate) fn request_full(&self) {
@@ -212,6 +241,8 @@ impl Checkpoints {
             conn,
             WRITER_CHECKPOINT_FRAMES,
             MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(test)]
+            false,
             #[cfg(feature = "fault-injection")]
             None,
         );
@@ -227,6 +258,8 @@ impl Checkpoints {
             conn,
             0,
             i64::MAX,
+            #[cfg(test)]
+            true,
             #[cfg(feature = "fault-injection")]
             Some(&mut phase),
         );
@@ -242,6 +275,8 @@ impl Checkpoints {
             conn,
             0,
             MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(test)]
+            true,
             #[cfg(feature = "fault-injection")]
             Some(&mut phase),
         );
@@ -252,6 +287,7 @@ impl Checkpoints {
         conn: &Connection,
         minimum_log_frames: i64,
         maximum_tail: i64,
+        #[cfg(test)] startup: bool,
         #[cfg(feature = "fault-injection")] mut phase: Option<&mut crate::capture_phase::Phase>,
     ) {
         let Ok((log, backfilled)) = frames(conn) else {
@@ -300,11 +336,15 @@ impl Checkpoints {
             }
             #[cfg(test)]
             {
-                self.writer_calls.fetch_add(1, Ordering::Relaxed);
-                self.writer_max
-                    .fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
+                let (calls, maximum) = if startup {
+                    (&self.startup_calls, &self.startup_max)
+                } else {
+                    (&self.writer_calls, &self.writer_max)
+                };
+                calls.fetch_add(1, Ordering::Relaxed);
+                maximum.fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
                 assert!(latest < 0 || finished - backfilled <= maximum_tail);
-                if minimum_log_frames == 0 {
+                if startup {
                     eprintln!(
                         "STARTUP_PASSIVE fresh={} elapsed_us={} starting_log={log} starting_backfilled={backfilled} finished={finished}",
                         maximum_tail == i64::MAX,
@@ -364,6 +404,14 @@ impl Checkpoints {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn startup_work_for_test(&self) -> (u64, i64) {
+        (
+            self.startup_calls.load(Ordering::Relaxed),
+            self.startup_max.load(Ordering::Relaxed),
+        )
+    }
+
     pub(crate) fn request(&self) -> bool {
         self.requests.as_ref().is_some_and(|requests| {
             !matches!(
@@ -380,6 +428,25 @@ impl Drop for Checkpoints {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+fn wait_for_cycle(
+    completed: &(std::sync::Mutex<u64>, std::sync::Condvar),
+    running: &AtomicBool,
+) -> CheckpointWait {
+    let (sequence, signal) = completed;
+    let guard = sequence.lock().unwrap();
+    let before = *guard;
+    let (sequence, _) = signal
+        .wait_timeout_while(guard, std::time::Duration::from_millis(100), |s| {
+            *s == before
+        })
+        .unwrap();
+    if *sequence == before && running.load(Ordering::Acquire) {
+        CheckpointWait::Running
+    } else {
+        CheckpointWait::Finished
     }
 }
 
@@ -442,6 +509,101 @@ mod tests {
     use crate::{EngineStore, NoFaults, StorageError};
     use dohc_test_scratch::ScratchDir;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn bounded_wait_reports_a_running_checkpoint_until_it_finishes() {
+        let completed = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+        let running = AtomicBool::new(false);
+        let run = CheckpointRun::start(&running);
+        assert_eq!(
+            wait_for_cycle(&completed, &running),
+            CheckpointWait::Running
+        );
+        drop(run);
+        assert_eq!(
+            wait_for_cycle(&completed, &running),
+            CheckpointWait::Finished
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_readers_release_checkpoint_locks() {
+        reader_checkpoint_race(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "upstream SQLite UNC misdetection leaks SHM locks for raw verbatim drive paths"]
+    fn raw_verbatim_readers_pin_checkpoint_locks() {
+        reader_checkpoint_race(true);
+    }
+
+    #[cfg(windows)]
+    fn reader_checkpoint_race(raw: bool) {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("reader-race.db");
+        std::fs::File::create(&path).unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let writer = if raw {
+            Connection::open(&path).unwrap()
+        } else {
+            crate::schema::open_engine_db(&path, 0, None).unwrap().conn
+        };
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+                 PRAGMA wal_autocheckpoint=0; CREATE TABLE probe(n);
+                 INSERT INTO probe VALUES(0)",
+            )
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                scope.spawn(move || {
+                    let reader = if raw {
+                        Connection::open(path).unwrap()
+                    } else {
+                        crate::schema::open_engine_db_read_only(&path, None, None)
+                            .unwrap()
+                            .conn
+                    };
+                    for _ in 0..256 {
+                        reader.execute_batch("BEGIN; SELECT * FROM probe").unwrap();
+                        barrier.wait();
+                        barrier.wait();
+                        reader.execute_batch("ROLLBACK").unwrap();
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                });
+            }
+            let mut pinned = None;
+            for round in 0..256 {
+                barrier.wait();
+                barrier.wait();
+                barrier.wait();
+                // Both read transactions ended. Keep them idle until the
+                // writer checks that no reader still blocks backfill.
+                writer.execute("UPDATE probe SET n=n+1", []).unwrap();
+                let (log, backfilled): (i64, i64) = writer
+                    .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                        Ok((r.get(1)?, r.get(2)?))
+                    })
+                    .unwrap();
+                if log != backfilled {
+                    pinned.get_or_insert((round, log, backfilled));
+                }
+                barrier.wait();
+            }
+            assert!(
+                pinned.is_none(),
+                "finished readers pinned the WAL: {pinned:?}"
+            );
+        });
+    }
 
     fn write(store: &mut EngineStore, n: i64, bytes: usize) {
         store
@@ -525,7 +687,7 @@ mod tests {
                 Ok::<_, rusqlite::Error>(())
             })
             .unwrap();
-            assert_eq!(checkpoints.writer_work_for_test().0, 0);
+            assert_eq!(checkpoints.startup_work_for_test().0, 0);
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -597,7 +759,13 @@ mod tests {
             s.read_with(|conn| {
                 let mut phase =
                     crate::capture_phase::Phase::new("pinned_reader_PASSIVE", None, 0, true);
-                checkpoints.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES, Some(&mut phase));
+                checkpoints.checkpoint_tail(
+                    conn,
+                    0,
+                    MAX_WRITER_BACKFILL_FRAMES,
+                    true,
+                    Some(&mut phase),
+                );
                 let (log, backfilled) = frames(conn)?;
                 assert!(log > backfilled);
                 Ok::<_, rusqlite::Error>(())
@@ -615,6 +783,7 @@ mod tests {
                         conn,
                         0,
                         MAX_WRITER_BACKFILL_FRAMES,
+                        true,
                         Some(&mut phase),
                     );
                 }
@@ -681,7 +850,7 @@ mod tests {
             }
             let s = EngineStore::open_passive(&path, 2, None, None).unwrap();
             assert!(s.is_passive());
-            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert_eq!(s.startup_checkpoint_work_for_test(), (0, 0));
             assert!(!s.checkpoint_worker_running_for_test());
             assert_eq!(s.table_row_count("link_pending").unwrap(), 0);
             assert_eq!(s.table_row_count("link_aliases").unwrap(), 0);
@@ -691,7 +860,7 @@ mod tests {
             }
             drop(s);
             let s = EngineStore::open_passive(&path, 3, None, None).unwrap();
-            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert_eq!(s.startup_checkpoint_work_for_test(), (0, 0));
             assert!(!s.checkpoint_worker_running_for_test());
             assert_eq!(s.table_row_count("link_index_state").unwrap(), 0);
         }
@@ -707,9 +876,10 @@ mod tests {
             log, backfilled,
             "fresh schema must finish its whole metadata tail before publication"
         );
-        let (calls, maximum) = s.checkpoint_work_for_test();
+        let (calls, maximum) = s.startup_checkpoint_work_for_test();
         assert_eq!(calls, 1);
         assert!(maximum > 0);
+        assert_eq!(s.checkpoint_work_for_test(), (0, 0));
     }
 
     #[test]
@@ -732,7 +902,8 @@ mod tests {
         let checkpoints = Checkpoints::start(&path).unwrap();
         checkpoints.checkpoint_fresh_schema(&conn);
         assert_eq!(frames(&conn).unwrap(), (log, log));
-        assert_eq!(checkpoints.writer_work_for_test(), (1, log - backfilled));
+        assert_eq!(checkpoints.startup_work_for_test(), (1, log - backfilled));
+        assert_eq!(checkpoints.writer_work_for_test(), (0, 0));
     }
 
     fn store_before_link_migration(path: &Path) -> Connection {
@@ -771,7 +942,7 @@ mod tests {
         assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 1);
         let (log, backfilled) = s.read_with(frames).unwrap();
         assert_eq!(log, backfilled);
-        let (calls, maximum) = s.checkpoint_work_for_test();
+        let (calls, maximum) = s.startup_checkpoint_work_for_test();
         assert_eq!(calls, 1);
         assert!((1..=MAX_WRITER_BACKFILL_FRAMES).contains(&maximum));
     }
@@ -797,7 +968,7 @@ mod tests {
             s.stop_checkpoint_worker_for_test();
             assert!(!s.was_freshly_created());
             assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
-            let (calls, maximum) = s.checkpoint_work_for_test();
+            let (calls, maximum) = s.startup_checkpoint_work_for_test();
             assert_eq!(calls, u64::from(bytes == 4096));
             assert!(maximum <= MAX_WRITER_BACKFILL_FRAMES);
             let (log, backfilled) = s.read_with(frames).unwrap();
@@ -817,7 +988,7 @@ mod tests {
             drop(s);
             let s = EngineStore::open_for_actor(&path, 3, None, None).unwrap();
             assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
-            assert_eq!(s.checkpoint_work_for_test().0, 0);
+            assert_eq!(s.startup_checkpoint_work_for_test().0, 0);
         }
     }
 
@@ -1127,7 +1298,7 @@ mod tests {
         assert!(!s.was_freshly_created());
         assert!(s.checkpoint_worker_running_for_test());
         assert_eq!(
-            s.checkpoint_work_for_test().0,
+            s.startup_checkpoint_work_for_test().0,
             0,
             "an existing, fully migrated store must do no startup checkpoint"
         );

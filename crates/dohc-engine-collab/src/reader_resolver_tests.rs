@@ -46,6 +46,16 @@ fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
     )
 }
 
+#[test]
+fn outside_fold_round1_unclaimed_note_skips_document_load() {
+    let (conn, key, _, _, _) = fixture();
+    conn.execute("UPDATE ydoc_docs SET lineage_claim_id=NULL", [])
+        .unwrap();
+    assert!(prepare_fold(&conn, &key, "note.md", "**changed**")
+        .expect("unclaimed document was loaded")
+        .is_none());
+}
+
 fn canonical_fold_clears_the_reader_marker(staging: bool) {
     let (_, _, doc, _, _) = fixture();
     assert!(doc.has_reader_source());
@@ -72,6 +82,197 @@ fn canonical_folds_clear_the_reader_marker_with_the_witness() {
 #[test]
 fn canonical_staging_clears_the_reader_marker_with_the_witness() {
     canonical_fold_clears_the_reader_marker(true);
+}
+
+#[test]
+fn source_recording_cannot_silently_downgrade_a_reader_document() {
+    let (_, _, doc, source, _) = fixture();
+    let before = doc.encode_full_state();
+    let result = doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &source);
+    assert!(matches!(
+        result,
+        Err(CollabError::MarkdownReaderUnavailable)
+    ));
+    assert_eq!(doc.encode_full_state(), before);
+    assert!(doc.has_reader_source());
+}
+
+#[test]
+fn frontmatter_source_recording_keeps_the_reader_marker() {
+    let (_, _, doc, source, _) = fixture();
+    let markdown = format!("---\ntitle: changed\n---\n{source}");
+    doc.frontmatter_set_preserving_markdown_source("title", "changed", &markdown)
+        .unwrap();
+    assert!(doc.has_reader_source());
+    assert_eq!(
+        doc.markdown_source(&doc.markdown_source_reference().unwrap())
+            .as_deref(),
+        Some(markdown.as_str())
+    );
+}
+
+#[test]
+fn ordinary_source_recording_and_frontmatter_edits_do_not_create_a_reader_marker() {
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "plain paragraph")
+        .unwrap();
+    assert!(!doc.has_reader_source());
+    doc.frontmatter_set_preserving_markdown_source(
+        "title",
+        "changed",
+        "---\ntitle: changed\n---\nplain paragraph",
+    )
+    .unwrap();
+    assert!(!doc.has_reader_source());
+}
+
+#[test]
+fn construction_as_proof_refuses_body_deletions() {
+    use yrs::{updates::decoder::Decode, ReadTxn, Transact, XmlFragment};
+    let (_, _, live, _, _) = fixture();
+    let before = live.encode_full_state();
+    let clone = yrs::Doc::new();
+    clone
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = clone.transact().state_vector();
+    let body = clone.get_or_insert_xml_fragment("body");
+    let length = body.len(&clone.transact());
+    assert!(length > 0);
+    body.remove_range(&mut clone.transact_mut(), 0, length);
+    let delta = clone.transact().encode_state_as_update_v1(&vector);
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    assert_eq!(live.encode_full_state(), before);
+}
+
+fn reject_native_metadata(key: &str) {
+    reject_native_metadata_value(key, yrs::Any::String("unexpected".into()));
+}
+
+fn reject_native_metadata_value(key: &str, value: yrs::Any) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+    let base = Ydoc::wire();
+    base.rewrite_content_to_markdown(ContentKind::Richdoc, "Before")
+        .unwrap();
+    let before = base.encode_full_state();
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = raw.transact().state_vector();
+    raw.get_or_insert_map("meta")
+        .insert(&mut raw.transact_mut(), key, value);
+    let delta = raw.transact().encode_state_as_update_v1(&vector);
+    assert!(base.native_fold_candidate(&delta).is_err(), "{key}");
+    assert_eq!(base.encode_full_state(), before);
+}
+
+#[test]
+fn native_fold_candidate_rejects_source() {
+    reject_native_metadata("dohcMarkdownSource");
+}
+#[test]
+fn native_fold_candidate_rejects_source_digest() {
+    reject_native_metadata("dohcMarkdownSourceSha256");
+}
+#[test]
+fn native_fold_candidate_rejects_source_witness() {
+    reject_native_metadata("dohcMarkdownSourceProjectionSha256");
+}
+#[test]
+fn native_fold_candidate_rejects_reader_marker() {
+    reject_native_metadata("dohcMarkdownSourceReader");
+}
+#[test]
+fn native_fold_candidate_rejects_unknown_metadata() {
+    reject_native_metadata("unknown");
+}
+
+#[test]
+fn native_fold_candidate_rejects_non_string_epoch_metadata() {
+    reject_native_metadata_value("dohcLineageEpoch", yrs::Any::Number(7.0));
+}
+
+#[test]
+fn native_fold_candidate_rejects_pending_updates() {
+    let base = Ydoc::wire();
+    base.rewrite_content_to_markdown(ContentKind::Richdoc, "Before")
+        .unwrap();
+    let missing = Ydoc::wire();
+    missing.richdoc_append_paragraph("Missing dependency");
+    let delta = missing.richdoc_append_paragraph("Cannot integrate");
+    assert!(base.native_fold_candidate(&delta).is_err());
+}
+
+#[test]
+fn construction_as_proof_cannot_change_content_or_unknown_metadata() {
+    let (_, _, doc, _, _) = fixture();
+    let before = doc.encode_full_state();
+    let body = doc.richdoc_append_paragraph("must not be repaired by proof");
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &body).unwrap());
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact, Xml, XmlFragment};
+    for key in ["schemaVersion", "dohcLineageEpoch", "foreign"] {
+        let raw = yrs::Doc::new();
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&before).unwrap())
+            .unwrap();
+        let vector = raw.transact().state_vector();
+        raw.get_or_insert_map("meta")
+            .insert(&mut raw.transact_mut(), key, "changed");
+        let delta = raw.transact().encode_state_as_update_v1(&vector);
+        assert!(
+            !crate::replay_parity::reader_metadata_only(&before, &delta).unwrap(),
+            "{key}"
+        );
+    }
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = raw.transact().state_vector();
+    let root = raw.get_or_insert_xml_fragment("body");
+    let element = root.get(&raw.transact(), 0).unwrap();
+    let yrs::XmlOut::Element(element) = element else {
+        panic!("expected element")
+    };
+    element.insert_attribute(&mut raw.transact_mut(), "foreign", "value");
+    let delta = raw.transact().encode_state_as_update_v1(&vector);
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    // The body edit above belongs only to this local test document. Proof
+    // construction receives immutable checkpoint bytes, never that document.
+    let (_, _, live, _, _) = fixture();
+    let unchanged = live.encode_full_state();
+    assert!(!crate::replay_parity::reader_metadata_only(&before, &delta).unwrap());
+    assert_eq!(live.encode_full_state(), unchanged);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn real_reader_proves_frontmatter_source_without_rewriting_live_state() {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let (conn, key, doc, source, _) = fixture();
+    let resolver = ReaderResolver::new(Arc::new(Reader::new(Some(config))));
+    let markdown = format!("---\ntitle: changed\n---\n{source}");
+    doc.frontmatter_set_preserving_markdown_source("title", "changed", &markdown)
+        .unwrap();
+    let sha = crate::hex_sha256(markdown.as_bytes());
+    conn.execute(
+        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
+        params![sha, markdown, markdown.len() as i64],
+    )
+    .unwrap();
+    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
+        .unwrap();
+    let before = doc.encode_full_state();
+    run(pending(lookup(&conn, &key, &doc, &resolver)).resolve());
+    assert_eq!(
+        lookup(&conn, &key, &doc, &resolver).unwrap(),
+        Some(markdown)
+    );
+    assert_eq!(doc.encode_full_state(), before);
+    assert!(doc.has_reader_source());
 }
 
 #[test]
@@ -127,6 +328,20 @@ fn fake_resolver(fault: &str) -> (dohc_engine_testkit::ScratchDir, ReaderResolve
 fn expired_proofs_must_match_the_engine_projection() {
     let (_scratch, resolver) = fake_resolver("expired");
     let (conn, key, doc, _, _) = fixture();
+    // Force prove, rather than metadata-only construction, to exercise Expired.
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap())
+        .unwrap();
+    let before = raw.transact().state_vector();
+    raw.get_or_insert_map("meta").insert(
+        &mut raw.transact_mut(),
+        "dohcMarkdownSourceProjectionSha256",
+        "0".repeat(64),
+    );
+    doc.apply(&raw.transact().encode_state_as_update_v1(&before))
+        .unwrap();
     let proof = pending(lookup(&conn, &key, &doc, &resolver));
     run(proof.resolve());
     assert!(
@@ -182,6 +397,22 @@ fn pending(result: Result<Option<String>, CollabError>) -> Arc<PendingProof> {
         Err(CollabError::MarkdownReaderPending(p)) => p,
         other => panic!("{other:?}"),
     }
+}
+
+pub(crate) fn evict_with_other_snapshot_misses(resolver: &ReaderResolver) {
+    let (conn, key, doc, _, _) = fixture();
+    for index in 0..MAX_ENTRIES {
+        conn.execute(
+            "UPDATE snapshots SET latest_moment_id=?1",
+            [format!("other-workspace-{index}")],
+        )
+        .unwrap();
+        assert!(matches!(
+            lookup(&conn, &key, &doc, resolver),
+            Err(CollabError::MarkdownReaderPending(_))
+        ));
+    }
+    assert_eq!(resolver.entries.lock().unwrap().len(), MAX_ENTRIES);
 }
 fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver) {
     // This cache test supplies the receipt; the real-reader test below obtains it from the child.
@@ -440,7 +671,7 @@ fn dispatch_drops_the_request_even_while_the_verdict_is_retained() {
     assert_eq!(resolver.entries.lock().unwrap().len(), 1);
 }
 
-fn run(future: impl std::future::Future<Output = ()>) {
+pub(crate) fn run(future: impl std::future::Future<Output = ()>) {
     struct Wake(std::thread::Thread);
     impl std::task::Wake for Wake {
         fn wake(self: Arc<Self>) {
@@ -538,4 +769,90 @@ fn real_reader_checks_the_current_witness_and_holds_without_a_runtime() {
         lookup(&conn, &key, &doc, &unavailable),
         Err(CollabError::MarkdownReaderUnavailable)
     ));
+}
+
+pub(crate) fn baseline_with_meta(bytes: &[u8], key: &str) -> Vec<u8> {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(bytes).unwrap())
+        .unwrap();
+    raw.get_or_insert_map("meta")
+        .insert(&mut raw.transact_mut(), key, "unexpected");
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    bytes
+}
+
+/// An original imported base has no successor epoch. Keep the resolver fixture intact.
+pub(crate) fn original_baseline_case(case: &str) -> (Vec<u8>, String) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let (bytes, source) = witness_case(case);
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    raw.get_or_insert_map("meta")
+        .remove(&mut raw.transact_mut(), "dohcLineageEpoch");
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    (bytes, source)
+}
+
+#[test]
+fn reader_baseline_refuses_lineage_epoch() {
+    let (bytes, _) = witness_case("valid");
+    let bytes = baseline_with_meta(&bytes, "dohcLineageEpoch");
+    let doc = Ydoc::wire();
+    doc.apply(&bytes).unwrap();
+    assert!(matches!(
+        doc.validate_reader_baseline(&bytes),
+        Err(CollabError::MalformedUpdate { .. })
+    ));
+}
+
+/// Each caller applies these wire mutations before selecting its own authority.
+pub(crate) fn witness_case(case: &str) -> (Vec<u8>, String) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, StateVector, Transact};
+    let data: Value = serde_json::from_str(include_str!("../tests/reader-resolver.json")).unwrap();
+    let bytes = STANDARD
+        .decode(
+            data[if case == "stale" {
+                "stale"
+            } else {
+                "checkpoint"
+            }]
+            .as_str()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut source = data["source"].as_str().unwrap().to_owned();
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&bytes).unwrap())
+        .unwrap();
+    let map = raw.get_or_insert_map("meta");
+    match case {
+        "forged" => {
+            source = "- forged body\n".into();
+            let mut tx = raw.transact_mut();
+            map.insert(&mut tx, "dohcMarkdownSource", source.as_str());
+            map.insert(
+                &mut tx,
+                "dohcMarkdownSourceSha256",
+                crate::hex_sha256(source.as_bytes()),
+            );
+        }
+        "partial" => {
+            map.remove(&mut raw.transact_mut(), "dohcMarkdownSourceSha256");
+        }
+        "valid" | "stale" => {}
+        _ => panic!("unknown witness case"),
+    }
+    let bytes = raw
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    (bytes, source)
 }

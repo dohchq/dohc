@@ -123,7 +123,9 @@ export function queueLiveHostRequests(client: EngineClient, options: {
       args[index] = options.signal;
       const request = args[0] as {id: number; deadlineMs?: number | null};
       const kind = property === "openLiveAppliedSync" || property === "readNextLiveApplied" ? "read" : "write";
-      const forwardCancel = forwardsCancellation.has(property) ? () => void target.cancelRequest(request.id).catch(() => undefined) : undefined;
+      const cancellation = forwardsCancellation.has(property) ? new AbortController() : undefined;
+      if (cancellation) args[index + 1] = cancellation.signal;
+      const forwardCancel = cancellation ? () => cancellation.abort(caller?.reason) : undefined;
       return run(kind, caller, args.slice(0, index), request.deadlineMs ?? undefined, remainingMs => {
         if (remainingMs !== undefined) args[0] = {...request, deadlineMs: remainingMs};
         return method(...args);

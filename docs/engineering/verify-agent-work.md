@@ -57,6 +57,7 @@ Read the printed `instance.json` for the main-process inspector and renderer deb
 Attach a debugger to those loopback endpoints. Confirm the recorded checkout before editing or measuring.
 Close that app or interrupt its command to stop the session and retain logs, a screenshot, and a trace.
 The session retains its disposable data beside the evidence for diagnosis.
+On macOS and Linux, the app reaches its home through a short link in the system temp folder, which keeps the desktop's CLI socket path under the system's limit so agents can reply. The session removes the link when it ends. `instance.json` records the link as `home` and the folder as `homeFiles`.
 
 For native folder-dialog QA, run `pnpm qa:debug -- --native-dialogs`.
 Ask the operator to choose the printed disposable workspace, cancel a second picker, and confirm keyboard focus returns to the app.
@@ -252,6 +253,7 @@ The dashboard refuses the lane switch there. Do not write `verification-lanes` o
 
 On the shared Windows host, a run that selects Rust also checks Rust in WSL. A change that breaks only the Linux build then fails before merge.
 A PR run runs the gate's clippy command there, which builds every target, tests included, without running them.
+It then runs the app compiler owner's tests, which check its Landlock and seccomp rules. Those compile only on Linux.
 A full run, such as the nightly, runs the whole Rust job there, tests included.
 A full Rust job on every PR would take as long as the Windows one, and the host runs one Linux job at a time for every lane.
 
@@ -274,6 +276,7 @@ Without that file, nothing runs on Linux. Other hosts and CI do not have it.
 - The job waits at most 75 minutes in all for the Linux slot, a cargo lane, and memory, or 55 minutes in a full run. The run's own Windows jobs hold a cargo lane and memory for about 45 minutes, or 60 in a full run, so the wait outlasts them. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
 - The step is `rust-linux`. Its evidence is in the attempt's `rust-linux` folder: a `result.json`, the logs, and the scripts that ran in WSL. In a full run, that `result.json` and the logs are the Linux verifier's own.
 - A clippy error or warning, or a failed Linux test, fails the change. A failed test appears under `failed` and `flaky` with the step `rust-linux`. A failure of WSL, of the transfer, or of the Linux host is a machine failure, and the queue retries it.
+  The distro keeps its own cargo home, so the job first runs `cargo fetch --locked`. If cargo gives up after network errors, the run is a machine failure too. Any other failed fetch, such as a lockfile that needs an update, fails the change.
 - `pnpm verify:plan` shows the distro under `linux`. A run that reuses Rust evidence with `--reuse-rust` runs nothing on Linux, because a reuse covers renderer changes only.
 
 To run a failed Linux check again, use your own clone in the distro, not the queue's checkout.
@@ -468,6 +471,7 @@ Isolated desktop script tests then use the repository lane.
 PR verification then reuses that lane for the integration proofs after every database package finishes.
 In PR verification, desktop and database package tests start first so proofs can overlap the remaining package tests.
 Standalone `pnpm test` does not run these integration proofs.
+When the repository lane's own work ends, it runs package tests that have not started.
 The runtime packaging test waits for all three lanes, including proof readers, because it rebuilds shared runtime files.
 Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
 Package results and durations are in the JS test report referenced by `result.json`.

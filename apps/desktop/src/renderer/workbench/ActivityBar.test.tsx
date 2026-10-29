@@ -77,6 +77,24 @@ describe("ActivityBar Sharing and Settings", () => {
     expect(screen.getByRole("button", { name: "Sharing" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("button", { name: "Sharing" }).querySelector(".bg-danger")).toBeNull();
   });
+
+  // Sharing is about people, so it draws people, not the cloud of sync or storage.
+  it("draws Sharing as people", () => {
+    render(
+      <ActivityBar
+        views={VIEW_IDS}
+        activeView="explorer"
+        sidebarVisible
+        hasConflict={false}
+        onSelectView={() => undefined}
+      />,
+    );
+
+    const sharing = screen.getByRole("button", { name: "Sharing" });
+    expect(sharing.getAttribute("title")).toBe("Sharing");
+    expect(sharing.querySelector("svg.lucide-users")).not.toBeNull();
+    expect(sharing.querySelector("svg.lucide-cloud")).toBeNull();
+  });
 });
 
 describe("ActivityBar order and pinned apps", () => {

@@ -72,6 +72,26 @@ describe("TableView paging", () => {
   });
 });
 
+describe("New record row", () => {
+  it.each([0, 2])("ends the table with a New record row that adds one (%i records)", (count) => {
+    const onNewRecord = vi.fn();
+    render(<TableView schema={makeSchema([{ name: "title", type: "text" }])} records={makeRecords(count)} onNewRecord={onNewRecord} />);
+    expect(screen.getByRole("columnheader", { name: /title/ })).toBeDefined();
+    expect(screen.queryByText("No records in this collection yet.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "New record" }));
+    expect(onNewRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the row while editing is paused, and has no row without the action", () => {
+    const schema = makeSchema([{ name: "title", type: "text" }]);
+    const { rerender } = render(<TableView schema={schema} records={[]} onNewRecord={vi.fn()} editingDisabled />);
+    expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(<TableView schema={schema} records={[]} />);
+    expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
+    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+  });
+});
+
 describe("paused table editing", () => {
   it("keeps a typed multi-select option mounted and disabled until editing resumes", () => {
     const records = [makeRecord("rec-1", [indexedValue("tags", ["alpha"])])];

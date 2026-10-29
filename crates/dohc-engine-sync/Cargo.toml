@@ -19,6 +19,14 @@ sha2 = "0.11"
 thiserror = "2"
 base64 = "0.23"
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Finds the workspace of a store opened through its folder's ID.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Finds the workspace of a store opened through a held descriptor.
+dohc-linux-files = { path = "../dohc-linux-files" }
+
 [dev-dependencies]
 yrs = "=0.27.3"
 quote = "1"
@@ -26,6 +34,8 @@ syn = { version = "2", features = ["full"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+# Builds a store as the build before agent ids left it.
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 
 [lints]
 workspace = true

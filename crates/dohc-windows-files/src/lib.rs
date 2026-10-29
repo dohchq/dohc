@@ -1,6 +1,11 @@
 //! Safe Windows file operations.
 
 #[cfg(windows)]
+mod private_dir;
+#[cfg(windows)]
+pub use private_dir::{NotPrivate, NotPrivateReason, ensure_private_dir, not_private};
+
+#[cfg(windows)]
 /// Move a file without replacing the destination or copying across volumes.
 pub fn move_file_no_replace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     use std::io::ErrorKind;

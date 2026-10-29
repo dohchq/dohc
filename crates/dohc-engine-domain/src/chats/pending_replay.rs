@@ -2,7 +2,7 @@ use super::{
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
     ThreadMessageResolution, bump_chat_conversation_revision,
-    index_replicated_chat_message_search_rows, mark_live_bookmarks_pending,
+    index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
     parse_mention_handles, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
 };
@@ -60,6 +60,11 @@ struct PendingMessageAppend {
     /// Another computer's automation or agent message sends its chain depth;
     /// sync apply checked it before parking the message.
     chain_depth: Option<u32>,
+    /// A link message's link, which sync apply also checked.
+    link_grant_id: Option<String>,
+    link_principal_id: Option<String>,
+    /// The agent that wrote an agent message, which sync apply also checked.
+    author_agent_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -555,6 +560,15 @@ fn apply_pending_message(
     let body = normalize_body(&payload.body).map_err(|_| DomainError::StateCorrupt {
         reason: "pending chat message body is invalid",
     })?;
+    if payload
+        .author_agent_id
+        .as_deref()
+        .is_some_and(|agent_id| !is_agent_id(agent_id) || payload.author_kind != "agent")
+    {
+        return Err(DomainError::StateCorrupt {
+            reason: "pending chat message agent id is invalid",
+        });
+    }
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages \
@@ -586,8 +600,9 @@ fn apply_pending_message(
         .execute(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
-              author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+              author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
+              link_grant_id,link_principal_id,author_agent_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -600,7 +615,10 @@ fn apply_pending_message(
                 payload.origin,
                 body,
                 payload.created_at_ms,
-                owner_name
+                owner_name,
+                payload.link_grant_id,
+                payload.link_principal_id,
+                payload.author_agent_id
             ],
         )
         .map_err(DomainError::sql_persist)?;

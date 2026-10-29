@@ -777,7 +777,7 @@ mod tests {
         }
         async fn fence(&mut self) -> Value {
             let response = self.control("liveApplication.fenceRestore",json!({"operation":{
-                "operationId":"restore","relayDatabaseNamespace":"namespace","oldBinding":self.binding,
+                "point":{"journalCursor":0,"receiptDigest":self.binding["lineageClaimId"]},"operationId":"restore","relayDatabaseNamespace":"namespace","oldBinding":self.binding,
                 "hostId":"host","newFence":1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":self.terminal,"appliedSequence":self.sequence
             }})).await;
             response.response.result["receipt"].clone()

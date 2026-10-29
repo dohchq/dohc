@@ -14,10 +14,12 @@ import {
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { realpathSync, type BigIntStats } from "node:fs";
-import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { recordNeverSynced, recordSynced } from "./syncHistory";
+import { recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
+import { recordNewCollectionsHolder } from "./collectionsHolder";
+import { identityOf } from "./workspaceTrust";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -27,10 +29,9 @@ export interface CreatedWorkspace {
   mode: ReturnType<typeof defaultWorkspaceMode>;
 }
 
-// A workspace folder's one spelling: its real path after every link. The
-// registry holds only this spelling, so the root it lists and the root a
-// workspace operation receives are the same string. Throws when the folder
-// does not exist.
+// The registry lists this spelling of the real path after every link.
+// A workspace operation receives the physical real path, which uses native
+// separators on Windows. Throws when the folder does not exist.
 export function canonicalWorkspaceRoot(rootPath: string): string {
   return rootSpelling(realpathSync.native(rootPath));
 }
@@ -62,13 +63,16 @@ type ManifestState =
   | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] };
 
 async function inspectManifest(metadataDir: string): Promise<ManifestState> {
-  let raw: string;
-  try {
-    raw = await readFile(join(metadataDir, "manifest.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+  const path = join(metadataDir, "manifest.json");
+  const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
     throw error;
+  });
+  if (entry === null) return { kind: "absent" };
+  if (!entry.isFile()) {
+    throw new WorkspaceManifestError("unreadable", "dohc didn't open .dohc/manifest.json because it isn't a regular file. Replace it with this workspace's manifest file.");
   }
+  const raw = await readFile(path, "utf8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -155,7 +159,32 @@ async function homeFolder(homeDir: string): Promise<{ path: string; identity: Bi
   }
 }
 
-export async function createWorkspaceFolder(input: {
+// What New workspace may trust: the folder this call made a workspace from
+// nothing, by its identity.
+export interface FreshWorkspaceFolder {
+  folder: string | null;
+}
+
+export async function createWorkspaceFolder(
+  input: Parameters<typeof createWorkspaceFolderWithFreshness>[0],
+): Promise<CreatedWorkspace> {
+  return (await createWorkspaceFolderWithFreshness(input)).workspace;
+}
+
+// Only dohc's own records, which this call wrote, and nothing else.
+async function holdsOnlyNewMetadata(rootPath: string, metadataDir: string): Promise<boolean> {
+  const [entries, metadata] = await Promise.all([readdir(rootPath), readdir(metadataDir)]);
+  return entries.length === 1 && entries[0] === ".dohc" &&
+    metadata.every((name) => name === "manifest.json" || name === "sync-history.json" || name === "collections.json");
+}
+
+/**
+ * createWorkspaceFolder, saying whether the workspace is new: `fresh` names
+ * the folder when this call wrote the manifest into a folder that was missing
+ * or empty and still holds nothing else. An adopted manifest, a file that
+ * arrived meanwhile, or a replaced folder leaves it null.
+ */
+export async function createWorkspaceFolderWithFreshness(input: {
   rootPath: string;
   // The home folder the root must not resolve to.
   homeDir: string;
@@ -166,7 +195,10 @@ export async function createWorkspaceFolder(input: {
   // already a dohc workspace (an existing manifest's identity always wins —
   // silently rebinding it would sever history and sync).
   workspaceId?: string;
-}): Promise<CreatedWorkspace> {
+  // This installation, which runs a new workspace's schedules until it syncs
+  // and keeps its Collections.
+  computer: Computer;
+}): Promise<{ workspace: CreatedWorkspace; fresh: FreshWorkspaceFolder | null }> {
   const folderCheck = validateAttachedFolder(input.rootPath);
   if (!folderCheck.ok) {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
@@ -183,6 +215,7 @@ export async function createWorkspaceFolder(input: {
   if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
   if (await isFilesystemRoot(folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
   if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
+  const startedEmpty = (await readdir(rootPath)).length === 0;
   // Node cannot create files relative to an open folder, so writes go by path.
   // Each step below first checks that the path still leads to the folder
   // judged above. That detects a folder or link put in its place before the
@@ -201,10 +234,13 @@ export async function createWorkspaceFolder(input: {
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {
     return {
-      workspaceId: state.workspaceId,
-      rootPath,
-      kind: state.workspaceKind === "cloud-only" ? input.kind : state.workspaceKind,
-      mode: state.mode,
+      workspace: {
+        workspaceId: state.workspaceId,
+        rootPath,
+        kind: state.workspaceKind === "cloud-only" ? input.kind : state.workspaceKind,
+        mode: state.mode,
+      },
+      fresh: null,
     };
   }
 
@@ -213,8 +249,8 @@ export async function createWorkspaceFolder(input: {
     kind: input.kind,
   });
 
-  // wx: manifest is absent (inspectManifest returned "absent"); never clobber
-  // an unexpected file, or follow a link, that appeared since the check.
+  // inspectManifest checked the entry itself: Windows "wx" can follow a
+  // dangling link. "wx" keeps a competing regular file from being replaced.
   await writeFile(
     join(metadataDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
@@ -223,12 +259,19 @@ export async function createWorkspaceFolder(input: {
   await assertSameFolder();
   // A folder that had no manifest was never a dohc workspace. A join names
   // the synced workspace's id, and its folder records that it synced.
-  if (input.workspaceId === undefined) await recordNeverSynced(rootPath);
-  else await recordSynced(rootPath);
+  if (input.workspaceId === undefined) {
+    await recordNeverSynced(rootPath, input.computer);
+    await recordNewCollectionsHolder(rootPath, manifest.workspaceId, input.computer);
+  } else await recordSynced(rootPath);
+  const fresh = startedEmpty && await holdsOnlyNewMetadata(rootPath, metadataDir);
+  await assertSameFolder();
   return {
-    workspaceId: manifest.workspaceId,
-    rootPath,
-    kind: input.kind,
-    mode: manifest.mode,
+    workspace: {
+      workspaceId: manifest.workspaceId,
+      rootPath,
+      kind: input.kind,
+      mode: manifest.mode,
+    },
+    fresh: fresh ? { folder: identityOf(folder) } : null,
   };
 }

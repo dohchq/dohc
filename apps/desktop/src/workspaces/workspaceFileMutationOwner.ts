@@ -1,3 +1,5 @@
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
+import { DuplicateWorkspaceFilePayload, DuplicateWorkspaceFileResult } from "../ipc/bridgeContract";
 import { randomUUID } from "node:crypto";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -8,6 +10,8 @@ import {
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
+  ReadHistoryOperationPayload,
+  ReadHistoryOperationResult,
   MoveWorkspacePathPayload,
   MoveWorkspacePathResult,
   WriteWorkspaceAssetPayload,
@@ -40,7 +44,7 @@ import {
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
-import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 import { assertMoveDocumentKind, deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
@@ -63,12 +67,14 @@ export interface WorkspaceFileMutationOwner<Event> {
     Event,
     CreateWorkspaceFileResult
   >;
+  duplicateFile: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof DuplicateWorkspaceFileResult>>;
   movePath: WorkspaceFileMutationIpcHandler<Event, MoveWorkspacePathResult>;
   deletePath: WorkspaceFileMutationIpcHandler<
     Event,
     DeleteWorkspacePathResult
   >;
   undoHistoryOperation: WorkspaceFileMutationIpcHandler<Event, DeleteUndoResult>;
+  readHistoryOperation: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof ReadHistoryOperationResult>>;
   writeText: WorkspaceFileMutationIpcHandler<Event, WriteWorkspaceTextResult>;
   writeAsset: WorkspaceFileMutationIpcHandler<Event>;
 }
@@ -300,6 +306,14 @@ export function createWorkspaceFileMutationOwner<
       );
     },
 
+    duplicateFile: async (event, payload) => {
+      const request = admitMutation(event, payload, DuplicateWorkspaceFilePayload.parse);
+      const person = await dependencies.localPerson();
+      return runAdmittedMutation(event, request, async ({input, workspace, assertCurrent, capture}) => {
+        if (!capture) throw new Error("Restart dohc before duplicating this file.");
+        return DuplicateWorkspaceFileResult.parse(await duplicateWorkspaceFile({workspace, assertCurrent}, input.relativePath, person, capture));
+      });
+    },
     movePath: async (event, payload) => {
       const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
       const person = await dependencies.localPerson();
@@ -309,8 +323,13 @@ export function createWorkspaceFileMutationOwner<
       const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
         if (!receivedShare) {
           assertWritableWorkspace(workspace);
+          const history = dependencies.historyFor(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            linkRewrites: history.rewriteHistoryLinks ? {
+              workspaceId: workspace.workspaceId, signal,
+              history: {rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history)},
+            } : undefined,
             onRecorded: (path, operationId) => {
               const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
               const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
@@ -337,6 +356,12 @@ export function createWorkspaceFileMutationOwner<
         reject(error);
       });
       return result;
+    },
+
+    readHistoryOperation: async (event, payload) => {
+      const request = admitMutation(event, payload, ReadHistoryOperationPayload.parse);
+      return runAdmittedMutation(event, request, ({ input, workspace, signal, assertCurrent }) =>
+        readWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, dependencies.historyFor(workspace), { agent: false }));
     },
 
     undoHistoryOperation: async (event, payload) => {

@@ -143,7 +143,7 @@ describe("workspace switch admission", () => {
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 
-  it("keeps a title bar change made while the saved layout loads", async () => {
+  it("applies the saved layout over a title bar change made while it loads", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
@@ -160,15 +160,11 @@ describe("workspace switch admission", () => {
       await stored.promise;
     });
     await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-    expect(screen.queryByTestId("tab-b.md")).toBeNull();
-    await waitFor(() => expect(bridge.setWorkspaceUiState).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      state: expect.objectContaining({ sidebarVisible: false }),
-    }));
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  it.each(["null", "failed"] as const)("opens on the defaults after a %s read and saves them from then on", async (outcome) => {
+  it.each(["null", "failed"] as const)("opens on the defaults after a %s read", async (outcome) => {
     const read = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(read.promise);
     const view = renderShell(bridge);
@@ -178,12 +174,18 @@ describe("workspace switch admission", () => {
 
     await act(async () => {
       if (outcome === "null") read.resolve(null);
-      else read.reject(new Error("unreadable"));
+      else read.reject(new Error("dohc has not finished opening this workspace."));
       await read.promise.catch(() => undefined);
     });
     await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
     expect(screen.queryByTestId("tab-b.md")).toBeNull();
+    window.dispatchEvent(new Event("beforeunload"));
     view.unmount();
+    if (outcome === "failed") {
+      // A failed read can't say what is saved, so nothing is saved over it.
+      expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
+      return;
+    }
     const [payload] = bridge.setWorkspaceUiState.mock.lastCall!;
     expect(payload.workspaceId).toBe(WORKSPACE.workspaceId);
     expect(storedTabs(payload.state)).toEqual([]);
@@ -1969,8 +1971,8 @@ describe("explorer destructive change flush boundaries", () => {
     // Start a second Explorer flush while the write and rename are held.
     // The rename settlement must add recovery semantics when it joins this
     // promise, even though the create operation started it without them.
-    await user.click(screen.getByLabelText("New file"));
-    await user.type(await screen.findByLabelText("New file name"), "spare.md{Enter}");
+    await user.click(screen.getByLabelText("New folder"));
+    await user.type(await screen.findByLabelText("New folder name"), "spare{Enter}");
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
 
     await act(async () => {
@@ -2259,6 +2261,39 @@ describe("set-aside draft recovery", () => {
     await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
     expect(bridge.listLiveDraftRecovery).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId});
     expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([first.recordId, second.recordId]);
+  });
+
+  it("follows main's drafts while the workspace is open: a new one shows, a rewrite replaces its text, and a removal removes its row", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const first = {recordId: "a".repeat(64), path: "notes/gone.md", objectId: "object", text: "Typed before the delete", updateBase64: "AAA="};
+    const rewritten = {...first, recordId: "b".repeat(64), text: "Typed after the delete", updateBase64: "AAE="};
+    bridge.listLiveDraftRecovery.mockResolvedValue([]);
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledOnce());
+    const copied = async () => {
+      await user.click(screen.getByTestId("recovery-list-copy"));
+      return await navigator.clipboard.readText();
+    };
+
+    // Another workspace's drafts are not this one's.
+    act(() => bridge.emitLiveDraftRecoveryChanged(OTHER_WORKSPACE.workspaceId));
+    bridge.listLiveDraftRecovery.mockResolvedValue([first]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    expect(await copied()).toBe(first.text);
+
+    bridge.listLiveDraftRecovery.mockResolvedValue([rewritten]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await waitFor(async () => expect(await copied()).toBe(rewritten.text));
+    expect(screen.getAllByTestId("recovery-list-row")).toHaveLength(1);
+
+    bridge.listLiveDraftRecovery.mockResolvedValue([]);
+    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
+    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(4);
   });
 
   // Most tests capture a draft before the shell mounts, and the draft store

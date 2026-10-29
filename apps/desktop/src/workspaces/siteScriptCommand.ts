@@ -1,12 +1,90 @@
 import type { SitePackageInfo } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
-  packageManagerCommand,
+  choosesHost,
   packageManagerValidatedScriptCommand,
   splitCommandLine,
+  splitShellStatements,
+  type PackageManager,
 } from "./siteRunner";
 
 export type SitePreviewScript = "dev" | "start" | "build";
+
+interface SiteScriptCommand {
+  command: string;
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+interface PackageManagerScriptRun {
+  manager: PackageManager;
+  script: string;
+  options: string[];
+  forwardedArgs: string[];
+}
+
+// The renderer's preview frame admits only http://127.0.0.1:*, so a server
+// that prints localhost or [::1] would not show inside dohc.
+const LOOPBACK_HOST = "127.0.0.1";
+
+// A server's own `--` ends its options, so a host flag after it is ignored.
+function serverOptions(args: string[]): string[] {
+  const end = args.indexOf("--");
+  return end === -1 ? args : args.slice(0, end);
+}
+
+function beforeServerSeparator(args: string[], flag: string[]): string[] {
+  const end = args.indexOf("--");
+  return end === -1 ? [...args, ...flag] : [...args.slice(0, end), ...flag, ...args.slice(end)];
+}
+
+// Next.js and Create React App listen on every interface when no host is
+// given, yet still print a localhost URL. Vite listens on localhost, but a
+// vite.config `server.host` can widen it, and its CLI flag wins over the
+// config. Start these on loopback unless the command already picks a host,
+// which the validator holds to loopback.
+function loopbackDefault(server: {
+  command: string;
+  args: string[];
+}): { args: string[] } | { env: NodeJS.ProcessEnv } | null {
+  const options = serverOptions(server.args);
+  if (choosesHost(options)) return null;
+  const name = server.command.replaceAll("\\", "/").split("/").at(-1);
+  const [subcommand] = options;
+  if (name === "next" && (subcommand === "dev" || subcommand === "start")) {
+    return { args: ["--hostname", LOOPBACK_HOST] };
+  }
+  // `build` or `optimize` first is a Vite build; `vite --mode build` serves.
+  // A build written as `vite --mode x build` rejects the added --host and
+  // exits, which costs nothing: a build never prints a URL to preview.
+  if (name === "vite" && subcommand !== "build" && subcommand !== "optimize") {
+    return { args: ["--host", LOOPBACK_HOST] };
+  }
+  if (name === "react-scripts" && subcommand === "start") return { env: { HOST: LOOPBACK_HOST } };
+  return null;
+}
+
+// A body that ends in a separator, a backslash, or a newline would run the
+// trailing args as their own command.
+const TRAILING_SHELL_OPERATOR = /[;&|\\\r\n][ \t]*$/;
+
+// The package manager appends trailing args to the script's text, so a host
+// flag reaches the server only when the script ends in the server's own
+// options: not after a separator, a comment, or its own `--`. A HOST variable
+// reaches it wherever the script ends.
+function scriptLoopbackDefault(
+  scriptBody: string,
+  forwardedArgs: string[],
+): ReturnType<typeof loopbackDefault> {
+  const statements = splitShellStatements(scriptBody);
+  if (statements.length !== 1) return null;
+  const { command, args } = splitCommandLine(statements[0]!);
+  const loopback = loopbackDefault({ command, args: [...args, ...forwardedArgs] });
+  if (!loopback || "env" in loopback) return loopback;
+  if (TRAILING_SHELL_OPERATOR.test(scriptBody)) return null;
+  if (args.some((arg) => arg === "--" || arg.startsWith("#"))) return null;
+  return loopback;
+}
 
 const KNOWN_PACKAGE_MANAGER_COMMANDS: ReadonlySet<string> = new Set([
   "npm",
@@ -49,7 +127,7 @@ function npmRunScriptResult(
 
 function packageManagerScriptRun(
   parsed: ReturnType<typeof splitCommandLine>,
-): { manager: "npm" | "pnpm" | "yarn" | "bun"; script: string; options: string[]; forwardedArgs: string[] } | null {
+): PackageManagerScriptRun | null {
   if (parsed.command === "npm") {
     const [first, ...rest] = parsed.args;
     if (first !== "run" && first !== "run-script") return null;
@@ -77,10 +155,9 @@ function packageManagerScriptRun(
 
 function validatedPackageManagerRun(
   site: SitePackageInfo,
-  parsed: ReturnType<typeof splitCommandLine>,
-): ReturnType<typeof packageManagerCommand> | null {
-  const run = packageManagerScriptRun(parsed);
-  if (!run) return null;
+  run: PackageManagerScriptRun,
+  previewScript: SitePreviewScript,
+): SiteScriptCommand {
   if (!site.packagePath) {
     throw new Error(
       `App has no package.json to run ${run.script} via ${run.manager}: ${site.root}`,
@@ -101,15 +178,23 @@ function validatedPackageManagerRun(
       post: site.scripts[`post${run.script}`],
     },
   );
-  // Forwarded args need the `--` separator preserved, not just appended —
-  // without it npm treats them as its own options (`npm run dev --port
-  // 3000` lets npm's CLI consume --port instead of forwarding it to the
-  // script), so the args the user meant for the script silently vanish.
+  const loopback =
+    previewScript === "build" ? null : scriptLoopbackDefault(scriptBody, run.forwardedArgs);
+  const forwardedArgs =
+    loopback && "args" in loopback
+      ? beforeServerSeparator(run.forwardedArgs, loopback.args)
+      : run.forwardedArgs;
+  const env = loopback && "env" in loopback ? { env: loopback.env } : {};
+  // npm needs the `--` separator to forward args — without it `npm run dev
+  // --port 3000` lets npm's CLI consume --port instead of forwarding it to
+  // the script. pnpm, Yarn, and Bun forward everything after the script
+  // name, and pnpm passes a `--` through to the script as an argument.
   const extraArgs = [
     ...run.options,
-    ...(run.forwardedArgs.length > 0 ? ["--", ...run.forwardedArgs] : []),
+    ...(forwardedArgs.length > 0 && run.manager === "npm" ? ["--"] : []),
+    ...forwardedArgs,
   ];
-  if (extraArgs.length === 0) return validated;
+  if (extraArgs.length === 0) return { ...validated, ...env };
   // Recognized options and forwarded args both have to land on the command
   // dohc actually spawns — dropping `--ignore-scripts` here would run
   // pre/post hooks the user explicitly suppressed, and a forwarded
@@ -118,7 +203,7 @@ function validatedPackageManagerRun(
   // constraint has to see this final argv.
   const withExtraArgs = { command: validated.command, args: [...validated.args, ...extraArgs] };
   assertLoopbackOnlyDevServerCommand(withExtraArgs.command, withExtraArgs.args);
-  return withExtraArgs;
+  return { ...withExtraArgs, ...env };
 }
 
 // The literal-command paths below (a non-package-manager configured
@@ -129,20 +214,24 @@ function validatedPackageManagerRun(
 // itself.
 function validatedLiteralCommand(
   command: ReturnType<typeof splitCommandLine>,
-): ReturnType<typeof splitCommandLine> {
+  previewScript: SitePreviewScript,
+): SiteScriptCommand {
   assertLoopbackOnlyDevServerCommand(command.command, command.args);
-  return command;
+  const loopback = previewScript === "build" ? null : loopbackDefault(command);
+  if (!loopback) return command;
+  if ("env" in loopback) return { ...command, env: loopback.env };
+  return { command: command.command, args: beforeServerSeparator(command.args, loopback.args) };
 }
 
 export function commandForSiteScript(
   site: SitePackageInfo,
   script: SitePreviewScript,
-): { command: string; args: string[] } {
+): SiteScriptCommand {
   const configuredCommand = site.configuredScripts[script];
   if (configuredCommand) {
     const parsed = splitCommandLine(configuredCommand);
-    const validated = validatedPackageManagerRun(site, parsed);
-    if (validated) return validated;
+    const run = packageManagerScriptRun(parsed);
+    if (run) return validatedPackageManagerRun(site, run, script);
     // A known package manager must resolve to a validated script run — the
     // uninspected literal-command fallback below is only for commands that
     // aren't a package manager at all (e.g. a bare `vite --host ...`).
@@ -153,7 +242,7 @@ export function commandForSiteScript(
         `This app's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
       );
     }
-    return validatedLiteralCommand(parsed);
+    return validatedLiteralCommand(parsed, script);
   }
   const configured = site.scripts[script];
   if (!configured) throw new Error(`App has no ${script} script: ${site.root}`);
@@ -162,12 +251,11 @@ export function commandForSiteScript(
     // script (or its pre/post hooks) is exactly as capable of binding
     // outside loopback as a dev script is, for as long as buildSite's own
     // (longer) timeout allows it to keep listening.
-    return packageManagerValidatedScriptCommand(
-      site.packageManager ?? "npm",
+    return validatedPackageManagerRun(
+      site,
+      { manager: site.packageManager ?? "npm", script, options: [], forwardedArgs: [] },
       script,
-      configured,
-      { pre: site.scripts[`pre${script}`], post: site.scripts[`post${script}`] },
     );
   }
-  return validatedLiteralCommand(splitCommandLine(configured));
+  return validatedLiteralCommand(splitCommandLine(configured), script);
 }

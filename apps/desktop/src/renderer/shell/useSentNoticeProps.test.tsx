@@ -1,16 +1,25 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoticeRow, RetryCollectionAutomationResult, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  ChatDispatchStateForThreadPayload,
+  ChatDispatchStateForThreadResult,
+  NoticeRow,
+  RetryCollectionAutomationResult,
+  RetryStoppedRunResult,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import {
   ACCESS_ENDED_NOTE,
   AUTOMATION_NOT_HERE_NOTE,
   NOT_HERE_NOTE,
+  RUN_THREAD_NOT_HERE_NOTE,
   SHARE_LOOKUP_FAILED_NOTE,
   useSentNoticeProps,
 } from "./useSentNoticeProps";
 import type { SentNotices } from "./useSentNotices";
+import type { ChatsNav } from "../workbench/ChatsView";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -45,8 +54,16 @@ const RECEIVED = {
 
 const getRelayReceivedShare = vi.fn();
 const retryAutomationNotice = vi.fn();
+const listChatChannels = vi.fn();
+const listChannelThreads = vi.fn();
 const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
-beforeEach(() => vi.stubGlobal("dohcDesktop", { getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation }));
+const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
+const chatDispatchStateForThread = vi.fn(async (_payload: ChatDispatchStateForThreadPayload) => IDLE);
+const retryStoppedRun = vi.fn(async (): Promise<RetryStoppedRunResult> => ({ queued: true }));
+beforeEach(() => vi.stubGlobal("dohcDesktop", {
+  getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation, listChatChannels, listChannelThreads,
+  chatDispatchStateForThread, retryStoppedRun,
+}));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -84,6 +101,7 @@ function setup(
     openFile: vi.fn(),
     openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
     openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
+    openChat: vi.fn((_nav: ChatsNav) => undefined),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -207,6 +225,41 @@ describe("opening a sent notice", () => {
 });
 
 describe("a failed run's notice", () => {
+  it("opens a run's thread in the chat of whichever agent ran it", async () => {
+    const chat = (id: string, agentId: string) => ({
+      id, name: agentId, slug: id, kind: "agent" as const, agentId, createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0,
+    });
+    const thread = (id: string, channelId: string) => ({
+      id, channelId, title: id, createdAtMs: 0, updatedAtMs: 0, messageCount: 1, lastReadSequence: 0, unreadCount: 0,
+    });
+    listChatChannels.mockResolvedValue({ channels: [chat("chat-default", "default"), chat("chat-scout", "scout")], fileThreads: [] });
+    listChannelThreads.mockImplementation(async ({ channelId }: { channelId: string }) => ({
+      threads: [thread(channelId === "chat-scout" ? "thread-scout" : "thread-default", channelId)],
+    }));
+    const run = notice({
+      store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
+      title: "Your agent finished", target: { thread: "thread-scout", run: "run-1" },
+    });
+    const { result, openChat, openFile } = setup([run], [workspace("notes")]);
+    expect(result.current.sentNotices[0]?.openable).toBe(true);
+    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenCalledWith({ level: "thread", channel: chat("chat-scout", "scout"), thread: thread("thread-scout", "chat-scout") });
+    expect(openFile).not.toHaveBeenCalled();
+
+    // A thread that is gone, or a read that fails, says so on the row.
+    openChat.mockClear();
+    const gone = { ...run, target: { thread: "thread-gone", run: "run-2" } };
+    await expect(result.current.onOpenSentNotice(gone, live())).resolves.toBe(RUN_THREAD_NOT_HERE_NOTE);
+    listChatChannels.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBe("dohc could not open this run's thread.");
+    // Nothing opens once Open was cancelled.
+    const cancelled = new AbortController();
+    const opening = result.current.onOpenSentNotice(run, cancelled.signal);
+    cancelled.abort();
+    await expect(opening).resolves.toBeNull();
+    expect(openChat).not.toHaveBeenCalled();
+  });
+
   const failed = notice({
     kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },
@@ -410,5 +463,105 @@ describe("Try again on a failed run of the owner's server", () => {
     retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Another computer holds this run." });
     await act(async () => { for (const other of others) result.current.onRetrySentNotice(other); });
     expect(retryCollectionAutomation).not.toHaveBeenCalled();
+  });
+});
+
+describe("Try again on an agent run dohc's restart or quit stopped", () => {
+  const stoppedRun = (threadId: string, runId: string, overrides: Partial<NoticeRow> = {}) => notice({
+    store: "local", noticeId: `agent-run:notes:${runId}`, kind: "agent-run", workspaceId: "notes", recipientShareId: null,
+    senderKind: "agent", postedHere: true, target: { thread: threadId, run: runId }, ...overrides,
+  });
+  // Each conversation's dispatch state, as main reads it.
+  let states: Record<string, ChatDispatchStateForThreadResult>;
+  const stopped = (runId: string, retryable = true): ChatDispatchStateForThreadResult =>
+    ({ ...IDLE, stoppedRun: { runId, triggerMessageId: `ask-${runId}`, ending: "quit", retryable } });
+  beforeEach(() => {
+    states = {};
+    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => states[threadId] ?? IDLE);
+    retryStoppedRun.mockResolvedValue({ queued: true });
+  });
+
+  it("offers it while the run is the conversation's stopped run, then puts its request back in line", async () => {
+    states["thread-1"] = stopped("run-1");
+    const run = stoppedRun("thread-1", "run-1");
+    const { result, reportShellError } = setup([run], [workspace("notes")]);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    expect(chatDispatchStateForThread).toHaveBeenCalledWith({ workspaceId: "notes", threadId: "thread-1" });
+
+    // Back in line, the conversation shows the request waiting instead.
+    states["thread-1"] = { ...IDLE, pendingCount: 1 };
+    await act(async () => result.current.onRetrySentNotice(run));
+    expect(retryStoppedRun).toHaveBeenCalledWith({ workspaceId: "notes", threadId: "thread-1", runId: "run-1" });
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
+    expect(retryAutomationNotice).not.toHaveBeenCalled();
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("offers none for an older run, a run out of attempts, another computer's run or another workspace's", async () => {
+    states["thread-1"] = stopped("run-2");
+    states["thread-2"] = stopped("run-3", false);
+    states["thread-3"] = stopped("run-4");
+    const notices = [
+      stoppedRun("thread-1", "run-1"),
+      stoppedRun("thread-2", "run-3"),
+      stoppedRun("thread-3", "run-4", { postedHere: false }),
+      stoppedRun("thread-3", "run-4", { noticeId: "elsewhere", workspaceId: "home" }),
+    ];
+    const { result } = setup(notices, [workspace("notes"), workspace("home")]);
+    await waitFor(() => expect(chatDispatchStateForThread).toHaveBeenCalledTimes(2));
+    expect(chatDispatchStateForThread.mock.calls.map(([payload]) => payload.threadId).sort()).toEqual(["thread-1", "thread-2"]);
+    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([false, false, false, false]);
+  });
+
+  it("offers none when main can't read the conversation, and says nothing about it", async () => {
+    chatDispatchStateForThread.mockRejectedValue(new Error("The workspace engine is not running."));
+    const { result, reportShellError } = setup([stoppedRun("thread-1", "run-1")], [workspace("notes")]);
+    await waitFor(() => expect(chatDispatchStateForThread).toHaveBeenCalled());
+    expect(result.current.sentNotices[0]?.retryable).toBe(false);
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("takes Try again away, saying nothing, when the conversation already put the request back in line", async () => {
+    states["thread-1"] = stopped("run-1");
+    const run = stoppedRun("thread-1", "run-1");
+    const { result, reportShellError } = setup([run], [workspace("notes")]);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    // Try again in the conversation, which this notice doesn't hear about.
+    states["thread-1"] = { ...IDLE, pendingCount: 1 };
+    retryStoppedRun.mockResolvedValue({ queued: false });
+    await act(async () => result.current.onRetrySentNotice(run));
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("says nothing about a second press while the first is still on its way", async () => {
+    states["thread-1"] = stopped("run-1");
+    const run = stoppedRun("thread-1", "run-1");
+    const { result, reportShellError } = setup([run], [workspace("notes")]);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    states["thread-1"] = { ...IDLE, pendingCount: 1 };
+    retryStoppedRun.mockResolvedValueOnce({ queued: true }).mockResolvedValueOnce({ queued: false });
+    await act(async () => {
+      result.current.onRetrySentNotice(run);
+      result.current.onRetrySentNotice(run);
+    });
+    expect(retryStoppedRun).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
+    expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  it("reports a Try again that fails, with a Try again that asks again", async () => {
+    states["thread-1"] = stopped("run-1");
+    const error = new Error("This workspace is not open. Open it again.");
+    retryStoppedRun.mockRejectedValueOnce(error);
+    const run = stoppedRun("thread-1", "run-1");
+    const { result, reportShellError } = setup([run], [workspace("notes")]);
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    await act(async () => result.current.onRetrySentNotice(run));
+    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith("dohc could not start your agent's run again.", error, expect.any(Function)));
+    const again = vi.mocked(reportShellError).mock.calls[0]?.[2];
+    await act(async () => again?.());
+    expect(retryStoppedRun).toHaveBeenCalledTimes(2);
+    expect(retryStoppedRun).toHaveBeenLastCalledWith({ workspaceId: "notes", threadId: "thread-1", runId: "run-1" });
   });
 });

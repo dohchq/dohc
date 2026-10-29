@@ -1,8 +1,9 @@
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatChannelRecord,
   ChatDecisionRecord,
+  ChatDispatchStateForThreadResult,
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -15,7 +16,7 @@ import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
-import { ComposerNotice } from "./ChatsControls";
+import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
 
@@ -46,19 +47,37 @@ export function ChatLane(props: {
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
-  // What a picked agent's offer says. The lane does not read its dispatch.
+  // What a picked agent's offer says. Only an agent DM's lane reads its
+  // dispatch, to stop the agent's run.
   agentSetup?: AgentSetupSummary | null;
-  onSetupAgent?: () => void;
+  // An agent DM's agent, by the name its row shows.
+  agentName?: string;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   workspacePath?: string;
+  // An agent DM's unsent message and poll, kept with the tab's other drafts.
+  draft?: {
+    value: string;
+    onChange: (value: string) => void;
+    poll: ComposerPollDraft | null;
+    onPollChange: (poll: ComposerPollDraft | null) => void;
+  };
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const reactions = useReactions();
   const [loading, setLoading] = useState(true);
-  const [composer, setComposer] = useState("");
-  const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
+  const [ownComposer, setOwnComposer] = useState("");
+  const composer = props.draft?.value ?? ownComposer;
+  const setComposer = props.draft?.onChange ?? setOwnComposer;
+  const [ownPoll, setOwnPoll] = useState<ComposerPollDraft | null>(null);
+  const poll = props.draft ? props.draft.poll : ownPoll;
+  const setPoll = props.draft?.onPollChange ?? setOwnPoll;
   const [sending, setSending] = useState(false);
+  const [dispatch, setDispatch] = useState<ChatDispatchStateForThreadResult | null>(null);
+  const [stopping, setStopping] = useState(false);
   // The first message the reader had not seen when the lane opened.
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
   const [atEnd, setAtEnd] = useState(true);
@@ -72,6 +91,7 @@ export function ChatLane(props: {
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
+  const agentDm = props.channel.kind === "agent";
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
   });
@@ -111,13 +131,20 @@ export function ChatLane(props: {
         setThreadId(null);
         setMessages([]);
         setDecisions([]);
+        setDispatch(null);
         setLoading(false);
         return;
       }
       // Read the watermark before content so a concurrent write cannot be
       // remembered as painted until its content has actually been loaded.
-      const { revision } = await bridge().getChatThreadRevision({ workspaceId, threadId: lane.id });
+      // A run can start or end without a new message, so the dispatch is
+      // read on every pass. Without it the lane shows no Stop, not no chat.
+      const [{ revision }, nextDispatch] = await Promise.all([
+        bridge().getChatThreadRevision({ workspaceId, threadId: lane.id }),
+        agentDm ? bridge().chatDispatchStateForThread({ workspaceId, threadId: lane.id }).catch(() => null) : null,
+      ]);
       if (!isCurrent()) return;
+      setDispatch(nextDispatch);
       if (!force && paintedRevision.current?.threadId === lane.id && paintedRevision.current.revision === revision) {
         markRead(paintedRevision.current);
         return;
@@ -147,15 +174,17 @@ export function ChatLane(props: {
       setLoading(false);
       onError(ipcErrorMessage(error, "Could not load the chat."), error);
     }
-  }, [channelId, markRead, onError, reactions, workspaceId]);
+  }, [agentDm, channelId, markRead, onError, reactions, workspaceId]);
 
   useEffect(() => {
     setThreadId(null);
     setMessages([]);
     setDecisions([]);
-    setComposer("");
-    setPoll(null);
+    setOwnComposer("");
+    setOwnPoll(null);
     setSending(false);
+    setDispatch(null);
+    setStopping(false);
     setFirstUnreadMessageId(null);
     setAtEnd(true);
     paintedRevision.current = null;
@@ -220,6 +249,7 @@ export function ChatLane(props: {
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
         if (current !== token.current) return;
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         loadSequence.current += 1;
         listRef.current?.scrollToEnd();
         setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
@@ -242,6 +272,7 @@ export function ChatLane(props: {
           ticket,
         }]);
         if (current !== token.current) return;
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         loadSequence.current += 1;
         listRef.current?.scrollToEnd();
         setThreadId(result.thread.id);
@@ -256,25 +287,25 @@ export function ChatLane(props: {
     } finally {
       if (current === token.current) setSending(false);
     }
-  }, [channelId, composer, load, loading, onError, poll, props.locked, reactions, sending, threadId, workspaceId]);
+  }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, sending, threadId, workspaceId]);
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     if (!threadId || sending || loading || props.locked) return;
     const current = token.current;
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({ workspaceId, threadId, body: option });
+      const result = await bridge().sendChatMessage({
+        workspaceId, threadId, body: option,
+        resolves: { messageId: decision.messageId, chosenOption: option },
+      });
       if (current !== token.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
       listRef.current?.scrollToEnd();
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-      const resolved = await bridge().resolveChatDecision({
-        workspaceId, threadId, messageId: decision.messageId,
-        resolvedByMessageId: result.message.id, chosenOption: option,
-      });
-      if (current !== token.current) return;
-      loadSequence.current += 1;
-      setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved.decision : entry));
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
+      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that poll."), result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
       onError(ipcErrorMessage(error, "Could not answer that poll."), error);
@@ -284,7 +315,22 @@ export function ChatLane(props: {
         void load(true);
       }
     }
-  }, [threadId, sending, loading, props.locked, workspaceId, onError, load]);
+  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load]);
+
+  const liveRunId = dispatch?.liveRunId ?? null;
+  const stopRun = useCallback(async () => {
+    if (liveRunId === null || stopping) return;
+    const current = token.current;
+    setStopping(true);
+    try {
+      await bridge().stopAgentRun({ workspaceId, runId: liveRunId });
+      if (current === token.current) void load();
+    } catch (error) {
+      if (current === token.current) onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+    } finally {
+      if (current === token.current) setStopping(false);
+    }
+  }, [liveRunId, load, onError, stopping, workspaceId]);
 
   const threadReactions = threadId ? reactions.view(threadId) : null;
   const reactionControls = useMemo<ChatReactionControls | undefined>(() => threadId && threadReactions
@@ -321,11 +367,37 @@ export function ChatLane(props: {
 
   return (
     <div data-testid="chats-lane" className="flex min-h-0 flex-1 flex-col">
+      {dispatch && liveRunId !== null ? (
+        <div
+          data-testid="chats-lane-dispatch-status"
+          className="flex h-7 shrink-0 items-center justify-center gap-2 border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
+        >
+          <span>agent working{dispatch.pendingCount > 0 ? ` · ${dispatch.pendingCount} queued` : ""}</span>
+          {!props.locked ? (
+            <button
+              type="button"
+              data-testid="chats-lane-stop-agent-run"
+              aria-label="Stop agent run"
+              title="Stop agent run"
+              disabled={stopping}
+              onClick={() => void stopRun()}
+              className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+            >
+              <Square size={8} fill="currentColor" aria-hidden />
+              Stop
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <DispatchAnnouncement
+        testId="chats-lane-dispatch-announcement"
+        text={dispatch && liveRunId !== null ? dispatchAnnouncement(true, dispatch.pendingCount) : ""}
+      />
       <ChatMessageList
         testIdPrefix="chats-lane"
         messages={messages}
         loading={loading}
-        emptyLabel={`No messages in #${props.channel.name} yet.`}
+        emptyLabel={props.channel.kind === "agent" ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
         key={`${workspaceId}:${channelId}`}
         listRef={listRef}
         mentionCandidates={props.mentionCandidates}
@@ -363,7 +435,9 @@ export function ChatLane(props: {
           value={composer}
           sending={sending}
           disabled={loading}
-          placeholder={`Message #${props.channel.name}`}
+          placeholder={props.channel.kind !== "agent" ? `Message #${props.channel.name}`
+            // The input cuts a long name.
+            : props.agentName ? `Message ${props.agentName}…` : "Message your agent…"}
           sendLabel="Send message"
           candidates={props.mentionCandidates}
           fileCandidates={props.fileCandidates}
@@ -375,7 +449,6 @@ export function ChatLane(props: {
           onRosterPick={agentOffer.onRosterPick}
           rosterScope={agentOffer.scope}
           agentOffer={agentOffer.offer}
-          onSetUpAgent={props.onSetupAgent}
         />
       )}
     </div>

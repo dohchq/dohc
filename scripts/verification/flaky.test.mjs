@@ -160,22 +160,23 @@ test("the vitest reporter records the tests that passed on retry, failed both tr
   const previous = process.env.DOHC_TEST_RECORD;
   process.env.DOHC_TEST_RECORD = log;
   t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_TEST_RECORD; else process.env.DOHC_TEST_RECORD = previous; });
-  const testCase = (fullName, flaky, duration, state = "passed") => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") },
-    diagnostic: () => state === "skipped" ? undefined : { flaky, duration }, result: () => ({ state }) });
+  const testCase = (fullName, flaky, duration, state = "passed", errors = undefined) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") },
+    diagnostic: () => state === "skipped" ? undefined : { flaky, duration }, result: () => ({ state, errors }) });
   const reporter = new TestRecordReporter();
   reporter.onTestCaseResult(testCase("steady", false, 30));
-  reporter.onTestCaseResult(testCase("settles on retry", true, 40));
+  // A test that passed on retry still carries what its failed try threw.
+  reporter.onTestCaseResult(testCase("settles on retry", true, 40, "passed", [{ message: "EBUSY: resource busy or locked, rmdir 'C:\\tmp\\w'" }]));
   reporter.onTestCaseResult(testCase("drives a whole scenario", false, 12_500));
   // vitest reports a test that failed its retry too once, as failed and not flaky.
-  reporter.onTestCaseResult(testCase("fails both tries", false, 25, "failed"));
+  reporter.onTestCaseResult(testCase("fails both tries", false, 25, "failed", [{ message: "expected 1 to be 2" }, { message: "expected 1 to be 2" }]));
   // The run ends with a file that failed to load, a failed beforeAll, and an unhandled error, none of which a test owns.
   const suite = errors => ({ errors: () => errors });
   const module = (errors, suites = []) => ({ ...suite(errors), children: { allSuites: () => suites.values() } });
   reporter.onTestRunEnd([module([], [suite([{ message: "beforeAll failed" }])]), module([{ message: "SyntaxError" }])], [{ message: "unhandled" }], "failed");
   assert.deepEqual(readTestRecord(log), [
-    { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, passed: true, seconds: 0.04 },
+    { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, passed: true, seconds: 0.04, error: "EBUSY: resource busy or locked, rmdir 'C:\\tmp\\w'" },
     { test: "src/a.test.ts › drives a whole scenario", flaky: false, failed: false, passed: true, seconds: 12.5 },
-    { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, passed: false, seconds: 0.025 },
+    { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, passed: false, seconds: 0.025, error: "expected 1 to be 2" },
   ]);
   assert.deepEqual(recordedRun(log), { run: "failed", outside: 3 });
   // A run alone records every test, so a test that skipped itself is no pass.

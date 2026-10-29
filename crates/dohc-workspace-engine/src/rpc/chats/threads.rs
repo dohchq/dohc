@@ -44,6 +44,8 @@ struct ChatThreadStartParams {
     message_id: String,
     title: Option<String>,
     lane: Option<String>,
+    #[serde(default)]
+    own_thread: bool,
     author_kind: String,
     author_display_name: String,
     author_owner_display_name: Option<String>,
@@ -59,6 +61,10 @@ struct ChatThreadStartParams {
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -273,7 +279,11 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 author_actor_key: opening.author_actor_key.as_deref(),
                 origin: opening.origin.as_deref(),
                 id: &opening.message_id,
-                author: AuthorWire::new(opening.author_kind, &opening.author_display_name),
+                author: AuthorWire::new(
+                    opening.author_kind,
+                    &opening.author_display_name,
+                    opening.link_author.as_ref(),
+                ),
                 created_at_ms: opening.created_at_ms,
                 body_snippet: &opening.body_snippet,
                 reactions: opening.reactions.iter().map(ReactionWire::from).collect(),
@@ -310,6 +320,7 @@ impl EngineService {
                     message_id: params.message_id,
                     title: params.title,
                     lane,
+                    own_thread: params.own_thread,
                     author_kind,
                     author_display_name: params.author_display_name,
                     author_owner_display_name: params.author_owner_display_name,
@@ -325,6 +336,8 @@ impl EngineService {
                         .map(LocalAttachmentInput::from)
                         .collect(),
                     automation: params.automation.map(Into::into),
+                    author_agent_id: params.author_agent_id,
+                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -727,6 +740,7 @@ mod tests {
                 automation_id: "collection:tasks#stamp".to_owned(),
                 chain_depth: 2,
             }),
+            link_author: None,
             body_snippet: "hello".to_owned(),
             reactions: Vec::new(),
         };

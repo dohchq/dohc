@@ -8,6 +8,7 @@ import { SHORTCUTS, type ShortcutId, type ShortcutOwner } from "./shortcutRegist
 const NAMES = {
   "command-palette": "Command palette",
   "close-window": "Close window",
+  "quit": "Quit",
   "history-restore-undo": "Undo restore",
   "dev-panel": "Dev tools",
   "editor-undo": "Undo",
@@ -55,11 +56,11 @@ export function shortcutName(id: ShortcutId): string {
   return isStaticCommandId(id) ? COMMAND_ROWS[id].label : NAMES[id];
 }
 
-// Whether Settings > Keyboard lists the shortcut: only on its platform, and
+// Whether Settings > Keyboard lists the shortcut: only on its platforms, and
 // Dev tools' key only where the dev tools show.
 export function shortcutShown(id: ShortcutId, platform: string | undefined, devTools: boolean): boolean {
-  const shortcut: { owner: ShortcutOwner; platform?: string } = SHORTCUTS[id];
-  return (!shortcut.platform || shortcut.platform === platform) && (shortcut.owner !== "dev" || devTools);
+  const shortcut: { owner: ShortcutOwner; platforms?: readonly string[] } = SHORTCUTS[id];
+  return (!shortcut.platforms || shortcut.platforms.includes(platform ?? "")) && (shortcut.owner !== "dev" || devTools);
 }
 
 // The names Settings > Keyboard lists, once each, for Settings search.

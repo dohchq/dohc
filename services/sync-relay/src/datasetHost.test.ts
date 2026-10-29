@@ -1,5 +1,5 @@
 import * as supervisorRuntime from "@dohc/app-backend-runtime/supervisor";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -69,10 +69,20 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
     host.bindPublication(owner, {...scope, publicationId: result.publicationId});
     return result.publicationId;
   }
-  return {...base, get host() {return host;}, activate, invoke, publish, addHelper,
+  return {...base, directory, get host() {return host;}, activate, invoke, publish, addHelper,
     async reopen() {await host.close(); host = await create();}};
 }
 
+it("keeps its workers and recovery staging in the folder it was given", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish();
+  await f.invoke(f.link("friend"), id(5), {name: "Kept"}, publicationId);
+  const archive = await f.host.exportRecovery(owner, scope);
+  const names = await readdir(f.directory);
+  expect(names).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite", ".dohc-worker-session.json", "recovery"]));
+  expect(names.filter(name => name.startsWith("worker-"))).toHaveLength(1);
+  expect((await readdir(join(f.directory, "recovery"))).filter(name => name.startsWith("export-"))).toHaveLength(1);
+  await archive.dispose();
+});
 it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
   const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
   await f.invoke(link,id(5),{name:"Deleted"},publicationId);

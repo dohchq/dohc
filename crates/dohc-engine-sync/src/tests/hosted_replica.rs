@@ -367,7 +367,14 @@ fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
         let mut chats = LinkedChatStore::new(&mut store);
         for refused in [
             chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
-            chats.ensure_agent_channel("ws", "agent-local", 2_000, &NoFaults),
+            chats.ensure_agent_channel(
+                "ws",
+                "agent-local",
+                "default",
+                "My agent",
+                2_000,
+                &NoFaults,
+            ),
         ] {
             assert!(matches!(
                 refused,
@@ -1894,9 +1901,75 @@ fn withheld_conflict(
 fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     let (_scratch, _path, mut store) = hosted_store();
     let (parent, child, result_sha) = withheld_conflict(&mut store);
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+#[test]
+fn a_text_keep_without_lineage_holds_like_an_incoming_resolution() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (parent, _, result_sha) = withheld_conflict(&mut store);
+    let context = crate::conflict_resolve_v1::ConflictResolveEnvelopeContext {
+        workspace_id: "ws",
+        recorded_at_ms: 21,
+    };
+    let mut payload =
+        crate::conflict_resolve_v1::validate_conflict_resolve_v1(&parent.payload, context)
+            .unwrap()
+            .payload;
+    payload.chosen_from = crate::conflict_resolve_v1::ResolveChoiceV1::Current;
+    payload.resolution = crate::conflict_resolve_v1::ResolutionV1::KeptCurrent;
+    payload.current = payload.result.clone();
+    if let crate::conflict_resolve_v1::HeadV1::Present(head) = &mut payload.current {
+        head.latest_moment_id = "owner-before".to_owned();
+        head.updated_at_ms = 20;
+    }
+    payload.incoming = crate::conflict_resolve_v1::HeadV1::Absent { path_ref: 0 };
+    payload.effect_context.current_object_created_at_ms = Some(20);
+    assert!(payload.lineage_transition.is_none());
+    let built = crate::conflict_resolve_v1::build_conflict_resolve_v1(payload).unwrap();
+    let mut parent = envelope("owner", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "owner",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 21;
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "hosted-object".to_owned(),
+                path: "hosted.md".to_owned(),
+                text: "resolved by the owner".to_owned(),
+                moment_id: "owner-before".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_conflict_child_hold_parity(&mut store, parent, child, result_sha);
+}
+
+fn assert_conflict_child_hold_parity(
+    store: &mut EngineStore,
+    parent: ReplicationEnvelope,
+    child: ReplicationEnvelope,
+    result_sha: String,
+) {
     assert!(matches!(
         apply_replication_envelope(
-            &mut store,
+            store,
             &mut WriterDocCache::new(),
             &child,
             &NoFaults,
@@ -1912,7 +1985,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     feed.share("hosted-object", "hosted.md");
     feed.share("other-object", "other.md");
     let client = RelaySyncClient::new(feed);
-    sync(&client, &mut store);
+    sync(&client, store);
 
     // The child waits for its parent; a later edit of its document waits
     // behind it, though an edit of another document from the same origin does not.
@@ -1952,33 +2025,33 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
         }),
     ));
     feed.create("peer", 1, "other-object", "other.md", "independent");
-    let held = pass(&client, &mut store, &NoFaults).unwrap();
+    let held = pass(&client, store, &NoFaults).unwrap();
     assert_eq!(held.applied, 1);
-    assert!(commit(&client, &mut store, &held));
-    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert!(commit(&client, store, &held));
+    assert_eq!(hold(store, "hosted-object"), Some(parent_withheld()));
     assert_eq!(
-        retained(&store),
+        retained(store),
         0,
         "both edits of the held document wait in its feed"
     );
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [("owner".to_owned(), 2), ("peer".to_owned(), 1)]
     );
 
     // The parent arrives (5b projects it); the held document resumes in order.
     apply_replication_envelope(
-        &mut store,
+        store,
         &mut WriterDocCache::new(),
         &parent,
         &NoFaults,
         &NoLiveLeases,
     )
     .unwrap();
-    sync(&client, &mut store);
-    assert_eq!(retained(&store), 0);
+    sync(&client, store);
+    assert_eq!(retained(store), 0);
     assert_eq!(
-        coordinates(&store),
+        coordinates(store),
         [
             ("owner".to_owned(), 0),
             ("owner".to_owned(), 1),
@@ -1989,11 +2062,19 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     );
     assert_eq!(
         count(
-            &store,
+            store,
             "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='owner-moment'"
         ),
         1,
         "the resolution applies once, through its parent"
+    );
+    assert_eq!(
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .read_text("ws", "main", "hosted.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        later_text
     );
 }
 
@@ -4067,6 +4148,248 @@ fn a_ydoc_base_at_a_held_path_holds_its_document_until_the_path_frees() {
         ),
         1
     );
+}
+
+/// Two shared documents whose paths differ only in case, or where one path is
+/// a folder of the other, cannot both be files on a disk that ignores case
+/// (#2036). The later one is held, naming the document that holds its path,
+/// while the first and the main cursor go on. Once the first moves, the later
+/// one applies.
+#[test]
+fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() {
+    for (held, path) in [
+        ("a.md", "A.md"),
+        ("A.md", "a.md/c.md"),
+        ("a.md/c.md", "A.md"),
+        ("\u{212a}.md", "k.md"),
+        ("e\u{301}.md", "\u{e9}.md"),
+    ] {
+        let (_scratch, _path, mut store) = hosted_store();
+        let client = RelaySyncClient::new(HostedFeed::new());
+        let feed = client.transport();
+        feed.append(envelope("owner", 0, "workspace.init", json!({})));
+        feed.create("owner", 1, "doc-a", held, "hosted a");
+        feed.create("owner", 2, "doc-b", path, "hosted b");
+        feed.share("doc-a", held);
+        sync(&client, &mut store);
+
+        feed.share("doc-b", path);
+        sync(&client, &mut store);
+        assert_eq!(
+            hold(&store, "doc-b"),
+            Some(path_held(path, "doc-a")),
+            "{path} against {held}"
+        );
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "hosted a")]),
+            "{path} against {held}"
+        );
+        feed.replace(
+            "owner",
+            3,
+            "doc-a",
+            held,
+            "edited a",
+            ("doc-a", "hosted a", "moment-owner-1"),
+        );
+        sync(&client, &mut store);
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a")]),
+            "{path} against {held}"
+        );
+
+        feed.rename(
+            "owner",
+            4,
+            "doc-a",
+            held,
+            "z.md",
+            "edited a",
+            "moment-owner-3",
+        );
+        sync(&client, &mut store);
+        assert!(ready(&store, "doc-b"), "{path} against {held}");
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")]),
+            "{path} against {held}"
+        );
+        assert_eq!(retained(&store), 0, "{path} against {held}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM conflicts"),
+            0,
+            "{path} against {held}"
+        );
+    }
+}
+
+/// Documents shared together, at two spellings of one path, backfill one at
+/// a time in object id order, so the later id is held whatever the feed's
+/// order, and a document beside them keeps syncing (#2036).
+#[test]
+fn documents_shared_together_at_spellings_of_one_path_hold_the_later_id() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "Notes.md", "hosted b");
+    feed.create("owner", 2, "doc-a", "notes.md", "hosted a");
+    feed.create("owner", 3, "doc-c", "c.md", "hosted c");
+    feed.share("doc-a", "notes.md");
+    feed.share("doc-b", "Notes.md");
+    feed.share("doc-c", "c.md");
+    sync(&client, &mut store);
+
+    assert!(ready(&store, "doc-a"));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("Notes.md", "doc-a")));
+    assert!(ready(&store, "doc-c"));
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-c", "hosted c")])
+    );
+    assert_eq!(retained(&store), 0);
+}
+
+/// A ready document renamed to another spelling of a path another document
+/// holds would share that document's file on a disk that ignores case
+/// (#2036). The owner's scope moves with it. The document is held at the
+/// rename, naming the holder, and the other document and the main cursor go
+/// on. Once the holder moves, the rename applies.
+#[test]
+fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_frees() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-b", "A.md");
+    feed.replace(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-1"),
+    );
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+    assert_eq!(retained(&store), 0);
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
+        "the rename waits"
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+
+    feed.rename(
+        "owner",
+        5,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "edited a",
+        "moment-owner-4",
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(retained(&store), 0);
+}
+
+/// Opus's second-round finding: a rename onto another spelling of a held
+/// path stopped its ready document at the first refusal, even when the
+/// holder moved later in the same pass and the rename applied. A later edit
+/// behind a live session then held the document and cut the session off.
+/// The document is stopped only once nothing in the pass can free it. The
+/// scope keeps its paths, so only the spelling hold can stop `doc-b`.
+#[test]
+fn a_rename_freed_later_in_its_pass_leaves_the_document_ready() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.replace(
+        "owner",
+        5,
+        "doc-b",
+        "A.md",
+        "edited b",
+        ("doc-b", "hosted b", "moment-owner-3"),
+    );
+    let behind_session = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("doc-b"),
+        )
+        .unwrap();
+    assert!(commit(&client, &mut store, &behind_session));
+    assert!(ready(&store, "doc-b"), "the session keeps its document");
+
+    // The session closed.
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-b", "edited b")])
+    );
+    assert_eq!(retained(&store), 0);
 }
 
 /// Reports one document's live session.

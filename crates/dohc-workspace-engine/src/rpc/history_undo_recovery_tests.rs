@@ -130,6 +130,8 @@ async fn open_undo_fixture_with_operations(
 async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
     let (scratch, service, handle, open) = open_undo_fixture().await;
     let params = json!({"rootDir":scratch.path(), "workspaceId":"resume-undo"});
+    // Crash after the rename's inverse commits. The five deletes can share one
+    // turn on a fast host, so a later crash could find the Undo complete.
     assert!(matches!(
         open.actor
             .history_undo_in_turns(
@@ -138,10 +140,11 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
                 "resume-request".into(),
                 None,
                 open.root.clone(),
-                Arc::new(CrashAfter(AtomicUsize::new(3))),
+                Arc::new(CrashAfter(AtomicUsize::new(2))),
                 10,
                 [open.capture_apply_gate.clone(), open.session_ops.clone()],
                 Arc::new(()),
+                None,
                 dohc_engine_runtime::CancellationToken::new(),
             )
             .await,
@@ -232,6 +235,7 @@ async fn workspace_open_continues_after_one_pending_undo_fails_once() {
                     10,
                     [open.capture_apply_gate.clone(), open.session_ops.clone()],
                     Arc::new(()),
+                    None,
                     dohc_engine_runtime::CancellationToken::new(),
                 )
                 .await,
@@ -384,6 +388,7 @@ async fn workspace_close_finishes_while_request_undo_waits_between_turns() {
                     request_open.session_ops.clone(),
                 ],
                 Arc::new(()),
+                None,
                 dohc_engine_runtime::CancellationToken::new(),
             )
             .await
@@ -391,10 +396,9 @@ async fn workspace_close_finishes_while_request_undo_waits_between_turns() {
     reached.await.unwrap();
     // Close queues its capture barrier while the inverse still owns that gate.
     let probe = service.capture_apply_probe.as_ref().unwrap();
-    probe.observe_next_apply_gate_wait();
     let closing_service = service.clone();
     let closing = tokio::spawn(async move { closing_service.workspace_close(Some(handle)).await });
-    probe.wait_until_apply_gate_waiting().await;
+    probe.wait_until_close_gate_waiting().await;
     release.send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), closing)
         .await

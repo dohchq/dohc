@@ -67,8 +67,12 @@ impl<R: Read, W: Write> Session<R, W> {
     }
     pub fn execute(&mut self, r: &Request) -> Result {
         self.id += 1;
-        let constructed = r.method == Method::Construct;
-        let method = if constructed { "construct" } else { "prove" };
+        let constructed = r.method != Method::Prove;
+        let method = match r.method {
+            Method::Construct => "construct",
+            Method::ConstructFold => "construct-fold",
+            Method::Prove => "prove",
+        };
         let source = Blob::of(&r.source);
         let checkpoint = Blob::of(&r.checkpoint);
         self.pipe.control(&json!({"id": self.id, "method": method, "document": r.document, "currentPath": r.current_path, "source": source, "checkpoint": checkpoint}))?;
@@ -85,6 +89,7 @@ impl<R: Read, W: Write> Session<R, W> {
                 });
             }
             (Response::Constructed(reply), Method::Construct)
+            | (Response::Constructed(reply), Method::ConstructFold)
             | (Response::Proved(reply), Method::Prove) => reply,
             (Response::Expired(reply), Method::Prove) => {
                 expired = true;

@@ -90,8 +90,8 @@ export function signUpPage(options: { next?: string; closed?: boolean } = {}): s
     data: { next },
     main: `<h1>Create your dohc account</h1>
 <form id="form">
-${field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus')}
-${field("email", "Email", 'type="email" name="email" autocomplete="username" required')}
+${closed ? "" : field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus')}
+${field("email", "Email", `type="email" name="email" autocomplete="username" required${closed ? " autofocus" : ""}`)}
 ${closed ? "" : field("password", "Password", 'type="password" name="password" autocomplete="new-password" minlength="8" required')}
 <button type="submit">Create account</button>
 </form>
@@ -134,8 +134,11 @@ ${STATUS}
   });
 }
 
-export function resetPasswordPage(options: { token?: string; next?: string } = {}): string {
-  const { token, next } = options;
+// A closed server's first emailed link finishes setting up the account, so the
+// page also asks for the name other people see. The server ignores the name
+// once the address is verified.
+export function resetPasswordPage(options: { token?: string; next?: string; setup?: boolean } = {}): string {
+  const { token, next, setup } = options;
   if (!token) {
     return shell({
       title: "Reset your password",
@@ -145,15 +148,17 @@ export function resetPasswordPage(options: { token?: string; next?: string } = {
 <p class="links"><a href="/account/forgot-password">Send a new reset link</a><a href="/account/sign-in">Back to sign in</a></p>`,
     });
   }
+  const heading = setup ? "Finish setting up your account" : "Choose a new password";
   return shell({
-    title: "Choose a new password",
+    title: heading,
     page: "reset-password",
     data: { token },
-    main: `<h1>Choose a new password</h1>
+    main: `<h1>${heading}</h1>
 <form id="form">
-${field("password", "New password", 'type="password" name="password" autocomplete="new-password" minlength="8" required autofocus')}
-${field("confirm", "Confirm new password", 'type="password" name="confirm" autocomplete="new-password" minlength="8" required')}
-<button type="submit">Save password</button>
+${setup ? field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus') : ""}
+${field("password", setup ? "Password" : "New password", `type="password" name="password" autocomplete="new-password" minlength="8" required${setup ? "" : " autofocus"}`)}
+${field("confirm", setup ? "Confirm password" : "Confirm new password", 'type="password" name="confirm" autocomplete="new-password" minlength="8" required')}
+<button type="submit">${setup ? "Finish setup" : "Save password"}</button>
 </form>
 <p id="after" hidden><a href="${escapeHtml(next ? `/account/sign-in?next=${encodeURIComponent(next)}` : "/account/sign-in")}">Sign in with your new password</a></p>
 ${STATUS}`,

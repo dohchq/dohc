@@ -31,6 +31,7 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { createHistoryTimeline, type TimelineReads } from "../workspaces/historyTimeline";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -71,7 +72,8 @@ export function createWorkspaceEngineIpc<
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
   historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
-  localAgentDisplayName(): string;
+  /** The name Settings gives one of this computer's agents, while Settings lists it. */
+  agentName(agentId: string): string | undefined;
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
@@ -120,7 +122,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, agentName, localPersonId, localPersonName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, assertWritableWorkspace, syncStatusWithOwnedProjection,
@@ -129,6 +131,8 @@ export function createWorkspaceEngineIpc<
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   } = dependencies;
   const timeline = createHistoryTimeline();
+  // This computer's agent by its name now, or by its id once Settings no longer lists it.
+  const localAgentName = (agentId: string) => agentId === "dohc-mcp" ? "Agent" : agentName(agentId) ?? agentId;
   const runLocator = createRunLocator({
     onThisComputer: automationRunOnThisComputer,
     onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
@@ -259,7 +263,7 @@ export function createWorkspaceEngineIpc<
           const authors: RecordHistoryAuthors = {
             prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
             person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
-            agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
+            agent: (agentId, onBehalfOf) => onBehalfOf === localPersonId() ? localAgentName(agentId) : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
           };
@@ -288,10 +292,11 @@ export function createWorkspaceEngineIpc<
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
-    // Runs dohc started use the Settings name. Other agents use their handshake label.
+    // Your agents use the Settings name of their id, as record History does, with or without a run.
+    // Another person's runs show as "Agent". Their other agents use their handshake label.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         presentations,
@@ -383,9 +388,16 @@ export function createWorkspaceEngineIpc<
         const presentations = await identity.presentations();
         let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
         let pending: Promise<NonNullable<typeof resolved>> | undefined;
-        const getCollections = () => pending ??= dependencies.historyCollections(operation).then(value => { assertCurrent(); resolved = value; return value; });
+        // No Collection moments, for a History without them.
+        const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({ scope: operation.scope ?? workspace.workspaceId,
+          local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw why; } });
+        // Another computer keeps the Collections: History shows files and documents without them.
+        const getCollections = () => pending ??= dependencies.historyCollections(operation).catch((error: unknown) => {
+          if (error instanceof CollectionsRefusalError) return without(error);
+          throw error;
+        }).then(value => { assertCurrent(); resolved = value; return value; });
         const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
-          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
+          ? without(new Error("Collection History is unavailable in a received share."))
           : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
             local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };

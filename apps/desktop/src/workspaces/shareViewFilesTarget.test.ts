@@ -65,6 +65,19 @@ describe("resolveRegisteredShareViewFilesTarget", () => {
     );
   });
 
+  // The engine keys a standalone view's open by its attachment, and that open
+  // is what lets the view write its refresh records in `.dohc/local`.
+  it("carries a standalone view's attachment, and none for a mount's own store", () => {
+    const attachmentId = Symbol("attached view");
+    const record = mount("owner");
+    const shareView = { shareId: "share", granterEmail: null, ended: false,
+      grantedSelector: { access: "view", paths: ["docs"], versionId: null } };
+    expect(resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath, attachmentId, shareView },
+      { kind: "standalone", workspaceId })?.attachmentId).toBe(attachmentId);
+    expect(resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath, attachmentId, shareMounts: [record] },
+      { kind: "mount", workspaceId, shareId: record.shareId })).not.toHaveProperty("attachmentId");
+  });
+
   it("refuses an invalid mount label instead of falling back to the host root", () => {
     const record = mount(".env");
     expect(

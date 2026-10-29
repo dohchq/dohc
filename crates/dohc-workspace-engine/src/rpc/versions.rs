@@ -83,14 +83,13 @@ pub(super) enum VersionFenceOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn close_ydoc_session_for_version_fence(
+async fn settle_fence_session(
     sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
     self_writes: &SelfWriteSuppression,
     events: &EngineEvents,
     open: &OpenWorkspace,
     handle: &WorkspaceHandle,
     session_id: &str,
-    _summary: &str,
     token: &CancellationToken,
 ) -> Result<(), WireError> {
     let session = version_fence_session_view(sessions, handle, session_id)?;
@@ -126,6 +125,30 @@ async fn close_ydoc_session_for_version_fence(
             Err(error) => return Err(error),
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn close_ydoc_session_for_version_fence(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    events: &EngineEvents,
+    open: &OpenWorkspace,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    _summary: &str,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    settle_fence_session(
+        sessions,
+        self_writes,
+        events,
+        open,
+        handle,
+        session_id,
+        token,
+    )
+    .await?;
 
     let session = version_fence_session_view(sessions, handle, session_id)?;
     let now = now_ms()?;
@@ -336,7 +359,50 @@ impl EngineService {
         }
     }
 }
+#[cfg(test)]
+static CLOSE_WRITE_SESSION: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+pub(super) fn mutate_close_write_session(id: String) {
+    lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).insert(id);
+}
+
 impl VersionFence {
+    pub(super) fn link_document_is_open(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> dohc_engine_runtime::actor::DocumentIsOpen {
+        let sessions = self.sessions.clone();
+        let handle = handle.clone();
+        Arc::new(move |key| {
+            lock(&sessions)
+                .values()
+                .any(|s| s.workspace == handle && s.key == *key)
+        })
+    }
+
+    pub(super) fn link_document_resync(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> dohc_engine_runtime::actor::DocumentResync {
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let handle = handle.clone();
+        std::sync::Arc::new(move |key| {
+            let ids: Vec<_> = lock(&sessions)
+                .iter()
+                .filter(|(_, session)| session.workspace == handle && session.key == *key)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                events.emit(
+                    "ydoc.remoteUpdate",
+                    json!({"sessionId":id,"resyncRequired":true}),
+                );
+            }
+        })
+    }
+
     /// Acquire the capture and session barriers in the one per-workspace order
     /// used by version fencing and workspace teardown.
     async fn acquire_workspace_barriers(
@@ -583,7 +649,14 @@ impl VersionFence {
         let leases = self.leases.scoped(&open.root);
         let mut held = HashMap::new();
         for member in &result.moments {
-            if held.contains_key(&member.object_id) {
+            if held.contains_key(&member.object_id)
+                || (member.operation == "write"
+                    && lock(&self.sessions).values().any(|session| {
+                        session.key.workspace_id == open.workspace_id
+                            && session.key.version_id == result.version_id
+                            && session.key.object_id == member.object_id
+                    }))
+            {
                 continue;
             }
             let Ok(key) = DocKey::new(&open.workspace_id, &result.version_id, &member.object_id)
@@ -728,6 +801,19 @@ impl VersionFence {
         } else {
             None
         };
+        let undo_writes = if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
+            EngineService::read_under_ctx(
+                cancellation,
+                "history.undo (open writes)",
+                open.actor
+                    .history_undo_open_writes(open.workspace_id.clone(), operation_id.clone()),
+            )
+            .await?
+        } else {
+            std::collections::HashSet::new()
+        };
+        let resync = self.link_document_resync(handle);
+        let is_open = self.link_document_is_open(handle);
         let undo_objects = undo_group.as_ref().map(|members| {
             members
                 .iter()
@@ -828,17 +914,35 @@ impl VersionFence {
                 CancellationToken::new()
             };
             for session_id in session_ids {
-                close_ydoc_session_for_version_fence(
-                    &sessions,
-                    &self_writes,
-                    &events,
-                    &open,
-                    &handle,
-                    &session_id,
-                    &settle_summary,
-                    &token,
-                )
-                .await?;
+                let view = version_fence_session_view(&sessions, &handle, &session_id)?;
+                let keep_write = undo && undo_writes.contains(&view.key.object_id);
+                #[cfg(test)]
+                let keep_write = keep_write
+                    && !lock(CLOSE_WRITE_SESSION.get_or_init(Mutex::default)).remove(&session_id);
+                if keep_write {
+                    settle_fence_session(
+                        &sessions,
+                        &self_writes,
+                        &events,
+                        &open,
+                        &handle,
+                        &session_id,
+                        &token,
+                    )
+                    .await?;
+                } else {
+                    close_ydoc_session_for_version_fence(
+                        &sessions,
+                        &self_writes,
+                        &events,
+                        &open,
+                        &handle,
+                        &session_id,
+                        &settle_summary,
+                        &token,
+                    )
+                    .await?;
+                }
             }
 
             if let VersionFenceIntent::Fork { input } = &intent
@@ -856,19 +960,29 @@ impl VersionFence {
                 return Err(unsettled_fork_error(content_kind));
             }
 
+            let mut unpublished = std::collections::HashSet::new();
             if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
-                let jobs = open
+                let (preimages, jobs) = open
                     .actor
-                    .history_operation_pending_jobs(open.workspace_id.clone(), operation_id.clone())
+                    .history_undo_pending_publication(
+                        open.workspace_id.clone(),
+                        operation_id.clone(),
+                        open.root.clone(),
+                        token.clone(),
+                    )
                     .await
                     .map_err(map_runtime)?;
-                if !jobs.is_empty() {
+                unpublished.extend(preimages.into_keys());
+                for jobs in jobs.chunks(16) {
+                    if token.is_cancelled() {
+                        return Err(map_runtime(dohc_engine_runtime::RuntimeError::Cancelled));
+                    }
                     open.actor
                         .materialize_replay_selected_for_fence(
                             open.root.clone(),
                             open.workspace_id.clone(),
                             Arc::new(self_writes.scoped(&open.root)),
-                            jobs,
+                            jobs.to_vec(),
                             now_ms()?,
                         )
                         .await
@@ -899,7 +1013,9 @@ impl VersionFence {
                 &self_writes.scoped(&open.root),
                 capture_author_json,
                 match &intent {
-                    VersionFenceIntent::Undo { operation_id, .. } => Some(operation_id.as_str()),
+                    VersionFenceIntent::Undo { operation_id, .. } => {
+                        Some((operation_id.as_str(), &unpublished))
+                    }
                     _ => None,
                 },
                 reconcile_provenance,
@@ -935,6 +1051,13 @@ impl VersionFence {
                     let mut undo_leases = undo_objects
                         .unwrap_or_default()
                         .into_iter()
+                        .filter(|object| {
+                            !lock(&sessions).values().any(|s| {
+                                s.workspace == handle
+                                    && s.key.object_id == *object
+                                    && s.key.version_id == reconcile_version_id
+                            })
+                        })
                         .map(|object| {
                             let key =
                                 DocKey::new(&open.workspace_id, &reconcile_version_id, &object)
@@ -957,6 +1080,7 @@ impl VersionFence {
                         placement_now,
                         [open.capture_apply_gate.clone(), open.session_ops.clone()],
                         Arc::new(self_writes.scoped(&open.root)),
+                        Some((is_open, resync)),
                         token,
                     ))
                     .await
@@ -1705,3 +1829,7 @@ mod tests {
             .expect("workspace close");
     }
 }
+
+#[cfg(test)]
+#[path = "link_rewrite_rpc_tests.rs"]
+mod link_rewrite_rpc_tests;

@@ -91,11 +91,13 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 
 impl EngineStore {
     /// A bounded wait for the next checkpoint cycle, run off the writer.
-    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub fn checkpoint_cycle(&self) -> impl Fn() -> crate::CheckpointWait + Send + Sync + use<> {
         let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
         move || {
             if let Some(wait) = &wait {
-                wait();
+                wait()
+            } else {
+                crate::CheckpointWait::Finished
             }
         }
     }
@@ -222,11 +224,16 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work)?;
+        let opened = open_engine_db_read_only(path, work, None)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
-        let flushes = crate::flush::Flushes::read_only();
-        Ok(EngineStore {
-            conn: opened.conn,
+        Ok(Self::from_read_only(opened.conn, path, passive))
+    }
+
+    /// A store for queries only over `conn`, a checked connection to a current
+    /// store at `path` that this open neither migrates nor writes.
+    pub(crate) fn from_read_only(conn: Connection, path: &Path, passive: bool) -> Self {
+        EngineStore {
+            conn,
             checkpoints: None,
             checkpoint_changes: 0,
             freshly_created: false,
@@ -235,8 +242,8 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
-            flushes,
-        })
+            flushes: crate::flush::Flushes::read_only(),
+        }
     }
 
     /// Count this connection's SQLite work into `work` for as long as someone
@@ -302,6 +309,13 @@ impl EngineStore {
         self.checkpoints
             .as_ref()
             .map_or((0, 0), |c| c.writer_work_for_test())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_checkpoint_work_for_test(&self) -> (u64, i64) {
+        self.checkpoints
+            .as_ref()
+            .map_or((0, 0), |c| c.startup_work_for_test())
     }
 
     #[cfg(test)]
@@ -687,6 +701,16 @@ impl EngineStore {
         materialize::has_pending_job_for_path(&self.conn, workspace_id, path)
     }
 
+    /// Pending merge deletes in a workspace that expect these bytes at their
+    /// path, oldest first.
+    pub fn pending_merge_deletes_expecting(
+        &self,
+        workspace_id: &str,
+        preimage_sha256: &str,
+    ) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::pending_merge_deletes_expecting(&self.conn, workspace_id, preimage_sha256)
+    }
+
     /// Load a single materialization job by id.
     pub fn load_materialization_job(
         &self,
@@ -925,9 +949,11 @@ impl EngineStore {
     /// (`VACUUM INTO`). `dest` must not already exist. Used by the backup
     /// pipeline; not a general-purpose export.
     pub(crate) fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
-        let dest_str = dest.to_str().ok_or(StorageError::InvalidInput {
-            reason: "backup destination path is not valid UTF-8",
-        })?;
+        let dest_str = crate::sqlite_path(dest)
+            .to_str()
+            .ok_or(StorageError::InvalidInput {
+                reason: "backup destination path is not valid UTF-8",
+            })?;
         self.conn
             .execute("VACUUM INTO ?1", [dest_str])
             .map_err(StorageError::backup)?;
@@ -1005,6 +1031,48 @@ impl EngineStore {
     ) -> Result<(), StorageError> {
         self.require_materialization_owner()?;
         materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
+    }
+    /// The retained row with `id`, if it is still retained.
+    pub fn retained_displacement(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::RetainedDisplacement>, StorageError> {
+        materialize::retained_row_by_id(&self.conn, id)
+    }
+    /// How many of the workspace's retained originals the sweep can never
+    /// release, and their logical size.
+    pub fn retained_summary(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::RetainedSummary, StorageError> {
+        materialize::retained_summary(&self.conn, workspace_id)
+    }
+    /// At most `limit` of the workspace's retained originals the sweep can
+    /// never release, after `after`, quiet since `quiet_before_ms`.
+    pub fn blocked_retained_displacements(
+        &self,
+        workspace_id: &str,
+        quiet_before_ms: i64,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::RetainedDisplacement>, StorageError> {
+        materialize::blocked_retained_rows(&self.conn, workspace_id, quiet_before_ms, after, limit)
+    }
+    /// Whether recovery may still need `row`'s original.
+    pub fn retained_original_needed(
+        &self,
+        row: &crate::RetainedDisplacement,
+    ) -> Result<bool, StorageError> {
+        materialize::retained_original_needed(&self.conn, row)
+    }
+    /// Record whether `row`'s volume can refuse to unlink an open file.
+    pub fn record_retained_busy_check(
+        &self,
+        row: &crate::RetainedDisplacement,
+        unsupported: bool,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::record_retained_busy_check(&self.conn, row, unsupported)
     }
     pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
         self.require_materialization_owner()?;

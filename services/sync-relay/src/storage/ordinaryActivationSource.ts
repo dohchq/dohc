@@ -4,14 +4,41 @@ import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/da
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
-import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownJournalValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
-import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
+import type {LiveMarkdownRegistrationEvidence} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+import {createLiveMarkdownJournalValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+import {MAX_OLD_SUFFIX_ENTRIES,type OrderedLiveUpdateCutPolicy} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
+import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
 
 export class ServiceActivationStaleCut extends Error {
   constructor(){super("Ordinary replication advanced before service activation.");}
 }
+/** Live validation had no slot free for the capture. A later pass captures it again. */
+export class ServiceActivationBusy extends Error {
+  constructor(){super("Live validation is busy.");}
+}
+/** Validating the capture ran its validation process out of memory, as the same capture would again. */
+export class ServiceActivationTooLarge extends Error {
+  constructor(){super("Native activation is too large to validate.");}
+}
 export interface OrdinaryActivationBounds {maxCaptureBytes:number;maxEntriesPerDrain:number;maxBytesPerDrain:number}
+/** The relay history a capture must rebuild, as one read of its cut found it. */
+export interface OrdinaryActivationHistory {
+  readonly rows:readonly {relay_seq:number;origin_id:string;origin_seq:number}[];
+  readonly updates:readonly Uint8Array[];
+  readonly moment:Readonly<Record<string,unknown>>|null;
+  readonly charged:number;
+}
+/** A capture's validation. One the relay already retains checks only its baseline. */
+export interface OrdinaryActivationWork {
+  readonly document:LiveDocumentKey;readonly currentPath:string;readonly baselineBytes:Uint8Array;
+  readonly cut?:{readonly source:NativeOwnerActivationSource;readonly fullState:Uint8Array;readonly history:OrdinaryActivationHistory;readonly maxBytesPerDrain:number};
+}
+export type OrdinaryActivationBaseline=Pick<LiveMarkdownRegistrationEvidence,"projectedMarkdownSha256"|"projectedMarkdownByteLength">&
+  {readonly checkpoint:Pick<LiveMarkdownRegistrationEvidence["checkpoint"],"updateDigest"|"ranges">};
+export type OrdinaryActivationValidation={kind:"accepted";baseline:OrdinaryActivationBaseline}|{kind:"refused";message:string}|
+  {kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
+export type OrdinaryActivationValidator=(work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>;
 export interface VerifiedOrdinaryActivationCut {readonly verified:true}
 const emptyCandidate=()=>new Uint8Array([0,0]);
 const WIDEST_INTEGER=Number.MAX_SAFE_INTEGER,WIDEST_DIGEST="f".repeat(64);
@@ -32,7 +59,7 @@ export type KnownActivationSource=Pick<NativeOwnerActivationSource,"relayDatabas
   "replicationEpoch"|"streamIdentity"|"baseOriginId"|"sourceMomentId"|"sourceDigest"|"sourceByteLength">;
 /** The largest descriptor native can capture for these values; the rest take their widest form. */
 export function activationDescriptorReserve(known:KnownActivationSource){
-  return activationDescriptorBytes({version:1,relayDatabaseNamespace:known.relayDatabaseNamespace,workspaceId:known.workspaceId,mainVersionId:"main",
+  return activationDescriptorBytes({version:1,readerSource:true,relayDatabaseNamespace:known.relayDatabaseNamespace,workspaceId:known.workspaceId,mainVersionId:"main",
     objectId:known.objectId,lineageClaimId:WIDEST_DIGEST,currentPath:known.currentPath,replicationEpoch:known.replicationEpoch,
     streamIdentity:known.streamIdentity,committedCursor:WIDEST_INTEGER,baseOriginId:known.baseOriginId,baseOriginSeq:WIDEST_INTEGER,
     baseRelaySeq:WIDEST_INTEGER,sourceMomentId:known.sourceMomentId,sourceDigest:known.sourceDigest,sourceByteLength:known.sourceByteLength,
@@ -48,20 +75,21 @@ function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
   if(current?.replication_epoch!==source.replicationEpoch||current.stream_identity!==source.streamIdentity||high?.cursor!==source.committedCursor||
     source.baseRelaySeq>source.committedCursor||source.baseRelaySeq<=storage.getEpochLogFloor(source.workspaceId))throw new ServiceActivationStaleCut();
 }
-export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;
-  baselineBytes:Uint8Array;fullState:Uint8Array;baseline:LiveMarkdownRegistrationEvidence;
-  validateJournal:ReturnType<typeof createLiveMarkdownJournalValidator>;validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;
-  bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
-  const {source,document,baselineBytes,fullState,baseline,validateJournal,validateRegistration,bounds}=input;
+type HistoryInput={source:NativeOwnerActivationSource;document:LiveDocumentKey;baselineBytes:Uint8Array;fullState:Uint8Array;bounds:OrdinaryActivationBounds};
+/** Reads and checks the history a capture must rebuild, charging it to the drain budget. Validation runs on what it returns. */
+export function readOrdinaryActivationHistory(storage:StorageContext,input:HistoryInput):OrdinaryActivationHistory{
+  const {source,document,baselineBytes,fullState,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(activationCaptureBytes(baselineBytes.length,fullState.length,activationDescriptorBytes(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
+  // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
       AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
+      AND NOT (${OTHER_LINEAGE_UPDATE})
     ORDER BY relay_seq LIMIT ?`;
-  const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,entryLimit+1];
+  const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   const size=storage.db.prepare(`SELECT count(*) AS entries,COALESCE(sum(bytes),0) AS bytes FROM
     (SELECT length(CAST(payload_json AS BLOB))+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
   requireValue(size&&integer(size.entries)&&size.entries>0&&size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
@@ -105,6 +133,30 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     return new Uint8Array(bytes);
   });
   requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
+  const moment=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
+    WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
+  return {rows:rows.map(({relay_seq,origin_id,origin_seq})=>({relay_seq,origin_id,origin_seq})),updates,moment:moment?{...moment}:null,charged};
+}
+/**
+ * Validates a capture against the history `readOrdinaryActivationHistory` read for it. Runs in a
+ * validation process; it reads no storage. Each refusal message is the one activation reports.
+ */
+export function validateOrdinaryActivation(work:OrdinaryActivationWork,policy:OrderedLiveUpdateCutPolicy):Exclude<OrdinaryActivationValidation,{kind:"capacity-refused"|"retry"}>{
+  const {document,currentPath,baselineBytes}=work,validateRegistration=createLiveMarkdownRegistrationValidator(policy);
+  const base=validateRegistration({document,currentPath,checkpoint:baselineBytes});
+  if(base.kind!=="accepted")return {kind:"refused",message:"Native activation does not match the ordinary source."};
+  const baseline={checkpoint:{updateDigest:base.evidence.checkpoint.updateDigest,ranges:base.evidence.checkpoint.ranges},
+    projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength};
+  if(!work.cut)return {kind:"accepted",baseline};
+  try{checkOrdinaryActivationHistory(work,work.cut,baseline,validateRegistration,createLiveMarkdownJournalValidator(policy));}
+  catch(error){return {kind:"refused",message:error instanceof Error?error.message:String(error)};}
+  return {kind:"accepted",baseline};
+}
+function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNullable<OrdinaryActivationWork["cut"]>,baseline:OrdinaryActivationBaseline,
+  validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>,validateJournal:ReturnType<typeof createLiveMarkdownJournalValidator>){
+  const {document,baselineBytes}=work,{source,fullState,history:{rows,updates,moment},maxBytesPerDrain}=cut;
+  let charged=cut.history.charged;
+  const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   const normalize=(suffix:readonly Uint8Array[],candidate:Uint8Array)=>{
     const result=validateJournal({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix,candidate});
     requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");return result.evidence;
@@ -116,8 +168,6 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
     "Native activation differs from the complete ordinary CRDT history.");
-  const moment=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
-    WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   let momentMatches=moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&moment.path===source.currentPath&&
     moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   if(!momentMatches){
@@ -134,6 +184,14 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     momentMatches=prefix.projectedMarkdownSha256===source.sourceDigest&&prefix.projectedMarkdownByteLength===source.sourceByteLength;
   }
   requireValue(momentMatches,"Native activation source moment does not project the captured source.");
+}
+/**
+ * Accepts a capture whose validation passed on `history`, in the transaction that registers it. A write
+ * since that read refuses it as stale, so the transaction never registers evidence for another history.
+ */
+export function verifyOrdinaryActivationCut(storage:StorageContext,input:HistoryInput&{baseline:OrdinaryActivationBaseline;history:OrdinaryActivationHistory}):VerifiedOrdinaryActivationCut{
+  const {source,document,baseline,history}=input;
+  if(!isDeepStrictEqual(readOrdinaryActivationHistory(storage,input),history))throw new ServiceActivationStaleCut();
   const evidence={version:1 as const,document:structuredClone(document),currentPath:source.currentPath,
     checkpoint:{updateDigest:baseline.checkpoint.updateDigest,ranges:baseline.checkpoint.ranges.map(row=>({...row}))},
     projectedMarkdownSha256:baseline.projectedMarkdownSha256,projectedMarkdownByteLength:baseline.projectedMarkdownByteLength};

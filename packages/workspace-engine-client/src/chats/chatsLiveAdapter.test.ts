@@ -1,5 +1,5 @@
 import { ProtocolShapeError } from "../wireSchema";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
 import type { JsonValue, Request, Response } from "../protocol";
 import {
@@ -28,7 +28,7 @@ type ChatRequestCase = {
 
 const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.channelCreate, params: { channelId: "c", name: "C", kind: "channel" } },
-  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent" } },
+  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent", agentId: "default", name: "Nova" } },
   { method: CHATS_METHOD.channelEnsureGeneral, params: { channelId: "general" } },
   { method: CHATS_METHOD.channelFindBySlug, params: { slug: "general" } },
   { method: CHATS_METHOD.channelsList, params: {} },
@@ -89,6 +89,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { runId: "run_1" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,
@@ -139,9 +140,8 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   },
   {
     method: CHATS_METHOD.dispatchEnqueue,
-    params: { triggerMessageId: "m", threadId: "t" },
+    params: { triggerMessageId: "m", threadId: "t", agentId: "default" },
   },
-  { method: CHATS_METHOD.dispatchRecordEligibleTriggers, params: {} },
   { method: CHATS_METHOD.dispatchClaimNextPending, params: { runId: "r" } },
   { method: CHATS_METHOD.dispatchListPending, params: {} },
   { method: CHATS_METHOD.dispatchOpenRuns, params: {} },
@@ -155,7 +155,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.dispatchRecentCount, params: { threadId: "t", sinceMs: 0 } },
   {
     method: CHATS_METHOD.dispatchFailPendingForThread,
-    params: { threadId: "t", reason: "stop" },
+    params: { threadId: "t", agentId: "default", reason: "stop" },
   },
   {
     method: CHATS_METHOD.dispatchRecordRunMessage,
@@ -252,6 +252,7 @@ const bookmark = {
 const dispatch = {
   workspaceId: "workspace",
   triggerMessageId: "trigger",
+  agentId: "default",
   threadId: "thread",
   state: "pending",
   attemptCount: 0,
@@ -263,6 +264,7 @@ const run = {
   runId: "run",
   threadId: "thread",
   triggerMessageId: "trigger",
+  agentId: "default",
   command: "codex",
   startedAtMs: 3,
   failureHandled: false,
@@ -931,6 +933,17 @@ describe("ChatsLiveAdapter", () => {
     ).resolves.toBe("channel");
   });
 
+  it("moves a group named like an agent's chat to another slug when that chat is made", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "group", name: "My agent codex" });
+
+    const chat = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "codex", name: "Codex" });
+
+    expect(chat.slug).toBe("my-agent-codex");
+    const group = (await adapter.listChannels({ workspaceId: "workspace" })).find((channel) => channel.channelId === "group");
+    expect(group).toMatchObject({ name: "My agent codex", slug: expect.stringMatching(/^my-agent-codex-[0-9a-f]{64}$/) });
+  });
+
   it("matches native reaction validation for keycaps and ZWJ atoms", async () => {
     const loopback = new ChatsLoopbackEngine();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
@@ -1422,6 +1435,49 @@ describe("automation authors", () => {
   });
 });
 
+describe("loopback idempotency", () => {
+  it("refuses a reused key whose message names other agents or another author agent", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const human = { kind: "human" as const, displayName: "Sam" };
+    const agent = { kind: "agent" as const, displayName: "Nova" };
+    const start = { authorActorKey: null, workspaceId: "workspace", channelId: "channel", threadId: "thread", messageId: "first", idempotencyKey: "start", author: human, body: "Hello" };
+    await adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova", "codex"] });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova"] })).resolves.toMatchObject({ message: { id: "first" } });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["nova"] })).rejects.toThrow("idempotency-key-reuse-mismatch");
+    // The engine checks the ids before it looks up a retry, so one id can't stand for two.
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex,nova"] })).rejects.toThrow("invalid-input");
+    const agentStart = { ...start, threadId: "agent-thread", messageId: "opened", idempotencyKey: "opened", author: agent, authorAgentId: "nova" };
+    await adapter.startChannelThread(agentStart);
+    await expect(adapter.startChannelThread({ ...agentStart, authorAgentId: "codex" })).rejects.toThrow("idempotency-key-reuse-mismatch");
+
+    const send = { authorActorKey: null, workspaceId: "workspace", threadId: "thread", body: "Done" };
+    await adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["nova"] });
+    await expect(adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["codex"] }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+    await adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "nova" });
+    await expect(adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "codex" }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+  });
+});
+
+describe("link authors", () => {
+  it("cannot be written through either local write method", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Trip" });
+    const link = { kind: "link", displayName: "Guest", grantId: "grant-1", principalId: "principal-1" } as const;
+    // @ts-expect-error Only the relay writes a link author.
+    await expect(adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: link, body: "Hi" }))
+      .rejects.toThrow("invalid-sender");
+    const { thread } = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      author: { kind: "human", displayName: "Ice" }, body: "Hi" });
+    // @ts-expect-error Only the relay writes a link author.
+    await expect(adapter.sendMessage({ authorActorKey: null, workspaceId: "workspace", threadId: thread.id, author: link, body: "Hi" }))
+      .rejects.toThrow("invalid-sender");
+    expect((await adapter.listMessages({ workspaceId: "workspace", threadId: thread.id })).map((message) => message.author.kind)).toEqual(["human"]);
+  });
+});
+
 describe("local chat actor key transport", () => {
   it("passes admission keys through the native write door and preserves the own-store column on reads", async () => {
     const key = '{"kind":"installation","installationId":"device"}';
@@ -1450,4 +1506,15 @@ it("returns exactly one chat mention page even when an empty filtered page has a
   await expect(adapter.fileMentionsPage({workspaceId:"workspace",scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"})).resolves.toEqual(page);
   expect(requests).toHaveLength(1);
   expect(requests[0]).toMatchObject({workspace:WORKSPACE,method:CHATS_METHOD.attachmentsListFileMentions,params:{scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"}});
+});
+
+it("reads one conversation Links page without draining or accepting another workspace",async()=>{
+  const page={versionId:"main",subject:{channelWireId:"wire"},entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"next"};
+  const sendRequest=vi.fn(async(request:Request):Promise<Response>=>({id:request.id,result:page}));
+  const adapter=new ChatsLiveAdapter({sendRequest,close(){}},WORKSPACE,{workspaceId:"workspace"});
+  expect(await adapter.linksPage({workspaceId:"workspace",channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:2,cursor:"previous"})).toEqual(page);
+  expect(sendRequest).toHaveBeenCalledTimes(1);
+  expect(sendRequest.mock.calls[0]?.[0]).toMatchObject({method:CHATS_METHOD.conversationLinks,params:{channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:2,cursor:"previous"}});
+  await expect(adapter.linksPage({workspaceId:"other",channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:0})).rejects.toThrow();
+  expect(sendRequest).toHaveBeenCalledTimes(1);
 });

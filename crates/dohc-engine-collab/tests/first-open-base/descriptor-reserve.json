@@ -1,1 +1,15 @@
-{"known":{"relayDatabaseNamespace":"history","workspaceId":"工作区-ü","objectId":"objét-🎉","currentPath":"notes/café \"q\"\\\u0001.md","replicationEpoch":"epoch-ü","streamIdentity":"stream","baseOriginId":"relay-origin-ü","sourceMomentId":"moment-ü","sourceDigest":"41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d","sourceByteLength":2097152},"reserve":856}
+{
+  "known": {
+    "relayDatabaseNamespace": "history",
+    "workspaceId": "工作区-ü",
+    "objectId": "objét-🎉",
+    "currentPath": "notes/café \"q\"\\\u0001.md",
+    "replicationEpoch": "epoch-ü",
+    "streamIdentity": "stream",
+    "baseOriginId": "relay-origin-ü",
+    "sourceMomentId": "moment-ü",
+    "sourceDigest": "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+    "sourceByteLength": 2097152
+  },
+  "reserve": 876
+}

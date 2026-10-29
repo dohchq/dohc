@@ -26,6 +26,8 @@ Record sync continues. Agent reads name `collection.yaml` and ask for an update;
 Unreadable and newer file policies hold policy-dependent capture. Malformed policies use the engine's baseline capture rules.
 Each of these policy failures stops file search.
 
-In `dohc-settings.json` and `.dohc/settings.local.json`, an unknown key leaves the other settings in effect.
+In `dohc-settings.json` and `.dohc/local/settings.local.json`, an unknown key leaves the other settings in effect.
+`dohc-settings.json` uses `"version": 2`. dohc reads a version 1 file's agent as the `default` entry under `agents` and writes version 2 on its next save.
+`agents` keeps each agent by id, so a mistake in one entry turns off only that agent.
 One Notices row names the file and ignored keys. Saves preserve those keys and their values.
 Use **Try again** after fixing the file. Dismissing the toast keeps its Notices row.

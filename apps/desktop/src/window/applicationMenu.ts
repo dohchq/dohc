@@ -95,7 +95,7 @@ export function buildMenuTemplate(options: {
       { role: "hideOthers" },
       { role: "unhide" },
       { type: "separator" },
-      { role: "quit", label: "Quit dohc" },
+      { role: "quit", label: "Quit dohc", accelerator: shortcutAccelerators("quit", options.platform)[0] },
     ],
   };
   const macEditItems: MenuItemConstructorOptions[] = [
@@ -170,6 +170,11 @@ export function buildMenuTemplate(options: {
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
         { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
+        // A schedule can keep dohc running with no window, and GNOME hides the
+        // tray icon that would quit it, so Linux quits from File.
+        ...(options.platform === "linux"
+          ? [{ type: "separator" }, { role: "quit", label: "Quit", accelerator: shortcutAccelerators("quit", options.platform)[0] }] as const
+          : []),
       ],
     },
     // The editor answers Undo and Redo. macOS adds the items of Electron's

@@ -8,11 +8,19 @@ import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
 
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
+import { compileOwner } from "./stage-agent-probe.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const ownerTarget = "aarch64-apple-darwin";
+/** The platforms that build apps under crates/dohc-compiler-owner, and its Rust target on each. */
+const ownerTargets = { darwin: "aarch64-apple-darwin", linux: "x86_64-unknown-linux-gnu" };
 const ownerCrate = "crates/dohc-compiler-owner";
+const windowsOwnerSource = "src/workspaces/windowsCompilerOwner.cs";
+
+/** Builds the Windows job owner with the .NET Framework compiler that ships with Windows. */
+export function compileWindowsCompilerOwner(outfile, sourceRoot = desktopRoot) {
+  return compileOwner([join(sourceRoot, windowsOwnerSource)], outfile, "CompilerJob");
+}
 
 function compilerFiles(platform, arch) {
   const native = `node_modules/@esbuild/${platform}-${arch}`;
@@ -29,11 +37,11 @@ function refuseIntelMac(platform, arch) {
   if (platform === "darwin" && arch !== "arm64") throw new Error("The packaged app compiler requires macOS arm64. dohc has no Intel Mac build.");
 }
 
-// Windows x64 and Apple silicon Macs build apps; Linux ships only the esbuild
-// binary that Collection actions compile with.
+// Windows x64, Apple silicon Macs and Linux x64 build apps. Linux arm64 ships
+// only the esbuild binary that Collection actions compile with.
 function stagedFiles(platform, arch) {
-  if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "windowsCompilerJob.ps1"] : undefined;
-  if (platform === "darwin") return [...compilerFiles(platform, arch), "compiler-owner"];
+  if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "compiler-owner.exe"] : undefined;
+  if (platform === "darwin" || platform === "linux" && arch === "x64") return [...compilerFiles(platform, arch), "compiler-owner"];
   if (platform !== "linux" || !["arm64", "x64"].includes(arch)) return undefined;
   const native = `node_modules/@esbuild/${platform}-${arch}`;
   return ["node_modules/esbuild/LICENSE.md", `${native}/package.json`, `${native}/bin/esbuild`];
@@ -53,7 +61,7 @@ export async function requireAppCompiler(root = join(desktopRoot, "resources/app
   const files = stagedFiles(platform, arch);
   if (!files) return;
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  const node = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
+  const node = PINNED_NODE[`${platform}-${arch}`];
   if (node && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== node.sha256) ||
       manifest.platform !== platform || manifest.arch !== arch ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
@@ -103,7 +111,7 @@ export function archiveMember(archive, name) {
 /** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
 export async function readPinnedCompilerNode(options = {}) {
   const target = `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
-  const node = target.startsWith("linux-") ? undefined : PINNED_NODE[target];
+  const node = PINNED_NODE[target];
   if (!node) throw new Error(`App compiler has no pinned Node for ${target}.`);
   if (options.nodeExecutable) {
     const bytes = await readFile(options.nodeExecutable);
@@ -121,8 +129,9 @@ export async function readPinnedCompilerNode(options = {}) {
   return bytes;
 }
 
-/** Builds crates/dohc-compiler-owner for Apple silicon. */
-async function buildCompilerOwner(sourceRoot) {
+/** Builds crates/dohc-compiler-owner for this platform's target. */
+async function buildCompilerOwner(sourceRoot, platform) {
+  const ownerTarget = ownerTargets[platform];
   const repoRoot = resolve(sourceRoot, "../..");
   const targetDir = join(repoRoot, "target");
   try {
@@ -134,6 +143,19 @@ async function buildCompilerOwner(sourceRoot) {
   return join(targetDir, ownerTarget, "release", "dohc-compiler-owner");
 }
 
+/** csc output is not byte-reproducible, so an unchanged source and recipe reuse the checked staged owner. */
+async function stageWindowsCompilerOwner(sourceRoot, destination, staging) {
+  const sources = { [windowsOwnerSource]: sha256(await readFile(join(sourceRoot, windowsOwnerSource))) };
+  // These modules hold the compile recipe; hash the running copies, not files under sourceRoot.
+  for (const name of ["stage-app-compiler.mjs", "stage-agent-probe.mjs"]) sources[`scripts/${name}`] = sha256(await readFile(new URL(`./${name}`, import.meta.url)));
+  const current = await readFile(join(destination, "manifest.json"), "utf8").then(JSON.parse, () => null);
+  const previous = join(destination, "compiler-owner.exe"), owner = join(staging, "compiler-owner.exe");
+  if (JSON.stringify(current?.sources) === JSON.stringify(sources) &&
+      await readFile(previous).then(bytes => sha256(bytes) === current.files?.["compiler-owner.exe"], () => false)) await cp(previous, owner);
+  else await compileWindowsCompilerOwner(owner, sourceRoot);
+  return sources;
+}
+
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
@@ -142,7 +164,7 @@ export async function stageAppCompiler(options = {}) {
   if (!files) return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const pinned = platform === "linux" ? undefined : PINNED_NODE[`${platform}-${arch}`];
+  const pinned = PINNED_NODE[`${platform}-${arch}`];
   // A temporary destination reuses the copy that development staging keeps.
   const stagedNodePaths = pinned ? [join(destination, pinned.file), join(sourceRoot, "resources/app-compiler", pinned.file)] : [];
   const node = pinned ? await readPinnedCompilerNode({ platform, arch, nodeExecutable: options.nodeExecutable, stagedNodePaths }) : null;
@@ -161,9 +183,10 @@ export async function stageAppCompiler(options = {}) {
     throw new Error(`App compiler requires ${nativePackage}. Install it with pnpm install --cpu=current --cpu=${arch}.`);
   }
   if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error(`App compiler requires ${nativePackage} 0.28.1.`);
-  const owner = platform === "darwin" ? await buildCompilerOwner(sourceRoot) : null;
+  const owner = files.includes("compiler-owner") ? await buildCompilerOwner(sourceRoot, platform) : null;
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
+  let ownerSources;
   try {
     for (const path of files) await mkdir(dirname(join(staging, path)), { recursive: true });
     if (!node) {
@@ -178,7 +201,8 @@ export async function stageAppCompiler(options = {}) {
       const binary = platform === "win32" ? "esbuild.exe" : "bin/esbuild";
       for (const file of ["package.json", binary]) await cp(join(platformRoot, file), join(staging, "node_modules", nativePackage, file));
       if (platform === "win32") {
-        for (const file of ["compilerProcessRelay.mjs", "windowsCompilerJob.ps1"]) await cp(join(sourceRoot, "src/workspaces", file), join(staging, file));
+        await cp(join(sourceRoot, "src/workspaces/compilerProcessRelay.mjs"), join(staging, "compilerProcessRelay.mjs"));
+        ownerSources = await stageWindowsCompilerOwner(sourceRoot, destination, staging);
       } else {
         await cp(owner, join(staging, "compiler-owner"));
         await chmod(join(staging, "compiler-owner"), 0o755);
@@ -195,7 +219,7 @@ export async function stageAppCompiler(options = {}) {
     const identities = {};
     for (const path of files) identities[path] = sha256(await readFile(join(staging, path)));
     const runtime = pinned ? { nodeVersion: NODE_VERSION, nodeSha256: pinned.sha256 } : {};
-    await writeFile(join(staging, "manifest.json"), JSON.stringify({ ...runtime, platform, arch, files: identities }, null, 2));
+    await writeFile(join(staging, "manifest.json"), JSON.stringify({ ...runtime, platform, arch, ...(ownerSources && { sources: ownerSources }), files: identities }, null, 2));
     await requireAppCompiler(staging, platform, arch);
     const current = await readFile(join(destination, "manifest.json"), "utf8").catch(error => { if (error.code === "ENOENT") return null; throw error; });
     if (current === await readFile(join(staging, "manifest.json"), "utf8")) {

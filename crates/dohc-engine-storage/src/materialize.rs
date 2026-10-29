@@ -450,6 +450,35 @@ pub fn pending_switch_jobs_in(
         .map_err(StorageError::corrupt_public)
 }
 
+/// Without statistics SQLite picks the status index and reads every pending
+/// job, so the query names its index.
+fn pending_merge_deletes_sql() -> String {
+    format!(
+        "SELECT {JOB_COLUMNS} FROM materialization_jobs \
+         INDEXED BY idx_materialization_jobs_pending_delete_preimage \
+         WHERE status = 'pending' AND operation = 'delete' AND job_id GLOB 'merge-mat_*' \
+           AND workspace_id IN (?1, '') AND preimage_present = 1 AND preimage_sha256 = ?2 \
+         ORDER BY created_at_ms ASC, job_id ASC"
+    )
+}
+
+/// Pending merge deletes in a workspace, including legacy unscoped rows, that
+/// expect `preimage_sha256` at their path.
+pub(crate) fn pending_merge_deletes_expecting(
+    conn: &Connection,
+    workspace_id: &str,
+    preimage_sha256: &str,
+) -> Result<Vec<MaterializationJob>, StorageError> {
+    let mut stmt = conn
+        .prepare_cached(&pending_merge_deletes_sql())
+        .map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id, preimage_sha256], row_to_job)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
 pub(crate) fn has_pending_job_for_path(
     conn: &Connection,
     workspace_id: &str,
@@ -937,32 +966,158 @@ pub struct RetainedDisplacement {
     pub mtime: String,
     pub ctime: String,
     pub changed_at_ms: i64,
+    /// The source's volume cannot refuse to unlink a file a process has open,
+    /// so the sweep never releases it. Only an explicit delete does.
+    pub busy_check_unsupported: bool,
+}
+
+/// What `release_blocked` records for a volume that cannot refuse to unlink
+/// an open file.
+const BUSY_CHECK_UNSUPPORTED: &str = "busy-check-unsupported";
+
+const RETAINED_COLUMNS: &str = "displacement_id,job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms,release_blocked IS NOT NULL";
+
+fn retained_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RetainedDisplacement> {
+    Ok(RetainedDisplacement {
+        displacement_id: r.get(0)?,
+        job_id: r.get(1)?,
+        workspace_id: r.get(2)?,
+        target_path: r.get(3)?,
+        source_path: r.get(4)?,
+        device: r.get(5)?,
+        inode: r.get(6)?,
+        digest: r.get(7)?,
+        size: r.get(8)?,
+        mtime: r.get(9)?,
+        ctime: r.get(10)?,
+        changed_at_ms: r.get(11)?,
+        busy_check_unsupported: r.get(12)?,
+    })
+}
+
+fn release_blocked(row: &RetainedDisplacement) -> Option<&'static str> {
+    row.busy_check_unsupported.then_some(BUSY_CHECK_UNSUPPORTED)
 }
 
 pub(crate) fn retained_rows(
     conn: &Connection,
     after: i64,
 ) -> Result<Vec<RetainedDisplacement>, StorageError> {
-    let mut q = conn.prepare_cached("SELECT displacement_id,job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms FROM materialization_retained WHERE displacement_id>?1 ORDER BY displacement_id LIMIT 128").map_err(StorageError::corrupt)?;
-    q.query_map([after], |r| {
-        Ok(RetainedDisplacement {
-            displacement_id: r.get(0)?,
-            job_id: r.get(1)?,
-            workspace_id: r.get(2)?,
-            target_path: r.get(3)?,
-            source_path: r.get(4)?,
-            device: r.get(5)?,
-            inode: r.get(6)?,
-            digest: r.get(7)?,
-            size: r.get(8)?,
-            mtime: r.get(9)?,
-            ctime: r.get(10)?,
-            changed_at_ms: r.get(11)?,
+    let mut q = conn
+        .prepare_cached(&format!("SELECT {RETAINED_COLUMNS} FROM materialization_retained WHERE displacement_id>?1 ORDER BY displacement_id LIMIT 128"))
+        .map_err(StorageError::corrupt)?;
+    q.query_map([after], retained_row)
+        .map_err(StorageError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(StorageError::corrupt)
+}
+
+/// The retained row with `id`, if it is still retained.
+pub(crate) fn retained_row_by_id(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<RetainedDisplacement>, StorageError> {
+    use rusqlite::OptionalExtension;
+    conn.prepare_cached(&format!(
+        "SELECT {RETAINED_COLUMNS} FROM materialization_retained WHERE displacement_id=?1"
+    ))
+    .map_err(StorageError::corrupt)?
+    .query_row([id], retained_row)
+    .optional()
+    .map_err(StorageError::corrupt)
+}
+
+/// How many of a workspace's retained originals the sweep can never release,
+/// and their logical size in bytes. Read from the rows alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetainedSummary {
+    pub count: i64,
+    pub bytes: i64,
+}
+
+pub(crate) fn retained_summary(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<RetainedSummary, StorageError> {
+    conn.prepare_cached(
+        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM materialization_retained \
+         WHERE workspace_id=?1 AND release_blocked IS NOT NULL",
+    )
+    .map_err(StorageError::corrupt)?
+    .query_row([workspace_id], |r| {
+        Ok(RetainedSummary {
+            count: r.get(0)?,
+            bytes: r.get(1)?,
         })
     })
+    .map_err(StorageError::corrupt)
+}
+
+/// A workspace's retained originals the sweep can never release, oldest
+/// first, after `after`, whose quiet period ended by `quiet_before_ms`.
+/// Unfinished jobs and holds are the caller's to check.
+pub(crate) fn blocked_retained_rows(
+    conn: &Connection,
+    workspace_id: &str,
+    quiet_before_ms: i64,
+    after: i64,
+    limit: i64,
+) -> Result<Vec<RetainedDisplacement>, StorageError> {
+    conn.prepare_cached(&format!(
+        "SELECT {RETAINED_COLUMNS} FROM materialization_retained \
+         WHERE workspace_id=?1 AND release_blocked IS NOT NULL AND changed_at_ms<=?2 \
+           AND displacement_id>?3 \
+         ORDER BY displacement_id LIMIT ?4"
+    ))
+    .map_err(StorageError::corrupt)?
+    .query_map(
+        rusqlite::params![workspace_id, quiet_before_ms, after, limit],
+        retained_row,
+    )
     .map_err(StorageError::corrupt)?
     .collect::<Result<_, _>>()
     .map_err(StorageError::corrupt)
+}
+
+/// Whether recovery may still need `row`'s original: its job has not
+/// finished, or an open or kept displacement names the same staged file.
+pub(crate) fn retained_original_needed(
+    conn: &Connection,
+    row: &RetainedDisplacement,
+) -> Result<bool, StorageError> {
+    let name = row.source_path.rsplit('/').next().unwrap_or_default();
+    conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM materialization_jobs \
+             WHERE job_id=?1 AND status='pending') \
+         OR EXISTS (SELECT 1 FROM materialization_displacements \
+             WHERE job_id=?1 AND displaced_name=?2)",
+    )
+    .map_err(StorageError::corrupt)?
+    .query_row([row.job_id.as_str(), name], |r| r.get(0))
+    .map_err(StorageError::corrupt)
+}
+
+/// Record whether row `row`'s volume can refuse to unlink an open file, as
+/// read from its source's descriptor, unless the row changed since.
+pub(crate) fn record_retained_busy_check(
+    conn: &Connection,
+    row: &RetainedDisplacement,
+    unsupported: bool,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE materialization_retained SET release_blocked=?2 \
+         WHERE displacement_id=?1 AND device=?3 AND inode=?4 AND digest=?5 AND changed_at_ms=?6",
+        rusqlite::params![
+            row.displacement_id,
+            unsupported.then_some(BUSY_CHECK_UNSUPPORTED),
+            row.device,
+            row.inode,
+            row.digest,
+            row.changed_at_ms
+        ],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
 }
 
 pub(crate) fn with_full_commit<T>(
@@ -982,7 +1137,7 @@ pub(crate) fn with_full_commit<T>(
 pub(crate) fn retain(conn: &Connection, row: &RetainedDisplacement) -> Result<i64, StorageError> {
     // A lost row is reconstructed from the staged name during recovery.
     // Keep the ordinary NORMAL commit off the per-save fsync path.
-    conn.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms]).map_err(StorageError::persist)?;
+    conn.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms,release_blocked) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms,release_blocked(row)]).map_err(StorageError::persist)?;
     conn.query_row(
         "SELECT displacement_id FROM materialization_retained WHERE source_path=?1",
         [&row.source_path],
@@ -1006,10 +1161,45 @@ pub(crate) fn record_retained_read(
     // A read version can be overwritten before recovery or source release.
     // FULL keeps those exact bytes even when the staged inode later changes.
     with_full_commit(conn, |tx| {
-        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6,device=?9,inode=?10 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms,new.device,new.inode]).map_err(StorageError::persist)?;
+        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6,device=?9,inode=?10,release_blocked=?11 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms,new.device,new.inode,release_blocked(new)]).map_err(StorageError::persist)?;
         if updated == 1 && new.digest != old.digest {
             tx.execute("INSERT OR IGNORE INTO materialization_displacement_reads(workspace_id,displacement_id,job_id,target_path,sha256,bytes,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![old.workspace_id,format!("retained:{}",old.displacement_id),old.job_id,old.target_path,new.digest,bytes,now_ms]).map_err(StorageError::persist)?;
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write that finds its target occupied runs this lookup, so it must
+    /// read its index instead of scanning the pending jobs.
+    #[test]
+    fn pending_merge_delete_lookup_reads_its_index() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("pending-merge-deletes").unwrap();
+        let store = crate::EngineStore::open(&dir.join("engine.db"), 1).unwrap();
+        let details = store
+            .read_with(|conn| {
+                let mut plan = conn.prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    pending_merge_deletes_sql()
+                ))?;
+                plan.query_map(["ws", "sha"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_materialization_jobs_pending_delete_preimage")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.starts_with("SCAN materialization_jobs")),
+            "{details:?}"
+        );
+    }
 }

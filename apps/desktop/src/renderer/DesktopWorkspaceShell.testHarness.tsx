@@ -18,6 +18,7 @@ import type {
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
+  CollectionCopiesLeft,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationButtonsResult,
@@ -50,6 +51,8 @@ import type {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   OwnerLiveDocumentActionPayload,
+  RetryOwnerLiveQuarantinePayload,
+  StopOwnerLiveDocumentResult,
   OwnerLiveDocumentsResult,
   OwnerLiveRefusalsResult,
   RetryOwnerLiveSharePayload,
@@ -76,7 +79,6 @@ import type {
   SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -163,9 +165,19 @@ const IDLE_UPDATE_STATE: UpdateStateEvent = {
   canInstall: false,
 };
 
+const AVAILABLE_UPDATE_STATE: UpdateStateEvent = {
+  status: "available",
+  message: "dohc 1.2.4 is available.",
+  currentVersion: "1.2.3",
+  channel: "latest",
+  canCheck: false,
+  canInstall: false,
+  version: "1.2.4",
+};
+
 export const READY_UPDATE_STATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to install it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,
@@ -316,7 +328,11 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const collectionCopiesLeftCallbacks = new Set<() => void>();
+  const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
+  const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
+  let chatDispatchPaused = false;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
@@ -377,7 +393,14 @@ function makeBaseBridge(
       async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
     ),
     stopOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<StopOwnerLiveDocumentResult> => ({ keptEdits: "none" }),
+    ),
+    retryOwnerLiveQuarantine: vi.fn(
+      async (_payload: RetryOwnerLiveQuarantinePayload): Promise<void> => undefined,
+    ),
+    saveOwnerLiveRecoveryCopy: vi.fn(
+      async (payload: import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyPayload): Promise<import("../ipc/bridgeContract").SaveOwnerLiveRecoveryCopyResult> =>
+        ({ copyPath: payload.path.replace(/\.md$/u, " (recovered).md"), packagePath: payload.path.replace(/\.md$/u, " (recovered).dohc-recovery.json"), storedOn: "this-computer", keptEdits: "kept" }),
     ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
@@ -453,7 +476,11 @@ function makeBaseBridge(
     setTitlebarTheme: vi.fn(async () => undefined),
     onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
+    onVersionRound: vi.fn(() => () => {}),
+    answerVersionRound: vi.fn(async () => undefined),
     onChatDispatchNotices: vi.fn(() => () => {}),
+    onScheduleHostChanged: vi.fn(() => () => {}),
+    readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
     // This computer's agent is idle until a test pushes a run.
     readAgentRunState: vi.fn(
       async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({ workspaceId, revision: 0, active: false }),
@@ -467,6 +494,18 @@ function makeBaseBridge(
     emitAgentRunState: (event: AgentRunStateEvent) => {
       for (const callback of [...agentRunStateCallbacks]) callback(event);
     },
+    // Agent dispatch runs until a test pauses it.
+    readChatDispatchPaused: vi.fn(async () => ({ paused: chatDispatchPaused })),
+    setChatDispatchPaused: vi.fn(async ({ paused }: { paused: boolean }) => {
+      chatDispatchPaused = paused;
+      for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
+    }),
+    onChatDispatchPaused: vi.fn((listener: (event: { paused: boolean }) => void) => {
+      chatDispatchPausedCallbacks.add(listener);
+      return () => {
+        chatDispatchPausedCallbacks.delete(listener);
+      };
+    }),
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
@@ -485,12 +524,16 @@ function makeBaseBridge(
       truncated: false as const,
       contentHash: "a".repeat(64),
     })),
-    // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call — so a fake that omits it makes every
-    // no-call pin on that read pass for the wrong reason.
-    linksIn: vi.fn(async () => null),
+    // About's Links reads these. Its read of the chats that link to a file is
+    // an ENGINE CAPTURE call, so a fake that omits it makes every no-call pin
+    // on that read pass for the wrong reason.
+    linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
+    // About for a conversation reads the files it mentions.
+    chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(async ({ channelWireId }) => ({
+      versionId: "main", subject: { channelWireId }, entries: [], unchecked: [], complete: true, indexBuilding: false,
+      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     linksEdges: vi.fn(async () => ({ versionId: "main", files: [
       {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
       entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
@@ -522,6 +565,10 @@ function makeBaseBridge(
     getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
     checkForUpdates: vi.fn(async () => ({
       checked: true,
+      state: AVAILABLE_UPDATE_STATE,
+    })),
+    downloadUpdate: vi.fn(async () => ({
+      accepted: true,
       state: READY_UPDATE_STATE,
     })),
     installUpdate: vi.fn(async () => ({
@@ -725,7 +772,27 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
+    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    emitCollectionCopiesLeftChanged: () => {
+      for (const callback of [...collectionCopiesLeftCallbacks]) callback();
+    },
+    onCollectionCopiesLeftChanged: vi.fn((listener: () => void) => {
+      collectionCopiesLeftCallbacks.add(listener);
+      return () => collectionCopiesLeftCallbacks.delete(listener);
+    }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false })),
+    onWorkspaceTrustChanged: vi.fn((_listener: (event: { workspaceId: string; trusted: boolean }) => void) => () => {}),
+    emitLiveDraftRecoveryChanged: (workspaceId: string) => {
+      for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
+    },
+    onLiveDraftRecoveryChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      liveDraftRecoveryCallbacks.add(listener);
+      return () => liveDraftRecoveryCallbacks.delete(listener);
+    }),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     emitWorkspaceActivated: (workspace: Workspace, file?: string) => {
       for (const callback of [...activatedCallbacks]) callback(workspace, file);
@@ -805,11 +872,7 @@ export function makeBridge(
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
-    // drive a real review card and a real version switch through them.
-    getTryInVersionState: vi.fn(
-      async (): Promise<TryInVersionStateResult> => ({ state: null }),
-    ),
-    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
+    // drive a real version switch through it.
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
         activeVersionId: "main", ...historyPageFields,

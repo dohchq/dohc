@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, UpdateStateEvent, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
 import { COPY_FAILURE } from "./ui/CopyButton";
@@ -689,19 +689,20 @@ describe("registry read failure", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
       ...windowBridge(),
     });
     render(<DesktopRoot />);
 
     expect(await screen.findByText("dohc does not have permission to use this file or folder.")).toBeTruthy();
     expect(document.body.textContent).not.toContain("EACCES");
-    // The window has no OS title bar, so the screen draws its own drag strip
-    // over its top edge without moving the message.
+    // The window has no OS title bar, so the screen lays the start screen's
+    // title bar over its top edge without moving the message.
     const page = screen.getByText("dohc couldn't read its workspace registry").parentElement!;
-    const strip = page.querySelector<HTMLElement>(":scope > .titlebar-drag");
+    const bar = page.querySelector<HTMLElement>(":scope > .absolute > header.titlebar-drag");
     expect(page.className).toContain("relative");
-    expect(strip?.className).toContain("absolute");
-    expect(strip?.style.height).toBe("40px");
+    expect(bar?.style.height).toBe("40px");
     fireEvent.click(screen.getByRole("button", { name: "Show technical details" }));
     const details = screen.getByRole("region", { name: "Technical details" });
     expect(details.textContent).toContain("Cause: Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\dohc-workspaces.json'");
@@ -987,9 +988,11 @@ describe("the window's title and menu commands", () => {
     platform: NodeJS.Platform;
     workspaces: Workspace[];
     registryFails?: boolean;
+    update?: UpdateStateEvent;
   }) {
     let menu: ((command: MenuCommand) => void) | null = null;
     const closeThisWindow = vi.fn(async () => undefined);
+    const downloadUpdate = vi.fn(async (_payload: object) => ({ accepted: true, state: options.update }));
     vi.stubGlobal("dohcDesktop", {
       windowRole: options.windowRole,
       platform: options.platform,
@@ -999,8 +1002,9 @@ describe("the window's title and menu commands", () => {
         return () => { if (menu === listener) menu = null; };
       }),
       closeThisWindow,
+      downloadUpdate,
       checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
-        checked: false, state: { status: "error", message: "This build does not update itself." },
+        checked: true, state: { status: "error", message: "feed returned 500", canCheck: true, failure: { step: "check", id: 1 } },
       })),
       getWorkspaceRegistry: vi.fn(async () => {
         if (options.registryFails) throw new Error("dohc could not read dohc-workspaces.json.");
@@ -1016,11 +1020,12 @@ describe("the window's title and menu commands", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
-      getUpdateState: () => new Promise(() => {}),
+      getUpdateState: () => options.update ? Promise.resolve(options.update) : new Promise(() => {}),
       onUpdateState: () => () => {},
     });
     return {
       closeThisWindow,
+      downloadUpdate,
       send: (command: MenuCommand) => act(() => menu?.(command)),
       listening: () => menu !== null,
     };
@@ -1030,7 +1035,8 @@ describe("the window's title and menu commands", () => {
     const root = stub({ windowRole: "workspace", platform: "darwin", workspaces: [workspace("trip")] });
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
-    expect(document.title).toBe("trip");
+    // The title follows the workspace in an effect after the shell paints.
+    await waitFor(() => expect(document.title).toBe("trip"));
     expect(root.listening()).toBe(false);
   });
 
@@ -1050,11 +1056,27 @@ describe("the window's title and menu commands", () => {
     render(<DesktopRoot />);
     await screen.findByText("dohc couldn't read its workspace registry");
     expect(document.title).toBe("dohc");
+    // The screen subscribes to menu commands in an effect after it paints.
+    await waitFor(() => expect(root.listening()).toBe(true));
 
     root.send("check-updates");
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("No update check was started.");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not check for updates. feed returned 500");
 
     root.send("close-tab");
     expect(root.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
+  });
+
+  // Updates no longer download on their own, so this screen needs the button.
+  it("offers a found update on the registry error screen", async () => {
+    const available: UpdateStateEvent = {
+      status: "available", message: "dohc 1.2.4 is available.", currentVersion: "1.2.3", channel: "latest",
+      canCheck: false, canInstall: false, version: "1.2.4",
+    };
+    const root = stub({ windowRole: "workspace", platform: "win32", workspaces: [], registryFails: true, update: available });
+    render(<DesktopRoot />);
+    await screen.findByText("dohc couldn't read its workspace registry");
+
+    fireEvent.click(await screen.findByTestId("titlebar-update"));
+    await waitFor(() => expect(root.downloadUpdate).toHaveBeenCalledWith({}));
   });
 });

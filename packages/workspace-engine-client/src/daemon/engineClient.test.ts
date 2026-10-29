@@ -24,6 +24,7 @@ import {
   type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 it("tells a hosted document that is not ready from any other conflict", () => {
   const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
@@ -66,7 +67,7 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
       admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"b".repeat(64),journalCursor:9,authority:null,
       restore:{operationId:"restore",checkpointDigest:"c".repeat(64),checkpointBytes:checkpoint,proof:{
         proposalDigest:"d".repeat(64),candidateDigest:metadata.accepted.receipt.updateDigest,
-        preparation:{fence:{operation:{operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
+        preparation:{fence:{operation:{point:{journalCursor:0,receiptDigest:"e".repeat(64)},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
           hostId:"host",newFence:1,origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
           point:{journalCursor:0,receiptDigest:"e".repeat(64),markdownDigest:"f".repeat(64),projectionDigest:"a".repeat(64)}},
         nativeSourceManifestDigest:"b".repeat(64),admitted:metadata,checkpointDigest:"c".repeat(64),sourceRanges:[],recordedAtMs:10}}}]);
@@ -86,42 +87,65 @@ describe("private owner delivery transport", () => {
   it.each([-1,0.5,Number.MAX_SAFE_INTEGER+1,NaN,Infinity])("rejects an invalid retirement cursor before sending: %s",async cursor => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
     const sent=vi.fn();peer.onEnvelope=sent;
-    try {await expect(transport.ownerYDocRelease(request,target.binding,cursor)).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
+    try {await expect(transport.ownerYDocRelease(request,target.binding,{acceptedCursor:cursor})).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
     finally {transport.close();}
+  });
+  // A Try again names the kept edits its record holds, and the Stop says which edits its release took.
+  it("sends a Try again with only its kept edits, and reads the kept edits a Stop names", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    let answered="2".repeat(64);
+    peer.onEnvelope=e=>{
+      if (e.type!=="request") return;
+      expect(e.params).toEqual({binding:target.binding,keptSnapshot:"1".repeat(64)});
+      peer.send({type:"response",id:e.id,result:{stops:[{...stopTarget,state:"released",retirementOwed:false,keptSnapshot:answered,materialized:true}]}});
+    };
+    try {
+      await expect(transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"X"})).rejects.toThrow("Invalid kept edits snapshot.");
+      expect(await transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"1".repeat(64)})).toMatchObject({keptSnapshot:"2".repeat(64),materialized:true});
+      answered="NOT-HEX".padEnd(64,"0");
+      await expect(transport.ownerYDocRelease(request,target.binding,{keptSnapshot:"1".repeat(64)})).rejects.toThrow("Invalid Stop kept edits.");
+    } finally {transport.close();}
   });
   it.each(["valid", "negative", "extra", "unretired", "requested", "unbound"])("checks the deferred Stop contract: %s", async scenario => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
-    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",
+    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",materialized:false,
       ...(scenario==="unbound" ? {binding:null,relayDatabaseNamespace:""} : {}),
       deferred:{unsentEdits:scenario==="negative" ? -1 : 65,editable:false,...(scenario==="extra" ? {secret:"no"} : {})}};
     peer.onEnvelope=e=>{if (e.type==="request") peer.send({type:"response",id:e.id,result:{stops:[row]}});};
-    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, 0)).toEqual(row);
-      else await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);
+    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).toEqual(row);
+      else await expect(transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).rejects.toThrow(TypeError);
     } finally {transport.close();}
   });
   it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
+    // The first cancellation clears a finished Stop, which no list shows; the second finds none.
+    const finished = {...stopTarget, state: "released", retirementOwed: false};
+    let cleared = 0;
     peer.onEnvelope = e => {
       if (e.type !== "request") return;
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
-      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
-      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, state: action === "release" ? "released" : "requested"}]}});
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : action === "clear" ? {document: stopTarget.document} : {path: "a.md"});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? cleared++ === 0 ? [finished] : cleared === 2 ? [] : [finished, finished]
+        : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
-      expect((await transport.ownerYDocRelease(request, target.binding, 0)).state).toBe("released");
+      expect(await transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).toMatchObject({state: "released", materialized: true});
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
-      await transport.ownerYDocStopClear(request, "a.md");
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toEqual(finished);
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toBeUndefined();
+      await expect(transport.ownerYDocStopClear(request, stopTarget.document)).rejects.toThrow("Invalid Stop cancellation response.");
     } finally {transport.close();}
   });
-  it.each(["binding", "state", "extra", "namespace"])("rejects an invalid Stop release response: %s", async scenario => {
+  it.each(["binding", "state", "extra", "namespace", "unmaterialized", "materialized text"])("rejects an invalid Stop release response: %s", async scenario => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
-    const row = {...stopTarget, state: "released", ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
+    const row = {...stopTarget, state: "released", materialized: true, ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true}
+      : scenario === "unmaterialized" ? {materialized: undefined} : scenario === "materialized text" ? {materialized: "yes"} : {relayDatabaseNamespace: ""})};
     peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
-    try {await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);}
+    try {await expect(transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).rejects.toThrow(TypeError);}
     finally {transport.close();}
   });
   it("requests a Stop by its saved key and acknowledges an unenrolled retirement",async () => {
@@ -1015,11 +1039,11 @@ describe("outbound backpressure", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const controller = new AbortController();
-    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, controller.signal).catch(error => error);
+    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, mode === "abort" ? controller.signal : undefined, undefined, mode === "cancelRequest" ? controller.signal : undefined).catch(error => error);
     let cancellation: Promise<void> | undefined;
     try {
       if (mode === "abort") controller.abort(new Error("cancelled"));
-      if (mode === "cancelRequest") cancellation = transport.cancelRequest(2);
+      if (mode === "cancelRequest") controller.abort();
       expect(await second).toBeInstanceOf(Error);
       peer.drain(); await cancellation; await nextImmediate();
       expect(peer.received.filter(envelope => envelope.type === "request" || envelope.type === "cancel"))
@@ -1787,9 +1811,10 @@ describe("request progress", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const queued = transport.sendRequest({ ...request(2, "queued"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
-    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress).catch(error => error);
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress, cancel.signal).catch(error => error);
     try {
-      await transport.cancelRequest(3);
+      cancel.abort();
       expect(await cancelled).toMatchObject({ wireError: { code: "CANCELLED" } });
       clock.mockReturnValue(400);
       peer.drain();
@@ -2570,7 +2595,25 @@ describe("EngineClient", () => {
     transport.close();
   });
 
-  it("cancels the wire request behind a caller id", async () => {
+  it("cancels only the rewrite when two pending requests share a caller id", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = envelope => envelopes.push(envelope);
+    const open = transport.sendRequest(request(1, "workspace.open"));
+    const cancel = new AbortController();
+    const rewrite = transport.sendRequest(request(1, "history.rewriteLinks"), undefined, undefined, cancel.signal);
+    cancel.abort(); await nextImmediate();
+    expect(envelopes).toMatchObject([{type: "request", id: 1, method: "workspace.open"},
+      {type: "request", id: 2, method: "history.rewriteLinks"}, {type: "cancel", id: 2}]);
+    peer.send({type: "error", id: 2, error: {code: "CANCELLED", message: "cancelled", retry: "no"}});
+    await expect(rewrite).rejects.toMatchObject({wireError: {code: "CANCELLED"}});
+    peer.send({type: "response", id: 1, result: {workspace: "other-workspace"}});
+    await expect(open).resolves.toMatchObject({id: 1, result: {workspace: "other-workspace"}});
+    transport.close();
+  });
+
+  it("cancels the exact wire request", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
     peer.acknowledge();
@@ -2578,8 +2621,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_242, "slow.open"));
-    await transport.cancelRequest(4_242);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_242, "slow.open"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "slow.open" },
@@ -2608,8 +2653,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"));
-    await transport.cancelRequest(4_243);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "sync.commitCursor" },
@@ -2631,11 +2678,13 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
+    const cancel = new AbortController();
     const settlement = transport.sendRequest({
       ...request(4_244, "liveApplication.settle"),
       deadlineMs: 25,
-    });
-    await transport.cancelRequest(4_244);
+    }, undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "liveApplication.settle", deadlineMs: 25 },
       { type: "cancel", id: 1 },
@@ -2781,6 +2830,19 @@ describe("EngineClient", () => {
     peer.send({ ...event, seq: 2 });
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
+    transport.close();
+  });
+
+  it("runs a handler registered inside an engine run inside that run", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const inside: boolean[] = [];
+    inEngineRun(() => transport.onEvent(() => inside.push(insideEngineRun())));
+    transport.onEvent(() => inside.push(insideEngineRun()));
+    peer.send({ type: "event", seq: 1, sessionGeneration: 7, name: "workspace.changed", payload: { paths: ["note.md"] } });
+    expect(inside).toEqual([true, false]);
     transport.close();
   });
 
@@ -3300,7 +3362,8 @@ describe("EngineClient", () => {
     const transport = client(peer, { maxBlobBytes: 6 });
     peer.acknowledge();
     await transport.ready();
-    const cancelled = transport.sendRequest(request(23, "blob.cancelled"));
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(23, "blob.cancelled"), undefined, undefined, cancel.signal);
     peer.send({
       type: "blobStart",
       requestId: 1,
@@ -3309,7 +3372,8 @@ describe("EngineClient", () => {
       sha256: null,
     });
     peer.sendRaw(blobChunkFrame(82, Buffer.from("abc"), false));
-    await transport.cancelRequest(23);
+    cancel.abort();
+    await nextImmediate();
     peer.send({
       type: "error",
       id: 1,

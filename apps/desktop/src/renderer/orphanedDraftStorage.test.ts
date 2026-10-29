@@ -36,6 +36,16 @@ it("writes version 1 on capture and replacement and restores both", () => {
   expect(loadStoredDrafts(now)).toEqual([expect.objectContaining(replacement)]);
 });
 
+// A deleted file's draft keeps saying so after a restart.
+it("restores why main set a draft aside, and refuses a reason it does not know", () => {
+  const recovery = { objectId: "object", updateBase64: "AAA=", recordId: "a".repeat(64), reason: "deleted" as const };
+  expect(storeDraft({ ...draft, recovery })).toBe(true);
+  expect(loadStoredDrafts(now)).toEqual([expect.objectContaining({ recovery })]);
+  clearStoredDrafts();
+  localStorage.setItem(key, JSON.stringify({ ...draft, version: 1, recovery: { ...recovery, reason: "unknown" } }));
+  expect(loadStoredDrafts(now)).toEqual([]);
+});
+
 it("preserves a superseded key another window changed before cleanup", () => {
   const original = JSON.stringify({...draft, version: 1});
   localStorage.setItem(key, original);

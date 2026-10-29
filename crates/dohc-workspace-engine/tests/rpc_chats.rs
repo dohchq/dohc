@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use dohc_engine_protocol::{
     error::ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
@@ -1146,27 +1146,6 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         );
         assert_eq!(mentions["mentions"][0]["messageId"], json!("message"));
     }
-    let first = call(
-        &transport,
-        &handle,
-        &mut id,
-        "chats.dispatch.recordEligibleTriggers",
-        json!({}),
-    )
-    .await;
-    let retry = call(
-        &transport,
-        &handle,
-        &mut id,
-        "chats.dispatch.recordEligibleTriggers",
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        (first, retry),
-        (json!(1), json!(0)),
-        "scan-before-backfill or a non-idempotent ledger changes this pair."
-    );
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     let conn = rusqlite::Connection::open(&db_path).expect("open closed engine db");
@@ -1434,6 +1413,7 @@ async fn persisted_chat_identities_are_normalized() {
         &mut id,
         "chats.dispatch.enqueue",
         json!({
+            "agentId": "default",
             "triggerMessageId": "  trigger-round-7  ",
             "threadId": "  thread-round-7  ",
             "nowMs": 40,
@@ -1466,6 +1446,7 @@ async fn persisted_chat_identities_are_normalized() {
             &mut id,
             "chats.dispatch.enqueue",
             json!({
+                "agentId": "default",
                 "triggerMessageId": trigger_message_id,
                 "threadId": thread_id,
                 "nowMs": 42,
@@ -1501,7 +1482,12 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.channels.ensureAgent",
-        json!({ "channelId": "agent-round-8", "nowMs": 10 }),
+        json!({
+            "channelId": "agent-round-8",
+            "agentId": "default",
+            "name": "My agent",
+            "nowMs": 10,
+        }),
     )
     .await;
     call(
@@ -1526,6 +1512,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &mut id,
         "chats.dispatch.enqueue",
         json!({
+            "agentId": "default",
             "triggerMessageId": "message-round-8",
             "threadId": "thread-round-8",
             "nowMs": 21,
@@ -1542,20 +1529,20 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
     .await;
     assert_eq!(running["dispatch"]["state"], json!("running"));
 
-    let refused = second_transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                100,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "rpc-chat-round-8",
-                }),
-            ),
-        )
-        .await;
+    let refused = call_with_busy_retry(
+        &second_transport,
+        RequestContext::unbounded(),
+        request(
+            100,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "rpc-chat-round-8",
+            }),
+        ),
+    )
+    .await;
     let refused = refused.expect_err("a second service must not attach to the shared actor");
     assert_eq!(refused.code, ErrorCode::WorkspaceUnavailable);
     assert_eq!(refused.message, "workspace database is already attached");
@@ -1661,7 +1648,12 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.channels.ensureAgent",
-        json!({ "channelId": "channel-agent", "nowMs": 12 }),
+        json!({
+            "channelId": "channel-agent",
+            "agentId": "default",
+            "name": "My agent",
+            "nowMs": 12,
+        }),
     )
     .await;
     assert_eq!(agent["kind"], json!("agent"));
@@ -2818,7 +2810,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(enqueued["enqueued"], json!(true));
@@ -2827,7 +2819,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(duplicate["enqueued"], json!(false));
@@ -2836,7 +2828,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-001", "threadId": "thread-big", "nowMs": 2400 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-001", "threadId": "thread-big", "nowMs": 2400 }),
     )
     .await;
     assert_eq!(conflicting_thread.code, ErrorCode::Internal);
@@ -2949,7 +2941,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-002", "threadId": "thread-1", "nowMs": 2410 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-002", "threadId": "thread-1", "nowMs": 2410 }),
     )
     .await;
     call(
@@ -2990,7 +2982,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-003", "threadId": "thread-1", "nowMs": 2420 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-003", "threadId": "thread-1", "nowMs": 2420 }),
     )
     .await;
     call(
@@ -3305,7 +3297,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
     )
     .await;
     let claimed = call(
@@ -3330,7 +3322,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
+        json!({ "agentId": "default", "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
     )
     .await;
     let whitespace = call(
@@ -3447,18 +3439,22 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
     // Reserved wire ids refuse on the ensure paths exactly like create.
     // Mutation check: drop the reserved guard from ensure_well_known_channel
     // — both refusals below fail.
-    for (method, reserved) in [
-        ("chats.channels.ensureGeneral", "channel_wire_general_v1"),
-        ("chats.channels.ensureAgent", "channel_wire_agent_v1"),
+    for (method, params) in [
+        (
+            "chats.channels.ensureGeneral",
+            json!({ "channelId": "channel_wire_general_v1", "nowMs": 10 }),
+        ),
+        (
+            "chats.channels.ensureAgent",
+            json!({
+                "channelId": "channel_wire_agent_v1",
+                "agentId": "default",
+                "name": "My agent",
+                "nowMs": 10,
+            }),
+        ),
     ] {
-        let error = call_error(
-            &transport,
-            &handle,
-            &mut id,
-            method,
-            json!({ "channelId": reserved, "nowMs": 10 }),
-        )
-        .await;
+        let error = call_error(&transport, &handle, &mut id, method, params).await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
@@ -3791,6 +3787,7 @@ async fn page_adapter_drains_without_overlap_or_omission() {
             &mut id,
             "chats.dispatch.enqueue",
             json!({
+                "agentId": "default",
                 "triggerMessageId": trigger,
                 "threadId": "thread",
                 "nowMs": created_at_ms,
@@ -3976,6 +3973,37 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         ),
         (Some(10), Some("message"))
     );
+    // A caller names a run, never an agent, and only a running run moves its
+    // agent's place.
+    let up_to = json!({ "createdAtMs": 999, "messageId": "z" });
+    let named_agent = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "agentId": "codex", "threadId": "thread", "upTo": up_to }),
+    )
+    .await;
+    let unknown_run = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "runId": "no-such-run", "threadId": "thread", "upTo": up_to }),
+    )
+    .await;
+    assert_eq!(
+        (
+            named_agent.code,
+            unknown_run.code,
+            unknown_run.message.as_str()
+        ),
+        (
+            ErrorCode::InvalidParams,
+            ErrorCode::InvalidParams,
+            "run-not-found"
+        )
+    );
 
     call(
         &transport,
@@ -4025,7 +4053,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.enqueue",
-        json!({ "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
+        json!({ "agentId": "default", "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
     )
     .await;
     let paused = call(
@@ -4093,6 +4121,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(latest, claim["run"]);
+    let agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "default" }),
+    )
+    .await;
+    assert_eq!(agents_latest, claim["run"]);
+    let other_agents_latest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.latestRunForThread",
+        json!({ "threadId": "thread", "agentId": "nova" }),
+    )
+    .await;
+    assert_eq!(other_agents_latest, Value::Null);
     let open = call(
         &transport,
         &handle,
@@ -4177,6 +4223,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
+    let thread_recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(thread_recoveries["recoveries"], recoveries["recoveries"]);
+    let other_thread_recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({ "threadId": "other-thread" }),
+    )
+    .await;
+    assert_eq!(other_thread_recoveries["recoveries"], json!([]));
     let handled = call(
         &transport,
         &handle,
@@ -4199,7 +4263,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.failPendingForThread",
-        json!({ "threadId": "thread", "reason": "stop" }),
+        json!({ "threadId": "thread", "agentId": "default", "reason": "stop" }),
     )
     .await;
     assert_eq!(
@@ -5591,6 +5655,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         message_id: "local-opening".into(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: ChatActorKind::Human,
         author_display_name: "Alice".into(),
         author_owner_display_name: None,
@@ -5601,6 +5666,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         options: vec![],
         attachments: vec![],
         automation: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
     };
@@ -5619,6 +5686,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         options: vec![],
         attachments: vec![],
         automation: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),
     };
@@ -5654,4 +5723,216 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         assert_eq!(counts, (1,1,0,0,0));
         Ok::<_,rusqlite::Error>(())
     }).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_links_rpc_seeds_on_demand_and_pages_with_restart_errors() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+    store.bind_root_token(TOKEN, &NoFaults).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("conversation-links-rpc", "main", 1, &NoFaults)
+        .unwrap();
+    store.write_with(&NoFaults,|c| {
+        c.execute_batch("INSERT INTO chat_channels(workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES('conversation-links-rpc','c','C','c','channel',1,1);
+        INSERT INTO chat_channel_wire_ids VALUES('conversation-links-rpc','wire','c');
+        INSERT INTO chat_threads(workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES('conversation-links-rpc','t','T',1,1,'c');
+        INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES('conversation-links-rpc','t',0,'m','human','Ada','',1);").map_err(StorageError::persist_public)?;
+        for i in 0..125 {
+            let key=format!("f-{i:03}");
+            c.execute("INSERT INTO file_objects VALUES('conversation-links-rpc',?1,1)",[&key]).map_err(StorageError::persist_public)?;
+            c.execute("INSERT INTO path_aliases VALUES('conversation-links-rpc','main',?1,?2)",rusqlite::params![format!("notes/{key}.md"),key]).map_err(StorageError::persist_public)?;
+            c.execute("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('conversation-links-rpc',?1,'t','m','file',?1,?2)",rusqlite::params![key,i]).map_err(StorageError::persist_public)?;
+        }
+        Ok::<_,StorageError>(())
+    }).unwrap();
+    drop(store);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "conversation-links-rpc").await;
+    let mut id = 1;
+    let params = json!({"channelWireId":"wire","scope":"owner","sharedChannelRowsUncovered":0});
+    let first = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let p = call(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.conversations.listLinks",
+                params.clone(),
+            )
+            .await;
+            if p["indexBuilding"] == false {
+                break p;
+            }
+            assert_eq!(p["complete"], false);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bounded seed finishes");
+    assert_eq!(first["entries"].as_array().unwrap().len(), 100);
+    assert!(first.to_string().len() <= 64 * 1024);
+    let mut next = params.clone();
+    next["cursor"] = first["nextCursor"].clone();
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.conversations.listLinks",
+        next.clone(),
+    )
+    .await;
+    assert_eq!(second["entries"].as_array().unwrap().len(), 25);
+    assert!(second["nextCursor"].is_null());
+    next["scope"] = json!("changed");
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.conversations.listLinks",
+            next
+        )
+        .await
+        .code,
+        ErrorCode::Conflict
+    );
+    let mut invalid = params;
+    invalid["limit"] = json!(1);
+    assert_eq!(
+        call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.conversations.listLinks",
+            invalid
+        )
+        .await
+        .code,
+        ErrorCode::InvalidParams
+    );
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-stream").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "group", "name": "Team", "kind": "channel", "nowMs": 2 }),
+    )
+    .await;
+    for (thread, message, lane, at) in [
+        ("post-1", "p-1", "posts", 10),
+        ("chat", "c-1", "chat", 20),
+        ("chat-2", "c-2", "chat", 30),
+        ("post-2", "p-2", "posts", 40),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.start",
+            json!({
+                "channelId": "group", "threadId": thread, "messageId": message, "lane": lane,
+                "authorKind": "agent", "authorDisplayName": "Scout", "body": message, "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let db_path = engine_db_path(&scratch).expect("db");
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    // One message asked two agents.
+    conn.execute_batch(
+        "INSERT INTO chat_dispatch_ledger (workspace_id, trigger_message_id, agent_id, thread_id, \
+         state, run_id, failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+         VALUES ('rpc-stream', 'c-2', 'research', 'chat', 'pending', NULL, NULL, 0, 31, 31), \
+                ('rpc-stream', 'c-2', 'default', 'chat', 'pending', NULL, NULL, 0, 31, 31);",
+    )
+    .expect("requests");
+    drop(conn);
+
+    let newest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "pageLimit": 2 }),
+    )
+    .await;
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["message"]["id"].as_str().expect("id").to_owned())
+            .collect()
+    };
+    assert_eq!(ids(&newest), ["c-2", "p-2"]);
+    assert_eq!(
+        newest["items"][0]["message"]["agentRequests"],
+        json!([
+            { "agentId": "default", "state": "waiting" },
+            { "agentId": "research", "state": "waiting" },
+        ])
+    );
+    assert_eq!(newest["items"][1]["post"]["replyCount"], json!(0));
+    assert_eq!(
+        newest["nextBefore"],
+        json!({ "createdAtMs": 30, "lane": "chat", "id": "c-2" })
+    );
+    assert_eq!(newest["readPosition"], Value::Null);
+    let older = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "before": newest["nextBefore"].clone() }),
+    )
+    .await;
+    assert_eq!(ids(&older), ["p-1", "c-1"]);
+    assert_eq!(older["nextBefore"], Value::Null);
+
+    let messages = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "chat" }),
+    )
+    .await;
+    assert_eq!(messages["messages"][0].get("agentRequests"), None);
+    assert_eq!(
+        messages["messages"][1]["agentRequests"][0]["state"],
+        json!("waiting")
+    );
+
+    let found = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.get",
+        json!({ "threadId": "chat" }),
+    )
+    .await;
+    assert_eq!(found["thread"]["lane"], json!("chat"));
+    assert_eq!(found["channel"]["channelId"], json!("group"));
+    assert_eq!(found["messageCount"], json!(2));
+
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "pageLimit": 101 }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
 }

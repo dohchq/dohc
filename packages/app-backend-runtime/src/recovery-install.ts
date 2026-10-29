@@ -32,12 +32,12 @@ function sync<T>(fn: () => T): T {
 }
 function identity(value: string) { if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > 256) throw new Error("Invalid recovery import identity."); return value; }
 
-/** Private staging is durable and charged before the absent dataset becomes visible, inactive. */
-export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions<Context>) {
-  const { db, journal } = options;
-  const tx = <T>(run: () => T): T => sync(() => options.transaction(() => sync(run)));
-  tx(() => initializeDatasetAttempts(db));
-  tx(() => db.exec(`
+/**
+ * The import tables. A dataset host makes them too, because its catalog
+ * leaves out a dataset whose import nothing claimed yet.
+ */
+export function initializeRecoveryImports(db: JournalDb): void {
+  db.exec(`
     CREATE TABLE IF NOT EXISTS dohc_dataset_imports(
       import_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,manifest_hash TEXT NOT NULL,
       source_json TEXT NOT NULL,target_json TEXT,phase TEXT NOT NULL,owner_token TEXT NOT NULL,
@@ -50,7 +50,15 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       import_id TEXT NOT NULL,seq INTEGER PRIMARY KEY,body TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_import_checkpoints(
       import_id TEXT NOT NULL,stage_id TEXT PRIMARY KEY,stage_json TEXT NOT NULL,role TEXT NOT NULL) STRICT;
-  `));
+  `);
+}
+
+/** Private staging is durable and charged before the absent dataset is installed inactive. Catalogs list it once claimed. */
+export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions<Context>) {
+  const { db, journal } = options;
+  const tx = <T>(run: () => T): T => sync(() => options.transaction(() => sync(run)));
+  tx(() => initializeDatasetAttempts(db));
+  tx(() => initializeRecoveryImports(db));
   function account(context: Context, scope: DatasetScope, bytes: number, capacityDeltaBytes = 0) {
     if (options.account) sync(() => options.account!(context, { ...scope, bytes, capacityDeltaBytes }));
   }

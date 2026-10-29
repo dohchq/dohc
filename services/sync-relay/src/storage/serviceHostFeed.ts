@@ -6,6 +6,15 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
 import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
 import {hostedDocumentRows} from "./hostedDocumentIndex";
+import type {SqliteDb} from "./types";
+
+const CONFLICT_EFFECT_INDEX = "idx_sync_relay_log_conflict_effects";
+const CONFLICT_EFFECT_WHERE = "op_kind='moment.append' AND json_type(payload_json, '$.conflictId')='text'";
+
+export function initializeServiceHostFeedIndex(db: SqliteDb): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS ${CONFLICT_EFFECT_INDEX} ON sync_relay_log(workspace_id, json_extract(payload_json, '$.objectId'), relay_seq)
+    WHERE ${CONFLICT_EFFECT_WHERE}`);
+}
 
 export interface ServiceHostFeedScope {
   readonly workspaceId: string;
@@ -76,4 +85,20 @@ export function latestServiceHostDocumentUpdate(storage: StorageContext, input: 
   const row = storage.db.prepare(`SELECT relay_seq FROM ${hostedDocumentRows("?", "?")} AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
     .get(input.workspaceId, input.objectId);
   return row ? Number(row.relay_seq) : 0;
+}
+
+/** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */
+export function hasServiceHostConflictEffect(storage: StorageContext, input: {workspaceId: string; objectId: string}): boolean {
+  return !!storage.db.prepare(`SELECT 1 FROM sync_relay_log AS effect INDEXED BY ${CONFLICT_EFFECT_INDEX}
+    WHERE workspace_id=? AND json_extract(payload_json, '$.objectId')=? AND relay_seq>? AND ${CONFLICT_EFFECT_WHERE}
+      AND json_extract(payload_json, '$.versionId')='main'
+      AND length(json_extract(payload_json, '$.conflictId'))>0
+      AND json_type(payload_json, '$.conflictEffectIndex')='integer' AND json_extract(payload_json, '$.conflictEffectIndex')>=0
+      AND EXISTS(SELECT 1 FROM sync_relay_log AS parent WHERE parent.workspace_id=effect.workspace_id AND parent.origin_id=effect.origin_id
+        AND parent.origin_seq=effect.origin_seq-json_extract(effect.payload_json, '$.conflictEffectIndex')-1
+        AND parent.op_kind='conflict.resolve' AND json_extract(parent.payload_json, '$.targetVersionId')='main'
+        AND json_extract(parent.payload_json, '$.conflictId')=json_extract(effect.payload_json, '$.conflictId')
+        AND json_extract(parent.payload_json, '$.effects[' || json_extract(effect.payload_json, '$.conflictEffectIndex') || '].momentId')=
+          json_extract(effect.payload_json, '$.momentId')) LIMIT 1`)
+    .get(input.workspaceId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
 }

@@ -17,8 +17,7 @@ use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, Imp
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
     transport::{
-        ConnectionOwner, EngineService as _, EngineTransport, InProcessTransport, OutputGuard,
-        RequestContext,
+        ConnectionOwner, EngineService as _, InProcessTransport, OutputGuard, RequestContext,
     },
     wire::WorkspaceHandle,
 };
@@ -640,27 +639,27 @@ async fn open_workspace(
     relay: &FakeRelay,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE,
-                    "captureMode": "none",
-                    "relay": {
-                        "baseUrl": relay.base_url,
-                        "bearerToken": BEARER,
-                        "allowInsecureLoopbackForTests": true,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE,
+                "captureMode": "none",
+                "relay": {
+                    "baseUrl": relay.base_url,
+                    "bearerToken": BEARER,
+                    "allowInsecureLoopbackForTests": true,
+                },
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -2620,13 +2619,13 @@ impl LiveHost {
     async fn call(&self, method: &str, params: Value) -> Result<Value, WireError> {
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(self.owner.handle());
-        self.service
-            .call(
-                ctx,
-                request(900, method, Some(self.workspace.clone()), params),
-            )
-            .await
-            .map(|response| response.response.result)
+        service_call_with_busy_retry(
+            &self.service,
+            ctx,
+            request(900, method, Some(self.workspace.clone()), params),
+        )
+        .await
+        .map(|response| response.response.result)
     }
 
     /// Register `object_id` under the lineage [`journal_live_update`] names.
@@ -2658,8 +2657,7 @@ impl LiveHost {
             json!({"registrationId": registration, "deliveryId": "probe",
                 "updateDigest": "00".repeat(32)}),
         );
-        self.service
-            .call(ctx, read)
+        service_call_with_busy_retry(&self.service, ctx, read)
             .await
             .map(|response| response.output_guard.expect("output guard"))
     }
@@ -2997,8 +2995,7 @@ impl SessionHost {
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, WireError> {
         self.id += 1;
         let call = request(self.id, method, Some(self.workspace.clone()), params);
-        self.service
-            .call(self.context(), call)
+        service_call_with_busy_retry(&self.service, self.context(), call)
             .await
             .map(|response| response.response.result)
     }
@@ -3075,6 +3072,7 @@ fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &s
     let full_state_digest = dohc_engine_storage::put_binary_blob(&tx, &full_state).expect("state");
     let source = ImportedOwnerSource {
         version: 1,
+        reader_source: false,
         relay_database_namespace: "hosted-relay".into(),
         workspace_id: WORKSPACE.into(),
         main_version_id: "main".into(),

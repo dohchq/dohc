@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { createActorIssuer, deriveLocalActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import { chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
 
 // Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
@@ -137,6 +137,25 @@ describe("chat presentation admission", () => {
   it("rejects a retired operation rather than retrying it", async () => {
     const r = request(); r.assertCurrent.mockImplementation(() => { throw new Error("retired"); });
     await expect(r.present(message(), "t")).rejects.toThrow("retired");
+  });
+  it("tells link holders apart by their link principal, never by an account, and never as you", async () => {
+    const r = request();
+    const link = (principalId: string, displayName = "Guest"): ChatMessage =>
+      message({ author: { kind: "link", displayName, grantId: "grant-1", principalId }, authorUserId: undefined });
+    expect(chatActorForPresentation(link("p1"), issuer)).toMatchObject({
+      key: { kind: "link", grantId: "grant-1", principalId: "p1" }, assurance: "relay-verified",
+    });
+    const first = await r.present(link("p1"), "t");
+    expect(first).toMatchObject({ hue: null, self: false });
+    expect(first.group.startsWith("unknown:")).toBe(false);
+    // The same principal in another thread, under a new name, is the same link holder.
+    expect((await r.present(link("p1", "Renamed"), "other")).group).toBe(first.group);
+    expect((await r.present(link("p2"), "t")).group).not.toBe(first.group);
+    // A link holder named after you, on your account's server, is still not you.
+    expect(await r.present(link("p3", "alice"), "t")).toMatchObject({ self: false });
+    expect((await r.present(message(), "t")).group).not.toBe(first.group);
+    const entry = { authorKind: "link" as const, authorDisplayName: "Guest", linkGrantId: "grant-1", linkPrincipalId: "p1" };
+    expect((await r.present(chatLinkMessageForPresentation(entry), "t")).group).toBe(first.group);
   });
 });
 
@@ -300,4 +319,22 @@ it("resolves an in-flight chat and an unread History page against current settin
   expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBe("blue");
   choices = {};
   expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBeNull();
+});
+
+it.each(["human", "agent", "automation"] as const)("Links and Chat share %s keys and presentation across origins", async kind => {
+  const claim = kind === "agent" ? { kind, claimedName: "teammate-agent" } : { kind };
+  const input = { issuer, authorUserId: "sam", displayName: "teammate-agent", ...claim };
+  const key = serializeActorKey(deriveRelayChatActor(input).key);
+  for (const origin of ["renderer", "cli", "automation", "unknown"] as const) {
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, origin }).key)).toBe(key);
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null, origin }).key))
+      .toBe(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null }).key));
+  }
+  const cli = message({ author: { kind, displayName: input.displayName }, authorUserId: input.authorUserId, origin: "cli" });
+  const link = chatLinkMessageForPresentation({
+    authorKind: kind, authorDisplayName: input.displayName, authorUserId: input.authorUserId,
+  });
+  expect(chatActorForPresentation(link, issuer).key).toEqual(chatActorForPresentation(cli, issuer).key);
+  const present = request(true, "links-origin-" + kind).present;
+  expect(await present(link, "t")).toEqual(await present(cli, "t"));
 });

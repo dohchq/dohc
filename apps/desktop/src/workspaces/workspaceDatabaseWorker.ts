@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import type { FsEntryIdentity } from "@dohc/workspace-core/fs-entry-identity";
 import {
   isWorkspaceDatabaseWorkerResponse,
   type WorkspaceDatabaseWorkerRequest,
@@ -55,6 +56,7 @@ export interface WorkspaceDatabaseWorkerOwner {
     path: string;
     logPath: string;
     statePath: string;
+    storageIdentity: FsEntryIdentity;
     edit: DatabaseEdit;
     operation: DatabaseOperationInput;
     pageOffset?: number;
@@ -339,6 +341,7 @@ export function createWorkspaceDatabaseWorkerOwner(
           resultPath: input.path,
           logPath: input.logPath,
           statePath: input.statePath,
+          storageIdentity: input.storageIdentity,
           edit: input.edit,
           operation: input.operation,
           pageOffset: input.pageOffset ?? 0,

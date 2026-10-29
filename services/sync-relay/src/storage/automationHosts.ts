@@ -150,6 +150,173 @@ export function recordAutomationServerProgress(storage: StorageContext, input: {
   ).run(input.workspaceId, input.throughMs));
 }
 
+// Each server run whose changes the relay may not have yet, kept here
+// because the copy that made them is lost with the server's host data. A
+// run's row is written before each attempt first changes its copy, and goes
+// once that attempt ended and a sync that began after that succeeded. `touch` rises on
+// each write, so a sync removes a row only as it found it. A copy with a
+// later incarnation marks the rows of earlier ones lost, which run history
+// shows for as long as it keeps a run.
+export function initializeAutomationServerUnsentRunSchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_automation_server_unsent_runs (
+      workspace_id TEXT NOT NULL
+        REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      incarnation INTEGER NOT NULL CHECK (incarnation BETWEEN 0 AND 9007199254740991),
+      automation_id TEXT NOT NULL CHECK (length(automation_id) >= 1),
+      claim_id TEXT NOT NULL CHECK (length(claim_id) >= 1),
+      automation_name TEXT CHECK (automation_name IS NULL OR length(automation_name) BETWEEN 1 AND 256),
+      collection_path TEXT CHECK (collection_path IS NULL OR length(collection_path) >= 1),
+      started_at_ms INTEGER NOT NULL CHECK (started_at_ms BETWEEN 0 AND 9007199254740991),
+      unsent_since_ms INTEGER NOT NULL CHECK (unsent_since_ms BETWEEN 0 AND 9007199254740991),
+      ended INTEGER NOT NULL CHECK (ended IN (0, 1)),
+      touch INTEGER NOT NULL CHECK (touch BETWEEN 1 AND 9007199254740991),
+      lost_at_ms INTEGER CHECK (lost_at_ms IS NULL OR lost_at_ms BETWEEN 0 AND 9007199254740991),
+      reported INTEGER NOT NULL CHECK (reported IN (0, 1)),
+      PRIMARY KEY (workspace_id, incarnation, automation_id, claim_id)
+    ) STRICT;
+  `);
+}
+
+/** How long run history shows a run a lost copy had not sent, as it keeps any run that ended. */
+export const AUTOMATION_SERVER_LOST_RUN_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface AutomationServerRun {
+  workspaceId: string;
+  incarnation: number;
+  automationId: string;
+  claimId: string;
+}
+
+/** One run whose changes the copies that lost it may not have sent. */
+export interface LostAutomationServerRun {
+  claimId: string;
+  /** When it first started in a copy that lost it. */
+  startedAtMs: number;
+  /** Its changes from this time on may not have reached the relay. */
+  unsentSinceMs: number;
+}
+
+/** Before a run's first change to the copy since the relay last had all of them. */
+export function recordAutomationServerRunChanging(storage: StorageContext, input: AutomationServerRun & {
+  automationName: string | null; collectionPath: string | null; startedAtMs: number; nowMs: number;
+}): void {
+  storage.tx(() => storage.db.prepare(
+    `INSERT INTO sync_relay_automation_server_unsent_runs (workspace_id, incarnation, automation_id, claim_id, automation_name,
+       collection_path, started_at_ms, unsent_since_ms, ended, touch, lost_at_ms, reported)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, NULL, 0)
+     ON CONFLICT(workspace_id, incarnation, automation_id, claim_id) DO UPDATE SET
+       automation_name = coalesce(excluded.automation_name, automation_name),
+       collection_path = coalesce(excluded.collection_path, collection_path), ended = 0, touch = touch + 1`,
+  ).run(input.workspaceId, input.incarnation, input.automationId, input.claimId, input.automationName, input.collectionPath,
+    input.startedAtMs, input.nowMs));
+}
+
+/** The run ended, so it changes its copy no more. Answers whether the relay may lack its changes. */
+export function endAutomationServerRun(storage: StorageContext, input: AutomationServerRun): boolean {
+  return storage.tx(() => storage.db.prepare(
+    `UPDATE sync_relay_automation_server_unsent_runs SET ended = 1, touch = touch + 1
+     WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND claim_id = ? AND lost_at_ms IS NULL`,
+  ).run(input.workspaceId, input.incarnation, input.automationId, input.claimId).changes > 0);
+}
+
+/** The ended runs of this copy whose changes the relay may lack, as a sync about to begin finds them. */
+export function endedAutomationServerRuns(storage: StorageContext, input: { workspaceId: string; incarnation: number }) {
+  return storage.db.prepare(
+    `SELECT automation_id, claim_id, touch FROM sync_relay_automation_server_unsent_runs
+     WHERE workspace_id = ? AND incarnation = ? AND ended = 1 AND lost_at_ms IS NULL`,
+  ).all(input.workspaceId, input.incarnation)
+    .map((row) => ({ automationId: String(row.automation_id), claimId: String(row.claim_id), touch: Number(row.touch) }));
+}
+
+/** A sync that began after these runs ended succeeded: the relay has their changes. */
+export function confirmAutomationServerRunsSent(storage: StorageContext, input: {
+  workspaceId: string; incarnation: number; runs: ReadonlyArray<{ automationId: string; claimId: string; touch: number }>;
+}): void {
+  if (input.runs.length === 0) return;
+  storage.tx(() => {
+    const remove = storage.db.prepare(
+      `DELETE FROM sync_relay_automation_server_unsent_runs
+       WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND claim_id = ? AND touch = ? AND lost_at_ms IS NULL`,
+    );
+    for (const run of input.runs) remove.run(input.workspaceId, input.incarnation, run.automationId, run.claimId, run.touch);
+  });
+}
+
+/**
+ * This copy replaced an earlier one, whose engine is gone: what that copy had
+ * not sent is lost. Rows lost longer ago than run history keeps a run go.
+ */
+export function markAutomationServerRunsLost(storage: StorageContext, input: { workspaceId: string; incarnation: number; nowMs: number }): void {
+  const cutoff = input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS;
+  const stale = storage.db.prepare(
+    `SELECT 1 FROM sync_relay_automation_server_unsent_runs
+     WHERE workspace_id = ? AND ((incarnation <> ? AND lost_at_ms IS NULL) OR lost_at_ms <= ?) LIMIT 1`,
+  ).get(input.workspaceId, input.incarnation, cutoff);
+  if (!stale) return;
+  storage.tx(() => {
+    storage.db.prepare(
+      "DELETE FROM sync_relay_automation_server_unsent_runs WHERE workspace_id = ? AND lost_at_ms <= ?",
+    ).run(input.workspaceId, cutoff);
+    storage.db.prepare(
+      `UPDATE sync_relay_automation_server_unsent_runs SET lost_at_ms = ?
+       WHERE workspace_id = ? AND incarnation <> ? AND lost_at_ms IS NULL`,
+    ).run(input.nowMs, input.workspaceId, input.incarnation);
+  });
+}
+
+/** Where a page of lost runs ends: the next page lists the runs after this one. */
+export type LostAutomationServerRunCursor = Pick<LostAutomationServerRun, "startedAtMs" | "claimId">;
+
+/**
+ * Runs whose changes a lost copy may not have sent, newest first: one
+ * automation's, or one claim's. A claim lost in several copies is one run.
+ */
+export function lostAutomationServerRuns(storage: StorageContext, input: {
+  workspaceId: string; nowMs: number; limit: number; automationId: string; claimId?: string; after?: LostAutomationServerRunCursor;
+}): LostAutomationServerRun[] {
+  const after = input.after ?? null;
+  return storage.db.prepare(
+    `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms
+     FROM sync_relay_automation_server_unsent_runs
+     WHERE workspace_id = ? AND lost_at_ms > ? AND automation_id = ? AND (? IS NULL OR claim_id = ?)
+     GROUP BY claim_id
+     HAVING ? IS NULL OR (min(started_at_ms), claim_id) < (?, ?)
+     ORDER BY min(started_at_ms) DESC, claim_id DESC LIMIT ?`,
+  ).all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS, input.automationId, input.claimId ?? null, input.claimId ?? null,
+    after === null ? null : 1, after?.startedAtMs ?? null, after?.claimId ?? null, input.limit)
+    .map((row) => ({
+      claimId: String(row.claim_id), startedAtMs: Number(row.first_started_at_ms),
+      unsentSinceMs: Number(row.first_unsent_since_ms),
+    }));
+}
+
+/** The lost runs no Notice told of yet, for each lost copy and automation: how many, and the newest. */
+export function unreportedLostAutomationServerRuns(storage: StorageContext, input: { workspaceId: string; nowMs: number }) {
+  // SQLite takes the bare columns from the row with the latest start.
+  return storage.db.prepare(
+    `SELECT incarnation, automation_id, count(*) AS runs, max(started_at_ms) AS started_at_ms, claim_id, automation_name, collection_path
+     FROM sync_relay_automation_server_unsent_runs
+     WHERE workspace_id = ? AND lost_at_ms > ? AND reported = 0
+     GROUP BY incarnation, automation_id ORDER BY incarnation, automation_id`,
+  ).all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS)
+    .map((row) => ({
+      incarnation: Number(row.incarnation), automationId: String(row.automation_id), runs: Number(row.runs), newestClaimId: String(row.claim_id),
+      automationName: row.automation_name === null ? null : String(row.automation_name),
+      collectionPath: row.collection_path === null ? null : String(row.collection_path),
+    }));
+}
+
+/** A Notice told the owner of every lost run of this copy and automation. */
+export function reportAutomationServerRunsLost(storage: StorageContext, input: { workspaceId: string; incarnation: number; automationId: string }): void {
+  storage.tx(() => {
+    storage.db.prepare(
+      `UPDATE sync_relay_automation_server_unsent_runs SET reported = 1
+       WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND lost_at_ms IS NOT NULL AND reported = 0`,
+    ).run(input.workspaceId, input.incarnation, input.automationId);
+  });
+}
+
 /** The server gave its current copy the release at this generation to take. It never goes back. */
 export function recordAutomationServerTaken(storage: StorageContext, input: { workspaceId: string; generation: number }): void {
   storage.tx(() => storage.db.prepare(

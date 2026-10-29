@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { spawn } from "node:child_process";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +19,7 @@ import { useShellError } from "../renderer/shell/useShellError";
 import { WorkspaceErrorToast } from "../renderer/workbench/NoticeCenter";
 import { ipcWireError } from "../ipc/errorWords";
 import { createLocalDatasetHost } from "./localDatasetHost";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -77,7 +79,9 @@ async function fixture() {
   });
   cleanups.push(async () => { expect([...closedPids].sort()).toEqual([...pids].sort()); });
   async function openHost() {
-    const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
+    // Workers and exports live in .dohc/local, which an engine open prepares.
+    await openedLocalState({ workspaceId: "w", rootPath: root });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
       localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch },
       resources: () => ({ accountCheckpointStage: cacheAccounting }) });
     cleanups.push(() => host.close());

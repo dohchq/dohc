@@ -581,6 +581,39 @@ describe("history page updating retries", () => {
     expect(listHistory).toHaveBeenCalledTimes(5);
   });
 
+  it("keeps saying History is updating through a refresh until a page or a failure replaces it", async () => {
+    vi.useFakeTimers();
+    const it0 = mount();
+    const ladder = async () => {
+      const issued = reads.length;
+      const refresh = it0.refresh();
+      for (const [attempt, delay] of [100, 250, 500, 1_000].entries()) {
+        await settle(reads[issued + attempt]!, UPDATING);
+        await advance(delay);
+      }
+      await settle(reads[issued + 4]!, UPDATING);
+      await refresh;
+    };
+    await ladder();
+    expect(it0.hook().readState).toBe("updating");
+
+    const failing = it0.refresh();
+    const failed = expect(failing).rejects.toThrow("engine stopped");
+    expect(it0.hook().readState).toBe("updating");
+    await fail(reads[5]!, "engine stopped");
+    await failed;
+    expect(it0.hook().readState).toBe("failed");
+
+    await ladder();
+    const paging = it0.refresh();
+    expect(it0.hook().readState).toBe("updating");
+    await settle(reads[11]!, page("ready"));
+    await paging;
+    expect(it0.ids()).toEqual(["ready"]);
+    // A page dropped later is not known yet, not still updating.
+    expect(it0.hook().readState).toBe("loading");
+  });
+
   it("commits the page an updating answer is followed by", async () => {
     vi.useFakeTimers();
     const it0 = mount();
@@ -688,7 +721,7 @@ describe("newest moment order", () => {
   it("retries an updating answer in the same workspace and returns the order", async () => {
     vi.useFakeTimers();
     const listEngineMoments = stubMoments(UPDATING, UPDATING, ready(7));
-    const read = readNewestMomentOrder("ws-1", () => true);
+    const read = readNewestMomentOrder("ws-1", () => true, () => false);
     await advance(100 + 250);
     await expect(read).resolves.toBe(7);
     expect(listEngineMoments).toHaveBeenCalledTimes(3);
@@ -699,7 +732,7 @@ describe("newest moment order", () => {
     vi.useFakeTimers();
     let current = true;
     const listEngineMoments = stubMoments(UPDATING, ready(7));
-    const read = readNewestMomentOrder("ws-1", () => current);
+    const read = readNewestMomentOrder("ws-1", () => current, () => true);
     await act(async () => { await Promise.resolve(); });
     current = false;
     await advance(2_000);
@@ -707,10 +740,19 @@ describe("newest moment order", () => {
     expect(listEngineMoments).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects in words when the ladder ends still updating", async () => {
+  it("answers nothing, without failing, when the ladder ends still updating while capture works", async () => {
     vi.useFakeTimers();
     const listEngineMoments = stubMoments(UPDATING, UPDATING, UPDATING, UPDATING, UPDATING);
-    const read = readNewestMomentOrder("ws-1", () => true);
+    const read = readNewestMomentOrder("ws-1", () => true, () => false);
+    await advance(2_000);
+    await expect(read).resolves.toBeNull();
+    expect(listEngineMoments).toHaveBeenCalledTimes(5);
+  });
+
+  it("rejects in words when the ladder ends still updating after capture failed", async () => {
+    vi.useFakeTimers();
+    const listEngineMoments = stubMoments(UPDATING, UPDATING, UPDATING, UPDATING, UPDATING);
+    const read = readNewestMomentOrder("ws-1", () => true, () => true);
     const rejected = expect(read).rejects.toThrow("Recent changes are still being added to History.");
     await advance(2_000);
     await rejected;
@@ -719,7 +761,7 @@ describe("newest moment order", () => {
 
   it("answers nothing while History's rules are unreadable", async () => {
     stubMoments({ status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });
-    await expect(readNewestMomentOrder("ws-1", () => true)).resolves.toBeNull();
+    await expect(readNewestMomentOrder("ws-1", () => true, () => true)).resolves.toBeNull();
   });
 });
 

@@ -13,17 +13,19 @@ interface SettingsRead {
   source: "stored" | "default" | "recovered";
   warning?: string;
   ignored?: readonly IgnoredSetting[];
+  notOpened?: true;
 }
 
 const USER_FILE = "dohc-settings.json";
-const WORKSPACE_FILE = ".dohc/settings.local.json";
+const WORKSPACE_FILE = ".dohc/local/settings.local.json";
 
 /** What a settings read owes the person, or null when the whole file applies. */
 export function settingsFileNotice(
   fileName: string,
   read: SettingsRead | null,
 ): string | null {
-  if (!read) return null;
+  // A read before the workspace opened read no file.
+  if (!read || read.notOpened) return null;
   // A recovered read's warning names the file dohc could not use. Any other
   // warning reports a finished reset, which Settings shows where it happened.
   if (read.source === "recovered") return read.warning ?? null;
@@ -47,8 +49,9 @@ export function settingsFileNotice(
  * Tells the person when a settings file they can edit is not fully in
  * effect, as one row per file that opens the file and reads it again. The
  * user settings arrive with every change to them. The workspace settings are
- * read once the workspace opens, and again from every read or save in
- * Settings, which the answered callback takes.
+ * read once the workspace opens, again if the engine had not opened it yet,
+ * and from every read or save in Settings that reached the file, which the
+ * answered callback takes.
  */
 export function useSettingsFileNotices(input: {
   workspaceId: string;
@@ -77,6 +80,19 @@ export function useSettingsFileNotices(input: {
     // Settings shows a read that failed; this only reports the file.
     void readWorkspaceFile().catch(() => undefined);
   }, [readWorkspaceFile, workspaceIsReady]);
+
+  // The engine's open of the workspace sends activity, so a read that came
+  // before it reads again then. An open that came while that read was
+  // answering sent its activity already, so it also reads once more now.
+  const notOpened = workspaceRead?.notOpened === true;
+  useEffect(() => {
+    if (!notOpened) return;
+    const stop = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === undefined || event.workspaceId === workspaceId) void readWorkspaceFile().catch(() => undefined);
+    });
+    void readWorkspaceFile().catch(() => undefined);
+    return stop;
+  }, [notOpened, readWorkspaceFile, workspaceId]);
 
   // Each row's two steps. Try again shows the row again when the file still
   // says the same thing, because the retry has already cleared it.
@@ -131,6 +147,9 @@ export function useSettingsFileNotices(input: {
   );
 
   return useCallback((read: WorkspaceSettingsResult) => {
+    // A read from before the workspace opened says nothing about the file,
+    // and taking it would drop a read of this hook's that may have it.
+    if (read.notOpened) return;
     reads.next();
     setWorkspaceRead(read);
   }, [reads]);

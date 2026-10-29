@@ -3,6 +3,20 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { OwnerLiveDocumentsResult } from "./bridgeContract";
+
+it("bounds recovery replies with room for the capped restore queues", () => {
+  const rows = Array.from({length: 384}, (_, index) => ({objectId: "object", path: "note.md", reason: "restore-fenced",
+    storedOn: "this-computer", incident: `queue-${index}:delivery:0`, recovery: "paused", saveOnly: true}));
+  const status = {state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+    historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveQuarantines: rows};
+  expect(SyncStatusResult.parse(status).ownerLiveQuarantines).toEqual(rows);
+  expect(SyncStatusResult.safeParse({...status, ownerLiveQuarantines: [...rows, rows[0]]}).success).toBe(false);
+  const documents = rows.slice(0, 256).map(({reason: _reason, recovery, ...row}) => ({...row, status: "ready", canResume: false, quarantine: recovery}));
+  expect(OwnerLiveDocumentsResult.parse({documents, nextCursor: null}).documents).toEqual(documents);
+  expect(OwnerLiveDocumentsResult.safeParse({documents: [...documents, documents[0]], nextCursor: null}).success).toBe(false);
+});
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
@@ -110,9 +124,6 @@ import {
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
-  TryInVersionRunState,
-  TryInVersionStateResult,
-  TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
   WorkspaceVersionConflict,
@@ -1397,6 +1408,7 @@ describe("shared view refresh IPC contract", () => {
         unjournalablePaths: [
           { path: "docs/oversized.md", reason: "oversized-text" },
           { path: "docs/local.md", reason: "local-collision" },
+          { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
         ],
         refusedOps: 0,
         refusedDetail: null,
@@ -1409,6 +1421,7 @@ describe("shared view refresh IPC contract", () => {
       unjournalablePaths: [
         { path: "docs/oversized.md", reason: "oversized-text" },
         { path: "docs/local.md", reason: "local-collision" },
+        { path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" },
       ],
       refusedOps: 0,
       refusedDetail: null,
@@ -2141,12 +2154,15 @@ describe("settings IPC contract", () => {
   });
 
   it("accepts only a scoped runner self-test request and bounded result", () => {
-    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings" })).toEqual({
+    expect(RunnerSelfTestPayload.parse({ workspaceId: "ws-settings", agentId: "codex" })).toEqual({
       workspaceId: "ws-settings",
+      agentId: "codex",
     });
+    expect(RunnerSelfTestPayload.safeParse({ workspaceId: "ws-settings" }).success).toBe(false);
     expect(
       RunnerSelfTestPayload.safeParse({
         workspaceId: "ws-settings",
+        agentId: "codex",
         command: "untrusted command",
       }).success,
     ).toBe(false);
@@ -2154,10 +2170,13 @@ describe("settings IPC contract", () => {
       RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" }),
     ).toEqual({ ok: true, detail: "self-test ok" });
     expect(
+      RunnerSelfTestResult.parse({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" }),
+    ).toEqual({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" });
+    expect(
       RunnerSelfTestResult.safeParse({
         ok: false,
         detail: "Runner timed out.",
-        logPath: "/tmp/log",
+        command: "untrusted command",
       }).success,
     ).toBe(false);
     expect(
@@ -3299,86 +3318,6 @@ describe("workspace versions IPC contract", () => {
   });
 });
 
-describe("try-in-version IPC contract", () => {
-  it("accepts a well-formed gesture payload and state shapes", () => {
-    expect(
-      TryInWorkspaceVersionPayload.parse({
-        workspaceId: "ws-try",
-        task: "tidy the notes",
-      }).task,
-    ).toBe("tidy the notes");
-    expect(
-      TryInVersionStateResult.parse({ state: null }).state,
-    ).toBeNull();
-    expect(
-      TryInVersionStateResult.parse({
-        state: {
-          status: "running",
-          task: "tidy the notes",
-          versionId: "version-1",
-          versionName: "Try: tidy the notes",
-          runId: "run-1",
-          startedAtMs: 1,
-          mergeAvailable: true,
-        },
-      }).state?.status,
-    ).toBe("running");
-    // Review state: an unavailable count is null, never invented.
-    expect(
-      TryInVersionRunState.parse({
-        status: "review",
-        task: "tidy the notes",
-        versionId: "version-1",
-        versionName: "Try: tidy the notes",
-        runId: "run-1",
-        startedAtMs: 1,
-        endedAtMs: 2,
-        runOutcome: "complete",
-        changedFileCount: null,
-        mergeAvailable: false,
-      }).changedFileCount,
-    ).toBeNull();
-  });
-
-  it("rejects blank or oversized tasks and malformed states", () => {
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "   ",
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInWorkspaceVersionPayload.safeParse({
-        workspaceId: "ws-try",
-        task: "x".repeat(2001),
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "watching",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        mergeAvailable: true,
-      }).success,
-    ).toBe(false);
-    expect(
-      TryInVersionRunState.safeParse({
-        status: "review",
-        task: "tidy",
-        versionId: "version-1",
-        versionName: "Try: tidy",
-        runId: "run-1",
-        startedAtMs: 1,
-        changedFileCount: -1,
-        mergeAvailable: true,
-      }).success,
-    ).toBe(false);
-  });
-});
-
 describe("sync status IPC contract", () => {
   it("preserves file-read failure separately from history availability", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
@@ -3393,7 +3332,7 @@ describe("sync status IPC contract", () => {
   it("carries a document the server refused or whose server copy diverged to the status and the live documents list", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
-    const row = { path: "docs/a.md", status: "unavailable", canResume: true };
+    const row = { path: "docs/a.md", objectId: "object", status: "unavailable", canResume: true };
     for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"] as const) {
       expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
@@ -3427,7 +3366,7 @@ describe("sync status IPC contract", () => {
       }
       reported.add(refusal.reason);
       expect(OwnerLiveFirstOpen.parse(refusal)).toStrictEqual(refusal);
-      expect(OwnerLiveDocument.parse({ path: source.path, status: "unavailable", canResume: true, reason: "live-first-open-refused", firstOpen: refusal }).firstOpen)
+      expect(OwnerLiveDocument.parse({ objectId: source.objectId, path: source.path, status: "unavailable", canResume: true, reason: "live-first-open-refused", firstOpen: refusal }).firstOpen)
         .toStrictEqual(refusal);
       expect(SyncStatusResult.parse({ ...status, ownerLiveFirstOpen: [refusal] }).ownerLiveFirstOpen).toStrictEqual([refusal]);
     }
@@ -3569,7 +3508,7 @@ describe("engine history and linked Chats IPC contract", () => {
           recordedAtMs: 100,
           operation: "write",
           origin: "local-file",
-          summary: "Reconciled offline edits",
+          summary: "Changed while dohc was closed",
           correlationId: "reconcile-1",
           momentOrder: 7,
         },
@@ -3579,7 +3518,7 @@ describe("engine history and linked Chats IPC contract", () => {
       activeVersionId: "main",
       ...historyPageFields,
     });
-    expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.moments[0].summary).toBe("Changed while dohc was closed");
     expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
@@ -4589,4 +4528,17 @@ describe("poll send payloads", () => {
       expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
     });
   }
+});
+
+describe("ImportWorkspaceFilesResult", () => {
+  // On Windows, a skip deep in a dropped folder can pass the 4,096 characters
+  // a landed path keeps to.
+  it("takes a skipped path longer than a landed one", () => {
+    const path = `${"deep/".repeat(1000)}key.txt`;
+    expect(ImportWorkspaceFilesResult.safeParse({
+      imported: ["ok.md"],
+      skipped: 1,
+      skippedSources: [{ path, reason: "link" }],
+    }).success).toBe(true);
+  });
 });

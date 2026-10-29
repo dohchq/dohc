@@ -37,6 +37,9 @@ import {
   type KeptCopy,
   type CaptureMoveFileResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopy,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
@@ -55,6 +58,15 @@ import {
 const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+
+/** Capture was still working when its settle budget ran out. */
+export class EngineCaptureNotSettledError extends Error {
+  constructor(workspaceId: string) {
+    super(`Engine capture for ${workspaceId} did not settle.`);
+    this.name = "EngineCaptureNotSettledError";
+  }
+}
+
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
@@ -147,6 +159,8 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  readHistoryOperation: VersionedLiveAdapter["readHistoryOperation"];
+  readHistoryPage: VersionedLiveAdapter["readHistoryPage"];
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
   linkEdges: VersionedLiveAdapter["linkEdges"];
   incomingLinks: VersionedLiveAdapter["incomingLinks"];
@@ -176,6 +190,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   // them meanwhile, and the step that moves one to a visible copy.
   listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Old versions of files kept on a drive that cannot tell dohc whether a
+  // program still has one open, and the step that deletes listed ones.
+  listRetainedCopies(): Promise<RetainedCopiesListResult>;
+  deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
   // Capture records nothing from hold to release, or until the hold's lease
   // runs out unrenewed or the workspace closes.
@@ -183,6 +201,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   renewCapture?(holdId: string): Promise<boolean>;
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
+  duplicateFileUnderHold?: VersionedLiveAdapter["duplicateFileUnderHold"];
   moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
 };
 
@@ -400,6 +419,7 @@ function momentFromWire(
 function momentSummaryFromWire(
   workspaceId: string,
   moment: HistoryMomentMetadata,
+  sha256?: string,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -414,6 +434,7 @@ function momentSummaryFromWire(
     ...(moment.afterByteLength !== null
       ? { byteLength: moment.afterByteLength }
       : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
     metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
@@ -1203,7 +1224,8 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null},
+            moment.afterBinarySha256 ?? moment.afterBlobSha256 ?? undefined),
         ),
       };
     },
@@ -1437,9 +1459,7 @@ export function createCaptureLiveStores(
       captureWaitSignal?.throwIfAborted();
       const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
       let finished = false;
-      const didNotSettle = () => new Error(
-        `Engine capture for ${workspace.workspaceId} did not settle.`,
-      );
+      const didNotSettle = () => new EngineCaptureNotSettledError(workspace.workspaceId);
       const assertActive = () => {
         captureWaitSignal?.throwIfAborted();
         if (finished) throw didNotSettle();
@@ -1525,6 +1545,17 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
+    async listRetainedCopies() {
+      return await runRead(async (adapter) => await adapter.listRetainedCopies());
+    },
+
+    async deleteRetainedCopies(copies: readonly RetainedCopy[]) {
+      return await runMutation(async (adapter) => await adapter.deleteRetainedCopies(copies));
+    },
+
+    readHistoryOperation: input => runRead(adapter => adapter.readHistoryOperation(input)),
+    readHistoryPage: input => runRead(adapter => adapter.readHistoryPage(input)),
+    duplicateFileUnderHold: input => runMutation(adapter => adapter.duplicateFileUnderHold(input)),
     holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
 
     renewCapture: async (holdId: string) =>

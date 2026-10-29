@@ -1,3 +1,4 @@
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createTestScratch } from "../workspaces/testTemp";
 import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
@@ -151,9 +152,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     onError: vi.fn(),
   });
   const adapter = {
-    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false, heldFiles: [] })),
-    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
-    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] })),
+    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] })),
+    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
+    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(async () => undefined),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
@@ -193,7 +194,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
-  const displayName = vi.fn(() => "You");
+  // Settings lists one agent, "agent", named "You".
+  const displayName = vi.fn((agentId: string): string | undefined => agentId === "agent" ? "You" : undefined);
   const syncProjection = vi.fn(async (_workspace: RegistryEntry, status: SyncStatusResult) => status);
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   let missingAdapter = false;
@@ -245,7 +247,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
     },
-    requireEngineCapture, localAgentDisplayName: displayName,
+    requireEngineCapture, agentName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
@@ -380,7 +382,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
     const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture", deleted: false };
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery], heldFiles: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [recovery], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
     expect(await bridge.getCaptureRecoveryStatus({workspaceId: "workspace"})).toEqual({ captureRecoveries: [recovery] });
     expect(await bridge.clearCaptureRecovery({workspaceId: "workspace", momentId: "recovery"})).toBeUndefined();
     expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledWith("recovery");
@@ -411,7 +413,7 @@ describe("workspace engine IPC registrations", () => {
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [], captureRecoveries: [], heldFiles: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");
@@ -581,7 +583,7 @@ describe("workspace engine IPC registrations", () => {
         entry(8, { ...automation, automationRun: { claimId: "claim-here", automationName: "Stamp the finish date" } }),
         entry(7, { ...automation, automationRun: { claimId: "claim-gone", automationName: "Old name" } }),
         entry(6, automation),
-        entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
+        entry(5, { authorOriginId: "agent", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
         entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
@@ -844,7 +846,7 @@ describe("workspace engine IPC registrations", () => {
     const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
       .moments.map((moment) => moment.agentAuthorName);
     await expect(names()).resolves.toEqual(["You", "Agent"]);
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(names()).resolves.toEqual(["ice@example.com", "Agent"]);
     h.capture.readMoment.mockResolvedValue({
       protected: false,
@@ -860,7 +862,7 @@ describe("workspace engine IPC registrations", () => {
     });
   });
 
-  it("uses Settings only for dohc runs and handshake names for other agents", async () => {
+  it("uses Settings names for your agents and handshake names for other agents", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
       moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
@@ -873,7 +875,7 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
@@ -889,6 +891,40 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
       moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
     });
+  });
+
+  it("names each agent's changes by that agent, with the name Settings gives it now", async () => {
+    const h = await harness();
+    const settingsNames = new Map([["nova", "Nova"], ["codex", "Codex"]]);
+    h.displayName.mockImplementation((agentId) => settingsNames.get(agentId));
+    h.capture.listMoments.mockResolvedValue({
+      // Codex's last change came through dohc's command line, which records no run id.
+      moments: [{ agentId: "nova", agentRunId: "run-1" }, { agentId: "codex", agentRunId: "run-2" }, { agentId: "codex" }].map((run, index) => ({
+        id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
+        authors: [{ kind: "agent", onBehalfOf: "person-local", ...run }],
+      })),
+      nextCursor: null, latestMomentOrder: 2, activeVersionId: "main", ...historyPageFields,
+    });
+    const recordChange = (historyId: number, authorOriginId: string): CollectionGetRecordResult["history"][number] => ({
+      historyId, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId, actorKind: "agent", onBehalfOf: "person-local", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null,
+    });
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [recordChange(1, "nova"), recordChange(2, "codex")],
+    });
+    const names = async () => {
+      const moments = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> };
+      const record = GetCollectionRecordHistoryResult.parse(await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" }));
+      return [...moments.moments.map((moment) => moment.agentAuthorName), ...record.entries.map(({ author }) => author?.kind === "agent" ? author.name : null)];
+    };
+    await expect(names()).resolves.toEqual(["Nova", "Codex", "Codex", "Nova", "Codex"]);
+    // A rename shows at once, and an agent removed from Settings keeps its id.
+    settingsNames.set("codex", "Kit");
+    settingsNames.delete("nova");
+    await expect(names()).resolves.toEqual(["nova", "Kit", "Kit", "nova", "Kit"]);
   });
 
   it("restores as the person signed in here, never one the renderer names, and History names them", async () => {
@@ -1537,6 +1573,16 @@ describe("merged History IPC", () => {
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
     expect(h.historyCollections).not.toHaveBeenCalled();
   });
+});
+
+it("shows file History without Collections when another computer keeps them, and still fails on any other Collection error", async () => {
+  const h = await harness();
+  h.capture.listMoments.mockResolvedValue({ ...historyPage(), nextCursor: null });
+  h.historyCollections.mockRejectedValue(new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false }));
+  await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+  expect(h.historyCollections).toHaveBeenCalledOnce();
+  h.historyCollections.mockRejectedValue(new Error("Collection storage is full."));
+  await expect(h.invoke(historyOperations.listHistory.channel)).rejects.toThrow("Collection storage is full.");
 });
 
 it("does not start the Collection host for main per-file History", async () => {

@@ -44,7 +44,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
       async resolveDatasetRevision() { return revision; },
-      adapter: sourceCaptureAdapter(sources),
+      adapter: sourceCaptureAdapter(sources), deferredWrites: [],
     });
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;

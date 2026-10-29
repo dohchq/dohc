@@ -238,7 +238,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     grantId: editor.grantId, recipientUserId: editor.userId, recipientEmail: null,
     files: { paths: native ? (JSON.parse(f.storage.getShare("people-share")!.selectorJson) as { paths: string[] }).paths : ["People"], versionId: null, access: "edit" as const }, channel: null,
   }] : [] });
-  const store = createAutomationRunStore(f.directory, async () => metadata);
+  const store = createAutomationRunStore({ forWrite: async () => metadata, read: (work) => work(metadata) });
   let executor!: CollectionAutomations;
   const makeExecutor = () => executor = new CollectionAutomations({
     resolveRelayedPress: async hostPressId => {
@@ -551,6 +551,12 @@ it("accepts HTTP presses as the verified owner or editor and never accepts calle
   const ownerPath = "w/datasets/" + DATASET + "/press", sharedPath = "shares/people-share/datasets/" + DATASET + "/press";
   expect((await request("owner", ownerPath, { ...body, pressedBy: "editor" })).status).toBe(400);
   expect((await request("owner", ownerPath, { ...body, by: { kind: "agent", depth: 0 } })).status).toBe(400);
+  expect((await request("owner", ownerPath, { ...body, agent: { originId: "agent-run", depth: -1 } })).status).toBe(400);
+  expect((await request("owner", ownerPath, { ...body, agent: { originId: "agent-run", depth: 1, userId: "editor" } })).status).toBe(400);
+  // A press at the chain's limit starts nothing, so the server refuses it and records no claim.
+  const capped = await request("owner", ownerPath, { ...body, pressId: "http-capped", agent: { originId: "agent-run", depth: 4 } });
+  expect(capped.status).toBe(400);
+  expect(await capped.json()).toMatchObject({ error: expect.stringContaining("This press did not run.") });
   expect((await request("owner", ownerPath, { ...body, confirmed: "all" })).status).toBe(400);
   expect((await request("stranger", ownerPath, body)).status).toBe(404);
   expect((await request("owner", ownerPath, body, { cookie: "session=owner" })).status).toBe(404);
@@ -566,6 +572,13 @@ it("accepts HTTP presses as the verified owner or editor and never accepts calle
   const named = await second.json() as { claimId: string };
   expect(f.ledger.claim(automationId, named.claimId)?.actor).toEqual({ kind: "named", userId: "editor" });
   await vi.waitFor(() => expect(f.ledger.claim(automationId, named.claimId)?.state).toBe("done"), { timeout: 30_000 });
+  // An agent's press is the verified person's, at the agent's depth.
+  const byAgent = await request("owner", ownerPath, { ...body, pressId: "http-agent", agent: { originId: "agent-run", depth: 2 } });
+  expect(byAgent.status).toBe(200);
+  const agentClaim = f.ledger.claim(automationId, (await byAgent.json() as { claimId: string }).claimId);
+  expect(agentClaim).toMatchObject({ actor: { kind: "owner", userId: "owner", agent: { depth: 2 } }, depth: 2 });
+  await vi.waitFor(() => expect(f.ledger.claim(automationId, agentClaim!.claimId)?.state).toBe("done"), { timeout: 30_000 });
+  expect(f.ledger.pressed("http-capped")).toBeNull();
   expect(errors).toEqual([]);
 });
 

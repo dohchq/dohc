@@ -62,6 +62,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_event_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
+    "live_accepted_reader_history",
     "live_restore_fences",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
@@ -115,6 +116,7 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_ydoc_outbox_refusals",
     "owner_live_stops",
     "sync_identity",
     "replication_log",
@@ -426,8 +428,11 @@ fn restore_test(
     backup_path: &Path,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
-    let copy = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::backup)?;
+    let copy = Connection::open_with_flags(
+        crate::sqlite_path(backup_path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(StorageError::backup)?;
 
     let check: String = copy
         .pragma_query_value(None, "integrity_check", |row| row.get(0))
@@ -571,6 +576,7 @@ mod tests {
             tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
             tx.execute("INSERT INTO live_accepted_updates VALUES ('relay','workspace','main','object',?1,1,1,'delivery','{}',?1,1,2,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_accepted_checkpoints VALUES ('relay','workspace','main','object',?1,0,0,'null','{}',?1,?1,?1,NULL,NULL)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_accepted_reader_history VALUES ('relay','workspace','main','object',?1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
             tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();
@@ -586,6 +592,8 @@ mod tests {
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) VALUES ('outbox','workspace','main','owner',?1,'owner.md','[\"owner.md\"]',0,?1,?1,2,'quarantined',0,NULL,1,'invalid-update',NULL,0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO owner_ydoc_outbox_refusals VALUES ('outbox','delivery','refusal-key')",[]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
@@ -622,10 +630,12 @@ mod tests {
             "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
+            "live_accepted_reader_history",
             "live_restore_fences",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
             "live_owner_adoptions",
+            "owner_ydoc_outbox_refusals",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -671,6 +681,7 @@ mod tests {
             "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
+            "live_accepted_reader_history",
             "live_restore_fences",
             "live_owner_adoptions",
             "live_device_bootstraps",
@@ -722,6 +733,7 @@ mod tests {
         for table in [
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
+            "owner_ydoc_outbox_refusals",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
         ] {

@@ -42,7 +42,7 @@ function harness() {
     return { publicationId, candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS), active: true, authorityRevision: 1, owner: {
       workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
   });
-  const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => {});
+  const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => ({ deferredWrites: [] as string[] }));
   const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({ credentials, credentialGeneration }));
   let handler!: (event: { sender: { id: number } }, payload: unknown) => unknown;
   registerOwnerAppPublicationIpc({ registerHandler(_channel, fn) { handler = fn; }, assertTrustedSender(event: { sender: { id: number } }) { if (event.sender.id < 0) throw new Error("untrusted"); },

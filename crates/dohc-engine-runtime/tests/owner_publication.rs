@@ -84,7 +84,7 @@ impl Fixture {
         };
         store.write_with(&NoFaults,|tx| {
             tx.execute("UPDATE ydoc_docs SET path='notes/owner.md'",[]).unwrap();
-            dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(tx,&key,"notes/owner.md",&binding.lineage_claim_id,&dohc_engine_collab::owner_base_source::OwnerSeedSource { moment_id:"original".into(),blob_sha256:hex_sha256(text.as_bytes()) })?;
+            dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(tx,&key,"notes/owner.md",&binding.lineage_claim_id,&dohc_engine_collab::owner_base_source::OwnerSeedSource { moment_id:"original".into(),blob_sha256:hex_sha256(text.as_bytes()) }, None)?;
             tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
             tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/owner.md','object','adopted')",[]).unwrap();
             tx.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1)",[]).unwrap();
@@ -2615,6 +2615,7 @@ async fn stop_action_at_cursor(
             },
             None,
             Some(accepted_cursor),
+            None,
             action.into(),
             40,
             Arc::new(NoFaults),
@@ -2882,6 +2883,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
                         Some(f.binding.clone()),
                         None,
                         Some(0),
+                        None,
                         "release".into(),
                         30,
                         Arc::new(CrashAt(point)),
@@ -3417,6 +3419,72 @@ async fn stop_requested_work_precedes_sixty_four_deferred_rows() {
     assert_eq!(rows.len(), 64);
     assert_eq!(rows[0].document.object_id, "object");
     assert!(rows[0].retirement_owed);
+    supervisor.close_all().unwrap();
+}
+
+// A Try again names the kept edits its record holds. It never starts a
+// release, and an older finished Stop restored under the same binding, which
+// took other edits, does not answer for the newer record.
+#[tokio::test]
+async fn stop_try_again_answers_only_for_its_own_kept_edits() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let (older, newer) = ("1".repeat(64), "2".repeat(64));
+    let kept = |accepted_cursor: Option<i64>, snapshot: &str| {
+        actor.owner_ydoc_stop(
+            "workspace".into(),
+            None,
+            Some(f.binding.clone()),
+            None,
+            accepted_cursor,
+            Some(snapshot.to_owned()),
+            "release".into(),
+            41,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+    };
+    let before = release_snapshot(&f);
+    assert!(matches!(
+        kept(None, &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    assert_eq!(release_snapshot(&f), before);
+    let released = kept(Some(0), &newer).await.unwrap().unwrap();
+    assert_eq!(released[0].kept_snapshot.as_deref(), Some(newer.as_str()));
+    assert_eq!(
+        kept(None, &newer).await.unwrap().unwrap()[0].state,
+        "released"
+    );
+    assert!(matches!(
+        kept(None, &older).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    // The engine store restored to the older Stop's state.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let saved: String = tx
+                .query_row("SELECT binding_json FROM owner_live_stops", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let mut row: serde_json::Value = serde_json::from_str(&saved).unwrap();
+            row["keptSnapshot"] = serde_json::json!(older);
+            tx.execute(
+                "UPDATE owner_live_stops SET binding_json=?1",
+                [row.to_string()],
+            )
+            .unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        kept(None, &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    assert!(matches!(
+        kept(Some(0), &newer).await.unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
     supervisor.close_all().unwrap();
 }
 
@@ -4102,6 +4170,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
                 Some(f.binding.clone()),
                 None,
                 Some(0),
+                None,
                 "release".into(),
                 40,
                 Arc::new(ObserveCommit(submitted.clone())),

@@ -3,6 +3,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { ArrowLeft, Info, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ChatFileMentionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   ListFileChatsResponse,
@@ -15,13 +16,14 @@ import {
   AboutChatRow,
   AboutHeader,
   AboutHistory,
+  AboutLinks,
   AboutNote,
   AboutSection,
   type AboutFile,
   type AboutNotices,
   type AboutSectionId,
-  type AccessContext,
 } from "./About";
+import type { AccessContext } from "./accessReason";
 import {
   ChatComposer,
   ChatMessageList,
@@ -29,8 +31,8 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The About rail for a file: its Chats, History and Access. A focused chat
-// tab gets AboutConversationPanel instead.
+// The About rail for a file: its Links, Chats, History and Access. A focused
+// chat tab gets AboutConversationPanel instead.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.
@@ -55,19 +57,19 @@ const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
 // `key` names the workspace and file an answer is for: a state for another
 // file reads as loading, so a switch never shows the last file's chats.
+// `updating` is the engine still reading the workspace's files in.
 type ThreadsState =
   | { status: "loading" }
+  | { status: "updating"; key: string }
   | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
-const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { chats: true, history: true, access: false };
+const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { links: true, chats: true, history: true, access: false };
 
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+// The engine answers "still updating" only while its first capture of the
+// workspace runs, and that capture ends ready or degraded. So the read asks
+// again each second, with no deadline of its own.
 const THREAD_LOAD_RETRY_MS = 1_000;
-// Initial capture has a 120s early-import decision ceiling. Leave one retry
-// interval for the Ready/Degraded transition, with a fail-safe if that bound
-// is ever violated.
-const THREAD_LOAD_RETRY_DEADLINE_MS = 121_000;
 
 function isWorkspaceUpdatingResponse(
   response: ListFileChatsResponse,
@@ -115,11 +117,23 @@ export function LinkedChatsPanel(props: {
   // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
   onError: (message: string, cause?: unknown) => void;
+  // A sent message asks an agent that Restricted Mode holds. The shell opens
+  // main's trust dialog for the workspace named.
+  onAgentWaitsForTrust?: (workspaceId: string) => void;
   // The file's History, where this workspace records it. A shared view
   // records none, so it passes nothing and About shows no History.
   history?: {
     revision: number;
+    // History stopped recording, so its section says so.
+    paused: boolean;
     onOpenMoment: (momentId: string, filePath: string) => void;
+  };
+  // The links into the file, read again as `revision` changes. Chats that
+  // link here are read only where `onOpenChat` can open them.
+  links: {
+    revision: number;
+    onOpenLink: (path: string, line: number) => void;
+    onOpenChat?: (mention: ChatFileMentionRecord) => void;
   };
   // Where a section read that failed reports, and what can explain an Access
   // answer that covers nothing. Both stay the same object between renders.
@@ -169,23 +183,15 @@ export function LinkedChatsPanel(props: {
       notices.report({ identity, message, cause, retry: () => void refreshThreads() });
     };
     setThreadsState({ status: "loading" });
-    let updatingStartedAtMs: number | null = null;
     while (current()) {
       try {
         const result = await bridge().listFileChats({ workspaceId, path: filePath });
         if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
-          const now = performance.now();
-          updatingStartedAtMs ??= now;
-          const remainingMs =
-            updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
-          if (remainingMs <= 0) {
-            fail(WORKSPACE_UPDATING_MESSAGE);
-            return;
-          }
-          await new Promise((resolveDelay) =>
-            setTimeout(resolveDelay, Math.min(THREAD_LOAD_RETRY_MS, remainingMs)),
+          setThreadsState((state) =>
+            state.status === "updating" && state.key === threadsKey ? state : { status: "updating", key: threadsKey },
           );
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, THREAD_LOAD_RETRY_MS));
           continue;
         }
         notices.clear(identity);
@@ -357,6 +363,7 @@ export function LinkedChatsPanel(props: {
         body,
       });
       if (token !== liveToken.current) return;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       setMessages((current) => [...current, result.message]);
       setComposer("");
       listRef.current?.scrollToEnd();
@@ -371,7 +378,7 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props.onError, sending, workspaceId]);
+  }, [activeThread, composer, props.onAgentWaitsForTrust, props.onError, sending, workspaceId]);
 
   // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.
@@ -485,15 +492,26 @@ export function LinkedChatsPanel(props: {
 
   const threads = "key" in threadsState && threadsState.key === threadsKey ? threadsState : null;
   // History asks about the file's object id, which this file's chats read
-  // answers. History keeps its place while that read runs or fails.
+  // answers. History keeps its place while that read runs, waits or fails.
   const file: AboutFile =
     threads === null ? { status: "loading" }
+    : threads.status === "updating" ? { status: "updating" }
     : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
     : { status: "ready", objectId: threads.fileObjectId };
   return (
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
       <AboutHeader subject={{ path: filePath }} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
+        <AboutLinks
+          workspaceId={workspaceId}
+          path={filePath}
+          revision={props.links.revision}
+          expanded={sectionsOpen.links}
+          onToggle={toggleSection("links")}
+          onOpenLink={props.links.onOpenLink}
+          {...(props.links.onOpenChat ? { onOpenChat: props.links.onOpenChat } : {})}
+          notices={notices}
+        />
         <AboutSection
           id="chats"
           icon={MessageSquare}
@@ -502,7 +520,7 @@ export function LinkedChatsPanel(props: {
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
         >
-          {threads === null ? (
+          {threads === null || threads.status === "updating" ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
           ) : threads.status === "unavailable" ? (
             <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
@@ -530,6 +548,7 @@ export function LinkedChatsPanel(props: {
             path={filePath}
             file={file}
             revision={props.history.revision}
+            paused={props.history.paused}
             expanded={sectionsOpen.history}
             onToggle={toggleSection("history")}
             onOpenMoment={props.history.onOpenMoment}

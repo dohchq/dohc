@@ -6,10 +6,12 @@ import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./stor
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { refusalOutstanding, type OwnerKnownRefusal, type OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import { SERVICE_KEPT_EDITS_REASONS, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 
 export type LiveAdmissionValidation = LiveJournalValidation | {
@@ -24,6 +26,14 @@ export interface OwnerOutboxAdmission {
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
+  /** Outlives every pass and connection, so a refusal received once is recorded, not admitted again. */
+  readonly refusals: OwnerKnownRefusals;
+  /**
+   * The workspace identity whose hosted store holds the queue, where it lives
+   * on the service host, so its owner can find and recover a refused queue
+   * there. A device's queue is on the owner's computer.
+   */
+  readonly keptOnServer?: ServiceKeptEditsIdentity;
   validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
@@ -68,16 +78,28 @@ export async function drainOwnerOutbox(options: {
   const readStatus = async () => {
     const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
     check();
-    const status = configRecord(available.result,["outboxId","pendingBytes","state"]);
+    const status = configRecord(available.result,["outboxId","pendingBytes","state","retryDeliveryId"]);
     if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: true};
+    if (status.retryDeliveryId !== null && (status.state !== "quarantined" || typeof status.retryDeliveryId !== "string")) throw new Error("Invalid owner outbox retry.");
+    // Only the owner's Try again lets a quarantined queue reach admission, and only for its head.
+    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: status.retryDeliveryId === null};
     if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
-  if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
-  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
-  if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
+  const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  // The row of this queue in the attached store. A store of another identity can hold a queue with the same ID.
+  const queue = admission.keptOnServer && typeof outboxId === "string" ? {workspaceId: binding.workspaceId, identity: admission.keptOnServer, outboxId} : undefined;
+  // A queue that delivers again, as after an accepted Try again, is no longer
+  // kept for its owner. Its status is read again under the hold, so a refusal
+  // another pass is recording keeps its row.
+  if (queue && status.quarantined === undefined && storage.readServiceKeptEdits(queue)) {
+    if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
+    try {
+      const current = await readStatus();
+      if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits(queue);
+    } finally {refusals.release(held);}
+  }
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
   const outbox = new OwnerYDocOutbox({sendRequest: async original => {
@@ -96,12 +118,57 @@ export async function drainOwnerOutbox(options: {
     }
     return {...response,id: original.id};
   }},options.workspace);
+  // The record of a refusal its owner can find, written before the engine's
+  // quarantine so no crash leaves a quarantine without one.
+  const keep = (outbox: string, refusal: {reason: string; deliveryId: string; key: string}) => {
+    if (admission.keptOnServer) storage.recordServiceKeptEdits({identity: admission.keptOnServer, outboxId: outbox, binding, reason: refusal.reason,
+      headDeliveryId: refusal.deliveryId, refusalKey: refusal.key, nowMs: Date.now()});
+  };
+  if (status.quarantined) {
+    // With no Try again outstanding, no known refusal is left to record.
+    const known = refusals.get(held);
+    try {
+      // A quarantine whose record was lost, or forgotten once its document left, is recorded from the engine's queue.
+      if (queue && !storage.readServiceKeptEdits(queue)) {
+        if (known) keep(queue.outboxId, known);
+        else {
+          const head = await outbox.readDeliveryHead(queue.outboxId, binding); check();
+          if (head.entry && head.quarantineReason !== null && SERVICE_KEPT_EDITS_REASONS.includes(head.quarantineReason)) {
+            keep(queue.outboxId, {reason: head.quarantineReason, deliveryId: head.entry.deliveryId, key: `quarantined:${head.entry.deliveryId}`});
+          }
+        }
+      }
+    } finally {outbox.dispose();}
+    if (known) refusals.recorded(held, known);
+    adoption.applied(); return {admittedEntries: 0, hasMore: false};
+  }
+  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
+  if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
+  const quarantine = async (known: OwnerKnownRefusal) => {
+    keep(outboxId, known);
+    await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
+      params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
+    refusals.recorded(held, known);
+    check();
+  };
+  // One attempt per outbox at a time, across passes and connections.
+  if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
   try {
     for (let index = 0; index < admission.maxEntriesPerDrain; index++) {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
-      if (pending.state === "quarantined") {adoption.applied(); return {admittedEntries, hasMore: false};}
+      const known = refusals.get(held);
+      if (known) {
+        // A refusal already received completes; it never reaches admission again.
+        if (refusalOutstanding(pending, known)) {
+          await quarantine(known);
+          adoption.applied();
+          return {admittedEntries, hasMore: true, retryReady: true};
+        }
+        refusals.recorded(held, known);
+      }
+      if (pending.state === "quarantined" && (!pending.entry || pending.entry.deliveryId !== pending.retryDeliveryId)) {adoption.applied(); return {admittedEntries, hasMore: false};}
       if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
       // The seed is the queue's first entry, so a later head proves it applied.
@@ -141,10 +208,10 @@ export async function drainOwnerOutbox(options: {
         cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
       if (committed.result.kind !== "accepted") {
-        if (["provenance-refused", "delivery-conflict"].includes(committed.result.reason)) {
-          await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
-            params: {registrationId, reason: committed.result.reason}}, signal);
-          check();
+        // Final refusals of this candidate freeze its whole queue. Contention returned retry above;
+        // validator integration and admitted-cut failures threw in storage.
+        if (["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"].includes(committed.result.reason)) {
+          await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: committed.result.reason}));
           adoption.applied();
           return {admittedEntries, hasMore: false};
         }
@@ -172,5 +239,5 @@ export async function drainOwnerOutbox(options: {
       return {admittedEntries, hasMore: remaining.pendingBytes > 0};
     }
     throw error;
-  } finally { outbox.dispose(); }
+  } finally { outbox.dispose(); refusals.release(held); }
 }

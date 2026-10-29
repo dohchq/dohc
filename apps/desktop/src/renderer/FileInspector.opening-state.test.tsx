@@ -34,6 +34,14 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 
 setupFileInspectorTests();
 
@@ -357,11 +365,9 @@ describe("markdown document opening state", () => {
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
     );
 
-    // The properties draw where they will be, and the block as written starts
-    // closed, as it does once the properties take edits.
+    // The properties draw where they will be, so nothing moves once the
+    // document is ready.
     await screen.findByTestId("properties-panel");
-    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
-    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
     // The body draws with the editor's own rules (styles.css
     // .dohc-notion-editor): its column, type and block spacing. No block
     // carries a look of its own that would beat them.
@@ -375,7 +381,8 @@ describe("markdown document opening state", () => {
     );
     bind();
     await screen.findByTestId("markdown-source-toggle");
-    expect(asWritten()?.open).toBe(false);
+    // The page's icon shows every line, so the properties offer no Source.
+    expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {
@@ -879,7 +886,7 @@ describe("markdown document opening state", () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Plan\n---\n\n${"body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Plan\n---\n\n${"body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 5 + 1)}`;
     const newestLocalBody = initialBody.replace(
       "title: Plan",
       "title: Newest local title",
@@ -1224,7 +1231,7 @@ describe("markdown document opening state", () => {
 
   it("rereads legacy Markdown after a write overlaps a newer content request", async () => {
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 5 + 1)}`;
     const externalBody = initialBody.replace("title: Base", "title: External");
     const initialHash = "3".repeat(64);
     const localHash = "4".repeat(64);
@@ -1407,7 +1414,7 @@ describe("markdown document opening state", () => {
 
   it("captures the same legacy conflict again after its first recovery is dismissed", async () => {
     const bridge = makeHeldOpenBridge();
-    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(14_000)}`;
+    const initialBody = `---\ntitle: Base\n---\n\n${"Body\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 5 + 1)}`;
     const initialHash = "9".repeat(64);
     const externalHash = "b".repeat(64);
     bridge.bridgeMock.readWorkspaceText

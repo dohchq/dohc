@@ -202,7 +202,7 @@ function read(storage: StorageContext, operationId: string, workspaceId: string)
   }
   const nativeReceipt = row.native_receipt_json === null ? null : parseNativeRestoreFenceReceipt(JSON.parse(String(row.native_receipt_json)));
   if (!["authority-invalidated","fenced","old-cut-applied"].includes(String(row.phase)) !== (nativeReceipt !== null)) refuse();
-  if (nativeReceipt && (!applied || !isDeepStrictEqual(nativeReceipt.operation, nativeRestoreFence(applied, Number(row.new_fence))))) refuse();
+  if (nativeReceipt && (!applied || !isDeepStrictEqual(nativeReceipt.operation, nativeRestoreFence(applied, Number(row.new_fence), intent)))) refuse();
   return { intent, basis: savedBasis, terminal: terminal === null ? null : parseLiveUpdateReceipt(terminal), applied, nativeReceipt,
     previousOperationId:row.previous_operation_id===null?null:parseLiveUpdateIdentifier(row.previous_operation_id),
     phase: row.phase as StopRestoreOperation["phase"], oldFence: Number(row.old_fence),
@@ -211,8 +211,8 @@ function read(storage: StorageContext, operationId: string, workspaceId: string)
     fencedAtMs: row.fenced_at_ms === null ? null : Number(row.fenced_at_ms) };
 }
 
-export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number): NativeRestoreFence {
-  return {operationId: applied.operationId, relayDatabaseNamespace: applied.namespace, oldBinding: structuredClone(applied.binding),
+export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number, intent: StopRestoreIntent): NativeRestoreFence {
+  return {point: {journalCursor: intent.restorePointCursor, receiptDigest: intent.restorePointReceiptDigest}, operationId: applied.operationId, relayDatabaseNamespace: applied.namespace, oldBinding: structuredClone(applied.binding),
     hostId: applied.hostId, newFence, origin: {kind: applied.kind, id: applied.sourceId},
     terminal: applied.terminal ? {...applied.terminal} : null, appliedSequence: applied.localYDocSequence};
 }
@@ -319,7 +319,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const maximumApplied = {operationId: intent.operationId,binding: intent.deliveryKind === "owner" ? initialBasis.ownerBinding : initialBasis.binding,
       kind: "bootstrap",namespace: initialBasis.namespace,hostMode: initialBasis.hostMode,
       hostId: initialBasis.hostId,sourceId: "\\".repeat(512),localYDocSequence: Number.MAX_SAFE_INTEGER,terminal: maximumReceipt};
-    const maximumNativeReceipt = {operation: nativeRestoreFence(maximumApplied as StopRestoreApplied, Number.MAX_SAFE_INTEGER),
+    const maximumNativeReceipt = {operation: nativeRestoreFence(maximumApplied as StopRestoreApplied, Number.MAX_SAFE_INTEGER, intent),
       localHeadSequence: Number.MAX_SAFE_INTEGER, recordedAtMs: Number.MAX_SAFE_INTEGER};
     const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied),JSON.stringify(maximumNativeReceipt), "authority-invalidated",
       intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]));

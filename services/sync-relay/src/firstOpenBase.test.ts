@@ -33,6 +33,8 @@ import {
   ordinaryActivationEntryBytes,
   ordinaryActivationReadBytes,
   verifyOrdinaryActivationCut,
+  readOrdinaryActivationHistory,
+  validateOrdinaryActivation,
   type KnownActivationSource,
 } from "./storage/ordinaryActivationSource.js";
 
@@ -123,10 +125,14 @@ describe("the verifier's byte counts", () => {
       sourceMomentId: "head-moment", sourceDigest: sha256(markdown), sourceByteLength: Buffer.byteLength(markdown), nativeHeadSequence: 1,
       fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length };
     const logEntryBytes = ordinaryActivationEntryBytes({ relay_seq: 2, origin_id: "origin", origin_seq: 1, op_kind: "ydoc.update" }, Buffer.byteLength(payload));
-    const verify = (bounds: { maxCaptureBytes: number; maxBytesPerDrain: number }) => verifyOrdinaryActivationCut(storage, {
-      source, document: live, baselineBytes: base, fullState, baseline: baseline.evidence,
-      validateJournal: createLiveMarkdownJournalValidator(policy), validateRegistration: createLiveMarkdownRegistrationValidator(policy),
-      bounds: { maxEntriesPerDrain: 10, ...bounds } });
+    const verify = (bounds: { maxCaptureBytes: number; maxBytesPerDrain: number }) => {
+      const input = {source, document: live, baselineBytes: base, fullState, bounds: {maxEntriesPerDrain: 10, ...bounds}};
+      const history = readOrdinaryActivationHistory(storage, input);
+      const validation = validateOrdinaryActivation({document: live, currentPath: source.currentPath, baselineBytes: base,
+        cut: {source, fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, policy);
+      if (validation.kind !== "accepted") throw new Error("Ordinary activation validation refused.");
+      return verifyOrdinaryActivationCut(storage, {...input, baseline: validation.baseline, history});
+    };
     return { base, source, logEntryBytes, verify,
       close() { raw.close(); storage.close(); rmSync(root, { recursive: true, force: true }); } };
   }
@@ -420,8 +426,8 @@ describe("first-open candidates", () => {
 });
 
 describe("first-open worker", () => {
-  function fixture(options?: Parameters<typeof createLiveValidationExecutor>[0]) {
-    const pool = createLiveValidationExecutor(options); pools.push(pool);
+  function fixture(options?: Parameters<typeof createLiveValidationExecutor>[2]) {
+    const pool = createLiveValidationExecutor(undefined, undefined, options); pools.push(pool);
     const doc = projectionImport.markdownToYDoc("A **shared** document");
     const checkpoint = Y.encodeStateAsUpdate(doc); doc.destroy();
     const journal = { document: { ...document, lineageClaimId: "lineage" }, currentPath: "note.md", checkpoint, suffix: [], candidate: Uint8Array.of(0, 0) };

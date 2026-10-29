@@ -44,7 +44,7 @@ const THEMES = ["light", "dark"] as const;
 // instead of leaving its baselines unread.
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
-  "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "menu", "document-menu",
+  "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty",
   "kind-glyph",
@@ -54,11 +54,11 @@ const PARTS = [
   "tab-row-actions",
   "slash-menu",
   "editor-group-focus",
-  "frontmatter-as-written",
   "title-bar-status",
   "capture-recovery",
   "recovery-row",
   "about",
+  "about-links",
   "sharing",
   "usage-record",
   "word-diff",
@@ -68,9 +68,11 @@ const PARTS = [
   "theme-picker",
   "zoom-stepper",
   "settings-keyboard",
+  "settings-privacy",
   "rails",
   "composer-sending",
   "about-conversation",
+  "about-conversation-links",
   "file-view-actions",
   "offers",
   "csv-bound",
@@ -394,10 +396,11 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     const failures: string[] = [];
     // A tab row keeps Share and the document's controls inside itself at any
     // width, and its save state gives way before the tab's file name: the
-    // name is cut only once the save state shows no more than one character
-    // and an ellipsis (13px of 11px mono). A row whose save state shows no
-    // words draws the same width as the loading row. The narrow specimen must
-    // really have cut its save state short, or the check proves nothing.
+    // name is cut only once the save state shows little more than an
+    // ellipsis (under 13px; the ellipsis is 9.5px of 11px Inter). A row whose
+    // save state shows no words draws the same width as the loading row. The
+    // narrow specimen must really have cut its save state short, or the check
+    // proves nothing.
     for (const theme of THEMES) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
       const widths: number[] = [];

@@ -154,6 +154,89 @@ fn main() {
                     }
                     0
                 }
+                "ipc" => {
+                    // The control creates, uses and removes its own objects. Raw syscalls: glibc's semop calls semtimedop.
+                    let mut calls = Vec::new();
+                    let mut call = |name, number, a: [i64; 5]| {
+                        let result = libc::syscall(number, a[0], a[1], a[2], a[3], a[4]);
+                        calls.push((name, result, std::io::Error::last_os_error().raw_os_error()));
+                        result
+                    };
+                    let mut message = [1i64, 0]; // mtype, then an 8-byte body
+                    let ops = [1, -1].map(|sem_op| libc::sembuf {
+                        sem_num: 0,
+                        sem_op,
+                        sem_flg: libc::IPC_NOWAIT as i16,
+                    });
+                    let timeout = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
+                    let mut attr: libc::mq_attr = std::mem::zeroed();
+                    (attr.mq_maxmsg, attr.mq_msgsize) = (1, 8);
+                    let (body, up, down) = (
+                        message.as_mut_ptr() as i64,
+                        &raw const ops[0] as i64,
+                        &raw const ops[1] as i64,
+                    );
+                    let (now, attr_ptr) = (&raw const timeout as i64, &raw mut attr as i64);
+                    let queue_name = c"dohc-replica-probe".as_ptr() as i64;
+                    let (private, create, rmid, nowait) = (
+                        libc::IPC_PRIVATE as i64,
+                        (libc::IPC_CREAT | 0o600) as i64,
+                        libc::IPC_RMID as i64,
+                        libc::IPC_NOWAIT as i64,
+                    );
+                    let shm = call("shmget", libc::SYS_shmget, [private, 4096, create, 0, 0]);
+                    let at = call("shmat", libc::SYS_shmat, [shm, 0, 0, 0, 0]);
+                    call("shmdt", libc::SYS_shmdt, [at, 0, 0, 0, 0]);
+                    call("shmctl", libc::SYS_shmctl, [shm, rmid, 0, 0, 0]);
+                    let msg = call("msgget", libc::SYS_msgget, [private, create, 0, 0, 0]);
+                    call("msgsnd", libc::SYS_msgsnd, [msg, body, 8, nowait, 0]);
+                    call("msgrcv", libc::SYS_msgrcv, [msg, body, 8, 0, nowait]);
+                    call("msgctl", libc::SYS_msgctl, [msg, rmid, 0, 0, 0]);
+                    let sem = call("semget", libc::SYS_semget, [private, 1, create, 0, 0]);
+                    call("semop", libc::SYS_semop, [sem, up, 1, 0, 0]);
+                    call("semtimedop", libc::SYS_semtimedop, [sem, down, 1, now, 0]);
+                    call("semctl", libc::SYS_semctl, [sem, 0, rmid, 0, 0]);
+                    let flags = (libc::O_CREAT | libc::O_RDWR) as i64;
+                    let queue = call(
+                        "mq_open",
+                        libc::SYS_mq_open,
+                        [queue_name, flags, 0o600, attr_ptr, 0],
+                    );
+                    call(
+                        "mq_timedsend",
+                        libc::SYS_mq_timedsend,
+                        [queue, body, 8, 0, now],
+                    );
+                    call(
+                        "mq_timedreceive",
+                        libc::SYS_mq_timedreceive,
+                        [queue, body, 8, 0, now],
+                    );
+                    call("mq_notify", libc::SYS_mq_notify, [queue, 0, 0, 0, 0]);
+                    call(
+                        "mq_getsetattr",
+                        libc::SYS_mq_getsetattr,
+                        [queue, 0, attr_ptr, 0, 0],
+                    );
+                    libc::close(queue as i32);
+                    call("mq_unlink", libc::SYS_mq_unlink, [queue_name, 0, 0, 0, 0]);
+                    for (name, result, errno) in &calls {
+                        println!("{name} result={result} errno={errno:?}");
+                    }
+                    if confined {
+                        let denied = |(_, result, errno): &(_, i64, _)| {
+                            (*result, *errno) == (-1, Some(libc::EPERM))
+                        };
+                        assert!(calls.iter().all(denied), "an IPC call escaped");
+                    }
+                    if calls.iter().any(|(_, result, _)| *result < 0) {
+                        return Err("IPC denied".into());
+                    }
+                    0
+                }
                 "data" => {
                     std::fs::read("/data/secret")?;
                     0

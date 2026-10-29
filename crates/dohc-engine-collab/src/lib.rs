@@ -32,6 +32,7 @@ pub mod live_update_application;
 pub mod owner_base_source;
 pub mod owner_outbox;
 pub mod reader_resolver;
+pub mod reader_snapshot;
 pub mod replay_parity;
 pub mod replication;
 pub mod scene;
@@ -44,26 +45,29 @@ pub use durable::{
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker, load_doc_in,
     load_persisted, local_close_is_covered, mark_base_coordinate_absent_in_tx, maybe_compact,
     pristine_seed_lineage_source, read_last_settled_sha, read_marker, read_marker_in,
-    read_pristine_seed_lineage_source, read_seed_only_lineage_source, record_base_coordinate_in_tx,
-    record_local_update, record_update_in_tx, replace_lineage_with_successor,
-    replace_lineage_with_successor_in_tx, replace_reviewed_lineage_with_successor_in_tx,
-    rewrite_bare_marker_content_kind, seed_only_lineage_source, settle, validate_remote_update,
-    AppendOutcome, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome,
-    CloseProjection, CompactOutcome, FileExportLane, LineageClaimStatus, LineageGuard, LocalAppend,
-    Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome,
-    SuccessorInstallOutcome, SuccessorReplacement,
+    read_pristine_seed_lineage_source, record_base_coordinate_in_tx, record_local_update,
+    record_update_in_tx, replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
+    replace_reviewed_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
+    validate_remote_update, AppendOutcome, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome,
+    CloseOutcome, CloseProjection, CompactOutcome, FileExportLane, LineageClaimStatus,
+    LineageGuard, LocalAppend, Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime,
+    SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
 pub use live_object_binding::LiveObjectBinding;
 pub use owner_outbox::{
     acknowledge as acknowledge_owner_outbox, append as append_owner_outbox,
+    prepare_recovery_checkpoint as prepare_owner_outbox_recovery_checkpoint,
     quarantine as quarantine_owner_outbox, read_pending as read_pending_owner_outbox,
-    read_pending_page as read_pending_owner_outbox_page, OwnerDeliveryReceipt,
-    OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput, OwnerOutboxAppendResult,
-    OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits, OwnerOutboxPageResult,
-    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
-    OwnerOutboxReadPart, OwnerOutboxState,
+    read_pending_hosted_page as read_pending_hosted_owner_outbox_page,
+    read_pending_page as read_pending_owner_outbox_page,
+    record_refusal as record_owner_outbox_refusal, retry as retry_owner_outbox,
+    HostedStoreIdentity, OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult,
+    OwnerOutboxAppendInput, OwnerOutboxAppendResult, OwnerOutboxEntry, OwnerOutboxError,
+    OwnerOutboxLimits, OwnerOutboxPageResult, OwnerOutboxPending, OwnerOutboxQuarantineInput,
+    OwnerOutboxReadCursor, OwnerOutboxReadPage, OwnerOutboxReadPart, OwnerOutboxRefusal,
+    OwnerOutboxRetryInput, OwnerOutboxState,
 };
 pub use replay_parity::{
     apply_replay_validated_batch, validate_replay_parity, validate_replay_parity_with_scratch,

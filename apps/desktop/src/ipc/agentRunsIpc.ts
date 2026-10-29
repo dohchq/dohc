@@ -1,3 +1,4 @@
+import { normalizeRootPath } from "@dohc/workspace-core";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
@@ -6,8 +7,10 @@ import {
   StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
   ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
+  stoppedRunOperations,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations } from "./operationTable";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -44,7 +47,7 @@ export function createAgentRunsIpc<
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
-  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
+  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "retryStoppedRun" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
   detectAgentTools(workspaceRoot: string, signal: AbortSignal): Promise<AgentToolsResult["tools"]>;
@@ -103,10 +106,10 @@ export function createAgentRunsIpc<
       return withRendererWorkspaceOperation(event.sender, input.workspaceId,
         "Agent detection stopped because this window changed workspaces.",
         async (operation) => {
-          const workingDirectory = operation.workspace.rootPath;
+          const workingDirectory = normalizeRootPath(operation.workspace.rootPath, process.platform);
           // Leaving the workspace in this window cancels detection even while another window keeps it open.
           const signal = AbortSignal.any([operation.signal, operation.session.signal]);
-          const tools = await dependencies.detectAgentTools(workingDirectory, signal)
+          const tools = await dependencies.detectAgentTools(operation.workspace.rootPath, signal)
             .catch((error: unknown) => {
               if (operation.session.signal.aborted) operation.assertCurrent();
               throw error;
@@ -144,7 +147,7 @@ export function createAgentRunsIpc<
       // A shared view hands out the MCP profile for its level, so the user's AI
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
-      return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
+      return McpConfigResult.parse(mcpConfigFor(normalizeRootPath(workspace.rootPath, process.platform), shareAccess));
     }));
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {
@@ -187,6 +190,28 @@ export function createAgentRunsIpc<
       );
     }));
 
+    registerOperations<typeof stoppedRunOperations, Event, Operation>({
+      handle: registerHandler,
+      assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+    }, stoppedRunOperations, {
+      retryStoppedRun: async (input) => {
+        const { workspace } = await requireEngineCapture(
+          input.workspaceId,
+          "Chats",
+        );
+        assertWritableWorkspace(workspace);
+        return {
+          queued: await chatDispatchService.retryStoppedRun(
+            input.workspaceId,
+            input.threadId,
+            input.runId,
+          ),
+        };
+      },
+    });
+
     registerHandler(CHANNELS.runnerSelfTest, async (event, payload) => {
       assertTrustedSender(event);
       const input = RunnerSelfTestPayload.parse(payload);
@@ -197,7 +222,7 @@ export function createAgentRunsIpc<
         });
       await openWorkspaceActivity(workspace);
       return RunnerSelfTestResult.parse(
-        await chatDispatchService.runnerSelfTest(workspace.workspaceId),
+        await chatDispatchService.runnerSelfTest(workspace.workspaceId, input.agentId),
       );
     });
   }

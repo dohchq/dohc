@@ -121,6 +121,7 @@ fn audit(directory: &Path, crates: &Path, found: &mut Vec<(String, String)>) {
                 audit(&path, crates, found);
             }
         } else if path.extension().is_some_and(|ext| ext == "rs")
+            && path.file_stem().is_some_and(|stem| stem != "tests")
             && !path
                 .file_stem()
                 .unwrap()

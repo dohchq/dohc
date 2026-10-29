@@ -8,7 +8,29 @@ export const AgentLaunchProfile = z.object({
   ),
 }).strict();
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
+
+// How dohc starts an agent: a tool it knows, or the person's own command.
+export const AgentLaunch = z.union([
+  AgentLaunchProfile,
+  z.object({
+    command: z.string().max(4096).refine((value) => value.trim().length > 0, "Enter the command that starts your agent."),
+  }).strict(),
+]);
+export type AgentLaunch = z.infer<typeof AgentLaunch>;
+
+export function launchProfile(launch: AgentLaunch): AgentLaunchProfile | undefined {
+  return "tool" in launch ? launch : undefined;
+}
+
+/** The chosen tool, else the typed command, else null for neither. */
+export function launchFrom(profile: AgentLaunchProfile | undefined, command: string): AgentLaunch | null {
+  return profile ?? (command.trim() ? { command: command.trim() } : null);
+}
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
+
+// What a person reads when Restricted Mode holds an agent back: main's
+// notice and the band in Chats.
+export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
 
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
@@ -21,7 +43,7 @@ export function supportsAgentProfile(tool: AgentToolId, version: string | null):
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Uses your Claude permissions. Requests that need approval are denied." },
+    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -30,20 +52,24 @@ export const AGENT_TOOLS = [
     permissions: "No launch profile yet" },
 ] as const;
 
-export function agentProfileArguments(profile: AgentLaunchProfile): string[] {
+// runArguments holds what one run adds: the dohc MCP server it replies
+// through and, for Codex, its sandbox and trust (codexRunConfig.ts).
+export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
+  // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
+  // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
-    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
+    : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-export function configuredRunnerCommand(runner: { command: string; profile?: AgentLaunchProfile }): string {
-  return runner.profile
-    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile)].join(" ")
-    : runner.command.trim();
+export function launchCommand(launch: AgentLaunch): string {
+  return "tool" in launch
+    ? [quoteRunnerToken(launch.executable), ...agentProfileArguments(launch).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
+    : launch.command.trim();
 }
 
 export const AgentToolDetection = z.object({

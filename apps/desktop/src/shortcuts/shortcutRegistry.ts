@@ -5,7 +5,7 @@ type EditorShortcutId = "editor-mac-backspace" | "editor-mac-delete" | "editor-m
   | "editor-paragraph" | "editor-heading-1" | "editor-heading-2" | "editor-heading-3" | "editor-heading-4" | "editor-heading-5" | "editor-heading-6"
   | "editor-delete-word" | "editor-backspace-word" | "editor-hard-break" | "editor-select-all" | "editor-highlight" | "editor-blockquote" | "editor-bullet-list"
   | "editor-code" | "editor-code-block" | "editor-italic" | "editor-strike" | "editor-underline" | "editor-ordered-list" | "editor-task-list";
-type OwnedShortcutId = "command-palette" | "close-window" | "history-restore-undo"
+type OwnedShortcutId = "command-palette" | "close-window" | "quit" | "history-restore-undo"
   | EditorShortcutId
   | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-again-next" | "find-again-previous" | "find-close" | "dev-panel";
 export type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "find" | "find-field" | "dev";
@@ -22,8 +22,8 @@ interface ShortcutDefinition extends ShortcutKeys {
   // Я for Z on a Russian layout. The row answers them; Settings does not list them.
   layoutAliases?: readonly string[];
   macOptionCode?: string;
-  // The row exists only on this platform.
-  platform?: "darwin";
+  // The row exists only on these platforms.
+  platforms?: readonly ("darwin" | "linux" | "win32")[];
 }
 type ShortcutEvent = Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">;
 
@@ -42,6 +42,9 @@ export const SHORTCUTS = {
   "previous-tab": { owner: "shell", accelerators: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], mac: { accelerators: ["Ctrl+Shift+Tab", "CommandOrControl+Shift+["] } },
   "close-tab": { owner: "shell", accelerators: ["CommandOrControl+W"] },
   "close-window": { owner: "native", accelerators: ["CommandOrControl+Shift+W"] },
+  // macOS's app menu and Linux's File menu quit, as their apps do. Windows apps
+  // quit with Alt+F4, and the tray icon Windows shows has Quit dohc.
+  "quit": { owner: "native", platforms: ["darwin", "linux"], accelerators: ["CommandOrControl+Q"] },
   "zoom-in": { owner: "main", accelerators: ["CommandOrControl+=", "CommandOrControl+Plus", "CommandOrControl+numadd"] },
   "zoom-out": { owner: "main", accelerators: ["CommandOrControl+-", "CommandOrControl+numsub"] },
   "zoom-reset": { owner: "main", accelerators: ["CommandOrControl+0"] },
@@ -72,11 +75,11 @@ export const SHORTCUTS = {
   "editor-code-block": { owner: "editor", accelerators: ["CommandOrControl+Alt+C"] },
   "editor-hard-break": { owner: "editor", accelerators: ["CommandOrControl+Enter"] },
   "editor-backspace-word": { owner: "editor", accelerators: ["CommandOrControl+Backspace"] },
-  "editor-mac-backspace": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+H", "Alt+Backspace"] },
+  "editor-mac-backspace": { owner: "editor", platforms: ["darwin"], accelerators: ["Ctrl+H", "Alt+Backspace"] },
   "editor-delete-word": { owner: "editor", accelerators: ["CommandOrControl+Delete"] },
-  "editor-mac-delete": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+D", "Ctrl+Alt+Backspace", "Alt+Delete", "Alt+D"] },
-  "editor-mac-line-start": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+A"] },
-  "editor-mac-line-end": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+E"] },
+  "editor-mac-delete": { owner: "editor", platforms: ["darwin"], accelerators: ["Ctrl+D", "Ctrl+Alt+Backspace", "Alt+Delete", "Alt+D"] },
+  "editor-mac-line-start": { owner: "editor", platforms: ["darwin"], accelerators: ["Ctrl+A"] },
+  "editor-mac-line-end": { owner: "editor", platforms: ["darwin"], accelerators: ["Ctrl+E"] },
   "editor-find": { owner: "editor", accelerators: ["CommandOrControl+F"] },
   // macOS keeps ⌘H for Hide, so Replace takes ⌥⌘F there, as in Xcode and Pages.
   "editor-replace": { owner: "editor", accelerators: ["CommandOrControl+H"], mac: { accelerators: ["CommandOrControl+Alt+F"] } },

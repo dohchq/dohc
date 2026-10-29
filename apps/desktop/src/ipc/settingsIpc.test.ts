@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
@@ -8,16 +8,18 @@ import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import { WorkspaceUiState } from "./bridgeContract";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type DesktopUserSettingsResult, type ThemeMode } from "../settings/userSettings";
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
+import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "../window/rendererWorkspaceSessionOwner";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
+import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
@@ -29,11 +31,13 @@ const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SE
 const workspacePayload = { workspaceId: "workspace-a" };
 const patchPayload = { ...workspacePayload, patch: { privacy: { confirmExternalLinks: false } } };
 const uiPayload = { ...workspacePayload, state };
+const localState = fakeLocalStateOpens();
 const settingsRequests = [
   [settingsOperations.getUserSettings.channel, undefined],
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
+  [settingsOperations.orderAgents.channel, { order: ["default"] }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
   [settingsOperations.getUserSettingsFilePath.channel, undefined],
@@ -89,7 +93,7 @@ async function harness() {
   let preferredName: string | undefined = "Before";
   const effects: Array<{ kind: string; value: unknown; persisted: DesktopUserSettings }> = [];
   const persisted = () => JSON.parse(readFileSync(join(stateDirectory, userSettingsStore.USER_SETTINGS_FILE), "utf8")) as DesktopUserSettings;
-  const setCachedPreferredName = vi.fn((value: string | undefined) => {
+  const setCachedNames = vi.fn((value: string | undefined) => {
     preferredName = value;
     effects.push({ kind: "name", value, persisted: persisted() });
   });
@@ -105,7 +109,7 @@ async function harness() {
   const openPath = vi.fn<(path: string) => Promise<string>>(async () => "");
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
-    stateDir: () => stateDirectory, setCachedPreferredName,
+    stateDir: () => stateDirectory, setCachedNames,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
@@ -125,12 +129,19 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
+    zoom: capability.stepWindowZoom, setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
+    // What workspace-a's engine open does: prepare .dohc/local, then answer.
+    prepareLocalState: async (ready = true, workspaceId = "workspace-a") => {
+      const workspace = entries.get(workspaceId)!;
+      await localState.open(workspace, ready);
+      return workspace;
+    },
+    closeLocalState: () => localState.close(entries.get("workspace-a")!),
     invoke: async (channel: string, payload?: unknown, value = first, trusted = true) => {
       const handler = handlers.get(channel);
       if (!handler) throw new Error(`Missing handler: ${channel}`);
@@ -177,7 +188,7 @@ describe("registered settings IPC", () => {
     for (const channel of [settingsOperations.setUserSettings.channel, ...workspaceRequests.map(([channel]) => channel)]) {
       await expect(h.invoke(channel, {})).rejects.toThrow();
     }
-    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: { ...DEFAULT_USER_SETTINGS, runner: { command: " ", enabled: true, timeoutMinutes: 30 } }, base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
+    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings: settingsWithAgent({ launch: { command: " " } }), base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: -1 } })).rejects.toThrow();
     for (const port of [writes, workspaceReads, workspaceWrites, resets, uiReads, uiWrites]) expect(port).not.toHaveBeenCalled();
     expect(h.effects).toEqual([]);
@@ -235,7 +246,7 @@ describe("registered settings IPC", () => {
       // the file rather than saving into it.
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
       // Every change puts the whole file into effect, the zoom step included.
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
+      expect(h.setCachedNames.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
@@ -294,7 +305,7 @@ describe("registered settings IPC", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => { logged.resolve(); });
     h.refreshDispatchTray.mockImplementationOnce(async () => { trayReached.resolve(); await trayRelease.promise; });
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     const result = h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS });
     try {
       await trayReached.promise;
@@ -319,11 +330,39 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const error = new Error("tray unavailable");
     h.refreshDispatchTray.mockRejectedValueOnce(error);
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(3);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("scans when any agent dohc starts changes, not only the first", async () => {
+    const h = await harness();
+    const one = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: one, base: DEFAULT_USER_SETTINGS });
+    await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
+    h.scanWorkspace.mockClear();
+    const off = { ...one, agents: { ...one.agents, codex: testAgent({ name: "Codex", enabled: false }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: one });
+    // An agent that is off does not change what dohc starts.
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
+    await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
+  });
+
+  it("tells every window and the tray when only the agents' order changes", async () => {
+    const h = await harness();
+    const two = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Claude Code" }), codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: two, base: DEFAULT_USER_SETTINGS });
+    h.broadcastUserSettings.mockClear();
+    h.refreshDispatchTray.mockClear();
+    await h.invoke(settingsOperations.orderAgents.channel, { order: ["codex"] });
+    expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
+    const [sent] = h.broadcastUserSettings.mock.lastCall as [DesktopUserSettingsResult];
+    expect(Object.keys(sent.settings.agents)).toEqual(["codex", "default"]);
+    expect(h.refreshDispatchTray).toHaveBeenCalledOnce();
   });
 
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
@@ -383,6 +422,7 @@ describe("registered settings IPC", () => {
       settings: { appearance: { zoomLevel: 4 }, profile: { preferredName: "Ada" } },
     });
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      version: 2,
       appearance: { themeMode: "system", zoomLevel: 4 },
       profile: { preferredName: "Ada" },
     });
@@ -407,9 +447,9 @@ describe("registered settings IPC", () => {
     expect(h.applyZoomLevelToWindows).not.toHaveBeenCalled();
   });
 
-  it("scans for waiting runner work only when the runner or the agent's name changes", async () => {
+  it("scans for waiting runner work only when the agent that answers changes", async () => {
     const h = await harness();
-    const runner = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const runner = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: runner, base: DEFAULT_USER_SETTINGS });
     await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
     h.scanWorkspace.mockClear();
@@ -439,9 +479,9 @@ describe("registered settings IPC", () => {
 
   it("opens this workspace's settings file through the workspace that asked", async () => {
     const h = await harness();
-    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { privacy: { confirmExternalLinks: false } });
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(await h.prepareLocalState(), { privacy: { confirmExternalLinks: false } });
     await h.invoke(settingsOperations.openWorkspaceSettingsFile.channel, workspacePayload);
-    expect(h.openPath).toHaveBeenCalledExactlyOnceWith(join(h.root, ".dohc", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE));
+    expect(h.openPath).toHaveBeenCalledExactlyOnceWith(join(h.root, ".dohc", "local", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE));
     await expect(h.invoke(settingsOperations.openWorkspaceSettingsFile.channel, workspacePayload, h.second)).rejects.toThrow("this window changed workspaces");
     expect(h.openPath).toHaveBeenCalledOnce();
   });
@@ -540,19 +580,19 @@ describe("registered workspace settings and UI state", () => {
   it("merges workspace patches onto disk and resets only the admitted workspace", async () => {
     const h = await harness();
     await expect(h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" });
-    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { sites: { defaultPreviewMode: "static" } });
-    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.otherRoot, { sites: { defaultPreviewMode: "build" } });
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(await h.prepareLocalState(), { sites: { defaultPreviewMode: "static" } });
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(await h.prepareLocalState(true, "workspace-b"), { sites: { defaultPreviewMode: "build" } });
     const saved = await h.invoke(settingsOperations.setWorkspaceSettings.channel, patchPayload);
     expect(saved).toMatchObject({ settings: { privacy: { confirmExternalLinks: false }, sites: { defaultPreviewMode: "static" } }, source: "stored" });
     await expect(h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload)).resolves.toEqual(saved);
     await expect(h.invoke(settingsOperations.resetWorkspaceSettings.channel, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
-    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.otherRoot)).resolves.toMatchObject({ settings: { sites: { defaultPreviewMode: "build" } } });
+    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.entries.get("workspace-b")!)).resolves.toMatchObject({ settings: { sites: { defaultPreviewMode: "build" } } });
   });
 
   it("keeps recovery warnings and save refusals from the real settings file owner", async () => {
     const h = await harness();
-    await mkdir(join(h.root, ".dohc"));
-    const path = join(h.root, ".dohc", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE);
+    await h.prepareLocalState();
+    const path = join(h.root, ".dohc", "local", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE);
     await writeFile(path, "{broken");
     const read = await h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload);
     expect(read).toMatchObject({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "recovered", warning: expect.stringContaining(path) });
@@ -561,12 +601,36 @@ describe("registered workspace settings and UI state", () => {
     await expect(h.invoke(settingsOperations.resetWorkspaceSettings.channel, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
   });
 
+  it("refuses a workspace settings save or reset until .dohc/local is ready, with words, and makes nothing", async () => {
+    const h = await harness();
+    // The window is admitted, but this workspace's engine open has not answered.
+    await expect(h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload))
+      .resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" });
+    await expect(h.invoke(settingsOperations.setWorkspaceSettings.channel, patchPayload)).rejects.toThrow(
+      "dohc did not save this workspace's settings because the workspace has not finished opening. Try again when it opens.",
+    );
+    await expect(h.invoke(settingsOperations.resetWorkspaceSettings.channel, workspacePayload)).rejects.toThrow(
+      "dohc did not reset this workspace's settings because the workspace has not finished opening. Try again when it opens.",
+    );
+    expect(await lstat(join(h.root, ".dohc")).catch(() => null)).toBeNull();
+
+    await h.prepareLocalState(false);
+    await expect(h.invoke(settingsOperations.setWorkspaceSettings.channel, patchPayload)).rejects.toThrow(
+      "dohc did not save this workspace's settings because it can't keep this computer's settings out of iCloud Drive. Restart dohc to try again.",
+    );
+    expect(await readdir(join(h.root, ".dohc", "local"))).toEqual([]);
+
+    await h.prepareLocalState();
+    await expect(h.invoke(settingsOperations.setWorkspaceSettings.channel, patchPayload))
+      .resolves.toMatchObject({ settings: { privacy: { confirmExternalLinks: false } }, source: "stored" });
+  });
+
   it.each(["renderer", "physical"])("suppresses a held workspace settings read after %s retirement", async owner => {
     const h = await harness();
     const reached = deferred(), release = deferred();
     const realRead = workspaceSettingsFile.readWorkspaceSettingsFile;
-    vi.spyOn(workspaceSettingsFile, "readWorkspaceSettingsFile").mockImplementationOnce(async root => {
-      const result = await realRead(root); reached.resolve(); await release.promise; return result;
+    vi.spyOn(workspaceSettingsFile, "readWorkspaceSettingsFile").mockImplementationOnce(async workspace => {
+      const result = await realRead(workspace); reached.resolve(); await release.promise; return result;
     });
     const result = h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload);
     const rejection = expect(result).rejects.toThrow();
@@ -583,10 +647,11 @@ describe("registered workspace settings and UI state", () => {
 
   it("suppresses a retired save response without pretending the admitted disk write was undone", async () => {
     const h = await harness();
+    await h.prepareLocalState();
     const reached = deferred(), release = deferred();
     const realSave = workspaceSettingsFile.saveWorkspaceSettingsFile;
-    vi.spyOn(workspaceSettingsFile, "saveWorkspaceSettingsFile").mockImplementationOnce(async (root, patch) => {
-      const result = await realSave(root, patch); reached.resolve(); await release.promise; return result;
+    vi.spyOn(workspaceSettingsFile, "saveWorkspaceSettingsFile").mockImplementationOnce(async (workspace, patch) => {
+      const result = await realSave(workspace, patch); reached.resolve(); await release.promise; return result;
     });
     const result = h.invoke(settingsOperations.setWorkspaceSettings.channel, patchPayload);
     const rejection = expect(result).rejects.toThrow("this window changed workspaces");
@@ -597,22 +662,49 @@ describe("registered workspace settings and UI state", () => {
       release.resolve();
       await rejection;
     }
-    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.root)).resolves.toMatchObject({ settings: { privacy: { confirmExternalLinks: false } } });
+    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.entries.get("workspace-a")!)).resolves.toMatchObject({ settings: { privacy: { confirmExternalLinks: false } } });
   });
 
   it("round-trips parsed UI state through the admitted workspace and strips unknown write fields", async () => {
     const h = await harness();
+    await h.prepareLocalState();
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, extra: "discard" } })).resolves.toBeUndefined();
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
     await expect(uiStateStore.readUiStateFile(h.otherRoot)).resolves.toBeNull();
   });
 
+  it("refuses a UI-state write the engine has not prepared .dohc/local for, and makes nothing", async () => {
+    const h = await harness();
+    // The renderer is admitted, but this workspace's engine open has not answered.
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).rejects.toThrow(
+      "dohc has not finished opening this workspace. Try again when it opens.",
+    );
+    expect(await lstat(join(h.root, ".dohc")).catch(() => null)).toBeNull();
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
+
+    // The open could not keep the folder out of iCloud Drive.
+    await h.prepareLocalState(false);
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).rejects.toThrow("out of iCloud Drive");
+    expect(await readdir(join(h.root, ".dohc", "local"))).toEqual([]);
+
+    await h.prepareLocalState();
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload)).resolves.toBeUndefined();
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(state);
+
+    // Once the engine closes the workspace, writes stop and the saved layout stays.
+    h.closeLocalState();
+    await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: 300 } }))
+      .rejects.toThrow("dohc has not finished opening this workspace.");
+    // On Windows nothing reads it until the next open holds the folder.
+    expect(JSON.parse(await readFile(join(h.root, ".dohc", "local", "ui-state.json"), "utf8"))).toEqual(state);
+  });
+
   it("denies a UI-state read from a renderer until its open admits it", async () => {
     const h = await harness();
     const fresh = sender(3);
     dispose.unshift(() => h.sessions.retireAfterCrash(fresh));
-    await uiStateStore.writeUiStateFile(h.root, state);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), state);
     const uiReads = vi.spyOn(uiStateStore, "readUiStateFile");
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).rejects.toThrow("UI state read stopped because this window changed workspaces.");
     expect(uiReads).not.toHaveBeenCalled();
@@ -622,28 +714,28 @@ describe("registered workspace settings and UI state", () => {
 
   it.each(["null", "[]", "7", "\"text\"", "{broken"])("returns null for unavailable or non-object UI state: %s", async raw => {
     const h = await harness();
-    await mkdir(join(h.root, ".dohc"));
-    await writeFile(join(h.root, ".dohc", "ui-state.json"), raw);
+    await h.prepareLocalState();
+    await writeFile(join(h.root, ".dohc", "local", "ui-state.json"), raw);
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toBeNull();
   });
 
   it("preserves raw object fields for renderer repair on UI-state reads", async () => {
     const h = await harness();
     const raw = { version: 1, activeView: "foreign", sidebarWidth: -100, extra: { retained: true } };
-    await uiStateStore.writeUiStateFile(h.root, raw);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), raw);
     await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload)).resolves.toEqual(raw);
   });
 
   it.each(["read", "write"])("suppresses UI-state %s completion after renderer retirement", async kind => {
     const h = await harness();
-    await uiStateStore.writeUiStateFile(h.root, state);
+    await uiStateStore.writeUiStateFile(await h.prepareLocalState(), state);
     const reached = deferred(), release = deferred();
     const realRead = uiStateStore.readUiStateFile, realWrite = uiStateStore.writeUiStateFile;
     if (kind === "read") vi.spyOn(uiStateStore, "readUiStateFile").mockImplementationOnce(async root => {
       const result = await realRead(root); reached.resolve(); await release.promise; return result;
     });
-    else vi.spyOn(uiStateStore, "writeUiStateFile").mockImplementationOnce(async (root, value) => {
-      await realWrite(root, value); reached.resolve(); await release.promise;
+    else vi.spyOn(uiStateStore, "writeUiStateFile").mockImplementationOnce(async (workspace, value) => {
+      await realWrite(workspace, value); reached.resolve(); await release.promise;
     });
     const result = h.invoke(kind === "read" ? settingsOperations.getWorkspaceUiState.channel : settingsOperations.setWorkspaceUiState.channel, kind === "read" ? workspacePayload : uiPayload);
     const rejection = expect(result).rejects.toThrow("this window changed workspaces");

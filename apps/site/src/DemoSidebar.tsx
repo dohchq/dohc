@@ -10,6 +10,7 @@ import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
+import { VIEW_IDENTITY } from "../../desktop/src/renderer/workbench/viewIdentity";
 
 // The demo has no engine, so no folder is a collection.
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
@@ -23,7 +24,7 @@ import type { DemoPanelId } from "./demoPanels";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
-const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
+export const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
 
 export type DemoWorkspaceDocument = {
   path: string;
@@ -75,8 +76,13 @@ export function DemoSidebar(props: {
   visible: boolean;
   documents: DemoWorkspaceDocument[];
   folders?: string[];
-  activePath: string;
+  // The document the editor shows, or null when no tab is open.
+  activePath: string | null;
+  openTabs: readonly string[];
   onOpenDocument: (path: string) => void;
+  onCloseTab: (path: string) => void;
+  onCloseAllTabs: () => void;
+  onOpenTabsChange: (update: (tabs: string[]) => string[]) => void;
   onCreateDocument: () => void;
   onBeforeChanges: () => Promise<void>;
   onError: (message: string) => void;
@@ -88,9 +94,6 @@ export function DemoSidebar(props: {
     "projects",
     "research",
   ]);
-  const [openTabs, setOpenTabs] = useState<string[]>(() =>
-    props.documents.slice(0, 5).map((document) => document.path),
-  );
   const [searchError, setSearchError] = useState<{
     message: string;
     retry: () => void;
@@ -134,11 +137,6 @@ export function DemoSidebar(props: {
   const historyEntries = useMemo(() => moments.map((moment) => ({ kind: "file" as const, moment })), [moments]);
   const refreshKey = props.documents.map((document) => document.path).join("|");
 
-  function open(path: string) {
-    setOpenTabs((current) => (current.includes(path) ? current : [...current, path]));
-    props.onOpenDocument(path);
-  }
-
   function reprojectPaths(changes: PendingTreeChange[]) {
     const project = (paths: string[]) => [
       ...new Set(
@@ -148,7 +146,7 @@ export function DemoSidebar(props: {
         }),
       ),
     ];
-    setOpenTabs(project);
+    props.onOpenTabsChange(project);
     setExpandedFolders(project);
   }
 
@@ -156,7 +154,7 @@ export function DemoSidebar(props: {
 
   return (
     <SidePanel
-      title={props.activePanel}
+      title={VIEW_IDENTITY[props.activePanel].label}
       width={width}
       onWidthChange={setWidth}
     >
@@ -172,7 +170,7 @@ export function DemoSidebar(props: {
           editorGroups={[
             {
               id: DEMO_EDITOR_GROUP_ID,
-              tabs: openTabs.map((path) => ({ path })),
+              tabs: props.openTabs.map((path) => ({ path })),
               activeTab: props.activePath,
               size: 1,
             },
@@ -184,13 +182,12 @@ export function DemoSidebar(props: {
           pinned={[]}
           openEditorsHeight={openEditorsHeight}
           onOpenEditorsHeightChange={setOpenEditorsHeight}
-          createRequest={null}
-          onOpenFile={open}
-          onActivateTab={(_groupId, path) => open(path)}
-          onCloseTab={(_groupId, path) =>
-            setOpenTabs((current) => current.filter((entry) => entry !== path))
-          }
-          onCloseAllTabs={() => setOpenTabs([])}
+          newFolderRequest={null}
+          onNewPage={props.onCreateDocument}
+          onOpenFile={props.onOpenDocument}
+          onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
+          onCloseTab={(_groupId, path) => props.onCloseTab(path)}
+          onCloseAllTabs={props.onCloseAllTabs}
           onNewUntitledTextFile={props.onCreateDocument}
           onCollapseFolders={() => setExpandedFolders([])}
           onSetFolderExpanded={(path, expanded) =>
@@ -246,22 +243,22 @@ export function DemoSidebar(props: {
               </button>
             </div>
           ) : null}
-          <SearchView search={search} onOpenResult={(path) => open(path)} />
+          <SearchView search={search} onOpenResult={props.onOpenDocument} />
         </div>
       ) : props.activePanel === "chats" ? (
         <ReactionStoreProvider workspaceId="marketing-demo">
         <ChatsView
           workspaceId="marketing-demo"
           workspaces={[{ workspaceId: "marketing-demo", label: "Marketing" }]}
-          onOpenFileChat={(thread) => thread.path && open(thread.path)}
-          onOpenPath={open}
+          onOpenFileChat={(thread) => thread.path && props.onOpenDocument(thread.path)}
+          onOpenPath={props.onOpenDocument}
           onError={() => undefined}
           mentionCandidates={[
             {
               id: "agent:default",
               kind: "agent",
-              handle: "agent",
-              label: "Your agent",
+              handle: "Nova",
+              label: "Nova",
               description: "your agent",
             },
             {
@@ -279,7 +276,7 @@ export function DemoSidebar(props: {
           workspaceId="marketing-demo"
           activePath={props.activePath}
           refreshKey={refreshKey}
-          onOpenPath={open}
+          onOpenPath={props.onOpenDocument}
         />
       ) : props.activePanel === "history" ? (
         <EngineHistoryView
@@ -289,7 +286,7 @@ export function DemoSidebar(props: {
           onLoadMore={() => undefined}
           onOpenMoment={(momentId) => {
             const path = moments.find((moment) => moment.id === momentId)?.path;
-            if (path) open(path);
+            if (path) props.onOpenDocument(path);
           }}
         />
       ) : (

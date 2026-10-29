@@ -5,6 +5,7 @@
 //! the NON-TAUTOLOGICAL parity differentials (channel slug, projection path,
 //! base64url feed cursor) validated against real TS output — not Rust's own.
 
+use dohc_engine_domain::chats::channel_collision_slug;
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
     ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
@@ -42,6 +43,7 @@ fn start_thread(
         message_id: message_id.to_owned(),
         title: None,
         lane: ChatThreadLane::Posts,
+        own_thread: false,
         author_kind: kind,
         author_display_name: "Ada".to_owned(),
         author_owner_display_name: None,
@@ -53,6 +55,8 @@ fn start_thread(
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
 }
 
@@ -80,6 +84,8 @@ fn send_msg(
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
+        author_agent_id: None,
+        named_agent_ids: Vec::new(),
     }
 }
 
@@ -651,7 +657,14 @@ fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
         .expect("remove the table only the full replay query reads");
 
     let changed = LinkedChatStore::new(&mut store)
-        .fail_pending_for_thread(WS, "no-pending-thread", "not needed", 2, &NO_FAULTS)
+        .fail_pending_for_thread(
+            WS,
+            "no-pending-thread",
+            "default",
+            "not needed",
+            2,
+            &NO_FAULTS,
+        )
         .expect("empty pending set must bypass the full replay query");
     assert_eq!(changed, 0);
 }
@@ -817,10 +830,10 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
     assert_eq!(g1.slug, "general");
 
     let a1 = chats
-        .ensure_agent_channel(WS, "agent-1", 12, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 12, &NO_FAULTS)
         .expect("a1");
     let a2 = chats
-        .ensure_agent_channel(WS, "agent-2", 13, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-2", "default", "My agent", 13, &NO_FAULTS)
         .expect("a2");
     assert_eq!(a1.channel_id, a2.channel_id, "agent is idempotent");
     assert_eq!(a1.kind, ChatChannelKind::Agent);
@@ -847,6 +860,44 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
             Ok::<_, rusqlite::Error>(())
         })
         .expect("wire lookups");
+}
+
+/// An earlier build let a group be named "My agent notes". When the notes
+/// agent's chat is made, it takes that slug, and the group keeps its name
+/// under a slug no agent chat can have.
+#[test]
+fn an_agents_chat_moves_a_group_off_its_slug() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws-1', 'notes-group', 'My agent notes', 'my-agent-notes', 'channel', 1, 1)",
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("an earlier build's group");
+    let mut chats = LinkedChatStore::new(&mut store);
+    let chat = chats
+        .ensure_agent_channel(WS, "notes-chat", "notes", "Notes", 10, &NO_FAULTS)
+        .expect("the notes agent's chat");
+    assert_eq!(chat.slug, "my-agent-notes");
+    let group = chats
+        .list_channels(WS)
+        .expect("channels")
+        .into_iter()
+        .find(|summary| summary.channel.channel_id == "notes-group")
+        .expect("the group")
+        .channel;
+    assert_eq!(group.name, "My agent notes");
+    assert_eq!(
+        group.slug,
+        channel_collision_slug("my-agent-notes", "notes-group", 0)
+    );
 }
 
 // ------------------------------------------- atomic thread + first message
@@ -1193,6 +1244,66 @@ fn start_channel_thread_creates_thread_and_first_message_atomically() {
     assert_eq!(rs.revision, 1);
 }
 
+/// Only the relay writes a link message. Neither local write path takes a
+/// link author, with or without an account, and a refusal writes nothing.
+#[test]
+fn local_writes_refuse_a_link_author() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    let refused = |result: Result<_, DomainError>| {
+        matches!(
+            result,
+            Err(DomainError::InvalidInput {
+                reason: "only the relay writes a link message"
+            })
+        )
+    };
+    for author_user_id in [Some("user-ada".to_owned()), None] {
+        let start = StartChannelThread {
+            author_user_id,
+            ..start_thread(
+                "gen-1",
+                "t-link",
+                "m-link",
+                "hello",
+                ChatActorKind::Link,
+                20,
+            )
+        };
+        assert!(refused(
+            chats.start_channel_thread(&start, &NO_FAULTS).map(|_| ())
+        ));
+    }
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "hello", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let reply = SendMessage {
+        author_kind: ChatActorKind::Link,
+        ..send_msg("t1", "m-link-reply", None, "hi", 30)
+    };
+    assert!(refused(chats.send_message(&reply, &NO_FAULTS).map(|_| ())));
+    let page = chats.list_messages(WS, "t1", 10, None).expect("list");
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1"]
+    );
+    assert!(
+        chats.get_message(WS, "m-link").is_err(),
+        "no link thread was started"
+    );
+}
+
 #[test]
 fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1311,6 +1422,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let agent_read_state = chats
         .mark_thread_read_by_agent(
             WS,
+            None,
             "thread-revision",
             30,
             "message-reply",
@@ -2876,7 +2988,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     chats
         .start_channel_thread(
@@ -2892,7 +3004,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
         )
         .expect("start");
     chats
-        .enqueue_dispatch(WS, "m0", "t1", 21, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
 
     for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
@@ -2945,7 +3057,8 @@ fn dispatch_claim_is_single_writer_idempotent() {
     assert_eq!(claim.dispatch.state, "running");
     assert_eq!(claim.dispatch.run_id.as_deref(), Some("run-1"));
     assert_eq!(claim.dispatch.failure_reason, None);
-    assert_eq!(claim.dispatch.created_at_ms, 21);
+    // The message asked the agent in its own write, at its own time.
+    assert_eq!(claim.dispatch.created_at_ms, 20);
     assert_eq!(claim.dispatch.updated_at_ms, 22);
     assert_eq!(claim.run.workspace_id, WS);
     assert_eq!(claim.run.thread_id, "t1");
@@ -2993,7 +3106,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     chats
         .start_channel_thread(
@@ -3002,7 +3115,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
         )
         .expect("start");
     chats
-        .enqueue_dispatch(WS, "m0", "t1", 21, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
     chats
         .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
@@ -3047,26 +3160,35 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     // Two triggers in two threads (a claim marks only same-thread pendings done).
+    // An agent DM keeps one conversation, so each asks for its own thread.
+    for (thread_id, message_id, body, now) in
+        [("t1", "mA", "@agent A", 20), ("t2", "mB", "@agent B", 21)]
+    {
+        chats
+            .start_channel_thread(
+                &StartChannelThread {
+                    own_thread: true,
+                    ..start_thread(
+                        "agent-1",
+                        thread_id,
+                        message_id,
+                        body,
+                        ChatActorKind::Human,
+                        now,
+                    )
+                },
+                &NO_FAULTS,
+            )
+            .expect(thread_id);
+    }
     chats
-        .start_channel_thread(
-            &start_thread("agent-1", "t1", "mA", "@agent A", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("t1");
-    chats
-        .start_channel_thread(
-            &start_thread("agent-1", "t2", "mB", "@agent B", ChatActorKind::Human, 21),
-            &NO_FAULTS,
-        )
-        .expect("t2");
-    chats
-        .enqueue_dispatch(WS, "mA", "t1", 22, &NO_FAULTS)
+        .enqueue_dispatch(WS, "mA", "default", "t1", 22, &NO_FAULTS)
         .expect("enq A");
     chats
-        .enqueue_dispatch(WS, "mB", "t2", 23, &NO_FAULTS)
+        .enqueue_dispatch(WS, "mB", "default", "t2", 23, &NO_FAULTS)
         .expect("enq B");
 
     let a = chats
@@ -3141,7 +3263,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         chats
             .start_channel_thread(
@@ -3150,7 +3272,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
             )
             .expect("start");
         chats
-            .enqueue_dispatch(WS, "mA", "t1", 21, &NO_FAULTS)
+            .enqueue_dispatch(WS, "mA", "default", "t1", 21, &NO_FAULTS)
             .expect("enqueue");
         chats
             .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
@@ -3725,7 +3847,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     let mut chats = LinkedChatStore::new(&mut store);
     for ws in [WS, OTHER_WS] {
         chats
-            .ensure_agent_channel(ws, "agent-x", 10, &NO_FAULTS)
+            .ensure_agent_channel(ws, "agent-x", "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         let mut start = start_thread("agent-x", "t-x", "m-x", "@agent", ChatActorKind::Human, 20);
         start.workspace_id = ws.to_owned();
@@ -3733,7 +3855,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .start_channel_thread(&start, &NO_FAULTS)
             .expect("start");
         chats
-            .enqueue_dispatch(ws, "m-x", "t-x", 21, &NO_FAULTS)
+            .enqueue_dispatch(ws, "m-x", "default", "t-x", 21, &NO_FAULTS)
             .expect("enqueue");
     }
 
@@ -3748,13 +3870,15 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     let start_y = {
         let mut start = start_thread("agent-x", "t-y", "m-y", "@agent", ChatActorKind::Human, 24);
         start.workspace_id = WS.to_owned();
+        // Its own thread, not t-x's conversation in the same agent DM.
+        start.own_thread = true;
         start
     };
     chats
         .start_channel_thread(&start_y, &NO_FAULTS)
         .expect("start y");
     chats
-        .enqueue_dispatch(WS, "m-y", "t-y", 24, &NO_FAULTS)
+        .enqueue_dispatch(WS, "m-y", "default", "t-y", 24, &NO_FAULTS)
         .expect("enqueue y");
     assert_eq!(
         chats

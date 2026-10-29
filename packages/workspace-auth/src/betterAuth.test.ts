@@ -185,6 +185,22 @@ describeWithPostgres("closed sign-up", () => {
     await closed.api.resetPassword({ body: { newPassword, token: link.searchParams.get("token") ?? "" } });
   }
 
+  /** Submits the set-password form over HTTP with the newest emailed link's token. */
+  async function submitResetPage(closed: WorkspaceAuth, email: string, body: Record<string, string>): Promise<Response> {
+    const token = linkIn(lastEmailTo(email)).searchParams.get("token") ?? "";
+    return closed.handler(
+      new Request("http://localhost:1786/api/auth/reset-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, ...body }),
+      }),
+    );
+  }
+
+  async function nameOf(userId: string): Promise<string | undefined> {
+    return (await pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [userId])).rows[0]?.name;
+  }
+
   it("creates an account the server admitted, with no session until its owner chooses a password from the emailed link", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
@@ -192,7 +208,8 @@ describeWithPostgres("closed sign-up", () => {
       new Request("http://localhost:1786/api/auth/sign-up/email", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password: PASSWORD, name: "Test User", callbackURL: "/device?user_code=ABCD-EFGH" }),
+        // The closed sign-up page has no name field.
+        body: JSON.stringify({ email, password: PASSWORD, name: "", callbackURL: "/device?user_code=ABCD-EFGH" }),
       }),
     );
     expect(response.status).toBe(200);
@@ -259,6 +276,71 @@ describeWithPostgres("closed sign-up", () => {
     expect(signin.user.emailVerified).toBe(true);
   });
 
+  it("takes the account's name from the owner's emailed link, never from an earlier sign-up", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
+    await closed.api.signUpEmail({ body: { email, password: "owner-password-bbb", name: "Owner" } });
+    expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBe("1");
+
+    const response = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "  Ada   Lovelace " });
+    expect(response.status).toBe(200);
+    expect(await nameOf(user.id)).toBe("Ada Lovelace");
+  });
+
+  it("leaves the account unnamed when the owner's link arrives without a name", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
+    await choosePassword(closed, email, "owner-password-bbb");
+    expect(await nameOf(user.id)).toBe("");
+  });
+
+  it("keeps each concurrent setup's name to its own account", async () => {
+    const closed = closedAuth("admitted");
+    const named = `${unique()}@dohc.test`;
+    const unnamed = `${unique()}@dohc.test`;
+    const first = await closed.api.signUpEmail({ body: { email: named, password: "attacker-password-aaa", name: "Mallory" } });
+    const second = await closed.api.signUpEmail({ body: { email: unnamed, password: "attacker-password-aaa", name: "Trudy" } });
+
+    const responses = await Promise.all([
+      submitResetPage(closed, named, { newPassword: "owner-password-bbb", name: "Ada" }),
+      submitResetPage(closed, unnamed, { newPassword: "owner-password-ccc" }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(await nameOf(first.user.id)).toBe("Ada");
+    expect(await nameOf(second.user.id)).toBe("");
+  });
+
+  it("refuses an email address as a name and keeps the link usable", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
+
+    const refused = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "ada@example.com" });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { code: string }).code).toBe("INVALID_NAME");
+    expect(await nameOf(user.id)).toBe("Mallory");
+
+    const accepted = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "Ada" });
+    expect(accepted.status).toBe(200);
+    expect(await nameOf(user.id)).toBe("Ada");
+  });
+
+  it("never renames a verified account from a password reset, even with a name in the request", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const { user } = await closed.api.signUpEmail({ body: { email, password: PASSWORD, name: "" } });
+    await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "Ada" });
+
+    await closed.api.requestPasswordReset({ body: { email } });
+    expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBeNull();
+    // A setup flag added to the page's address only makes the page send a name.
+    const response = await submitResetPage(closed, email, { newPassword: "another-password-ddd", name: "Mallory" });
+    expect(response.status).toBe(200);
+    expect(await nameOf(user.id)).toBe("Ada");
+  });
+
   it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {
     const email = `${unique()}@dohc.test`;
     // A session from while sign-up was open.
@@ -272,7 +354,7 @@ describeWithPostgres("closed sign-up", () => {
     const verify = vi.spyOn(internalAdapter, "updateUser").mockRejectedValueOnce(new Error("The database went away."));
     try {
       await expect(choosePassword(closed, email, "owner-password-ccc")).rejects.toThrow("The database went away.");
-      expect(verify).toHaveBeenCalledWith(user.id, { emailVerified: true });
+      expect(verify).toHaveBeenCalledWith(user.id, { name: "", emailVerified: true });
     } finally {
       verify.mockRestore();
     }
@@ -356,6 +438,7 @@ describeWithPostgres("account email", () => {
     await auth.api.requestPasswordReset({ body: { email } });
     const link = linkIn(lastEmailTo(email));
     expect(link.pathname).toBe("/account/reset-password");
+    expect(link.searchParams.get("setup")).toBeNull();
 
     const newPassword = "another-real-password-456";
     await auth.api.resetPassword({
@@ -364,6 +447,7 @@ describeWithPostgres("account email", () => {
 
     const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
     expect(signin.user.email).toBe(email);
+    expect(signin.user.name).toBe("Test User");
     // An open server keeps verification a separate step.
     expect(signin.user.emailVerified).toBe(false);
     await expect(

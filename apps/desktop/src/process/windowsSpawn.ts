@@ -152,7 +152,15 @@ export function killProcessTreeWin32(
 // trailing space with nothing after it — parseProcessTable's own "ignores
 // lines it cannot read" contract already drops that row rather than fail
 // the whole read, the same as any other malformed line.
-export function readProcessTableWithPowershell(): Promise<string> {
+// A read takes about 1 s on a desktop with some 650 processes. The bound
+// leaves room for a loaded machine, and ends a stalled PowerShell so a stop
+// that waits for captures in flight still ends. A read cut off at the bound
+// rejects, and processDescendants counts it as finding nothing.
+export const POWERSHELL_PROCESS_TABLE_READ_TIMEOUT_MS = 10_000;
+
+export function readProcessTableWithPowershell(
+  readTimeoutMs: number = POWERSHELL_PROCESS_TABLE_READ_TIMEOUT_MS,
+): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
       "powershell.exe",
@@ -162,7 +170,7 @@ export function readProcessTableWithPowershell(): Promise<string> {
         "-Command",
         "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)\" }",
       ],
-      { windowsHide: true },
+      { windowsHide: true, timeout: readTimeoutMs },
       (error, stdout) => {
         if (error) reject(error);
         else resolveOutput(stdout);

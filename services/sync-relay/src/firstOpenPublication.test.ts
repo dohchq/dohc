@@ -720,7 +720,7 @@ it("refuses for good a note whose seed runs the first-open worker out of memory,
 it("answers a build that passes its deadline as transient, and frees its slot first", async () => {
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});
   // A deadline of 0 passes long before a new worker can start and answer.
-  const f = await fixture(), pool = createLiveValidationExecutor({firstOpenBuildMs: 0});
+  const f = await fixture(), pool = createLiveValidationExecutor(undefined, undefined, {firstOpenBuildMs: 0});
   pools.push(pool);
   const validate = pool.validator(selfHostLiveProfile().service.activation.validation);
   const live = {document: {workspaceId: WS, mainVersionId: "main" as const, objectId: OBJECT, lineageClaimId: "lineage"}, currentPath: PATH,

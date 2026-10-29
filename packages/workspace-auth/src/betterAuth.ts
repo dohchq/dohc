@@ -1,5 +1,9 @@
 import { betterAuth } from "better-auth";
-import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import {
+  normalizeShareDiscussionDisplayName,
+  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
+} from "@dohc/security-contract/share-discussion";
+import { APIError, createAuthEndpoint, createAuthMiddleware, sessionMiddleware } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
@@ -61,14 +65,27 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   };
   // Better Auth commits each step of a reset on its own. Signing out first
   // means a failure in between leaves an unverified account nobody is in.
-  const verifyOnPasswordReset = async (userId: string): Promise<void> => {
+  // Anyone could have typed the sign-up name too, so the same write that
+  // verifies the address replaces it with the name sent alongside the token,
+  // or none.
+  const verifyOnPasswordReset = async (userId: string, name: string): Promise<void> => {
     const { internalAdapter } = await auth.$context;
     await internalAdapter.deleteUserSessions(userId);
-    await internalAdapter.updateUser(userId, { emailVerified: true });
+    await internalAdapter.updateUser(userId, { name, emailVerified: true });
   };
+  // Better Auth drops `name` from the reset body before onPasswordReset runs,
+  // so a hook reads it first and hands it over through the request they share.
+  const setupNames = new WeakMap<Request, string>();
   const auth = betterAuth({
     ...(admitAccount
       ? {
+          hooks: {
+            before: createAuthMiddleware(async (ctx) => {
+              const body: unknown = ctx.body;
+              if (ctx.path !== "/reset-password" || !ctx.request || !body || typeof body !== "object" || !("name" in body)) return;
+              setupNames.set(ctx.request, chosenName(body.name));
+            }),
+          },
           databaseHooks: {
             user: {
               create: {
@@ -91,11 +108,13 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, token, url: originalUrl }) => {
         const next = nextPage(originalUrl);
-        const url = page(
-          `/account/reset-password?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}`,
-        );
         // Until the address is verified, nobody has chosen a password yet.
         const settingUp = closed && !user.emailVerified;
+        // The flag only makes the page ask for a name; the server applies one
+        // only while the account is unverified.
+        const url = page(
+          `/account/reset-password?token=${encodeURIComponent(token)}${settingUp ? "&setup=1" : ""}${next ? `&next=${encodeURIComponent(next)}` : ""}`,
+        );
         await send({
           to: user.email,
           subject: settingUp ? "Choose your dohc password" : "Reset your dohc password",
@@ -119,8 +138,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
             onExistingUserSignUp: async ({ user }: { user: { email: string; emailVerified: boolean } }) => {
               if (!user.emailVerified) await sendPasswordLink(user.email, null);
             },
-            onPasswordReset: async ({ user }: { user: { id: string; emailVerified: boolean } }) => {
-              if (!user.emailVerified) await verifyOnPasswordReset(user.id);
+            onPasswordReset: async ({ user }: { user: { id: string; emailVerified: boolean } }, request?: Request) => {
+              if (!user.emailVerified) await verifyOnPasswordReset(user.id, (request && setupNames.get(request)) ?? "");
             },
           }
         : {}),
@@ -240,6 +259,20 @@ export async function signOutUnverifiedAccounts(pool: Pool): Promise<void> {
 function nextPage(betterAuthUrl: string): string | null {
   const callback = new URL(betterAuthUrl).searchParams.get("callbackURL");
   return callback && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback) ? callback : null;
+}
+
+/** The name other people see, normalized as the relay shows it. */
+function chosenName(value: unknown): string {
+  const invalid = (message: string) => new APIError("BAD_REQUEST", { code: "INVALID_NAME", message });
+  const name = normalizeShareDiscussionDisplayName(value);
+  if (!name.ok) {
+    throw invalid(name.reason === "too-long" ? `Enter a name of ${SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT} characters or fewer.` : "Enter your name.");
+  }
+  // The relay hides any name that looks like an address.
+  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(name.value)) {
+    throw invalid("Enter a name instead of an email address. Other people see it beside your work.");
+  }
+  return name.value;
 }
 
 function refuseUnadmitted(admission: SignUpAdmission): void {

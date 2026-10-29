@@ -139,9 +139,9 @@ it.skipIf(engine.missing)(
       rustEngineSessions: sessions,
     });
     try {
-      // 47 KiB: just under the 48 KiB in-band cap the daemon refuses a seeded
-      // open past (INBAND_CONTENT_CAP_BYTES), so this is the largest document
-      // a first open can carry.
+      // 47 KiB: just under the 48 KiB in-band cap (INBAND_CONTENT_CAP_BYTES),
+      // so this is the largest seed a first open carries in its answer. A
+      // larger one is read as a blob after the open.
       const paragraph = `${"lorem ipsum dolor sit amet ".repeat(38)}\n\n`;
       const big = `# big\n\n${paragraph.repeat(
         Math.floor((47 * 1024) / paragraph.length) - 1,

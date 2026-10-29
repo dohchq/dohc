@@ -49,7 +49,7 @@ function ScopedRecordDetails(props: TransactionalRecordDetailsDialogProps) {
   const actions = props.offline || !props.onAction ? [] : props.operations.filter(operation => operation.tableId === read.tableId && operation.kind === "action");
   const hasEditableField = fields.some(field => props.canEdit(field) && edits.some(operation => operation.fieldIds.includes(field.fieldId)));
   return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Record details", className: "dohc-elevated dohc-pop-in flex max-h-[90vh] w-[min(620px,92vw)] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink" }}>
-    <div className="flex items-center justify-between gap-3"><div><h2 className="m-0 text-sm font-semibold">Record details</h2><p className="m-0 mt-1 text-[12px] text-muted">Record {String(props.row.id)}{props.unavailable ? null : ` · Version ${props.row.version}`}</p></div><SecondaryButton disabled={props.disabled} onClick={props.onClose}>Close</SecondaryButton></div>
+    <div className="flex items-center justify-between gap-3"><div><h2 className="m-0 text-base font-semibold">Record details</h2><p className="m-0 mt-1 text-[12px] text-muted">Record {String(props.row.id)}{props.unavailable ? null : ` · Version ${props.row.version}`}</p></div><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
     {props.unavailable ? <p role="status" className="m-0 text-sm text-muted">{props.unavailable}</p> : <>
     {props.buttons?.fields.length ? <div data-testid="record-buttons" className="flex flex-wrap items-center gap-1.5">{props.buttons.fields.map(field => <Fragment key={field}>{props.buttons!.render(field, props.row)}</Fragment>)}</div> : null}
     <dl className="m-0 grid gap-2">
@@ -66,6 +66,6 @@ function ScopedRecordDetails(props: TransactionalRecordDetailsDialogProps) {
     {actions.length ? <div className="grid gap-2 border-t border-line pt-3"><p className="m-0 text-[12px] text-muted">Open an action to review its inputs before running it.</p><div className="flex flex-wrap gap-2">{actions.map(operation => <SecondaryButton key={operation.operationId} disabled={props.disabled} onClick={() => props.onAction?.(operation)}>Open {operation.label}</SecondaryButton>)}</div></div> : null}
     {props.offline ? <p className="m-0 text-[12px] text-muted">Offline copy · Read-only</p> : !hasEditableField && !actions.length ? <p className="m-0 text-[12px] text-muted">No edit action is available for this record.</p> : null}
     </>}
-    <div className="flex justify-end"><PrimaryButton disabled={props.disabled} onClick={props.onClose}>Done</PrimaryButton></div>
+    <div className="flex justify-end"><PrimaryButton onClick={props.onClose}>Done</PrimaryButton></div>
   </Overlay>;
 }

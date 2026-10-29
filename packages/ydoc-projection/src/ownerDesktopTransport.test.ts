@@ -21,6 +21,7 @@ import type {StorageContext} from "../../../services/sync-relay/src/storage/cont
 import * as Y from "yjs";
 import {EngineDaemonLifecycle,EngineWorkspaceSessions,type EngineClient} from "../../workspace-engine-client/src/daemon/index.js";
 import {decodeOrdinarySyncResult} from "../../workspace-engine-client/src/relay/ordinarySyncWireContract.js";
+import {OwnerKnownRefusals} from "../../workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.js";
 import {serveFetchHandler} from "../../service-http/src/index.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createWorkspaceEngineCapture} from "../../../apps/desktop/src/workspaces/workspaceEngineCapture.js";
@@ -165,7 +166,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
     const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)}}});
     relay.on("upgrade",control.handleUpgrade);
     const {certificate, key} = await ensureLocalhostTls();
@@ -315,7 +316,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       const bearer = Buffer.alloc(32,31).toString("base64url"), profile = Buffer.alloc(32,32).toString("base64url"), now = Date.now();
       expect(deployment.storage.mintLinkSession({session: {sessionId: "private-link-session",capabilityHash: hashLinkBearer(bearer,ticketKey),grantId: "private-link-grant",
         generation: 1,mintedAtMs: now,expiresAtMs: now + 15 * 60_000}})).toBe(true);
-      const resolver = createLinkLiveBrowserResolver({storage: deployment.storage,linkKey: ticketKey});
+      const resolver = createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage: deployment.storage,linkKey: ticketKey});
       const resolved = await resolver.resolve(new Request(`https://localhost:${sharePort}/private`,{headers: {authorization: `Bearer ${bearer}`,"x-dohc-link-profile-secret": profile}}),"abcdefghijkl");
       if (!resolved) throw new Error("Native proof link authentication was refused.");
       scope = resolved;

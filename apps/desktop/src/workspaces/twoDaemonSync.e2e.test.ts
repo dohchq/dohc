@@ -1,15 +1,18 @@
 import { parseHostEpoch } from "@dohc/live-session-contract";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { restoreDirectWrites } from "./stopAndRestore";
+import { engineMomentDetailForIpc } from "../ipc/engineHistoryIpc";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
+import { HostedLogClientClosedError, startServerProxy, type HostedLogResponseBarrier } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
@@ -17,15 +20,17 @@ import { parseFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, YdocLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
 import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
 import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
-import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -40,7 +45,7 @@ import {
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createRecordByHand, desktopRecordEditContext } from "./desktopRecordEdits";
 import { onWorkspaceCaptureSettled } from "./captureActivityBridge";
-import { createTestScratch } from "./testTemp";
+import { createSuiteTestScratchSync, createTestScratch } from "./testTemp";
 import {deferred} from "../testing/deferred";
 import {
   installWorkspaceDataKey,
@@ -62,6 +67,19 @@ import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
 const engine = requireEngineBinaryOrSkip();
+
+async function waitForHostedLog<T>(barrier: HostedLogResponseBarrier, promise: Promise<T>, phase: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Hosted-log ${phase} did not finish within 60 s.`));
+        barrier.destroy();
+      }, 60_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 let relayBuildDirectory: string;
 let compiledRelayMain: string;
 
@@ -86,6 +104,8 @@ interface LiveDaemonCapture {
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  // What the desktop does first at quit.
+  beginShutdown(): void;
   close(): Promise<void>;
 }
 
@@ -129,6 +149,10 @@ async function openLiveDaemonCapture(input: {
         workspaceId: input.workspaceId,
       }, { workspace: handle }),
     ),
+    beginShutdown: () => {
+      capture.beginShutdown();
+      workspace.sessions.beginShutdown();
+    },
     close: async () => {
       try {
         await capture.stop();
@@ -194,6 +218,10 @@ async function openJoinedDaemonCapture(input: {
         workspaceId: input.workspaceId,
       }, { workspace: handle }),
     ),
+    beginShutdown: () => {
+      capture.beginShutdown();
+      workspace.sessions.beginShutdown();
+    },
     close: async () => {
       try {
         await capture.stop();
@@ -611,6 +639,88 @@ it.skipIf(engine.missing)(
   240_000,
 );
 
+it.skipIf(engine.missing)(
+  "kept text resolution without lineage: edit over peer deletion",
+  async () => {
+    const workspaceId = "text-keep-deletion";
+    const path = "trip.txt";
+    const initial = "Trip destination: undecided\n";
+    const textB = "Trip destination: Tokyo\n";
+    const later = `${textB}continued on B\n`;
+    const rootA = await createTestScratch("dohc-text-keep-delete-a-");
+    const rootB = await createTestScratch("dohc-text-keep-delete-b-");
+    const relayRoot = await createTestScratch("dohc-text-keep-delete-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    const inspect = async (daemon: LiveDaemonCapture, root: string) => {
+      const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
+      const moments = (await daemon.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path === path);
+      return { text: await readFile(join(root, path), "utf8").catch(error => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }), rows, history: await Promise.all(moments.map(async moment => ({
+        summary: moment, detail: await daemon.capture.readMoment(moment.id),
+      }))) };
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await writeAndCapture(daemonA, rootA, path, initial);
+      await pushUntilDrained(daemonA.relay);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(daemonB, rootB, path, initial);
+      const before = (await daemonA.capture.listMoments({ limit: 100 })).moments.length;
+      await rm(join(rootA, path));
+      daemonA.capture.observeFileEvents([{ path, operation: "delete" }]);
+      await waitForPathMoments(daemonA.capture, path, before + 1);
+      await writeAndCapture(daemonB, rootB, path, textB);
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const rowsA = (await daemonA.capture.listOpenConflictsPage()).conflicts;
+      const rowsB = (await daemonB.capture.listOpenConflictsPage()).conflicts;
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.id).toBe(rowsB[0]!.id);
+      expect(rowsA[0]).toMatchObject({ current: { exists: false }, incoming: { text: textB } });
+      expect(rowsB[0]).toMatchObject({ current: { text: textB }, incoming: { exists: false } });
+      await daemonB.capture.resolveConflict(rowsB[0]!.id, { kind: "keep-current" });
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const keptA = await inspect(daemonA, rootA);
+      const keptB = await inspect(daemonB, rootB);
+      console.log("deletion after keep", JSON.stringify({ A: keptA, B: keptB }));
+      expect(keptA.text).toBeNull();
+      expect(keptA.rows).toHaveLength(2);
+      expect(keptB.text).toBe(textB);
+      expect(keptB.rows).toHaveLength(0);
+      await writeAndCapture(daemonB, rootB, path, later);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const laterA = await inspect(daemonA, rootA);
+      const laterB = await inspect(daemonB, rootB);
+      console.log("deletion after later edit", JSON.stringify({ A: laterA, B: laterB }));
+      expect(laterA.text).toBeNull();
+      expect(laterA.rows.length).toBeGreaterThanOrEqual(2);
+      expect(laterA.rows.some(row => row.incoming.text === later)).toBe(true);
+      expect(laterB.text).toBe(later);
+      expect(laterB.rows).toHaveLength(0);
+      expect(await daemonA.refusalNotices()).toMatchObject({ notices: [] });
+      expect(await daemonB.refusalNotices()).toMatchObject({ notices: [] });
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  90_000,
+);
+
 it.skipIf(engine.missing).each([
   { name: "existing id", hasId: true, body: "# Keep this body\n", stopQuarantine: false },
   { name: "id-less canonical", hasId: false, body: "# Body\n", stopQuarantine: false },
@@ -639,7 +749,8 @@ it.skipIf(engine.missing).each([
   let capture: WorkspaceEngineCapture | undefined;
   let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
   let peer: LiveDaemonCapture | undefined;
-  let releaseHostedPulls: (() => void) | undefined;
+  let preStopFeed: ReturnType<typeof proxy.holdNextHostedLogResponse> | undefined;
+  let resumedFeed: ReturnType<typeof proxy.holdNextHostedLogResponse> | undefined;
   const errors: string[] = [];
   let resyncSignals = 0;
   const recordError = (context: string, error: unknown) => {
@@ -709,8 +820,9 @@ it.skipIf(engine.missing).each([
     catch (error) { throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() }), { cause: error }); }
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
+    const refusals = new OwnerKnownRefusals();
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, refusals, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     let saveState: string | undefined;
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
@@ -858,7 +970,9 @@ it.skipIf(engine.missing).each([
           createdAtMs: Date.now(), updatedAtMs: Date.now(),
           change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         };
-        const store = createAutomationRunStore(rootA, resolveWorkspaceMetadataDir);
+        // The run reads its progress as it would while the engine holds `.dohc/local`.
+        readersTrustLocalState();
+        const store = createAutomationRunStore(preparedAutomationStoreFolder(rootA));
         const signal = new AbortController().signal;
         const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({
           capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local-person"},
@@ -978,10 +1092,17 @@ it.skipIf(engine.missing).each([
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
-          if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
+          if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
-        }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+          return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+            : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+        }), liveDocument: async (_workspace, target) => {
+          const resolved = await source.sessions.run(source.workspace, async ({client, workspace}) =>
+            new VersionedLiveAdapter(client, workspace, {workspaceId: source.workspace.workspaceId}).resolveFiles({workspaceId: source.workspace.workspaceId, targets: [target]}));
+          const [file] = resolved.results;
+          return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+        }, pushRecorded: async () => {}, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+        sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({
         handle: (channel, handler) => {handlers.set(channel, handler);},
@@ -993,14 +1114,25 @@ it.skipIf(engine.missing).each([
       }, relayShareOperations, ownerHandlers);
       const stop = () => Promise.resolve(handlers.get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
       const resume = () => Promise.resolve(handlers.get(relayShareOperations.resumeOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
+      // The document's state in the session host's store.
+      const hostDocumentState = async () => {
+        const stores = join(relayRoot, "relay-deployment", "live-host");
+        const store = (await readdir(stores)).find(entry => /^[0-9a-f]{64}$/u.test(entry));
+        if (!store) return undefined;
+        const db = new DatabaseSync(join(stores, store, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+        try {return (db.prepare("SELECT state FROM hosted_documents WHERE object_id=?").get(document.binding.objectId) as {state: string} | undefined)?.state;}
+        finally {db.close();}
+      };
       // The session host either parks the stopped document before Resume, or
       // pulls nothing between Stop and Resume and still holds it ready.
       const hostReadyAtResume = name === "stale-binding quarantine";
       if (hostReadyAtResume) {
-        const held = proxy.heldHostedPulls();
-        releaseHostedPulls = proxy.holdHostedPulls();
-        // Its next pull waits here, so any pull already on its way was answered before Stop.
-        await expect.poll(() => proxy.heldHostedPulls(), {timeout: 60_000}).toBeGreaterThan(held);
+        preStopFeed = proxy.holdNextHostedLogResponse(workspaceId);
+        const response = await waitForHostedLog(preStopFeed, preStopFeed.captured, "pre-Stop capture");
+        expect(response.status).toBe(200);
+        expect(JSON.parse(response.body.toString("utf8"))).toMatchObject({ ok: true,
+          scope: { documents: expect.arrayContaining([{ objectId: document.binding.objectId, path }]) } });
+        expect(await hostDocumentState()).toBe("ready");
       }
       if (offlineStop) {
         await expect(stop()).rejects.toThrow("Stop live editing is waiting.");
@@ -1047,15 +1179,6 @@ it.skipIf(engine.missing).each([
       expect(await readFile(join(rootA, path), "utf8")).toContain(offlineStop ? "Name: Offline while stopping" : "Name: Quarantined edit");
       const releasedMoment = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
       expect(releasedMoment?.authors).toContainEqual({kind: "human", humanId: "local-person"});
-      // The document's state in the session host's store.
-      const hostDocumentState = async () => {
-        const stores = join(relayRoot, "relay-deployment", "live-host");
-        const store = (await readdir(stores)).find(entry => /^[0-9a-f]{64}$/u.test(entry));
-        if (!store) return undefined;
-        const db = new DatabaseSync(join(stores, store, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
-        try {return (db.prepare("SELECT state FROM hosted_documents WHERE object_id=?").get(document.binding.objectId) as {state: string} | undefined)?.state;}
-        finally {db.close();}
-      };
       if (!hostReadyAtResume) await expect.poll(hostDocumentState, {timeout: 120_000}).toBe("parked");
       // An ordinary owner edit that reaches the peer through ordinary sync.
       const editOrdinary = async (value: string, key: string) => {
@@ -1080,17 +1203,24 @@ it.skipIf(engine.missing).each([
         const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
         return {ready, row};
       };
-      const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
+      const unadmitted = {ready: false, row: {path, objectId: document.binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"}};
       // The operator's reports that the host's copy misses the owner's edit.
       const reports = () => relayServer!.diagnostics().stderr
         .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
       await resume();
-      if (releaseHostedPulls) {
-        // The host ran a pass after Resume without pulling, so its copy is ready but misses the edit.
-        const held = proxy.heldHostedPulls();
-        await expect.poll(() => proxy.heldHostedPulls(), {timeout: 60_000}).toBeGreaterThan(held);
+      if (preStopFeed) {
+        // Finish the pre-Stop pass, then hold the fresh feed before it can fence the stale copy.
+        resumedFeed = proxy.holdNextHostedLogResponse(workspaceId);
+        preStopFeed.release();
+        try { await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery"); }
+        catch (error) {
+          // A timed-out host retries through the queued pull and the fresh-response barrier.
+          if (!(error instanceof HostedLogClientClosedError)) throw error;
+        }
+        expect((await waitForHostedLog(resumedFeed, resumedFeed.captured, "resumed capture")).status).toBe(200);
         expect(await hostDocumentState()).toBe("ready");
-        releaseHostedPulls(); releaseHostedPulls = undefined;
+        resumedFeed.release();
+        await waitForHostedLog(resumedFeed, resumedFeed.delivered, "resumed delivery");
       }
       await expect.poll(liveRow, {timeout: 120_000}).toEqual(unadmitted);
       expect(await hostDocumentState()).toBe("held");
@@ -1140,290 +1270,300 @@ it.skipIf(engine.missing).each([
     }
     await session.close({settle: false});
   } finally {
-    releaseHostedPulls?.();
+    preStopFeed?.destroy(); resumedFeed?.destroy();
     await delivery?.stop(); await peer?.close();
     try {await capture?.stop().catch(() => undefined);} finally {await owner?.close(); await relayServer?.stop(); await proxy.close();
       setDefaultCACertificates(previousRoots); vi.unstubAllEnvs();}
   }
 }, 420_000);
 
-it.skipIf(engine.missing).each([true, false])(
-  "settles adoption of an already-open Collection record through the real relay (has id=%s)",
-  async (hasId) => {
-    const workspaceId = `two-daemon-open-adoption-${hasId}`;
-    const rootA = await createTestScratch("dohc-open-adoption-a-");
-    const rootB = await createTestScratch("dohc-open-adoption-b-");
-    const relayRoot = await createTestScratch("dohc-open-adoption-relay-");
-    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
-    const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
-    const person = { kind: "human", humanId: "local-person" } as const;
-    const path = "tasks/pending.md";
-    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
-    let capture: WorkspaceEngineCapture | undefined;
-    let peer: LiveDaemonCapture | undefined;
-    let sync: CloudSyncEngine | undefined;
-    try {
-      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
-      const source = owner;
-      const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
-      await relay.claim();
-      await source.chats.ensureGeneralChannel({ workspaceId });
-      await pushUntilDrained(relay);
-      const adapter = await source.sessions.run(source.workspace, async ({ client, workspace }) =>
-        new VersionedLiveAdapter(client, workspace, { workspaceId }));
-      await adapter.ensureMainVersion({ workspaceId });
-      for (const [filePath, text] of [
-        ["tasks/collection.yaml", "fields:\n  Name:\n    type: text\n"],
-        [path, `${hasId ? "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n" : ""}# Keep this body\n`],
-      ]) {
-        await adapter.writeTextFile({ workspaceId, versionId: "main", path: filePath!, text: text!, publish: true,
-          metadata: { origin: "api" }, author: person });
-      }
-      // Reconciliation inserts the binding but cannot adopt it until desktop
-      // imports the rich-document lineage. Open the editor in that window.
-      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath),
-        { timeout: REAL_DAEMON_DEADLINE_MS }).toEqual([path]);
-      const errors: string[] = [];
-      capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions,
-        settleDebounceMs: 60_000, onError: (context, error) => errors.push(`${context}: ${String(error)}`) });
-      const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
-      expect((await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath)).toEqual([path]);
-      if (!hasId) await capture.flush();
-      await session.applyDecidedLocalUpdate(doc => {
-        const scratch = new Y.Doc();
-        try {
-          Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
-          const before = Y.encodeStateVector(scratch);
-          patchFrontmatter(scratch, new Map([["Name", "Manual"]]));
-          return Y.encodeStateAsUpdate(scratch, before);
-        } finally { scratch.destroy(); }
-      }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "owner-name" });
-      if (!hasId) await session.settleNow();
-      // The editor keeps its lease throughout adoption and capture settlement.
-      await capture.flush();
-      capture.start();
-      await expect.poll(async () => ({ pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
-        settled: (await adapter.flushCapture()).settled, errors }), { timeout: REAL_DAEMON_DEADLINE_MS })
-        .toEqual({ pending: 0, settled: true, errors: [] });
-      expect(errors).toEqual([]);
-      await expect.poll(() => adapter.watcherStatus(), { timeout: REAL_DAEMON_DEADLINE_MS })
-        .toMatchObject({ running: true, degraded: false, phase: "ready" });
-      const markdown = await readFile(join(rootA, path), "utf8");
-      expect(markdown).toContain("Name: Manual");
-      expect(markdown).toContain("# Keep this body");
-      expect(session.doc.getMap("frontmatter").get("Name")).toBe("Manual");
-      const recordId = session.doc.getMap("frontmatter").get("id");
-      if (typeof recordId !== "string") throw new Error("Adoption did not install the record id.");
-      const record = await adapter.getCollectionRecord({ collectionPath: "tasks", recordId, historyLimit: 100 });
-      expect(record.history.find(change => change.field === "Name")).toMatchObject({ authorOriginId: "local-person" });
-      const head = await adapter.readTextFile({ workspaceId, versionId: "main", path });
-      const moments = (await capture.listMoments({ limit: 100 })).moments;
-      expect(moments.find(moment => moment.id === head?.latestMomentId)?.authors).toContainEqual(person);
-      expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
-      sync = createRelaySyncEngine({ rootDir: rootA, relay: relayConnection, operations: relay, capture,
-        onChange: () => undefined });
-      sync.queueSync();
-      await sync.start();
-      expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
-      await sync.stop();
-      peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
-      await pullAndExpect(peer, rootB, path, markdown);
-      await session.close();
-    } finally {
-      await sync?.stop();
-      await peer?.close();
-      try { await capture?.stop().catch(() => undefined); } finally { await owner?.close(); await relayServer.stop(); }
-    }
-  },
-  60_000,
-);
+describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
+  let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>>;
+  let starting: Promise<typeof relayServer> | undefined;
 
-it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
-  "syncs a %s hand-made Collection record with local human History through the real relay",
-  async (queueStyle) => {
-    const workspaceId = "two-daemon-human-record-" + queueStyle;
-    const rootA = await createTestScratch("dohc-human-record-a-");
-    const rootB = await createTestScratch("dohc-human-record-b-");
-    const relayRoot = await createTestScratch("dohc-human-record-relay-");
-    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
-    const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
-    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
-    let capture: WorkspaceEngineCapture | undefined;
-    let peer: LiveDaemonCapture | undefined;
-    try {
-      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
-      const source = owner;
-      capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions });
-      let relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
-      await relay.claim();
-      await source.chats.ensureGeneralChannel({ workspaceId });
-      await pushUntilDrained(relay);
-      await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
-      const captureClient = await source.sessions.run(source.workspace, async ({ client }) => client);
-      if (!captureClient.onEvent) throw new Error("The real daemon has no capture event source.");
-      const onEvent = captureClient.onEvent.bind(captureClient);
+  // Cover the helper's 120 s startup guard and its shutdown drain.
+  beforeAll(async () => {
+    // Per-test scratch is removed after each case; this store belongs to the suite.
+    const relayRoot = createSuiteTestScratchSync("dohc-ordinary-relay-");
+    starting = spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    relayServer = await starting;
+  }, 150_000);
+
+  afterAll(async () => {
+    await (await starting?.catch(() => undefined))?.stop();
+  }, 30_000);
+
+  it.each([true, false])(
+    "settles adoption of an already-open Collection record through the real relay (has id=%s)",
+    async (hasId) => {
+      const workspaceId = `two-daemon-open-adoption-${hasId}-${randomUUID()}`;
+      const rootA = await createTestScratch("dohc-open-adoption-a-");
+      const rootB = await createTestScratch("dohc-open-adoption-b-");
+      const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
       const person = { kind: "human", humanId: "local-person" } as const;
-      const context = desktopRecordEditContext({
-        capture, workspaceRoot: rootA, person, signal: new AbortController().signal,
-        withAdapter: work => source.sessions.run(source.workspace, ({ client, workspace }) =>
-          work(new VersionedLiveAdapter(client, workspace, { workspaceId }))),
-        onCaptureSettled: listener => onWorkspaceCaptureSettled({ onEvent }, workspaceId, listener),
-      });
-      const record = await createRecordByHand({ collectionPath: "tasks", name: "hand-made" }, {
-        author: createLocalChangeAuthor("Local person"),
-        localPerson: async () => person,
-        withWorkspaceOperation: work => work(undefined),
-        editContext: async () => context,
-      });
-      if ("kind" in record) throw new Error(record.reason);
-      const local = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
-      expect(local?.authors).toEqual([person]);
-      if (queueStyle !== "new") {
-        // Restore an older build's wire row with the daemon stopped.
-        // Accepted agent rows also exist remotely, with a lost acknowledgement.
-        if (queueStyle === "accepted") expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
-        await capture.stop();
-        await owner.close();
-        capture = undefined;
-        owner = undefined;
-        const legacyAuthors = [
-          ...(queueStyle === "legacy" ? [person] : []),
-          { kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" },
-          { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 },
-        ];
-        const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH));
-        try {
-          const restored = db.prepare(
-            "UPDATE replication_log SET payload_json=json_set(payload_json, '$.authors', json(?)) WHERE workspace_id=? AND imported=0 AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
-          ).run(JSON.stringify(legacyAuthors), workspaceId, record.path);
-          expect(restored.changes).toBe(1);
-          const row = db.prepare(
-            "SELECT origin_id, origin_seq, payload_json FROM replication_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
-          ).get(workspaceId, record.path) as { origin_id: string; origin_seq: number; payload_json: string };
-          expect(JSON.parse(row.payload_json).authors).toEqual(legacyAuthors);
-          // Older Rust builds also serialized the entire row with sorted keys.
-          row.payload_json = stableJsonStringify(JSON.parse(row.payload_json));
-          expect(db.prepare(
-            "UPDATE replication_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
-          ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
-          if (queueStyle === "accepted") {
-            const relayDb = new DatabaseSync(relayServer.dbPath);
-            try {
-              expect(relayDb.prepare(
-                "UPDATE sync_relay_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
-              ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
-            } finally {
-              relayDb.close();
-            }
+      const path = "tasks/pending.md";
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      let capture: WorkspaceEngineCapture | undefined;
+      let peer: LiveDaemonCapture | undefined;
+      let sync: CloudSyncEngine | undefined;
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+        const source = owner;
+        const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+        await relay.claim();
+        await source.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(relay);
+        const adapter = await source.sessions.run(source.workspace, async ({ client, workspace }) =>
+          new VersionedLiveAdapter(client, workspace, { workspaceId }));
+        await adapter.ensureMainVersion({ workspaceId });
+        for (const [filePath, text] of [
+          ["tasks/collection.yaml", "fields:\n  Name:\n    type: text\n"],
+          [path, `${hasId ? "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n" : ""}# Keep this body\n`],
+        ]) {
+          await adapter.writeTextFile({ workspaceId, versionId: "main", path: filePath!, text: text!, publish: true,
+            metadata: { origin: "api" }, author: person });
+        }
+        // Reconciliation inserts the binding but cannot adopt it until desktop
+        // imports the rich-document lineage. Open the editor in that window.
+        await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath),
+          { timeout: REAL_DAEMON_DEADLINE_MS }).toEqual([path]);
+        const errors: string[] = [];
+        capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions,
+          settleDebounceMs: 60_000, onError: (context, error) => errors.push(`${context}: ${String(error)}`) });
+        const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+        expect((await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath)).toEqual([path]);
+        if (!hasId) await capture.flush();
+        await session.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try {
+            Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+            const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["Name", "Manual"]]));
+            return Y.encodeStateAsUpdate(scratch, before);
+          } finally { scratch.destroy(); }
+        }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "owner-name" });
+        if (!hasId) await session.settleNow();
+        // The editor keeps its lease throughout adoption and capture settlement.
+        await capture.flush();
+        capture.start();
+        await expect.poll(async () => ({ pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+          settled: (await adapter.flushCapture()).settled, errors }), { timeout: REAL_DAEMON_DEADLINE_MS })
+          .toEqual({ pending: 0, settled: true, errors: [] });
+        expect(errors).toEqual([]);
+        await expect.poll(() => adapter.watcherStatus(), { timeout: REAL_DAEMON_DEADLINE_MS })
+          .toMatchObject({ running: true, degraded: false, phase: "ready" });
+        const markdown = await readFile(join(rootA, path), "utf8");
+        expect(markdown).toContain("Name: Manual");
+        expect(markdown).toContain("# Keep this body");
+        expect(session.doc.getMap("frontmatter").get("Name")).toBe("Manual");
+        const recordId = session.doc.getMap("frontmatter").get("id");
+        if (typeof recordId !== "string") throw new Error("Adoption did not install the record id.");
+        const record = await adapter.getCollectionRecord({ collectionPath: "tasks", recordId, historyLimit: 100 });
+        expect(record.history.find(change => change.field === "Name")).toMatchObject({ authorOriginId: "local-person" });
+        const head = await adapter.readTextFile({ workspaceId, versionId: "main", path });
+        const moments = (await capture.listMoments({ limit: 100 })).moments;
+        expect(moments.find(moment => moment.id === head?.latestMomentId)?.authors).toContainEqual(person);
+        expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+        sync = createRelaySyncEngine({ rootDir: rootA, relay: relayConnection, operations: relay, capture,
+          onChange: () => undefined });
+        sync.queueSync();
+        await sync.start();
+        expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
+        await sync.stop();
+        peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
+        await pullAndExpect(peer, rootB, path, markdown);
+        await session.close();
+      } finally {
+        await sync?.stop();
+        await peer?.close();
+        try { await capture?.stop().catch(() => undefined); } finally { await owner?.close(); }
+      }
+    },
+    60_000,
+  );
+
+  it.each(["new", "legacy", "accepted"] as const)(
+    "syncs a %s hand-made Collection record with local human History through the real relay",
+    async (queueStyle) => {
+      const workspaceId = `two-daemon-human-record-${queueStyle}-${randomUUID()}`;
+      const rootA = await createTestScratch("dohc-human-record-a-");
+      const rootB = await createTestScratch("dohc-human-record-b-");
+      const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      let capture: WorkspaceEngineCapture | undefined;
+      let peer: LiveDaemonCapture | undefined;
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+        const source = owner;
+        capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions });
+        let relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+        await relay.claim();
+        await source.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(relay);
+        await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
+        const captureClient = await source.sessions.run(source.workspace, async ({ client }) => client);
+        if (!captureClient.onEvent) throw new Error("The real daemon has no capture event source.");
+        const onEvent = captureClient.onEvent.bind(captureClient);
+        const person = { kind: "human", humanId: "local-person" } as const;
+        const context = desktopRecordEditContext({
+          capture, workspaceRoot: rootA, person, signal: new AbortController().signal,
+          withAdapter: work => source.sessions.run(source.workspace, ({ client, workspace }) =>
+            work(new VersionedLiveAdapter(client, workspace, { workspaceId }))),
+          onCaptureSettled: listener => onWorkspaceCaptureSettled({ onEvent }, workspaceId, listener),
+        });
+        const record = await createRecordByHand({ collectionPath: "tasks", name: "hand-made" }, {
+          author: createLocalChangeAuthor("Local person"),
+          localPerson: async () => person,
+          withWorkspaceOperation: work => work(undefined),
+          editContext: async () => context,
+        });
+        if ("kind" in record) throw new Error(record.reason);
+        const local = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
+        expect(local?.authors).toEqual([person]);
+        if (queueStyle !== "new") {
+          // Restore an older build's wire row with the daemon stopped.
+          // Accepted agent rows also exist remotely, with a lost acknowledgement.
+          if (queueStyle === "accepted") expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
+          await capture.stop();
+          await owner.close();
+          capture = undefined;
+          owner = undefined;
+          const legacyAuthors = [
+            ...(queueStyle === "legacy" ? [person] : []),
+            { kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" },
+            { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 },
+          ];
+          const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH));
+          try {
+            const restored = db.prepare(
+              "UPDATE replication_log SET payload_json=json_set(payload_json, '$.authors', json(?)) WHERE workspace_id=? AND imported=0 AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
+            ).run(JSON.stringify(legacyAuthors), workspaceId, record.path);
+            expect(restored.changes).toBe(1);
+            const row = db.prepare(
+              "SELECT origin_id, origin_seq, payload_json FROM replication_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
+            ).get(workspaceId, record.path) as { origin_id: string; origin_seq: number; payload_json: string };
+            expect(JSON.parse(row.payload_json).authors).toEqual(legacyAuthors);
+            // Older Rust builds also serialized the entire row with sorted keys.
+            row.payload_json = stableJsonStringify(JSON.parse(row.payload_json));
             expect(db.prepare(
-              "UPDATE sync_relay_push_state SET pushed_seq=? WHERE workspace_id=? AND origin_id=?",
-            ).run(row.origin_seq - 1, workspaceId, row.origin_id).changes).toBe(1);
+              "UPDATE replication_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+            ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
+            if (queueStyle === "accepted") {
+              const relayDb = new DatabaseSync(relayServer.dbPath);
+              try {
+                expect(relayDb.prepare(
+                  "UPDATE sync_relay_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+                ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
+              } finally {
+                relayDb.close();
+              }
+              expect(db.prepare(
+                "UPDATE sync_relay_push_state SET pushed_seq=? WHERE workspace_id=? AND origin_id=?",
+              ).run(row.origin_seq - 1, workspaceId, row.origin_id).changes).toBe(1);
+            }
+          } finally {
+            db.close();
+          }
+          owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+          capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+          relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+        }
+        expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
+        const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+        const engineDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+        try {
+          const rows = relayDb.prepare(
+            "SELECT origin_id, origin_seq, payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append'",
+          ).all(workspaceId) as { origin_id: string; origin_seq: number; payload_json: string }[];
+          expect(rows.length).toBeGreaterThan(0);
+          for (const row of rows) {
+            const payload = JSON.parse(row.payload_json);
+            expect(payload.attributionUnavailable).toBeUndefined();
+            expect(payload.authors).toEqual(queueStyle !== "new" && payload.path === record.path
+              ? [{ kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" }, { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 }]
+              : undefined);
+            if (queueStyle === "new") expect(row.payload_json).not.toContain("local:");
+            expect(row.payload_json).not.toContain(person.humanId);
+            const stored = engineDb.prepare(
+              "SELECT payload_json FROM replication_log WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+            ).get(workspaceId, row.origin_id, row.origin_seq) as { payload_json: string };
+            expect(stored.payload_json).toBe(row.payload_json);
           }
         } finally {
-          db.close();
+          engineDb.close();
+          relayDb.close();
         }
-        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+        peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
+        await pullAndExpect(peer, rootB, record.path, await readFile(join(rootA, record.path)), "text");
+        expect((await peer.capture.listMoments({ limit: 100 })).moments.some(moment => moment.path === record.path)).toBe(true);
+        const echo = await capture.runRelaySync(materializePage => relay.pull(materializePage));
+        expect(echo.sharingDeclined).toEqual([]);
+        expect(await owner.sessions.run(owner.workspace, ({ client, workspace }) =>
+          new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace }),
+        )).toEqual({ notices: [] });
+        const afterEcho = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
+        expect(afterEcho?.authors).toEqual([person]);
+      } finally {
+        await peer?.close();
+        await capture?.stop();
+        await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "names the person on their restore in local History after a reopen, and never sends them to the relay",
+    async () => {
+      const workspaceId = `two-daemon-person-restore-${randomUUID()}`;
+      const root = await createTestScratch("dohc-person-restore-");
+      const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const person = { kind: "human", humanId: "local-person" } as const;
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      let capture: WorkspaceEngineCapture | undefined;
+      const restoreMoment = async (momentId: string) =>
+        (await capture!.listMoments({ limit: 100 })).moments.find(moment => moment.id === momentId);
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
         capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
-        relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
-      }
-      expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
-      const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
-      const engineDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
-      try {
-        const rows = relayDb.prepare(
-          "SELECT origin_id, origin_seq, payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append'",
-        ).all(workspaceId) as { origin_id: string; origin_seq: number; payload_json: string }[];
-        expect(rows.length).toBeGreaterThan(0);
-        for (const row of rows) {
-          const payload = JSON.parse(row.payload_json);
-          expect(payload.attributionUnavailable).toBeUndefined();
-          expect(payload.authors).toEqual(queueStyle !== "new" && payload.path === record.path
-            ? [{ kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" }, { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 }]
-            : undefined);
-          if (queueStyle === "new") expect(row.payload_json).not.toContain("local:");
-          expect(row.payload_json).not.toContain(person.humanId);
-          const stored = engineDb.prepare(
-            "SELECT payload_json FROM replication_log WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
-          ).get(workspaceId, row.origin_id, row.origin_seq) as { payload_json: string };
-          expect(stored.payload_json).toBe(row.payload_json);
+        const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+        await relay.claim();
+        await owner.chats.ensureGeneralChannel({ workspaceId });
+        await capture.writeAuthoredFile(join(root, "plan.md"), "first\n", person, { createOnly: true });
+        await capture.writeAuthoredFile(join(root, "plan.md"), "second\n", person);
+        const [edit] = await waitForPathMoments(capture, "plan.md", 2);
+        const { restoredMomentId } = await capture.restoreFileToBeforeMoment(edit!.id, person);
+        expect(await readFile(join(root, "plan.md"), "utf8")).toBe("first\n");
+        expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
+
+        expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
+        const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+        try {
+          const sent = relayDb.prepare(
+            "SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.momentId')=?",
+          ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
+          expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
+          expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
+          expect(JSON.parse(sent!.payload_json).attributionUnavailable).toBeUndefined();
+          expect(sent!.payload_json).not.toContain(person.humanId);
+        } finally {
+          relayDb.close();
         }
+
+        await capture.stop();
+        await owner.close();
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+        capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+        expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
       } finally {
-        engineDb.close();
-        relayDb.close();
+        await capture?.stop();
+        await owner?.close();
       }
-      peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
-      await pullAndExpect(peer, rootB, record.path, await readFile(join(rootA, record.path)), "text");
-      expect((await peer.capture.listMoments({ limit: 100 })).moments.some(moment => moment.path === record.path)).toBe(true);
-      const echo = await capture.runRelaySync(materializePage => relay.pull(materializePage));
-      expect(echo.sharingDeclined).toEqual([]);
-      expect(await owner.sessions.run(owner.workspace, ({ client, workspace }) =>
-        new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace }),
-      )).toEqual({ notices: [] });
-      const afterEcho = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
-      expect(afterEcho?.authors).toEqual([person]);
-    } finally {
-      await peer?.close();
-      await capture?.stop();
-      await owner?.close();
-      await relayServer.stop();
-    }
-  },
-  3 * REAL_DAEMON_DEADLINE_MS,
-);
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
 
-it.skipIf(engine.missing)(
-  "names the person on their restore in local History after a reopen, and never sends them to the relay",
-  async () => {
-    const workspaceId = "two-daemon-person-restore";
-    const root = await createTestScratch("dohc-person-restore-");
-    const relayRoot = await createTestScratch("dohc-person-restore-relay-");
-    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
-    const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
-    const person = { kind: "human", humanId: "local-person" } as const;
-    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
-    let capture: WorkspaceEngineCapture | undefined;
-    const restoreMoment = async (momentId: string) =>
-      (await capture!.listMoments({ limit: 100 })).moments.find(moment => moment.id === momentId);
-    try {
-      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
-      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
-      const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
-      await relay.claim();
-      await owner.chats.ensureGeneralChannel({ workspaceId });
-      await capture.writeAuthoredFile(join(root, "plan.md"), "first\n", person, { createOnly: true });
-      await capture.writeAuthoredFile(join(root, "plan.md"), "second\n", person);
-      const [edit] = await waitForPathMoments(capture, "plan.md", 2);
-      const { restoredMomentId } = await capture.restoreFileToBeforeMoment(edit!.id, person);
-      expect(await readFile(join(root, "plan.md"), "utf8")).toBe("first\n");
-      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
-
-      expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
-      const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
-      try {
-        const sent = relayDb.prepare(
-          "SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.momentId')=?",
-        ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
-        expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
-        expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
-        expect(JSON.parse(sent!.payload_json).attributionUnavailable).toBeUndefined();
-        expect(sent!.payload_json).not.toContain(person.humanId);
-      } finally {
-        relayDb.close();
-      }
-
-      await capture.stop();
-      await owner.close();
-      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
-      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
-      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
-    } finally {
-      await capture?.stop();
-      await owner?.close();
-      await relayServer.stop();
-    }
-  },
-  3 * REAL_DAEMON_DEADLINE_MS,
-);
+});
 
 it.skipIf(engine.missing)(
   "syncs a captured file between two real daemons through one real relay",
@@ -1454,6 +1594,66 @@ it.skipIf(engine.missing)(
       bootstrapRelayBeforeCapture: false,
     }),
   60_000,
+);
+
+// Quit stops waiting for a relay push the server has not answered. The
+// engine has not acknowledged the edit, so the next launch sends it.
+it.skipIf(engine.missing)(
+  "sends an edit whose push was unanswered at quit on the next launch",
+  async () => {
+    const workspaceId = "two-daemon-quit-push";
+    const token = `test:${workspaceId}`;
+    const rootA = await createTestScratch("dohc-quit-push-a-");
+    const rootB = await createTestScratch("dohc-quit-push-b-");
+    const relayRoot = await createTestScratch("dohc-quit-push-relay-");
+    const dbPath = join(relayRoot, "relay.sqlite");
+    let relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain });
+    const port = Number(new URL(relay.baseUrl).port);
+    const connection = { baseUrl: relay.baseUrl, token };
+    // A server that takes each connection and never answers. The engine resets
+    // the connection when it stops.
+    const held = new Set<Socket>();
+    const silent = createServer((socket) => {
+      held.add(socket);
+      socket.on("error", () => undefined);
+    });
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await daemonA.chats.ensureGeneralChannel({ workspaceId });
+      await pushUntilDrained(daemonA.relay);
+      await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+
+      await relay.stop();
+      silent.listen(port, "127.0.0.1");
+      await once(silent, "listening");
+      const reached = once(silent, "connection") as Promise<[Socket]>;
+      const push = daemonA.relay.push();
+      const [socket] = await reached;
+      await once(socket, "data");
+      daemonA.beginShutdown();
+      await expect(push).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      await daemonA.close();
+      daemonA = null;
+      for (const socket of held) socket.destroy();
+      silent.close();
+      await once(silent, "close");
+
+      relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain, port });
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(daemonB, rootB, "notes.md", "body\n");
+    } finally {
+      for (const socket of held) socket.destroy();
+      if (silent.listening) silent.close();
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  120_000,
 );
 
 // A rename that changes only case reaches a peer as a delete of the old
@@ -1650,6 +1850,98 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
       expect(await readdir(join(rootC, "notes"))).toEqual(["shared.txt"]);
     } finally {
       await Promise.allSettled([daemonC?.close(), daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  90_000,
+);
+
+it.skipIf(engine.missing).each([
+  "one device keeps",
+  "both keep",
+  "keep and incoming",
+  "same merged text",
+] as const)(
+  "kept text resolution without lineage: %s",
+  async (scenario) => {
+    const workspaceId = `text-keep-${scenario.replaceAll(" ", "-")}`;
+    const path = "notes/shared.txt";
+    const initial = "Trip destination: undecided\n";
+    const textA = "Trip destination: Manila\n";
+    const textB = "Trip destination: Tokyo\n";
+    const merged = "Trip destination: together\n";
+    const rootA = await createTestScratch("dohc-text-keep-a-");
+    const rootB = await createTestScratch("dohc-text-keep-b-");
+    const relayRoot = await createTestScratch("dohc-text-keep-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await writeAndCapture(daemonA, rootA, path, initial);
+      await pushUntilDrained(daemonA.relay);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pull(daemonB);
+      expect(await readFile(join(rootB, path), "utf8")).toBe(initial);
+      // No editor or sync runs between these independent file saves.
+      await writeAndCapture(daemonA, rootA, path, textA);
+      await writeAndCapture(daemonB, rootB, path, textB);
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      const rowsA = (await daemonA.capture.listOpenConflictsPage()).conflicts;
+      const rowsB = (await daemonB.capture.listOpenConflictsPage()).conflicts;
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.id).toBe(rowsB[0]!.id);
+      expect(rowsA[0]).toMatchObject({ current: { text: textA }, incoming: { text: textB } });
+      expect(rowsB[0]).toMatchObject({ current: { text: textB }, incoming: { text: textA } });
+      const id = rowsA[0]!.id;
+      if (scenario === "one device keeps") {
+        const modified = (await stat(join(rootB, path))).mtimeMs;
+        await daemonB.capture.resolveConflict(id, { kind: "keep-current" });
+        expect((await stat(join(rootB, path))).mtimeMs).toBe(modified);
+      } else if (scenario === "same merged text") {
+        await daemonA.capture.resolveConflict(id, { kind: "apply-merged", text: merged });
+        await daemonB.capture.resolveConflict(id, { kind: "apply-merged", text: merged });
+      } else {
+        await daemonA.capture.resolveConflict(id, { kind: "keep-current" });
+        await daemonB.capture.resolveConflict(id, { kind: scenario === "both keep" ? "keep-current" : "apply-incoming" });
+      }
+      await pushUntilDrained(daemonA.relay);
+      await pushUntilDrained(daemonB.relay);
+      await pull(daemonA);
+      await pull(daemonB);
+      if (scenario === "both keep") {
+        for (const [daemon, root, current, incoming] of [
+          [daemonA, rootA, textA, textB], [daemonB, rootB, textB, textA],
+        ] as const) {
+          expect(await readFile(join(root, path), "utf8")).toBe(current);
+          const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ current: { text: current }, incoming: { text: incoming } });
+        }
+      } else {
+        const chosen = scenario === "one device keeps" ? textB : scenario === "same merged text" ? merged : textA;
+        for (const [daemon, root] of [[daemonA, rootA], [daemonB, rootB]] as const) {
+          expect(await readFile(join(root, path), "utf8")).toBe(chosen);
+          expect(await daemon.capture.countOpenConflicts()).toBe(0);
+        }
+        await writeAndCapture(daemonA, rootA, path, `${chosen}continued on A\n`);
+        await pushUntilDrained(daemonA.relay);
+        await pullAndExpect(daemonB, rootB, path, `${chosen}continued on A\n`);
+        await writeAndCapture(daemonB, rootB, path, `${chosen}continued on B\n`);
+        await pushUntilDrained(daemonB.relay);
+        await pullAndExpect(daemonA, rootA, path, `${chosen}continued on B\n`);
+        expect(await daemonA.capture.countOpenConflicts()).toBe(0);
+        expect(await daemonB.capture.countOpenConflicts()).toBe(0);
+      }
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
@@ -2290,6 +2582,230 @@ async function openEditor(daemon: Pick<LiveDaemonCapture, "capture">, path: stri
   Y.applyUpdate(doc, session.initialUpdate);
   return { session, doc };
 }
+
+it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
+  "refuses synced deletion revival in fresh %s and keeps unrelated notes syncing both ways",
+  async scenario => {
+    const workspaceId = `deletion-revival-${scenario}`;
+    const path = "trip.txt";
+    const rootA = await createTestScratch("dohc-guard-a-");
+    const rootB = await createTestScratch("dohc-guard-b-");
+    const relayRoot = await createTestScratch("dohc-guard-relay-");
+    const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+    const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
+    let a: LiveDaemonCapture | null = null;
+    let b: LiveDaemonCapture | null = null;
+    const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+    const rounds = async () => {
+      for (let i = 0; i < 3; i++) {
+        await pushUntilDrained(a!.relay);
+        await pushUntilDrained(b!.relay);
+        await pull(a!);
+        await pull(b!);
+      }
+    };
+    try {
+      a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
+      await a.relay.claim();
+      await writeAndCapture(a, rootA, path, "Paris\n");
+      await writeAndCapture(a, rootA, "packing.md", "Packing: initial\n");
+      await writeAndCapture(a, rootA, "budget.md", "Budget: initial\n");
+      await pushUntilDrained(a.relay);
+      b = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: connection});
+      await rounds();
+      expect(await readFile(join(rootB, "packing.md"), "utf8")).toBe("Packing: initial\n");
+      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: initial\n");
+      for (const device of [b, a]) {
+        const editor = await openEditor(device, path);
+        await editor.session.close();
+        await rounds();
+      }
+      // Both devices have opened the same exact editor lineage before going offline.
+      const lineages = new Set<string>();
+      for (const device of [a, b]) {
+        const editor = await openEditor(device, path);
+        expect(shown(editor)).toBe("Paris\n");
+        expect(editor.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
+        lineages.add(editor.session.lineageClaimId!);
+        await editor.session.close();
+      }
+      expect(lineages.size).toBe(1);
+      const beforeDelete = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path).length;
+      await rm(join(rootA, path));
+      a.capture.observeFileEvents([{path, operation: "delete"}]);
+      const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
+      expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
+      const editor = await openEditor(b, path);
+      try { await typeAtEnd(editor, "Tokyo\n"); }
+      finally { await editor.session.close(); }
+      expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
+      await rounds();
+      const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+      expect(reviewB).toMatchObject({current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}});
+      await b.capture.resolveConflict(reviewB.id, {kind: scenario === "H2b" ? "apply-incoming" : "keep-current"});
+      await rounds();
+      if (scenario === "H2b") {
+        const deleted = (await b.capture.listMoments({limit: 100})).moments.find(row => row.path === path && row.operation === "delete")!;
+        expect(deleted).toBeDefined();
+        await expect(b.capture.restoreFileToBeforeMoment(deleted.id, {kind: "human", humanId: "guard-person"}))
+          .rejects.toMatchObject({name: "SyncedDeletionRevivalError"});
+        await expect(readFile(join(rootB, path))).rejects.toMatchObject({code: "ENOENT"});
+      } else {
+        const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewA).toMatchObject({current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}});
+        await expect(a.capture.resolveConflict(reviewA.id, {kind: "apply-incoming"}))
+          .rejects.toMatchObject({message: "synced-deletion-revival-refused"});
+      }
+      await expect(readFile(join(rootA, path))).rejects.toMatchObject({code: "ENOENT"});
+      await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
+      await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
+      await rounds();
+      expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
+      expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
+      expect(await pull(a)).toMatchObject({fetched: 0});
+      expect(await pull(b)).toMatchObject({fetched: 0});
+    } finally {
+      await Promise.allSettled([b?.close(), a?.close()]);
+      await relay.stop();
+    }
+  }, 90_000,
+);
+
+it.skipIf(engine.missing)(
+  "settles the synced deletion copy workaround with either both-deleted choice",
+  async () => {
+    for (const choice of ["keep-current", "apply-incoming"] as const) {
+      const workspaceId = `deletion-workaround-${choice}`;
+      const path = "trip.txt";
+      const copyPath = "trip copy.txt";
+      const bEditedAgainstARemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
+      const aRemovedAgainstBKeptEdit = {path, current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}};
+      const bEditedAgainstAKeptRemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
+      const aBothDeletedReview = {path, current: {exists: false}, incoming: {exists: false}};
+      const rootA = await createTestScratch("dohc-guard-a-");
+      const rootB = await createTestScratch("dohc-guard-b-");
+      const relayRoot = await createTestScratch("dohc-guard-relay-");
+      const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+      const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
+      let a: LiveDaemonCapture | null = null;
+      let b: LiveDaemonCapture | null = null;
+      const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+      type ExpectedRow = {path: string; current: {exists: boolean}; incoming: {exists: boolean}};
+      const rounds = async (expectedA: ExpectedRow[] = [], expectedB: ExpectedRow[] = []) => {
+        for (let i = 0; i < 3; i++) {
+          await pushUntilDrained(a!.relay);
+          await pushUntilDrained(b!.relay);
+          await pull(a!);
+          await pull(b!);
+          expect(await a!.refusalNotices()).toEqual({notices: []});
+          expect(await b!.refusalNotices()).toEqual({notices: []});
+          for (const [machine, device, expected] of [["A", a!, expectedA], ["B", b!, expectedB]] as const) {
+            const page = await device.capture.listOpenConflictsPage();
+            expect(page.conflicts, `${machine}: only the expected conflict rows after round ${i + 1}`).toMatchObject(expected);
+            expect(page.nextAfterConflictId).toBeNull();
+          }
+        }
+      };
+      try {
+        a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
+        await a.relay.claim();
+        await writeAndCapture(a, rootA, path, "Paris\n");
+        await writeAndCapture(a, rootA, "packing.md", "Packing: initial\n");
+        await writeAndCapture(a, rootA, "budget.md", "Budget: initial\n");
+        await pushUntilDrained(a.relay);
+        b = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: connection});
+        await rounds();
+        expect(await readFile(join(rootB, "packing.md"), "utf8")).toBe("Packing: initial\n");
+        expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: initial\n");
+        for (const device of [b, a]) {
+          const editor = await openEditor(device, path);
+          await editor.session.close();
+          await rounds();
+        }
+        // Both devices have opened the same exact editor lineage before going offline.
+        const lineages = new Set<string>();
+        for (const device of [a, b]) {
+          const editor = await openEditor(device, path);
+          expect(shown(editor)).toBe("Paris\n");
+          expect(editor.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
+          lineages.add(editor.session.lineageClaimId!);
+          await editor.session.close();
+        }
+        expect(lineages.size).toBe(1);
+        const beforeDelete = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path).length;
+        await rm(join(rootA, path));
+        a.capture.observeFileEvents([{path, operation: "delete"}]);
+        const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
+        expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
+        const editor = await openEditor(b, path);
+        try { await typeAtEnd(editor, "Tokyo\n"); }
+        finally { await editor.session.close(); }
+        expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
+        await rounds([], [bEditedAgainstARemoval]);
+        const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewB).toMatchObject(bEditedAgainstARemoval);
+        await b.capture.resolveConflict(reviewB.id, {kind: "keep-current"});
+        await rounds([aRemovedAgainstBKeptEdit]);
+        const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(reviewA).toMatchObject(aRemovedAgainstBKeptEdit);
+        await a.capture.resolveConflict(reviewA.id, {kind: "keep-current"});
+        expect(await a.capture.countOpenConflicts()).toBe(0);
+        let copied: string | null = null;
+        const history = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path);
+        for (const row of history) {
+          const detail = await a.capture.readMoment(row.id);
+          if (!detail || detail.protected) continue;
+          const ipcMoment = engineMomentDetailForIpc(detail, {
+            agent: () => undefined, person: () => undefined, automation: () => null,
+            named: author => author.userId, presentations: () => [],
+          });
+          if (ipcMoment.afterText === "Paris\nTokyo\n") {
+            copied = ipcMoment.afterText;
+            break;
+          }
+        }
+        expect(copied, "A's History still exposes B's text through readEngineMoment after Keep").toBe("Paris\nTokyo\n");
+        if (copied === null) throw new Error("B's text is missing from A's History after Keep");
+        await writeAndCapture(a, rootA, copyPath, copied);
+        await rounds([], [bEditedAgainstAKeptRemoval]);
+        expect(await readFile(join(rootB, copyPath), "utf8")).toBe(copied);
+        const removalB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(removalB).toMatchObject(bEditedAgainstAKeptRemoval);
+        await b.capture.resolveConflict(removalB.id, {kind: "apply-incoming"});
+        await rounds([aBothDeletedReview]);
+        const absentA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        expect(absentA).toMatchObject(aBothDeletedReview);
+        await a.capture.resolveConflict(absentA.id, {kind: choice});
+        await rounds();
+        for (const [device, text] of [[b, "B later\n"], [a, "A later\n"]] as const) {
+          const editor = await openEditor(device, copyPath);
+          try { await typeAtEnd(editor, text); }
+          finally { await editor.session.close(); }
+          await rounds();
+          for (const otherRoot of [rootA, rootB]) {
+            expect(await readFile(join(otherRoot, copyPath), "utf8")).toContain(text);
+          }
+        }
+        await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
+        await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
+        await rounds();
+        expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
+        expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
+        for (const [device, root] of [[a, rootA], [b, rootB]] as const) {
+          expect((await device.capture.listOpenConflictsPage()).conflicts).toEqual([]);
+          expect(await device.capture.countOpenConflicts()).toBe(0);
+          expect(await readFile(join(root, copyPath), "utf8")).toBe(`${copied}B later\nA later\n`);
+          await expect(readFile(join(root, path))).rejects.toMatchObject({code: "ENOENT"});
+        }
+        expect(await pull(a)).toMatchObject({fetched: 0});
+        expect(await pull(b)).toMatchObject({fetched: 0});
+      } finally {
+        await Promise.allSettled([b?.close(), a?.close()]);
+        await relay.stop();
+      }
+    }
+  }, 180_000,
+);
 
 async function typeAtEnd(editor: OpenEditor, text: string): Promise<void> {
   const typed = editor.doc.getText("plainText");

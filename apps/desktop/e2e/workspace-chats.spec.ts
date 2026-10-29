@@ -6,9 +6,11 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openAboutPanel,
   openChatsView,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
+  waitForFileObjectId,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -300,6 +302,56 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await page.getByTestId(editorTabTestId("tab://chats")).click();
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
 
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// About for an open Group lists each file its messages mention once, last
+// mentioned first, and a row opens its file.
+test("About for a Group lists the files its messages mention and opens one", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "chats-about-links-e2e";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path: "data/funnel.csv", contents: "step,share\nsigned up,27\n" },
+      { path: "notes/plan.md", contents: "# Plan\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    for (const path of ["data/funnel.csv", "notes/plan.md"]) await waitForFileObjectId(page, workspaceId, path);
+
+    const panel = await openChatsView(page);
+    await panel.getByTestId("chats-channel").click();
+    const channelView = page.locator('[data-testid="chats-channel-view"][data-variant="page"]');
+    const opening = channelView.getByTestId("chats-new-thread-composer");
+    await opening.fill("Numbers are in @[data/funnel.csv] and the plan is @[notes/plan.md] for review");
+    await opening.press("Enter");
+    const threadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
+    await expect(threadView).toBeVisible();
+    const reply = threadView.getByTestId("chats-composer");
+    await reply.fill("@[data/funnel.csv] changed again");
+    await reply.press("Enter");
+    await expect(threadView.getByTestId("chats-message-body")).toHaveCount(2);
+
+    await openAboutPanel(page);
+    const about = page.getByTestId(desktopPins.aboutRail);
+    await expect(about.getByTestId("about-panel")).toHaveAttribute("data-conversation-kind", "group");
+    const links = about.getByTestId("about-conversation-link");
+    // The conversation's link index may still be building when About opens.
+    await expect(links).toHaveCount(2, { timeout: 30_000 });
+    await expect(about.getByTestId("about-conversation-links-gathering")).toHaveCount(0);
+    expect(await links.evaluateAll((rows) => rows.map((row) => row.getAttribute("data-path"))))
+      .toEqual(["data/funnel.csv", "notes/plan.md"]);
+    await expect(links.first().getByTestId("about-conversation-link-authors")).toContainText("Mentioned by");
+
+    await links.nth(1).click();
+    await expect(page.getByTestId(editorTabTestId("notes/plan.md"))).toHaveAttribute("data-active", "true");
+    await expect(about.getByTestId("about-header")).toHaveText("plan.md");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { privateFolder } from "./private-folder.test-helper";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -660,7 +661,7 @@ async function host(operationSource = hostSource, definition = hostDefinition) {
   const db = new DatabaseSync(join(directory, "host.sqlite")); db.exec("PRAGMA journal_mode=WAL;");
   const transaction = transactions(db);
   const journal = createDatasetJournal({ db, transaction });
-  let supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
+  let supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) });
   const wakes: DatasetScope[] = [], storage = { bytes: 0, limit: Number.POSITIVE_INFINITY };
   cleanups.push(async () => { await supervisor.close(); db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   const visitor = { kind: "link" as const, principalId: "visitor", grantId: "public-link" };
@@ -682,7 +683,7 @@ async function host(operationSource = hostSource, definition = hostDefinition) {
     revisionSha256: revision.revisionSha256, operationId, input: operationId === CREATE ? { value: idempotencyKey } : {}, idempotencyKey,
     ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
   return { db, journal, wakes, storage, invoke, revision, get host() { return current; }, get claims() { return current.automationClaims; },
-    async restart() { await supervisor.close(); supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") }); current = create(); } };
+    async restart() { await supervisor.close(); supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) }); current = create(); } };
 }
 
 it("claims a host commit once, as the actor its context names, and never on a replay or recovery", async () => {

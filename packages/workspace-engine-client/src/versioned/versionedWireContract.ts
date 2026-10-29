@@ -44,6 +44,7 @@ export const VERSIONED_METHOD = {
   historyPage: "history.page",
   historyOperations: "history.operations",
   historyUndo: "history.undo",
+  historyRewriteLinks: "history.rewriteLinks",
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
@@ -513,6 +514,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.historyPage]: HistoryPageParams;
   [VERSIONED_METHOD.historyOperations]: JsonObject & {operationId: string};
   [VERSIONED_METHOD.historyUndo]: JsonObject & {operationId: string; author?: WriteAuthor};
+  [VERSIONED_METHOD.historyRewriteLinks]: JsonObject & {operationId: string; author?: WriteAuthor};
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
 
@@ -556,6 +558,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.historyPage]: HistoryPageResult;
   [VERSIONED_METHOD.historyOperations]: typeof HistoryOperationSchema.Type;
   [VERSIONED_METHOD.historyUndo]: typeof HistoryUndoSchema.Type;
+  [VERSIONED_METHOD.historyRewriteLinks]: typeof HistoryLinkRewriteSchema.Type;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
 };
 
@@ -1024,8 +1027,16 @@ const HistoryMomentMetadataSchema = mutableStruct({
   authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
-const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int});
-const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
+const HistoryOperationFields = {operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int};
+const HistoryOperationSchema = mutableStruct({...HistoryOperationFields, kind: Schema.NullOr(Schema.Literal("file-duplicate"))});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationFields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
+const HistoryLinkRewriteSchema = mutableStruct({
+  documents: Schema.Int,
+  links: Schema.Int,
+  unchecked: Schema.mutable(Schema.Array(Schema.String)),
+  uncheckedCount: Schema.Int,
+  complete: Schema.Boolean,
+});
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
   moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),
@@ -1111,6 +1122,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.historyPage]: HistoryPageResultSchema,
   [VERSIONED_METHOD.historyOperations]: HistoryOperationSchema,
   [VERSIONED_METHOD.historyUndo]: HistoryUndoSchema,
+  [VERSIONED_METHOD.historyRewriteLinks]: HistoryLinkRewriteSchema,
   [VERSIONED_METHOD.searchEnsureIndex]: EmptyObjectSchema,
 } as const;
 

@@ -19,6 +19,8 @@ export function restoreIntegrity(condition:unknown):asserts condition {
 export function parseRestoreAdmission(value:unknown):RestoreAdmission {
   const r=configRecord(value,["proposalDigest","candidateDigest","preparation","nativeSourceManifestDigest","admitted","checkpointDigest","sourceRanges","recordedAtMs"]);
   const p=configRecord(r.preparation,["fence","point"]),point=configRecord(p.point,["journalCursor","receiptDigest","markdownDigest","projectionDigest"]);
+  const fence = parseNativeRestoreFenceReceipt(p.fence);
+  restoreIntegrity(point.journalCursor === fence.operation.point.journalCursor && point.receiptDigest === fence.operation.point.receiptDigest);
   restoreIntegrity(Array.isArray(r.sourceRanges));
   const sourceRanges=r.sourceRanges.map(value=>{
     const s=configRecord(value,["sourceOrdinal","clientId","startClock","endClock","sourceDigest"]);
@@ -27,7 +29,7 @@ export function parseRestoreAdmission(value:unknown):RestoreAdmission {
     return {sourceOrdinal:authorityInteger(s.sourceOrdinal),clientId:authorityInteger(s.clientId),startClock,endClock,sourceDigest:parseLiveUpdateDigest(s.sourceDigest)};
   });
   return {proposalDigest:parseLiveUpdateDigest(r.proposalDigest),candidateDigest:parseLiveUpdateDigest(r.candidateDigest),
-    preparation:{fence:parseNativeRestoreFenceReceipt(p.fence),point:{journalCursor:authorityInteger(point.journalCursor),
+    preparation:{fence,point:{journalCursor:authorityInteger(point.journalCursor),
       receiptDigest:parseLiveUpdateDigest(point.receiptDigest),markdownDigest:parseLiveUpdateDigest(point.markdownDigest),projectionDigest:parseLiveUpdateDigest(point.projectionDigest)}},
     nativeSourceManifestDigest:parseLiveUpdateDigest(r.nativeSourceManifestDigest),admitted:parseCanonicalAdmittedLiveUpdateMetadata(r.admitted),
     checkpointDigest:parseLiveUpdateDigest(r.checkpointDigest),sourceRanges,recordedAtMs:authorityInteger(r.recordedAtMs)};

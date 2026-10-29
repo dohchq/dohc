@@ -52,17 +52,19 @@ test("replica sandbox under compose security options and a 64 MiB replicas tmpfs
 });
 
 // The engine's own policy must deny these calls even without Docker's seccomp filter.
-test("replica kernel-surface filter without an outer seccomp profile", {
+test("replica kernel-surface and IPC filter without an outer seccomp profile", {
   skip: !process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, timeout: 60_000,
 }, async () => {
   const name = `replica4b-kernel-${randomUUID()}`;
   try {
-    for (const mode of ["control", "sandbox"]) {
+    for (const action of ["kernel-surface", "ipc"]) for (const mode of ["control", "sandbox"]) {
       const result = await docker(["run", "--rm", "--pull=never", "--name", name, "--network", "none", "--init",
         "--security-opt", "no-new-privileges:true", "--security-opt", "seccomp=unconfined", "--cap-drop", "ALL", "--read-only",
         "--tmpfs", "/replicas:uid=1000,gid=1000,mode=700", "--workdir", "/replicas", "--entrypoint", "/app/probe",
-        process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, "kernel-surface", mode, "1"]);
-      console.log(mode, result.stdout);
+        process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, action, mode, "1"], action === "kernel-surface");
+      // The probe asserts EPERM itself; a denied ipc run exits 13 and an escape panics.
+      if (action === "ipc") assert.equal(result.code, mode === "sandbox" ? 13 : 0, result.stdout + result.stderr);
+      console.log(action, mode, result.stdout);
     }
   } finally {
     // This test exclusively owns the unpredictable name.

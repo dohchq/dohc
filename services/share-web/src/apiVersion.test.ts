@@ -22,7 +22,8 @@ const routes = [
   ["POST", "/api/exchange"], ["POST", "/api/handoff"],
   ["GET", "/api/view/meta"], ["GET", "/api/view/current"], ["GET", "/api/view/log"],
   ["GET", "/api/view/discussion"], ["POST", "/api/view/discussion"], ["GET", "/api/view/discussion/activity"],
-  ["POST", "/api/view/collection-writes"], ["GET", "/api/account/session"],
+  ["POST", "/api/view/collection-writes"], ["GET", "/api/view/chat/channels"], ["GET", "/api/view/chat/messages"],
+  ["POST", "/api/view/chat/messages"], ["GET", "/api/account/session"],
   ["POST", "/api/account/sign-in"], ["POST", "/api/account/sign-out"],
   ...["link-document", "link-ticket", "named-session", "named-ticket", "named-documents"].map(path => ["POST", "/api/live/" + path]),
   ["GET", "/api/apps"], ["POST", "/api/apps/launch"], ["POST", "/api/apps/summary"],
@@ -39,6 +40,7 @@ function fixture(extra: Partial<CreateShareWebApplicationOptions> = {}) {
     if (path === "/sync/link/share") return Response.json({ok: true, access: "view", effectiveSelector: {versionId: null, paths: [], access: "view"}});
     if (path === "/sync/link/log") return Response.json({ok: true, ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0});
     if (path === "/sync/link/current") return Response.json({ok: true, files: []});
+    if (path === "/sync/link/chat/channels") return new Response(null, {status: 404});
     return Response.json({ok: true});
   });
   const app = createShareWebApplication({relayUrl: "https://relay.test", publicRelayUrl: "https://relay.test", publicHosts: new Set([host]),

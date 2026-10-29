@@ -9,7 +9,7 @@ import { orderFormDefinition } from "./helpers/datasetCompletion";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
 
 async function dragBoardCard(page: Page, card: Locator, column: Locator): Promise<void> {
   const source = await card.boundingBox(), target = await column.boundingBox();
@@ -46,6 +46,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await keepCollectionsHere(page, workspaceId);
     await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
@@ -54,8 +55,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before sharing");
     await collection.getByLabel("Manage Collection", { exact: true }).click();
@@ -123,7 +124,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(approval).toContainText("Owner actions: None");
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
-    await expect(publication.getByRole("status")).toHaveText("App published on the selected link.");
+    // The publication list reloads behind the notice, so its loading status can show beside it.
+    await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
     await publication.getByRole("button", { name: "Close publication", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
@@ -240,8 +242,8 @@ test("@dataset-completion history reverses an authored rule against current reco
       operationId: definition.operations.find(operation => operation.kind === "create")!.operationId, input: { values: { [nameField.fieldId]: "Blocked participant" } }, idempotencyKey: "blocked-before-reversal" };
     const refused = await page.evaluate(async request => window.dohcDesktop!.dataset(request), invoke);
     expect(refused).toMatchObject({ kind: "refused", code: "registration_closed" });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record", exact: true }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record", exact: true }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Registered after rule change");
     const management = collection.getByLabel("Manage Collection", { exact: true });

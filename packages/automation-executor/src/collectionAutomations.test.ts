@@ -3,16 +3,16 @@ import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { createAutomationRunStore } from "./automationRunStore";
+import { AutomationStoreNotOpenedError, createAutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, type CollectionAutomationEngine, type CollectionAutomationsOptions } from "./collectionAutomations";
 import { definitionHash } from "./automationPlan";
 import { newRun } from "./collectionAutomationRun";
 import { SHARED_BUTTON_DENIED } from "./buttonPresser";
 import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
-import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createTestScratch, testStoreFolder } from "./testScratch";
 
 it("labels unconfirmed receipts in History, including created records", async () => {
-  const store = createAutomationRunStore(await createTestScratch("dohc-history-unconfirmed-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-history-unconfirmed-")));
   const evaluator = createAutomationFormulaEvaluator();
   const text = "version: 1\nautomations:\n  - id: change\n    name: Change\n    when: record-added\n    do: [{set: {A: 1}}]\n";
   const parsed = parseAutomationsFile(text);
@@ -92,7 +92,7 @@ function emptyExecutor(store: CollectionAutomationsOptions["store"], overrides: 
 
 it("retries a busy reconcile during background open without rejecting or reporting a failure", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-busy-")));
   const errors = vi.fn((_where: string, error: unknown) => { throw error; });
   const reconciled = Promise.withResolvers<void>();
   const { executor, evaluator, engine } = emptyExecutor(store, {
@@ -122,9 +122,25 @@ it("retries a busy reconcile during background open without rejecting or reporti
   }
 });
 
+it.each([false, true])("opens once the workspace opens, after an open that came first could not read the run store (still opening: %s)", async (stillOpening) => {
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-before-workspace-")));
+  const changed = vi.fn();
+  const { executor, evaluator } = emptyExecutor(store, { onAutomationsChanged: changed });
+  vi.spyOn(store, "readReachVerdicts").mockRejectedValueOnce(new AutomationStoreNotOpenedError("The workspace has not finished opening."));
+  try {
+    const first = executor.open();
+    if (!stillOpening) await first;
+    await executor.workspaceOpened();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+  }
+});
+
 it.each([false, true])("reports a non-retryable reconcile refusal through the open error path (after busy: %s)", async (afterBusy) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const store = createAutomationRunStore(await createTestScratch("dohc-open-refused-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-refused-")));
   const reported = Promise.withResolvers<void>();
   const errors = vi.fn(() => reported.resolve());
   const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
@@ -152,7 +168,7 @@ it.each([
   ["close", "releaseAutomationGroups"], ["dispose", "releaseAutomationGroups"],
 ] as const)("cancels a busy open retry on %s after %s refuses", async (operation, method) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-stop-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-busy-stop-")));
   const errors = vi.fn();
   const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
   const open = vi.spyOn(executor, "open");
@@ -176,7 +192,7 @@ it.each([
 
 it.each(["listCollections", "releaseAutomationGroups"] as const)("resumes a busy open after an engine restart when %s refuses", async (method) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-restart-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-busy-restart-")));
   const errors = vi.fn();
   const reconciled = Promise.withResolvers<void>();
   const { executor, evaluator, engine } = emptyExecutor(store, {
@@ -204,7 +220,7 @@ it.each(["listCollections", "releaseAutomationGroups"] as const)("resumes a busy
 
 it.each(["listCollections", "releaseAutomationGroups"] as const)("stays closed when closed during an engine restart after %s refuses", async (method) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-restart-close-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-busy-restart-close-")));
   const errors = vi.fn();
   const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
   const refused = vi.spyOn(engine, method).mockRejectedValueOnce(
@@ -229,7 +245,7 @@ it.each(["listCollections", "releaseAutomationGroups"] as const)("stays closed w
 });
 
 it.each(["close", "dispose"] as const)("waits for the current run history prune batch on %s without starting another", async (operation) => {
-  const store = createAutomationRunStore(await createTestScratch(`dohc-${operation}-pruning-`), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch(`dohc-${operation}-pruning-`)));
   const entered = Promise.withResolvers<void>();
   const batch = Promise.withResolvers<string | null>();
   const expire = vi.spyOn(store, "expire").mockImplementation(() => {
@@ -260,7 +276,7 @@ it.each(["close", "dispose"] as const)("waits for the current run history prune 
 });
 
 it("closes when run history pruning has never started", async () => {
-  const store = createAutomationRunStore(await createTestScratch("dohc-close-no-pruning-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-close-no-pruning-")));
   const expire = vi.spyOn(store, "expire");
   let closing: Promise<void> | undefined;
   const { executor, evaluator } = emptyExecutor(store, {
@@ -278,7 +294,7 @@ it("closes when run history pruning has never started", async () => {
 });
 
 it("persists unchanged reach verdicts after the first save fails", async () => {
-  const store = createAutomationRunStore(await createTestScratch("dohc-reach-save-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-reach-save-")));
   const failure = new Error("Verdict save failed");
   const save = vi.spyOn(store, "saveReachVerdicts").mockRejectedValueOnce(failure);
   const errors = vi.fn();
@@ -349,7 +365,7 @@ it("persists unchanged reach verdicts after the first save fails", async () => {
 });
 
 it("keeps private reach reasons out of a recipient's direct press and retry", async () => {
-  const store = createAutomationRunStore(await createTestScratch("dohc-button-privacy-"), testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-button-privacy-")));
   const errors = vi.fn();
   const evaluator = createAutomationFormulaEvaluator();
   const texts = new Map([

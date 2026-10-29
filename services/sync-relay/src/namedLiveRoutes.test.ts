@@ -28,6 +28,7 @@ import { fixture as ticketFixture, audience, binding, host, key, scope } from ".
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { liveEditors } from "./liveEditors.js";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
@@ -296,19 +297,23 @@ it("rechecks Edit access when a waiting desktop admission wakes", async () => {
   expect((await waiting).status).toBe(404);
   expect(mint).toHaveBeenCalledTimes(1);
 });
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
+afterEach(async () => {
+  const owned = cleanups.splice(0).reverse(); vi.restoreAllMocks();
+  for (const cleanup of owned) await cleanup();
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
 const defaultScope = scope, defaultBinding = binding, defaultFrames = frames, defaultBounds = bounds;
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0, production = false, workspaceId = defaultScope.workspaceId, shareId = defaultScope.shareId) {
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0, production = false, workspaceId = defaultScope.workspaceId, shareId = defaultScope.shareId, population?: {people: number; documents: number}) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames, bounds = production ? liveProfile.namedLive.host : defaultBounds;
   const scope = {...defaultScope, workspaceId, shareId, userId: person ? "reader-" + person : defaultScope.userId,
     grantId: link && shareId !== defaultScope.shareId ? shareId + "-link" : !link && person ? "edit-" + person : defaultScope.grantId};
   const binding = {...defaultBinding, workspaceId, objectId: document ? "object-" + document : defaultBinding.objectId};
-  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId, workspaceId, shareId});
+  const state = await ticketFixture(population ? {liveTickets: {...liveProfile.namedLive.tickets, now: () => 1000}} : undefined,
+    {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId, workspaceId, shareId}, population);
   const routeKind = desktop ? "desktop" : link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
@@ -318,10 +323,13 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   if (link) {
     vi.spyOn(Date, "now").mockReturnValue(1000);
     state.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
-    expect(state.storage.mintLinkSession({ session: { sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key),
-      grantId: scope.grantId, generation: 4, mintedAtMs: 999, expiresAtMs: 61_000 } })).toBe(true);
+    for (let person = 1; person <= (population?.people ?? 1); person++) {
+      expect(state.storage.mintLinkSession({ session: { sessionId: population ? "link-session-" + person : "link-session",
+        capabilityHash: hashLinkBearer(population ? Buffer.alloc(32, person).toString("base64url") : bearer, key),
+        grantId: scope.grantId, generation: 4, mintedAtMs: 999, expiresAtMs: 61_000 } })).toBe(true);
+    }
   }
-  const changes = createNamedFrameChanges(16), invalidated = new AbortController();
+  const changes = createNamedFrameChanges(population ? liveProfile.namedLive.maxListeners : 16), invalidated = new AbortController();
   const native: NamedFrameNativeHost = {
     workspace: "never-send-native-handle", registrationId: 73, binding: { ...binding, selectorPaths: [binding.currentPath] }, coordinate: host,
     invalidated: invalidated.signal, changes, deadlineMs: 1000, nextRequestId: () => 1, drain: vi.fn(async () => undefined),
@@ -331,7 +339,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       readNextLiveApplied: vi.fn(async () => null), readLiveApplicationAck: vi.fn(async () => null),
     },
   };
-  const captureNative = vi.fn(async () => native);
+  const captureNative = vi.fn(async (current?: LiveObjectBinding) => population && current ? {...native, binding: {...current, selectorPaths: [current.currentPath]}} : native);
   const sessionHostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}) => false);
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
@@ -341,10 +349,10 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     }
     const cookie = request.headers.get("cookie");
     if (!cookie || cookie === "anonymous") throw new UnauthorizedError();
-    return { userId: cookie === "account=reader" ? scope.userId : "other-user", workspaceId };
+    return { userId: population && /^account=reader-\d+$/.test(cookie) ? cookie.slice("account=".length) : cookie === "account=reader" ? scope.userId : "other-user", workspaceId };
   });
   const application = createSyncRelayHandler({ storage: state.storage, resolveActor: actor, shareWebOrigin: audience, relayExchangeKey: exchangeKey, nowMs: () => 1000,
-    namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
+    namedBrowserSessionLimits: { maxSessions: population ? liveProfile.browserSessions.maxSessions : 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
   const desktopAdmission = desktop ? createNamedDesktopLive({ storage: state.storage, resolveActor: actor,
     readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000},
@@ -354,11 +362,12 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
   const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
     frames, bounds, limits: routeLimits, validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission, sessionHostBlocked });
+    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission, sessionHostBlocked });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission ? desktopAdmission.handle(request) : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
   http.on("upgrade", (request, socket, head) => { upgrades.push(routes.handleUpgrade(request, socket, head)); });
+  cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const port = (http.address() as { port: number }).port;
   async function post(path: string, body: unknown, cookie = "account=reader", extra: Record<string, string> = {}) {
@@ -372,8 +381,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       request.once("error", reject); request.end(JSON.stringify(body));
     });
   }
-  cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
-  const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: production && document ? "abcdefghijk" + document.toString(36) : "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
+  const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : population || link || owner ? Response.json({ discriminator: production && document ? "abcdefghijk" + document.toString(36) : "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
   const bootstrapped = await bootstrap.json() as {discriminator: string; ticket?: {token: string; expiresAtMs: number}};
   let discriminator = bootstrapped.discriminator, initialDesktopTicket = bootstrapped.ticket;
@@ -391,8 +399,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
-  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "") {
-    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${discriminator}`;
+  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
+    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
       headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
@@ -402,14 +410,43 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       ws.once("open", () => done(101)); ws.once("error", () => done(0));
       ws.once("unexpected-response", (_request, response) => { response.resume(); done(response.statusCode!); ws.terminate(); });
     });
-    function until(condition: () => boolean) {
+    function until(condition: () => boolean, expected = "the expected frame") {
       if (condition()) return Promise.resolve();
-      return new Promise<void>(done => { const notify = () => { if (condition()) { watchers.delete(notify); done(); } }; watchers.add(notify); });
+      return new Promise<void>((resolve, reject) => {
+        const clear = () => { watchers.delete(notify); ws.off("close", close); ws.off("error", error); };
+        const notify = () => { if (condition()) { clear(); resolve(); } };
+        const close = (code: number, reason: Buffer) => { clear(); reject(new Error(`Live socket closed before ${expected}: ${code} ${reason.toString()}`)); };
+        const error = (cause: Error) => { clear(); reject(new Error(`Live socket failed before ${expected}`, {cause})); };
+        if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) { reject(new Error(`Live socket closed before ${expected}`)); return; }
+        watchers.add(notify); ws.once("close", close); ws.once("error", error);
+      });
     }
     const closed = new Promise<[number, string]>(resolve => ws.once("close", (code, reason) => resolve([code, reason.toString()])));
     return { ws, status, received, until, closed };
   }
-  return { ...state, frames, binding, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked };
+  async function peer(person: number, document: number) {
+    const grantId = link ? scope.grantId : "edit-" + person, cookie = "account=reader-" + person;
+    const profile = Buffer.alloc(32, person).toString("base64url"), bearer = Buffer.alloc(32, person).toString("base64url");
+    const headers: Record<string, string> = link ? {authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile} : {};
+    const bootstrap = link ? Response.json({discriminator}) : await post("/sync/live/named-sessions", {grantId}, cookie);
+    expect(bootstrap.status).toBe(200);
+    const session = (await bootstrap.json() as {discriminator: string}).discriminator;
+    return {
+      async mint() {
+        if (!link) expect(await application.resolveNamedBrowserSession(new Request("https://relay.example.test", {headers: {cookie}}), session))
+          .toEqual({...scope, grantId, userId: "reader-" + person});
+        const context = currentScope.kind === "link" ? {...currentScope, sessionId: "link-session-" + person,
+          capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)} : {...scope, grantId, userId: "reader-" + person};
+        expect(state.storage.resolveLiveObjectHostBinding(context, "object-" + document)).toMatchObject({kind: "current",
+          binding: {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`}});
+        const response = await post(`/sync/live/${routeKind}-tickets`, {discriminator: session, objectId: "object-" + document}, cookie, headers);
+        expect(response.status).toBe(200);
+        return await response.json() as {token: string};
+      },
+      connect: (token: string) => connect(token, cookie, headers, "", session),
+    };
+  }
+  return { ...state, frames, binding, post, discriminator, mint, connect, peer, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked };
 }
 
 it.each([false, true])("refuses a ticket for a document the session host blocked until the block lifts; link=%s", async link => {
@@ -844,12 +881,13 @@ it("keeps an unrelated desktop connection that is still resolving its account",a
 
 it.each([false, true])("connects 20 people with three documents each under the promoted profile; link=%s", async link => {
   const admission = createLiveConnectionAdmission(), profile = selfHostLiveProfile(), sockets: WebSocket[] = [];
+  const f = await fixture({...profile.namedLive.transport, idleTimeoutMs: 60_000}, link,
+    {maxSessions: 128, maxMembers: 128, maxSnapshotBytes: 4096}, false, false, admission, 0, 0, false, scope.workspaceId, scope.shareId,
+    {people: 20, documents: 3});
   for (let person = 1; person <= 20; person++) for (let document = 1; document <= 3; document++) {
-    const f = await fixture({...profile.namedLive.transport, idleTimeoutMs: 60_000}, link,
-      {maxSessions: 128, maxMembers: 128, maxSnapshotBytes: 4096}, false, false, admission, person, document);
-    const socket = f.connect((await f.mint()).token);
+    const peer = await f.peer(person, document), socket = peer.connect((await peer.mint()).token);
     expect(await socket.status).toBe(101);
-    await socket.until(() => socket.received.some(frame => frame.kind === "welcome"));
+    await socket.until(() => socket.received.some(frame => frame.kind === "welcome"), "welcome");
     sockets.push(socket.ws);
   }
   expect(sockets).toHaveLength(60);

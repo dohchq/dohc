@@ -4,6 +4,7 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
@@ -28,7 +29,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await dialog.getByTestId("new-collection-create").click();
     await expect(dialog).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await expect(collection.getByRole("button", { name: "New record", exact: true })).toBeVisible();
+    await expect(collection.getByRole("button", { name: "New record", exact: true }).first()).toBeVisible();
     await openManagement(collection);
     await collection.getByRole("button", { name: "Create form", exact: true }).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
@@ -123,8 +124,8 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Equipment", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Camera");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Camera");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Camera");
     await collection.getByRole("button", { name: /^Open record / }).click();
@@ -165,10 +166,8 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark" }).click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.evaluate(async () => {
-        await Promise.allSettled(document.getAnimations().map(animation => animation.finished));
-        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      });
+      await waitForVisibleAnimations(page);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       await page.screenshot({ path: test.info().outputPath(`collection-management-${theme}.png`) });
     }
     await openManagement(collection);

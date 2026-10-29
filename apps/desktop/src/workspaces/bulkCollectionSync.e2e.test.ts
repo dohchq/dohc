@@ -221,6 +221,6 @@ it.for(counts)("automatically syncs %i valid-id Collection files through create 
     expect(remaining).toEqual([]);
   }
   expect(completed).toBe(true);
-  expect(evidence.captureFlush).toMatchObject({ settled: true, running: true, degraded: false });
+  expect(evidence.captureFlush).toMatchObject({ deferredWrites: [], settled: true, running: true, degraded: false });
   if (label === "candidate") expect(failures).toEqual([]);
 });

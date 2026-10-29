@@ -39,6 +39,7 @@ mod flush;
 pub mod limits;
 pub mod links;
 pub mod materialize;
+pub mod recovery;
 pub mod remote_changes;
 pub mod replica;
 pub mod store;
@@ -48,6 +49,9 @@ mod checkpoint;
 pub(crate) mod migration;
 pub(crate) mod schema;
 mod search_generation;
+mod sqlite_path;
+
+pub(crate) use sqlite_path::{open_store, sqlite_path};
 
 pub use search_generation::search_generation;
 
@@ -59,6 +63,7 @@ pub use blob::{
     get_binary_blob, has_binary_blob, hex, hex_sha256, put_binary_blob, put_binary_blob_verified,
     put_binary_blob_with_sha,
 };
+pub use checkpoint::CheckpointWait;
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
@@ -78,9 +83,10 @@ pub use limits::{
 pub use materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, JobStatus,
     MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    RetainedDisplacement, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
-    pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
+    RetainedDisplacement, RetainedSummary, cancel_pending_jobs_for_path, enqueue_delete_job,
+    enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
     upsert_projection_job,
 };
+pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
 pub use store::{EngineStore, TxnOutcome};

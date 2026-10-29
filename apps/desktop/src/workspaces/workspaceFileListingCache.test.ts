@@ -292,7 +292,7 @@ describe("WorkspaceFileListingCache", () => {
   const load = vi.fn(async () => listing("kept.md"));
   const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
   await read();
-  cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/engine/index", ".dohc/ui-state.json"], pathSetChanged: false });
+  cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/engine/index", ".dohc/local/ui-state.json"], pathSetChanged: false });
   await read();
   expect(load).toHaveBeenCalledOnce();
   cache.invalidate({ workspaceId: "ws-a", paths: [".DOHC/VISIBILITY.TOML"], pathSetChanged: false });

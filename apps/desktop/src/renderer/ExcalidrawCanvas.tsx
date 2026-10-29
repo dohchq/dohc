@@ -5,6 +5,7 @@ import {
   serializeAsJSON,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
+import "./excalidrawTheme.css";
 import {
   useCallback,
   useEffect,

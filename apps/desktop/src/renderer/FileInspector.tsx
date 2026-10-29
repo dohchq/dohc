@@ -1,7 +1,8 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
 import {
   DocumentControls,
@@ -12,6 +13,8 @@ import {
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
+  OpenExternallyControl,
+  openExternally,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -32,9 +35,9 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { Layers, TriangleAlert } from "lucide-react";
@@ -242,25 +245,25 @@ function useTextContent(
   };
 }
 
-function TruncatedNotice(props: { workspaceId: string; path: string }) {
+function TruncatedNotice(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
     <div
       data-testid="truncated-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       <span>Showing the start of a large file.</span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open the full file externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open the full file externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
@@ -278,12 +281,6 @@ type FileInspectorProps = {
   fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
-  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
-  // Whether this workspace has the capture Chats calls need. The
-  // linked-mentions panel asks main for chat mentions, which goes through
-  // requireEngineCapture — so a shared view must not ask. Same name and same
-  // fact GraphView's chat-mentions toggle reads.
-  chatMentionsAvailable?: boolean;
   // A pending search-result jump. Consumed (onScrollConsumed)
   // once a mounted view applied it, so plain re-opens never re-jump.
   scrollTarget?: ScrollTarget;
@@ -311,6 +308,9 @@ type FileInspectorProps = {
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
   accessEnded?: boolean;
+  // Capture holds this file's outside edit, and Try again asks it to retry.
+  captureHeld?: boolean;
+  onRetryHeldCapture?: (path: string) => void;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -330,6 +330,9 @@ type FileInspectorProps = {
   // finish its read and, when applicable, bind its live document session.
   surfaceKey?: string;
   onSurfaceReady?: (path: string, surfaceKey: string) => void;
+  // A new page's file: its editor takes the keystrokes the page held, and
+  // null says none will.
+  onEditorReady?: (editor: PageEditor | null) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -469,6 +472,57 @@ export const FileInspector = memo(function FileInspector(
   const retryEngineOpen = useCallback(() => {
     setEngineRetryNonce((nonce) => nonce + 1);
   }, []);
+  // A reload after a change outside dohc opens new bytes, so it is a new open
+  // for the lossy-note check: it reads the file again, checks it, and asks
+  // for Edit anyway again. A retry of the same open keeps both.
+  const [reloads, setReloads] = useState(0);
+  const reloadChangedOutside = useCallback(() => {
+    setReloads((count) => count + 1);
+    refreshAfterConflict();
+    retryEngineOpen();
+  }, [refreshAfterConflict, retryEngineOpen]);
+  // A note opens an engine session only once its bytes are known not to be a
+  // lossy note. Until then, and for a lossy note, the view shows the file's
+  // text read-only, and the engine sees the note as closed. A failed read
+  // holds too, unless a version switch still carries the last version's
+  // verdict: only a checked note opens for editing.
+  const checksLossyNote = kind === "markdown" && liveDocumentKind !== null && !props.readOnly;
+  useEffect(() => {
+    if (checksLossyNote) warmLossyNoteCheck();
+  }, [checksLossyNote]);
+  // One open of one version: a switch, a reload that bumps the version key,
+  // or a reload after a change outside dohc checks its own read, and asks for
+  // Edit anyway again.
+  const lossyOpen = `${key}\u0000${reloads}`;
+  // A note past read mode's size with no engine record gets no session and
+  // edits as source, which writes what is typed. So its open goes first, and
+  // only a session that binds waits for the check.
+  const large = text !== null && exceedsUtf8Bytes(text, WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
+  const [bound, setBound] = useState(false);
+  const checked = useLossyNote({
+    open: lossyOpen,
+    note: `${props.workspaceId}\u0000${props.path}`,
+    applies: checksLossyNote && !truncated,
+    waiting: large && !bound,
+    markdown: loadedPath === props.path ? text : null,
+    contentHash,
+    readSeq,
+  });
+  // "Edit anyway" lasts for this open and covers the bytes the person
+  // accepted saving would rewrite: the session seeded from them records them
+  // as its source. A session that records another source, as when another
+  // pane reloads a change made outside dohc into the shared session, needs
+  // its own check and consent.
+  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
+  const consented = editAnyway?.open === lossyOpen;
+  // A session that binds a different note from the one checked, as when the
+  // file changed before the open, closes once its own check says lossy. It
+  // stays closed until a read brings other bytes; the session that then
+  // opens is checked in turn.
+  const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
+  const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
+  const allowed = consented ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -477,12 +531,41 @@ export const FileInspector = memo(function FileInspector(
       (kind === "markdown" || kind === "drawing") &&
       readAnswered &&
       (!truncated || liveDocumentKind === "scene") &&
+      (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
+  useEffect(() => setBound(engine.available), [engine.available]);
+  const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  useEffect(() => {
+    if (consented && !editingAnyway) {
+      setEditAnyway(null);
+      // The shared session has other bytes. Read them before asking again.
+      setStaleConsentRead({ open: lossyOpen, seq: readSeq });
+      refreshAfterConflict();
+    }
+  }, [consented, editingAnyway, lossyOpen, readSeq, refreshAfterConflict]);
+  const session = useBoundNoteCheck({
+    open: lossyOpen,
+    // Edit anyway already accepted what saving does.
+    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
+    checkedHash: checked.checkedHash,
+  });
+  useEffect(() => {
+    if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
+  }, [session, lossyOpen, contentHash]);
+  // The render a large note's session binds in, before its check starts,
+  // waits too, as does a bound session while its own check runs.
+  const rereadingConsent = staleConsentRead?.open === lossyOpen && staleConsentRead.seq === readSeq;
+  const lossyNote = rereadingConsent ? "checking"
+    : editingAnyway ? "clear"
+    : session === "lossy" ? "lossy"
+    : session === "checking" || (large && engine.available && !bound && allowed === "clear") ? "checking"
+    : allowed;
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,
     authorCapacity: engine.authorCapacity, saveState: engine.saveState,
@@ -531,6 +614,7 @@ export const FileInspector = memo(function FileInspector(
     engine.documentUnavailable ||
     engine.liveHostUnavailable ||
     engine.opening ||
+    lossyNote !== "clear" ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||
     switchUnresyncedRef.current ||
@@ -565,7 +649,7 @@ export const FileInspector = memo(function FileInspector(
   const { scrollTarget, onScrollConsumed } = props;
   const textReady =
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
-  const activeSurfaceReady = textReady && !engine.opening;
+  const activeSurfaceReady = textReady && !engine.opening && lossyNote !== "checking";
   useEffect(() => {
     if (!activeSurfaceReady || !props.surfaceKey) return;
     props.onSurfaceReady?.(props.path, props.surfaceKey);
@@ -575,10 +659,21 @@ export const FileInspector = memo(function FileInspector(
       onScrollConsumed?.(scrollTarget.nonce);
     }
   }, [scrollTarget, props.path, textReady, onScrollConsumed]);
+  // A failed read of a note still waiting for its check shows the failure,
+  // even over an earlier text: that note opens only once a read checks it.
+  const readFailedUnchecked = error && lossyNote === "checking";
+  const reading = isText && !engineDocBound && (text === null || loadedPath !== props.path || readFailedUnchecked);
+  // A new page waiting on this file hears when no document opens here to
+  // take what was typed; MarkdownView answers for one that does.
+  const { onEditorReady } = props;
+  const noDocument = notInVersion || engine.documentUnavailable || (reading && error);
+  useEffect(() => {
+    if (noDocument) onEditorReady?.(null);
+  }, [noDocument, onEditorReady]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
   const truncatedNotice =
     isText && truncated ? (
-      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
+      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
     ) : null;
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
@@ -679,7 +774,7 @@ export const FileInspector = memo(function FileInspector(
     );
   }
 
-  if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
+  if (reading) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (
@@ -700,6 +795,7 @@ export const FileInspector = memo(function FileInspector(
           <EngineArtifactAssetsInvalidNotice
             workspaceId={props.workspaceId}
             path={props.path}
+            onError={props.onButtonError}
           />
         ) : null}
         {engine.removalInProgress ? (
@@ -713,7 +809,12 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file." />
+          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file.">
+            {/* A note opens only once a read checks it, so reading again is its way back. */}
+            {checksLossyNote ? (
+              <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
+            ) : null}
+          </EmptyState>
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:
           // in a pane that keeps its scrollbar's room, as the document's does.
@@ -749,8 +850,6 @@ export const FileInspector = memo(function FileInspector(
             scrollTarget={props.scrollTarget}
             headingTarget={props.headingTarget}
             onOpenPath={props.onOpenPath}
-            onOpenChatMention={props.onOpenChatMention}
-            chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             onLiveReadOnly={props.onLiveReadOnly}
@@ -762,7 +861,6 @@ export const FileInspector = memo(function FileInspector(
             reopenKey={props.engineVersionKey}
             switchReadPending={switchReadPending.current}
             switchUnresyncedRef={switchUnresyncedRef}
-            refreshKey={props.refreshKey}
             registerSourceToggle={props.registerSourceToggle}
             autoFocus={props.autoFocus}
             onPendingDraftChange={setPendingDraft}
@@ -770,9 +868,14 @@ export const FileInspector = memo(function FileInspector(
             onButtonNotice={props.onButtonNotice}
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
+            lossyNote={lossyNote}
+            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
+            onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}
+            onEditorReady={props.onEditorReady}
           />
         </div>
       );
@@ -802,6 +905,7 @@ export const FileInspector = memo(function FileInspector(
           onRetryEngineOpen={retryEngineOpen}
           presenceFactory={props.drawingCollaboration}
           localBuffer={localBuffer}
+          onButtonError={props.onButtonError}
         />
       );
     case "csv":
@@ -899,7 +1003,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );
@@ -937,7 +1041,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );

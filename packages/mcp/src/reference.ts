@@ -110,6 +110,11 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   show: "moment",
 };
 
+export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
+  list: "versionList", compare: "versionCompare", conflicts: "versionConflicts",
+  create: "versionCreate", switch: "versionSwitch", merge: "versionMerge", resolve: "versionResolve",
+};
+
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
@@ -134,6 +139,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", edit: "documentEdit", create: "documentCreate", chats: "fileChats", comment: "fileChatStart",
+  "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -150,11 +156,12 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
+  links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
   inbox: [["chat", "inbox"]],
-  show: [["chat", "show", "th_1", "--peek"]],
+  show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
   post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
@@ -172,6 +179,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_chat_links:{cli:"chatLinks"},
   dohc_chat_file_mentions: { cli: "chatFileMentions" },
   dohc_links_edges: { cli: "linksEdges" },
   dohc_links_in: { cli: "linksIn" },
@@ -181,22 +189,35 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.",
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },
   dohc_undo_operation: { cli: "historyUndo" },
+  dohc_list_versions: { cli: "versionList" },
+  dohc_compare_version: { cli: "versionCompare" },
+  dohc_list_version_conflicts: { cli: "versionConflicts" },
+  dohc_create_version: { cli: "versionCreate" },
+  dohc_switch_version: { cli: "versionSwitch" },
+  dohc_merge_version: { cli: "versionMerge" },
+  dohc_resolve_version_conflict: { cli: "versionResolve" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
+  dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
+  dohc_retry_kept_edits: { cli: "retryKeptEdits" },
+  dohc_stop_again: { cli: "stopAgain" },
+  dohc_list_retained_copies: { cli: "retainedCopies" },
+  dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
   dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
   dohc_write_file: "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
   dohc_create_directory: "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
-  dohc_move_path: "`{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.",
+  dohc_duplicate_file: { cli: "fileDuplicate" },
+  dohc_move_path: "`{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/local/trash.",
   dohc_delete_path: "`{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.",
   dohc_detect_apps: "`{ ok: true, apps: { root, title, kind, confidence, entry?, packageManager?, scripts, configuredPreviewMode?, buildOutputs, configPath?, diagnostics }[], count, detector }`",
   dohc_create_app: "`{ ok: true, appRoot, files }`, or `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists files published before the first failure.",
@@ -386,6 +407,10 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
+  dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
+  dohc_list_versions: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_compare_version: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_list_version_conflicts: "A shared view keeps no versions of its own, so it does not offer this tool.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
@@ -444,10 +469,10 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "links"
+  const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
     ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
     : command === "chat"
-    ? name === "file-mentions" ? "chatFileMentions" : name
+    ? name === "links" ? "chatLinks" : name === "file-mentions" ? "chatFileMentions" : name
     : command === "history"
       ? HISTORY_RESULTS[name]
       : command === "document"
@@ -455,13 +480,14 @@ function verbReturns(command: string, name: string): string {
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
             : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+              : command === "version" ? VERSION_RESULTS[name]
               : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
     // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => !["history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["file", "history", "version", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
@@ -501,6 +527,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
+  if (name === "version") checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
@@ -580,6 +607,8 @@ Two environment variables also change what the CLI does:
 
 - \`DOHC_RUN_ID\` links the messages that \`post\` and \`reply\` write to a local agent run.
 - \`DOHC_STATE_DIR\` names the app's state folder when the CLI cannot find the running app in its default place.
+
+On Windows, dohc starts a chat agent with \`NoDefaultCurrentDirectoryInExePath=1\`, so in cmd the agent must run a program in the workspace folder as \`.\\name\`, not by its bare name.
 
 ${cliSection()}
 

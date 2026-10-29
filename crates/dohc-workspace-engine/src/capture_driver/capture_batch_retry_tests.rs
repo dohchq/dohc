@@ -19,10 +19,21 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_files(&[("a.md", b"alpha"), ("b.md", b"bravo")]).await
+    }
+
+    async fn with_files(files: &[(&str, &[u8])]) -> Self {
+        let fixture = Self::unblocked(files).await;
+        fixture.pin_busy();
+        fixture
+    }
+
+    async fn unblocked(files: &[(&str, &[u8])]) -> Self {
         let scratch = ScratchDir::new().unwrap();
         let root = scratch.path();
-        std::fs::write(root.join("a.md"), "alpha").unwrap();
-        std::fs::write(root.join("b.md"), "bravo").unwrap();
+        for (path, bytes) in files {
+            std::fs::write(root.join(path), bytes).unwrap();
+        }
         let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
         let mut store = EngineStore::open(&db, 1).unwrap();
         VersionedTextStore::new(&mut store)
@@ -41,19 +52,6 @@ impl Fixture {
             )
             .unwrap();
         let reader = rusqlite::Connection::open(&db).unwrap();
-        reader
-            .execute_batch("BEGIN; SELECT count(*) FROM capture_retry_load")
-            .unwrap();
-        writer
-            .execute_batch("INSERT INTO capture_retry_load VALUES(zeroblob(28*1024*1024))")
-            .unwrap();
-        let frames: i64 = writer
-            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))
-            .unwrap();
-        assert!(
-            frames > 6000,
-            "the real write gate must refuse this fixture"
-        );
         Self {
             scratch,
             supervisor,
@@ -63,6 +61,25 @@ impl Fixture {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer,
         }
+    }
+
+    fn pin_busy(&self) {
+        let reader = self.reader.lock().unwrap();
+        let reader = reader.as_ref().unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM capture_retry_load")
+            .unwrap();
+        self.writer
+            .execute_batch("INSERT INTO capture_retry_load VALUES(zeroblob(28*1024*1024))")
+            .unwrap();
+        let frames: i64 = self
+            .writer
+            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))
+            .unwrap();
+        assert!(
+            frames > 6000,
+            "the real write gate must refuse this fixture"
+        );
     }
 
     fn context<'a>(
@@ -113,9 +130,203 @@ impl Fixture {
     }
 }
 
+async fn apply_releasing_busy_reader(fixture: &Fixture) -> (bool, bool, bool, usize) {
+    let reader = Arc::clone(&fixture.reader);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&waits);
+    let probe = CaptureApplyProbe {
+        capture_batch_wait: Some(Arc::new(move |_| {
+            if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                reader
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .execute_batch("ROLLBACK")
+                    .unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let outcome = apply_bound_run_with_handle(
+        fixture.context(&leases, &status, &self_writes, Some(probe)),
+        &fixture.files.handle(),
+        fixture.run().await,
+        &CancellationToken::new(),
+    )
+    .await;
+    (
+        outcome.clean,
+        status.degraded(),
+        fixture.files.handle().stats().await.unwrap().dirty,
+        waits.load(Ordering::Relaxed),
+    )
+}
+
+fn assert_busy_apply_settled((clean, degraded, dirty, waits): (bool, bool, bool, usize)) {
+    assert!(clean, "the first apply must recover from FileLocked");
+    assert!(!degraded);
+    assert!(
+        waits > 0,
+        "the real busy gate must refuse the first attempt"
+    );
+    assert!(!dirty, "the first receipt must settle the path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_text_first_apply_retries_busy_ingest_without_degrading() {
+    let text = "a".repeat(4 * 1024 * 1024 + 1);
+    let fixture = Fixture::with_files(&[("large.csv", text.as_bytes())]).await;
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let mut store = EngineStore::open(&fixture.db, 2).unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WORKSPACE_ID, "main", "large.csv")
+        .unwrap();
+    drop(store);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(head.unwrap().text, text);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_first_apply_retries_busy_ingest_without_degrading() {
+    let fixture = Fixture::with_files(&[(".env", b"TOKEN=alpha")]).await;
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let heads = secret_heads(&fixture);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(heads, 1);
+}
+
+fn secret_heads(fixture: &Fixture) -> i64 {
+    let observer = rusqlite::Connection::open(&fixture.db).unwrap();
+    observer
+        .query_row(
+            "SELECT count(*) FROM secret_files WHERE workspace_id=?1 AND path='.env'",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_first_apply_retries_busy_removal_without_degrading() {
+    let fixture = Fixture::unblocked(&[(".env", b"TOKEN=alpha")]).await;
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    assert!(
+        apply_bound_run_with_handle(
+            fixture.context(&leases, &status, &self_writes, None),
+            &fixture.files.handle(),
+            fixture.run().await,
+            &CancellationToken::new(),
+        )
+        .await
+        .clean
+    );
+    assert_eq!(secret_heads(&fixture), 1);
+    std::fs::remove_file(fixture.scratch.path().join(".env")).unwrap();
+    fixture.files.handle().request_rescan();
+    fixture.pin_busy();
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let heads = secret_heads(&fixture);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(heads, 0);
+}
+
+async fn binary_first_apply_recovers_from_store_busy(bytes: &[u8], expected_heads: i64) {
+    let fixture = Fixture::with_files(&[("asset.bin", bytes)]).await;
+    let run = fixture.run().await;
+    let reader = Arc::clone(&fixture.reader);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&waits);
+    let probe = CaptureApplyProbe {
+        capture_batch_wait: Some(Arc::new(move |_| {
+            if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                reader
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .execute_batch("ROLLBACK")
+                    .unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let outcome = apply_bound_run_with_handle(
+        fixture.context(&leases, &status, &self_writes, Some(probe)),
+        &fixture.files.handle(),
+        run,
+        &CancellationToken::new(),
+    )
+    .await;
+    let dirty = fixture.files.handle().stats().await.unwrap().dirty;
+    let observer = rusqlite::Connection::open(&fixture.db).unwrap();
+    let heads: i64 = observer
+        .query_row(
+            "SELECT count(*) FROM path_aliases WHERE workspace_id=?1",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(observer);
+    let mut store = EngineStore::open(&fixture.db, 2).unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .read_binary(WORKSPACE_ID, "main", "asset.bin")
+        .unwrap();
+    drop(store);
+    fixture.close().await;
+    assert!(
+        outcome.clean,
+        "the first apply must recover from FileLocked"
+    );
+    assert!(!status.degraded());
+    assert!(
+        waits.load(Ordering::Relaxed) > 0,
+        "the real busy gate must refuse the first attempt"
+    );
+    assert_eq!(heads, expected_heads);
+    if expected_heads == 1 {
+        assert_eq!(head.unwrap().bytes, bytes);
+    } else {
+        assert!(head.is_none());
+    }
+    assert!(!dirty, "the first receipt must settle the binary path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_first_apply_retries_busy_ingest_without_degrading() {
+    binary_first_apply_recovers_from_store_busy(b"\0binary", 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_first_apply_retries_busy_over_cap_retire_without_degrading() {
+    let bytes = vec![0; dohc_engine_files::MAX_CAPTURE_BINARY_BYTES as usize + 1];
+    binary_first_apply_recovers_from_store_busy(&bytes, 0).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_cancel_reaches_a_sink_already_waiting_on_store_busy() {
     let fixture = Fixture::new().await;
+    assert_apply_cancel_reaches_busy_sink(fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_first_apply_cancel_while_busy_keeps_capture_degraded() {
+    let fixture = Fixture::with_files(&[("asset.bin", b"\0binary")]).await;
+    assert_apply_cancel_reaches_busy_sink(fixture).await;
+}
+
+async fn assert_apply_cancel_reaches_busy_sink(fixture: Fixture) {
     let run = fixture.run().await;
     let cancel = CancellationToken::new();
     let in_wait = cancel.clone();
@@ -157,10 +368,7 @@ async fn apply_cancel_reaches_a_sink_already_waiting_on_store_busy() {
     assert!(!outcome.clean);
     assert!(status.degraded());
     assert_eq!(observed_waits, 1);
-    assert_eq!(
-        captured, 0,
-        "cancellation must not commit either added file"
-    );
+    assert_eq!(captured, 0, "cancellation must not commit an added file");
     assert!(dirty);
 }
 

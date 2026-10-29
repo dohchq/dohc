@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  codeCover,
   codeRanges,
   findMentions,
   matchMentionCandidates,
@@ -117,5 +118,52 @@ describe("shared mention composer helpers", () => {
     expect(activeMentionQuery("ice@you", 7)).toBeNull();
     expect(activeMentionQuery("é@you", 5)).toBeNull();
     expect(activeMentionQuery("@K", 2)).toEqual({ start: 0, query: "K" });
+  });
+});
+
+describe("code cover", () => {
+  // Bodies of backtick runs, fences, mentions and line breaks, from a fixed seed.
+  const bodies = () => {
+    const pieces = ["`", "``", "```\n", "~~~\n", "\n", " ", "a", "@you ", "  ```\n"];
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    return Array.from({ length: 3000 }, () => {
+      let body = "";
+      const size = Math.floor(random() * 30);
+      for (let at = 0; at < size; at++) body += pieces[Math.floor(random() * pieces.length)];
+      return body;
+    });
+  };
+  const inRanges = (body: string) => {
+    const ranges = codeRanges(body);
+    return (position: number) => ranges.some(([start, end]) => position >= start && position < end);
+  };
+
+  it("agrees with the ranges at every position", () => {
+    for (const body of bodies()) {
+      const cover = codeCover(body);
+      const naive = inRanges(body);
+      const positions = Array.from({ length: body.length + 1 }, (_, at) => at);
+      expect({ body, inside: positions.map(cover) }).toEqual({ body, inside: positions.map(naive) });
+    }
+  });
+
+  it("drops the same mentions as the ranges do", () => {
+    for (const body of bodies()) {
+      const naive = inRanges(body);
+      const expected = scanMentionTokens(body).filter((mention) => !naive(mention.start));
+      expect({ body, found: scanMentionTokens(body, { ignoreCode: true }) }).toEqual({ body, found: expected });
+    }
+  });
+
+  it("scans a long body of backtick runs in linear time", () => {
+    for (const body of ["`@you ".repeat(8000), "```\na\n```\n".repeat(5000) + "`x`".repeat(5000)]) {
+      const started = performance.now();
+      scanMentionTokens(body, { ignoreCode: true });
+      expect(performance.now() - started).toBeLessThan(100);
+    }
   });
 });

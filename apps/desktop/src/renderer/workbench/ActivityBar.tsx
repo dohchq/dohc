@@ -1,5 +1,5 @@
 import { desktopPins, activityPin } from "../../testPins";
-import { Cloud, Settings, type LucideIcon } from "lucide-react";
+import { Settings, Users, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
 import { VIEW_IDENTITY } from "./viewIdentity";
@@ -179,7 +179,7 @@ export function ActivityBar(props: {
               active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
               badge={props.hasConflict ? "danger" : undefined}
               onClick={() => props.onSelectView(SHARING_VIEW_ID)}
-              icon={<RailGlyph Icon={Cloud} />}
+              icon={<RailGlyph Icon={Users} />}
             />
           </div>
         ) : null}

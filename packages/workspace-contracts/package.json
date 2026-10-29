@@ -20,6 +20,7 @@
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./names": "./src/names.ts",
     "./chat-message-body": "./src/chatMessageBody.ts",
+    "./chat-links": "./src/chatLinks.ts",
     "./chat-file-mentions": "./src/chatFileMentions.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./collection": "./src/collection.ts",

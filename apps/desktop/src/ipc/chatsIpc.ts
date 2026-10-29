@@ -1,3 +1,4 @@
+import type { createChatLinksReader } from "../workspaces/chatLinks";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
@@ -13,7 +14,6 @@ import {
   GetChatThreadRevisionResult,
   SendChatMessageResult,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionResult,
   ListChatThreadAttachmentsResult,
   ListChatChannelsResult,
   ListChatFollowsResult,
@@ -32,6 +32,7 @@ import {
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { registerOperations, type OperationHandlers } from "./operationTable";
+import { ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -180,6 +181,7 @@ export function registerChatsIpcHandlers<
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
+  chatLinks: ReturnType<typeof createChatLinksReader>;
   resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   activity: { queueCloudSync(workspaceId: string): void };
   desktopChatBookmarks: {
@@ -196,6 +198,8 @@ export function registerChatsIpcHandlers<
   automationCollectionOf(workspaceId: string): AutomationCollectionOf;
   // A group is a folder. Main creates it when the group is created.
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
+  // Whether the person's message asks an agent that Restricted Mode holds.
+  agentWaitsForTrust(workspaceId: string, messageId: string): Promise<boolean>;
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
@@ -203,7 +207,7 @@ export function registerChatsIpcHandlers<
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
-    notifyRenderer, ensureGroupFolder, automationCollectionOf,
+    notifyRenderer, ensureGroupFolder, automationCollectionOf, agentWaitsForTrust,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
@@ -388,11 +392,21 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   };
 
+  // The message is saved whatever this answers, so a failed answer is none.
+  async function waitsForTrust(workspaceId: string, messageId: string): Promise<{ waitsForTrust?: true }> {
+    try {
+      return await agentWaitsForTrust(workspaceId, messageId) ? { waitsForTrust: true } : {};
+    } catch (error) {
+      console.warn("[desktop] could not read whether a message waits for workspace trust", error);
+      return {};
+    }
+  }
+
   const sendChatMessage: ChatHandler<"sendChatMessage"> = async (input, { event, operation }) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    const message = await chatWrites.sendMessage(chatWritePlace(scope), {
+    const reply = {
       writer: RENDERER,
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
@@ -405,11 +419,18 @@ export function registerChatsIpcHandlers<
           (path) => chatFileObjectId(scope, path),
           input.fileReferences,
         ),
-    });
+    };
+    const sent = input.resolves
+      ? await chatWrites.answer(chatWritePlace(scope), { ...reply, resolves: input.resolves })
+      : { message: await chatWrites.sendMessage(chatWritePlace(scope), reply) };
+    const { message } = sent;
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+      ...("decision" in sent ? { resolved: chatDecisionForIpc(sent.decision) } : {}),
+      ...("failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {}),
+      ...await waitsForTrust(scope.workspace.workspaceId, message.id),
     });
   };
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
@@ -422,30 +443,6 @@ export function registerChatsIpcHandlers<
       input.threadId,
     );
     return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
-  };
-
-  const resolveChatDecision: ChatHandler<"resolveChatDecision"> = async (input) => {
-    // Reads are reachable from a share view; this mutation is not.
-    const scope = await requireChatScope(input.workspaceId);
-    const decision = await chatWrites.resolveDecision(chatWritePlace(scope), {
-      threadId: input.threadId,
-      messageId: input.messageId,
-      resolvedByMessageId: input.resolvedByMessageId,
-      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-    });
-    return ResolveChatDecisionResult.parse({
-      decision: {
-        threadId: decision.threadId,
-        messageId: decision.messageId,
-        state: decision.state,
-        ...(decision.resolvedByMessageId
-          ? { resolvedByMessageId: decision.resolvedByMessageId }
-          : {}),
-        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
-        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-        atMs: decision.atMs,
-      },
-    });
   };
 
   const listChatThreadAttachments: ChatHandler<"listChatThreadAttachments"> = async (input) => {
@@ -471,6 +468,7 @@ export function registerChatsIpcHandlers<
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      ...(channel.agentId !== undefined ? { agentId: channel.agentId } : {}),
       type: channel.type,
       purpose: channel.purpose,
       ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
@@ -908,6 +906,7 @@ export function registerChatsIpcHandlers<
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
       ...await askedDecision(linkedChatStoreFor(workspace), workspace.workspaceId, input, started.message),
+      ...await waitsForTrust(workspace.workspaceId, started.message.id),
     });
   };
   const markChatThreadRead: ChatHandler<"markChatThreadRead"> = async (input) => {
@@ -996,7 +995,6 @@ export function registerChatsIpcHandlers<
     createFileChat,
     getChatThreadRevision,
     listChatThreadDecisions,
-    resolveChatDecision,
     listChatThreadAttachments,
     listChatChannels,
     listChatFollows,
@@ -1006,6 +1004,7 @@ export function registerChatsIpcHandlers<
     markChatThreadRead,
     listChatReactions,
     setChatReaction,
+    chatLinks: ({workspaceId,...input}, {operation}) => dependencies.chatLinks(workspaceId,input,operation.assertCurrent),
     chatFileMentionsPage,
     listChatMessages,
     sendChatMessage,

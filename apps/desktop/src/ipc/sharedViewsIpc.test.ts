@@ -37,7 +37,7 @@ it("opens a share into a folder chosen through a link and refreshes it under the
   const homeDir = await createTestScratch("dohc-share-home-");
   const h = await harness({ rootPath: await createTestScratch("dohc-share-existing-"), canonicalizeRoot: canonicalWorkspaceRoot });
   h.roots.approveRoot(chosen);
-  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal" }));
+  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } }));
   // The real share files refuse a lease taken on another spelling of the root.
   h.reconcile.mockImplementation(async lease => {
     assertActiveWorkspaceOperationLease(canonicalWorkspaceRoot(real), lease);
@@ -340,6 +340,17 @@ describe("registered received-view handlers", () => {
     expect(h.relayFor).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: expect.any(Symbol) }));
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: info.selector });
     expect(h.open).toHaveBeenCalledWith(expect.objectContaining({ shareView: expect.objectContaining({ grantedSelector: info.selector }) }));
+  });
+
+  it("waits for daemon startup before creating a shared view", async () => {
+    const h = await harness(); const startup = deferred(); const waiting = deferred();
+    h.startup.mockImplementation(() => { waiting.resolve(); return startup.promise; });
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+    await waiting.promise;
+    expect(h.steps).toEqual(["preflight"]); expect(h.mkdir).not.toHaveBeenCalled();
+    startup.resolve();
+    await expect(result).resolves.toMatchObject({ workspace: { rootPath: h.openPayload.rootPath } });
+    expect(h.steps.slice(0, 3)).toEqual(["preflight", "mkdir", "create"]);
   });
 
   it("rolls back a failed first refresh before opening activity", async () => {

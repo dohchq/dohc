@@ -45,6 +45,19 @@ tokio-util = "0.7"
 [target.'cfg(any(windows, target_vendor = "apple"))'.dependencies]
 file-guard = "=0.2.0"
 
+[target.'cfg(unix)'.dependencies]
+# Makes the store's files private through their folder's descriptor,
+# without following a link at any of them.
+rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Creates the engine's folder without the ACL entries its folder gives new ones.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Checks the engine's folder and holds it, and reaches it by its descriptor.
+dohc-linux-files = { path = "../dohc-linux-files" }
+
 [target.'cfg(windows)'.dependencies]
 winapi-util = "=0.1.11"
 
@@ -67,6 +80,10 @@ tokio = { version = "1", features = [
 # arming the crash-injection at the index-commit boundary.
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Stands in for /proc/self/fd where the engine's folder can't be held.
+dohc-linux-files = { path = "../dohc-linux-files", features = ["test-support"] }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

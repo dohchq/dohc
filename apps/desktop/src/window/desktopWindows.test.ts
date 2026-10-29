@@ -10,7 +10,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettingsResult } from "../settin
 import { deferred } from "../testing/deferred";
 import * as windowZoom from "./windowZoom";
 import { createWorkspaceRootApproval, registerWorkspaceRegistryIpcHandlers } from "../ipc/workspaceRegistryIpc";
-import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { createWorkspaceFolderWithFreshness as createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { createRegistryStore } from "../workspaces/registryStore";
 import { workspaceSummariesFrom } from "../workspaces/workspaceSummaryProjection";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -176,7 +176,8 @@ describe("desktop workspace windows", () => {
       workspaceSummaries: () => rows,
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: () => undefined,
+      createWorkspaceFolder, registerPhysicalWorkspace: () => undefined, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
+      trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: () => undefined,
@@ -442,6 +443,23 @@ describe("desktop workspace windows", () => {
     } finally { held.resolve(); await pending; }
   });
 
+  it.each(["manager", "workspace"] as const)("wires %s navigation to document-scoped reload and restores its workspace", async (role) => {
+    const f = fixture();
+    if (role === "manager") f.windows.showOrCreateManagerWindow();
+    else await f.windows.showOrCreateMainWindow();
+    const sender = f.all[0]!.webContents.native;
+    const options = f.createdOptions[0]!;
+    await f.sessions.open(sender, { workspaceId: "b", attachmentId: Symbol("b") }, "document-1");
+    f.windows.setPreferredWorkspaceId("a", sender);
+
+    expect(options.currentRendererDocumentId?.(sender)).toBe("document-1");
+    expect(await options.prepareForRendererReload?.(sender, "document-1")).toBe(true);
+
+    expect(f.sessions.current(sender)).toBeUndefined();
+    expect(options.currentRendererDocumentId?.(sender)).toBeUndefined();
+    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender)[0]!.workspaceId).toBe("b");
+  });
+
   it("leaves preference and the active renderer intact when the reload document is stale", async () => {
     const f = fixture(); const sender = new Contents();
     const session = await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "current");
@@ -538,7 +556,8 @@ describe("desktop native menus", () => {
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
       roots, effectiveHome: () => home, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
+      createWorkspaceFolder, registerPhysicalWorkspace: registry.register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
+      trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
@@ -561,8 +580,8 @@ describe("desktop native menus", () => {
     expect(f.templates).toHaveLength(2);
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
-    const attached = await createWorkspaceFolder({
-      rootPath: attachedPath, homeDir: home, kind: "shared",
+    const { workspace: attached } = await createWorkspaceFolder({
+      rootPath: attachedPath, homeDir: home, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
       workspaceId: "attached-workspace",
     });
     await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
@@ -598,9 +617,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -642,7 +661,7 @@ describe("desktop native menus", () => {
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -655,7 +674,7 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
     click(submenu(item(f, "File", "Open recent"))[0]!, target.native);

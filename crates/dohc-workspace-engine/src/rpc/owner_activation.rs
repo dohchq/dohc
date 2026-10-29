@@ -16,7 +16,7 @@ struct ActivationOutputGuard {
     connection: ConnectionHandle,
     cancel: CancelSignal,
     deadline: Option<Instant>,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl std::fmt::Debug for ActivationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -25,10 +25,8 @@ impl std::fmt::Debug for ActivationOutputGuard {
     }
 }
 impl OutputGuard for ActivationOutputGuard {
-    fn is_current(&self) -> bool {
-        self.connection.is_current()
-            && !self.cancel.is_cancelled()
-            && self.deadline.is_none_or(|limit| Instant::now() < limit)
+    fn is_current_ignoring_cancel(&self) -> bool {
+        self.connection.is_current() && self.deadline.is_none_or(|limit| Instant::now() < limit)
     }
     fn cancel_signal(&self) -> CancelSignal {
         self.cancel.clone()
@@ -38,6 +36,9 @@ impl OutputGuard for ActivationOutputGuard {
     }
     fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+    fn release(&self) {
+        crate::lock(&self.reservation).take();
     }
 }
 
@@ -148,7 +149,7 @@ impl EngineService {
             connection: connection.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: std::sync::Mutex::new(Some(reservation.clone())),
         });
         let workspace = request
             .workspace
@@ -178,14 +179,14 @@ impl EngineService {
             }
             (session.key, None)
         } else {
-            let db_path = open.db_path.clone();
+            let held = open.actor.location();
             let workspace_id = open.workspace_id.clone();
             let path = params.path.clone();
             let namespace = namespace.clone();
             let activation_id = params.activation_id.clone();
             let key = tokio::task::spawn_blocking(move || {
                 use rusqlite::OptionalExtension;
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|workspace_unavailable())?;
                 // A resume finds its document through the activation it retained, so one
                 // with no head, as once it parked, still answers whether it is ready.
                 let object_id: Option<String> = store.read_with(|conn| match &activation_id {

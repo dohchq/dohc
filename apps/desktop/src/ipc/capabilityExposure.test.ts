@@ -66,20 +66,20 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
-  it("records the 14 settings operations", () => {
+  it("records the 15 settings operations", () => {
     const channels = [
-      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "set-agent-color",
+      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "order-agents", "set-agent-color",
       "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
       "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
       "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
     ].map(name => `desktop:${name}`);
-    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(14);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(15);
   });
   it("records all 23 chat operations with their sender-workspace admission", () => {
     const channels = [
-      "list-file-chats", "chat-file-mentions-page", "list-chat-bookmarks", "save-chat-bookmark",
+      "list-file-chats", "chat-file-mentions-page", "chat-links", "list-chat-bookmarks", "save-chat-bookmark",
       "archive-chat-bookmark", "create-file-chat", "list-chat-messages", "get-chat-thread-revision",
-      "send-chat-message", "list-chat-thread-decisions", "resolve-chat-decision", "list-chat-thread-attachments",
+      "send-chat-message", "list-chat-thread-decisions", "list-chat-thread-attachments",
       "list-chat-channels", "list-chat-follows", "set-chat-follow", "list-personal-chat-feed",
       "mark-personal-chat-feed-seen", "create-chat-channel", "list-channel-threads", "start-channel-thread",
       "mark-chat-thread-read", "list-chat-reactions", "set-chat-reaction",
@@ -88,7 +88,7 @@ describe("main inventories", () => {
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
     for (const row of chatRows) {
       const chatRefusal = [
-        "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:list-chat-messages",
+        "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:chat-links", "desktop:list-chat-messages",
         "desktop:send-chat-message", "desktop:list-personal-chat-feed", "desktop:list-channel-threads",
         "desktop:start-channel-thread",
       ].includes(row.channel);
@@ -179,9 +179,9 @@ describe("main inventories", () => {
     }
   });
   it("records the nine remaining relay operation rows with their existing admission", () => {
-    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity", "undo-relay-share"]
       .map(name => `desktop:${name}`);
-    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
+    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "cancel-relay-share-discussion-activity"]
       .map(name => `desktop:${name}`);
     const channels = [...workspaceChannels, ...deviceChannels];
     const migrated = rows.filter(row => channels.includes(row.channel));

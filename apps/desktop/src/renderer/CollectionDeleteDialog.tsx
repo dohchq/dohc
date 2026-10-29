@@ -61,7 +61,7 @@ function Delete(props: CollectionDeleteDialogProps) {
   }
   return <><Overlay appearance="warning" onClose={busy || exporting ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-labelledby": "delete-collection-title" }}>
     <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink">
-      <h2 id="delete-collection-title" className="m-0 text-sm font-semibold">Delete {props.name} permanently?</h2>
+      <h2 id="delete-collection-title" className="m-0 text-base font-semibold">Delete {props.name} permanently?</h2>
       <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection.</p>
       <p className="m-0 text-[13px] text-danger">This cannot be undone on this host, even with a recovery file.</p>
       <p className="m-0 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>

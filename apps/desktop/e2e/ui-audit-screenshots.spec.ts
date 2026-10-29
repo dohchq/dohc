@@ -227,9 +227,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     const page = desktop.page;
 
     // 01 — first-run surface (before opening the workspace)
-    const openFolder = page.getByRole("button", {
-      name: /open an existing folder as a workspace/i,
-    });
+    const openFolder = page.getByTestId("workspace-manager").getByRole("button", { name: "Open folder", exact: true });
     await openFolder.waitFor({ state: "visible", timeout: 8_000 });
     await shot(page, "01-first-run-light");
     await setTheme(page, "dark");
@@ -343,11 +341,11 @@ test("@ui-audit capture baseline screenshots", async () => {
     await shot(page, "17-shell-dark");
     await setTheme(page, "light");
 
-    // 18 — new file dialog
+    // 18 — new page, before its file exists
     await page.keyboard.press("ControlOrMeta+n");
-    await page.waitForTimeout(400);
-    await shot(page, "18-new-file-dialog-light");
-    await page.keyboard.press("Escape");
+    await expect(page.getByLabel("Page title")).toBeFocused();
+    await shot(page, "18-new-page-light");
+    await page.keyboard.press("ControlOrMeta+w");
 
     // 19 — settings: appearance section
     await page.getByTestId(activityPin("settings")).click();

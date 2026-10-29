@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, realpathSync, renameSync, type Stats, writeFileSync } from "node:fs";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,10 +13,21 @@ export interface SupervisorOwnership extends WorkerOwnership {
 }
 const SESSION=".dohc-worker-session.json", MANIFEST=".dohc-worker.json", LOCK=".dohc-worker-lock.sqlite";
 const format="dohc-dataset-worker-v1";
+// A record or lock decides which process owns a folder, so it counts only if
+// this user owns it, no other user can write it, and it has one name: the
+// rule of @dohc/workspace-core's readOwnedFile, which a worker can't await.
+// Windows reports no owner or mode, so there only the link count is checked.
+class UntrustedOwnerFile extends Error {}
+function owned(info:Stats,path:string):void {
+  if(!info.isFile()||info.isSymbolicLink())throw new Error(`A Collection folder's owner file is not a regular file: ${path}`);
+  const uid=process.getuid?.();
+  if((uid!==undefined&&(info.uid!==uid||(info.mode&0o022)!==0))||info.nlink>1)
+    throw new UntrustedOwnerFile(`A Collection folder's owner file is not one only you can change. Check it before you remove anything: ${path}`);
+}
 function regular(path:string, optional=false):void {
   let info;
   try{info=lstatSync(path);}catch(error){if(optional&&(error as NodeJS.ErrnoException).code==="ENOENT")return;throw error;}
-  if(!info.isFile()||info.isSymbolicLink())throw new Error(`A Collection folder's owner file is not a regular file: ${path}`);
+  owned(info,path);
 }
 function canonical(path:string):string {
   if(typeof path!=="string"||!isAbsolute(path)||path.includes("\0"))throw new Error("Invalid dataset worker path.");
@@ -30,9 +41,19 @@ function child(root:string,directory:string):string {
   return dir;
 }
 function readJson(path:string):Record<string,unknown> {
+  // Checked again on the open file, so a name swapped after the check changes nothing.
   regular(path);
-  if(lstatSync(path).size>4096)throw new Error(`A Collection folder's owner file is too large: ${path}`);
-  try {const value=JSON.parse(readFileSync(path,"utf8"));if(!value||typeof value!=="object"||Array.isArray(value))throw Error();return value;}
+  const fd=openSync(path,constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0));
+  let text:string;
+  try {
+    const info=fstatSync(fd);owned(info,path);
+    if(info.size>4096)throw new Error(`A Collection folder's owner file is too large: ${path}`);
+    const buffer=Buffer.alloc(4097);let length=0;
+    for(let read;length<buffer.length&&(read=readSync(fd,buffer,length,buffer.length-length,length))>0;)length+=read;
+    if(length>4096)throw new Error(`A Collection folder's owner file is too large: ${path}`);
+    text=buffer.toString("utf8",0,length);
+  }finally{closeSync(fd);}
+  try {const value=JSON.parse(text);if(!value||typeof value!=="object"||Array.isArray(value))throw Error();return value;}
   catch{throw new Error(`A Collection folder's owner file is damaged. Check it before you remove anything: ${path}`);}
 }
 function durableJson(path:string,value:unknown):void {
@@ -54,7 +75,7 @@ function lock(path:string,create:boolean):WorkerLease {
 }
 function manifest(root:string,directory:string):Record<string,unknown> {
   let value:Record<string,unknown>;
-  try{value=readJson(join(directory,MANIFEST));}catch(error){throw new Error(`A Collection folder's owner file is missing or damaged. Check it before you remove anything: ${directory}`,{cause:error});}
+  try{value=readJson(join(directory,MANIFEST));}catch(error){if(error instanceof UntrustedOwnerFile)throw error;throw new Error(`A Collection folder's owner file is missing or damaged. Check it before you remove anything: ${directory}`,{cause:error});}
   if(value.format!==format||value.root!==root||value.directory!==basename(directory)||typeof value.session!=="string"||!/^[a-f0-9-]{36}$/.test(value.session))
     throw new Error(`dohc does not recognize this Collection folder. Check it before you remove anything: ${directory}`);
   return value;

@@ -11,6 +11,12 @@ import { resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
+
+// A note stays read-only until its lossy-note check answers and the engine
+// open that follows it settles.
+async function waitForEditable(): Promise<void> {
+  await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(false));
+}
 import { documentVersionKey } from "./documentVersionKey";
 import { lineSpanInText } from "./FileInspector.text-fixture";
 import {
@@ -45,6 +51,14 @@ const csvMode = (name: "Table" | "Raw") =>
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 
 setupFileInspectorTests();
 
@@ -155,6 +169,7 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
@@ -1158,7 +1173,7 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("opens large editable Markdown in CodeMirror and keeps every rapid keystroke", async () => {
-    const largeBody = `# Large\n\n${"Body line\n".repeat(8_000)}`;
+    const largeBody = `# Large\n\n${"Body line\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 10 + 1)}`;
     const typed = "profilex-0123456789-abcdefghij";
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: largeBody,
@@ -1327,6 +1342,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Properties render inline under the title now — no toggle to open.
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));
@@ -1339,6 +1355,70 @@ describe("markdown editor unmount flush", () => {
       text: "---\nid: note-1\ntitle: Plan\nstatus: ready\n---\n\n# Plan\n",
       expectedContentHash: TEST_CONTENT_HASH,
     });
+  });
+
+  it("writes a list property still being typed and a pending body edit when the editor goes", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    const editor = await screen.findByTestId("markdown-editor");
+    await user.click(editor);
+    await user.type(editor, "Draft!");
+    await user.type(screen.getByLabelText("Property tags value"), ", nara");
+    // A shortcut changes the tab with focus still in the list.
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
+    expect(written).toContain("tags:\n  - kyoto\n  - nara\n");
+    expect(written).toContain("Draft!");
+  });
+
+  it("keeps other properties' edits when the editor goes while a property name is held", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\nstatus: draft\nowner: Sam\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.type(screen.getByLabelText("Property owner value"), "a");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toContain("status: draft\nowner: Sama\n");
+  });
+
+  it("keeps a list property still being typed when Ctrl+/ switches the editor to source", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\ntags:\n  - kyoto\n---\n\n# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await waitForEditable();
+    const field = screen.getByLabelText("Property tags value");
+    await user.type(field, ", nara");
+    fireEvent.keyDown(field, { key: "/", ctrlKey: true });
+    await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("WYSIWYG"));
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText.mock.lastCall?.[0].text).toContain("tags:\n  - kyoto\n  - nara\n");
   });
 
   it("keeps a pending WYSIWYG body edit when the title changes before debounce", async () => {
@@ -1392,7 +1472,7 @@ describe("markdown editor unmount flush", () => {
     // over the WYSIWYG threshold opens in read mode without being truncated
     // (truncated would make PageIdentity read-only and skip the save entirely).
     const bigBody = `---\ntitle: Plan\n---\n\n${LARGE_READ_MODE_FILLER}`;
-    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    expect(bigBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: bigBody,
       truncated: false,
@@ -5951,7 +6031,7 @@ describe("markdown editor unmount flush", () => {
 
     // Source mode edits the raw markdown (frontmatter included), so the inline
     // property rows step aside.
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.click(await findEnabledMarkdownEditToggle());
     await waitFor(() => {
       expect(screen.queryByTestId("properties-panel")).toBeNull();
     });
@@ -5981,6 +6061,7 @@ describe("markdown editor unmount flush", () => {
     );
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Large docs open in read mode; properties still render inline (editable).
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));

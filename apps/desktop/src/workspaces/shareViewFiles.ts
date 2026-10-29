@@ -41,6 +41,7 @@ import {
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import {
+  assertHeldSpellingsUnchanged,
   assertShareChangesJournalable,
   recordedShareSelector,
   SharePinInvalidError,
@@ -85,6 +86,8 @@ export interface ResolvedShareViewFilesTarget {
   recipientEmail?: string | null;
   /** Present only for a mount; revalidated before any projected-folder write. */
   mountLabel?: string;
+  /** Present only for a standalone view: the attachment its engine open belongs to. */
+  attachmentId?: symbol;
 }
 
 export type ShareViewFileChange =
@@ -732,6 +735,7 @@ export function createShareViewFiles(
         );
       }
       assertShareChangesJournalable(captured.unjournalablePaths);
+      assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
     const before = await canonicalSnapshot(
       store,
@@ -850,6 +854,9 @@ export function createShareViewFiles(
           ...(target.mountLabel === undefined
             ? {}
             : { mountLabel: target.mountLabel }),
+          ...(target.attachmentId === undefined
+            ? {}
+            : { attachmentId: target.attachmentId }),
         },
         workspaceLease: lease,
       },
@@ -1041,7 +1048,8 @@ export function createShareViewFiles(
         return [...new Set([
           ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
           ...(captured.failedPaths ?? []),
-          ...captured.unjournalablePaths.map(entry => entry.path),
+          // A held spelling's file is another spelling's, not unsaved work.
+          ...captured.unjournalablePaths.filter(entry => entry.reason !== "spelling-collision").map(entry => entry.path),
         ])];
       });
     } catch {

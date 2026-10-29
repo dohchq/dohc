@@ -1,10 +1,8 @@
-import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import { join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
-import type { DesktopUserSettingsResult } from "../settings/userSettings";
+import { firstAgent, type DesktopUserSettingsResult } from "../settings/userSettings";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import {
-  applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
 } from "../systemThemeIcon";
@@ -34,7 +32,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   nativeImage: { createFromPath(path: string): Image };
   nativeTheme: { readonly shouldUseDarkColors: boolean };
   Tray: new (image: Image) => DesktopTrayInstance<Image, Menu>;
-  BrowserWindow: { getAllWindows(): Array<{ setIcon(path: string): void }> };
   readCachedUserSettingsFile(directory: string): Promise<DesktopUserSettingsResult>;
   stateDir(): string;
   chatDispatchService: Pick<ChatDispatchService, "isPaused" | "setPaused">;
@@ -42,9 +39,16 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   /** How many schedules this computer runs. Any keep dohc in the tray. */
   runningSchedules(): number;
   readonly appLifecycle: { isQuitting(): boolean };
+  Notification: new (options: { title: string; body: string }) => {
+    on(event: "click", listener: () => void): unknown;
+    show(): void;
+  };
+  /** Whether the Linux desktop shows tray icons. */
+  linuxTrayShown(): Promise<boolean>;
+  hasWindow(): boolean;
 }) {
   const {
-    app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
+    app, process, Menu, nativeImage, nativeTheme, Tray,
     readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   } = dependencies;
 
@@ -52,7 +56,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   let dispatchEnabled = false;
 
   function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
-    return settings.runner.enabled && configuredRunnerCommand(settings.runner).length > 0;
+    return firstAgent(settings)?.enabled === true;
   }
 
   function desktopIconDirectory(): string {
@@ -140,15 +144,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     rebuildDispatchTrayMenu();
   }
 
-  function refreshSystemThemeDesktopIcons(): void {
-    const iconPath = currentDesktopIconPath();
-    if (iconPath) {
-      applyDesktopIconToPlatform({
-        platform: process.platform,
-        iconPath,
-        windows: BrowserWindow.getAllWindows(),
-      });
-    }
+  function refreshTrayIcon(): void {
     if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
   }
 
@@ -168,8 +164,34 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
 
+  // Without a tray, as on stock GNOME, nothing shows that dohc keeps running
+  // after its last window closes. Say so once a run, and how to quit. The
+  // notice is kept: Electron drops its click listener once it is collected.
+  let backgroundNotice: InstanceType<typeof dependencies.Notification> | null = null;
+  async function noticeRunningInBackground(): Promise<void> {
+    if (process.platform !== "linux" || backgroundNotice) return;
+    const trayShown = await dependencies.linuxTrayShown();
+    // A quit, a reopened window, or another close's notice may have come
+    // during the check, which can take seconds on a slow session bus.
+    if (trayShown || backgroundNotice || dependencies.hasWindow() || dependencies.appLifecycle.isQuitting()) return;
+    const schedules = dependencies.runningSchedules();
+    const notice = new dependencies.Notification({
+      title: "dohc is still running",
+      body: [
+        ...(dispatchEnabled ? [chatDispatchService.isPaused() ? "Agent dispatch is paused." : "Agent dispatch is on."] : []),
+        ...(schedules > 0 ? [schedules === 1 ? "Running 1 schedule." : `Running ${schedules} schedules.`] : []),
+        "To quit, open dohc and press Ctrl+Q.",
+      ].join(" "),
+    });
+    backgroundNotice = notice;
+    notice.on("click", () => {
+      void showOrCreateMainWindow();
+    });
+    notice.show();
+  }
+
   /** Whether agent dispatch keeps dohc running, as the last refresh read it. */
   const dispatchKeepsRunning = () => dispatchEnabled;
 
-  return { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning };
+  return { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning, noticeRunningInBackground };
 }

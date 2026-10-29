@@ -9,9 +9,9 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
-    IngestOutcome, IngestReason, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds,
-    ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource, WatchEvent,
-    apply_then_ack,
+    IngestOutcome, IngestReason, ManifestEntry, ReconcileController, ReconcileRun, RetireOutcome,
+    ScanBounds, ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource,
+    WatchEvent, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::io::ErrorKind;
@@ -42,8 +42,8 @@ impl CaptureSink for AcceptAll {
         })
     }
 
-    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
-        Ok(())
+    fn retire(&mut self, _path: &str) -> Result<RetireOutcome, CaptureError> {
+        Ok(RetireOutcome::Retired)
     }
 }
 
@@ -262,7 +262,117 @@ fn a_case_variant_hard_link_is_not_another_spelling() {
             !dohc_engine_files::stored_under_other_spelling(ws.path(), probed),
             "{probed}"
         );
+        assert_eq!(
+            dohc_engine_files::disk_spelling(ws.path(), probed)
+                .unwrap()
+                .as_deref(),
+            Some(probed)
+        );
     }
+}
+
+/// Each name comes back as the disk stores it, also where a lookup finds the
+/// file through another spelling. In a folder that ignores case Linux keeps
+/// the spelling it was given, so the folder's own entry names the file.
+#[test]
+fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
+    let ws = Scratch::new();
+    ws.write("Notes/a.md", b"a");
+    let stored = |path| dohc_engine_files::disk_spelling(ws.path(), path).unwrap();
+    assert_eq!(stored("Notes/a.md").as_deref(), Some("Notes/a.md"));
+    let ignores_case = ws.path().join("notes/A.md").exists();
+    assert_eq!(
+        stored("notes/A.md").as_deref(),
+        ignores_case.then_some("Notes/a.md")
+    );
+    assert_eq!(stored("missing.md"), None);
+}
+
+/// Only macOS can name an entry without listing its folder. Root can list
+/// any folder, so this test skips there.
+#[cfg(unix)]
+#[test]
+fn disk_spelling_is_unknown_in_an_unlistable_folder_except_on_macos() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Scratch::new();
+    ws.write("private/docs/Notes.md", b"a");
+    let private = ws.path().join("private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let unlistable = std::fs::read_dir(&private).is_err();
+    let stored = dohc_engine_files::disk_spelling(ws.path(), "private/docs/Notes.md");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if !unlistable {
+        eprintln!("SKIP: this user can list the private folder");
+        return;
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(stored.unwrap().as_deref(), Some("private/docs/Notes.md"));
+    } else {
+        assert!(stored.is_err());
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn may_share_entry_distinguishes_unknown_hard_links_from_different_files() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Scratch::new();
+    ws.write("private/a.md", b"a");
+    ws.write("private/c.md", b"a");
+    std::fs::hard_link(
+        ws.path().join("private/a.md"),
+        ws.path().join("private/b.md"),
+    )
+    .unwrap();
+    assert!(!dohc_engine_files::may_share_entry(
+        ws.path(),
+        "private/a.md",
+        "private/b.md"
+    ));
+    let private = ws.path().join("private");
+    #[cfg(unix)]
+    let permissions = std::fs::metadata(&private).unwrap().permissions();
+    #[cfg(unix)]
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    #[cfg(windows)]
+    let icacls = |args: &[&str]| {
+        std::process::Command::new("icacls")
+            .arg(&private)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    #[cfg(windows)]
+    let denied = icacls(&["/deny", "*S-1-1-0:(RD)", "/q"]);
+    let unlistable = std::fs::read_dir(&private).is_err();
+    #[cfg(windows)]
+    let unknown = ["private/a.md", "private/b.md", "private/c.md"]
+        .map(|path| dohc_engine_files::disk_spelling(ws.path(), path).is_err());
+    let linked = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/b.md");
+    let separate = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/c.md");
+    let missing =
+        dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/missing.md");
+    #[cfg(unix)]
+    std::fs::set_permissions(&private, permissions).unwrap();
+    #[cfg(windows)]
+    {
+        let restored = icacls(&["/remove:d", "*S-1-1-0", "/q"]);
+        assert!(restored.status.success(), "{restored:?}");
+        assert!(denied.status.success(), "{denied:?}");
+    }
+    if !unlistable {
+        eprintln!("SKIP: this user can list the private folder");
+        return;
+    }
+    #[cfg(windows)]
+    assert_eq!(
+        unknown, [true; 3],
+        "stored names must be unknown while listing is denied"
+    );
+    assert_eq!(linked, !cfg!(target_os = "macos"));
+    assert!(!separate);
+    assert!(!missing);
 }
 
 /// A link to a folder whose name differs only in case is not a rename, even

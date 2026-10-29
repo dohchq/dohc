@@ -1,4 +1,5 @@
 import {afterEach, expect, it} from "vitest";
+import {writeFileSync} from "node:fs";
 import type {ReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import {AGENT_CHANNEL_WIRE_ID} from "@dohc/security-contract/chat-wire-ids";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -6,7 +7,7 @@ import {createReplicaSupervisor} from "./replicaSupervisor";
 import {closeTestStorage, closeTestStorages, inspectDatabase, seedDependentGrant, seedLinkGrant, sha256, storagePath, tempRoot, testStorage} from "./testing";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import type {StorageContext} from "./storage/context";
-import {replicaCurrentViewReadCacheSize} from "./replicaCurrentViewReads";
+import {replicaCurrentViewReadCacheSize, withReplicaCurrentView} from "./replicaCurrentViewReads";
 import {replicaCurrentViewStoredCacheSize} from "./storage/replicaCurrentViews";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import {accountDeletionKey} from "@dohc/workspace-auth/accountDeletion";
@@ -37,6 +38,21 @@ async function fixture() {
   const read = (path = "docs/a.md") => storage.readReplicaCurrentViewFile({...input, path});
   return {storage, lease, input, file, view, save, list, read, db:inspectDatabase(storagePath(storage))};
 }
+
+it.skipIf(!process.env.DOHC_SESSION_CHECK_PERF_OUTPUT)("measures the replica session comparison",async()=>{
+  const f=await fixture();seedLinkGrant(f.storage,{grantId:"link",shareId:"s",secretHash:"hash"});f.save();
+  const input={grantId:"link",generation:1,principal:{kind:"link" as const,requireSession:()=>({grantId:"link",generation:1})}};
+  const read=()=>f.storage.readReplicaCurrentViewFile({...input,path:"docs/a.md"});
+  expect(read()).toMatchObject({status:"ready",text:"current"});
+  for(let i=0;i<500;i++)read();
+  const samplesUs=[];
+  for(let batch=0;batch<9;batch++) {
+    const start=performance.now();
+    for(let i=0;i<1000;i++)read();
+    samplesUs.push((performance.now()-start)*1000/1000);
+  }
+  writeFileSync(process.env.DOHC_SESSION_CHECK_PERF_OUTPUT!,JSON.stringify({samplesUs,medianUs:[...samplesUs].sort((a,b)=>a-b)[4]},null,2)+"\n");
+});
 
 it("filters every row of the selector union, including another version", async () => {
   const f = await fixture();
@@ -85,20 +101,67 @@ it("dependent readers remain within their parent's selector and access", async (
   expect(f.storage.listReplicaCurrentViewFiles(input)).toEqual({status:"denied"});
 });
 
-it.each(["dm", "agent", null])("a blocked group channel (%s) authorizes nothing even with a stored view", async kind => {
+it.each(["channel", "dm", "agent", null])("a Group channel (%s) serves files only for an ordinary channel", async kind => {
   const f = await fixture();
   const wireId = kind === "agent" ? AGENT_CHANNEL_WIRE_ID : "channel";
   if (kind) f.storage.appendLogBatch({workspaceId:"w",originId:"owner",ops:[{originSeq:0,opKind:"chat.channel.create",recordedAtMs:1,
     payloadJson:JSON.stringify({wireId,channelId:"channel",kind,name:"blocked",slug:"blocked",createdAtMs:1})}]});
   if (kind) expect(f.storage.findChannelCreateKind("w",wireId)).toBe(kind);
   f.db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='s'").run(JSON.stringify({kind:"group",channelWireId:wireId,paths:["docs"],versionId:null}));
+  f.db.prepare("UPDATE sync_relay_share_grants SET access='read-only' WHERE grant_id='s'").run();
   f.save(); // The separate workspace share still collects these files.
+  if(kind === "channel") {
+    expect(f.list()).toMatchObject({status:"ready",files:[{path:"docs/a.md"}]});
+    expect(f.read()).toMatchObject({status:"ready",text:"current"});
+    return;
+  }
   expect(f.list()).toEqual({status:"denied"}); expect(f.read()).toEqual({status:"denied"});
+});
+
+it("requires the link session check in every replica storage reader",async()=>{
+  const f=await fixture();seedLinkGrant(f.storage,{grantId:"link",shareId:"s",secretHash:"hash",access:"edit"});f.save();
+  const input={grantId:"link",generation:1,principal:{kind:"link" as const,requireSession:()=>{throw new Error("session refused");}}};
+  for(const read of [
+    ()=>withReplicaCurrentView(f.storage as unknown as StorageContext,input,undefined,()=>"leaked"),
+    ()=>f.storage.listReplicaCurrentViewFiles(input),
+    ()=>f.storage.readReplicaCurrentViewFile({...input,path:"docs/a.md"}),
+    ()=>f.storage.listReplicaHistoryPins(input),
+    ()=>f.storage.readReplicaHistoryPin({...input,pinId:"pin"}),
+  ]) expect.soft(read).toThrow("session refused");
+  const unchecked={grantId:"link",generation:1,principal:{kind:"link" as const}};
+  if(false) {
+    // @ts-expect-error Link principals must supply a session check.
+    withReplicaCurrentView(f.storage as unknown as StorageContext,unchecked,undefined,()=>"leaked");
+    // @ts-expect-error Link principals must supply a session check.
+    f.storage.listReplicaCurrentViewFiles(unchecked);
+    // @ts-expect-error Link principals must supply a session check.
+    f.storage.readReplicaCurrentViewFile({...unchecked,path:"docs/a.md"});
+    // @ts-expect-error Link principals must supply a session check.
+    f.storage.listReplicaHistoryPins(unchecked);
+    // @ts-expect-error Link principals must supply a session check.
+    f.storage.readReplicaHistoryPin({...unchecked,pinId:"pin"});
+  }
+});
+
+it.each([{grantId:"another",generation:1},{grantId:"link",generation:2}])("refuses a session that does not match the replica input: %j",async session=>{
+  const f=await fixture();seedLinkGrant(f.storage,{grantId:"link",shareId:"s",secretHash:"hash",access:"edit"});f.save();
+  const input={grantId:"link",generation:1,principal:{kind:"link" as const,requireSession:()=>session}};
+  for(const read of [
+    ()=>withReplicaCurrentView(f.storage as unknown as StorageContext,input,undefined,()=>"leaked"),
+    ()=>f.storage.listReplicaCurrentViewFiles(input),
+    ()=>f.storage.readReplicaCurrentViewFile({...input,path:"docs/a.md"}),
+    ()=>f.storage.listReplicaHistoryPins(input),
+    ()=>f.storage.readReplicaHistoryPin({...input,pinId:"pin"}),
+  ]) expect.soft(read()).toEqual({status:"denied"});
+  if(false) {
+    // @ts-expect-error A session check must return a validated session, never null.
+    f.storage.listReplicaCurrentViewFiles({...input,principal:{kind:"link",requireSession:()=>null}});
+  }
 });
 
 it("accountless paths use the existing relative projection in both directions", async () => {
   const f = await fixture(); seedLinkGrant(f.storage, {grantId:"link", shareId:"s", secretHash:"hash"}); f.save();
-  const input = {grantId:"link", generation:1, principal:{kind:"link" as const}};
+  const input = {grantId:"link", generation:1, principal:{kind:"link" as const,requireSession(){return {grantId:"link",generation:1};}}};
   expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({files:[{path:"docs/a.md"}]});
   // A deeper root loses its private parents.
   f.db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='s'").run('{"paths":["private/docs"],"versionId":null}');

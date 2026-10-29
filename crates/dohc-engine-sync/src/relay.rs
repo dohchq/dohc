@@ -2250,7 +2250,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             leases,
         )?;
         // A ready document that stopped at a conflict child whose parent the
-        // feed withholds, or at work past the retention limit, is held from
+        // feed withholds, at a move onto another spelling of a path another
+        // document holds, or at work past the retention limit, is held from
         // there and reads its own rows.
         for (object_id, op) in &pass.stopped {
             if replica
@@ -2534,7 +2535,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         retryable_refusals.push((op, reason));
-                        holding.stop_at_withheld_parent(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
                                 durable.insert(key.clone());
@@ -2575,6 +2575,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !first && !made_progress {
+                // Nothing left in the pass can free these, so a ready
+                // document whose op can wait indefinitely stops here.
+                for (op, reason) in &retryable_refusals {
+                    holding.stop_where_it_can_wait(op, reason);
+                }
                 // A document that is not ready retains nothing: its read
                 // stops at its first op still to apply, in relay order.
                 let (stopped, retained): (Vec<_>, Vec<_>) = still_retryable
@@ -4564,8 +4569,8 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to park. A hosted document that is
-/// not ready retains nothing.
+/// path waits for a departed document to park. A hosted document that is not
+/// ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
         crate::hosted::PATH_HELD_BY_DEPARTED => true,
@@ -4623,12 +4628,16 @@ impl Holding {
         crate::hosted::hosted_document(op).filter(|object_id| unready.contains(*object_id))
     }
 
-    /// Stop a ready hosted document at `op`, whose conflict parent the feed
-    /// withholds: it can wait indefinitely, so the document is held there
-    /// and retains nothing, as one that is not ready.
-    fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
+    /// Stop a ready hosted document at `op` when it can wait indefinitely:
+    /// the feed withholds its conflict parent, or it would move onto another
+    /// spelling of a path another document holds. The document is held there,
+    /// naming why, and retains nothing, as one that is not ready.
+    fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
-            && reason == crate::hosted::CONFLICT_PARENT_WITHHELD
+            && matches!(
+                reason,
+                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::PATH_HELD_IN_SCOPE
+            )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {
             unready.insert(object_id.to_owned());
@@ -5985,11 +5994,21 @@ fn replay_share_write<T: RelayTransport>(
             },
         ));
     }
-    if content_kind != "binary" && std::str::from_utf8(&bytes).is_err() {
-        return Err(RelayError::ShareOpInvalid {
-            reason: "share write claims text content the shared bytes cannot be",
-        });
-    }
+    let content: Result<String, Vec<u8>> = if content_kind == "binary" {
+        Err(bytes)
+    } else {
+        // These bytes already matched the sha the op named, so they are
+        // the content the granter shared. The op calling them text is the
+        // defect, and no repair at the relay changes that.
+        Ok(String::from_utf8(bytes).map_err(|_| {
+            remember(
+                blob_refusals,
+                RelayError::ShareOpInvalid {
+                    reason: "share write claims text content the shared bytes cannot be",
+                },
+            )
+        })?)
+    };
     if let Some(before) = rename_from {
         let input = dohc_engine_domain::RenameTextFile {
             workspace_id: workspace_id.to_owned(),
@@ -6067,8 +6086,8 @@ fn replay_share_write<T: RelayTransport>(
             now_ms: envelope.recorded_at_ms,
         }
     });
-    let deduped = {
-        if content_kind == "binary" {
+    let deduped = match content {
+        Err(bytes) => {
             let input = WriteBinary {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
@@ -6117,18 +6136,8 @@ fn replay_share_write<T: RelayTransport>(
             )
             .map_err(domain)?
             .deduped
-        } else {
-            // These bytes already matched the sha the op named, so they are
-            // the content the granter shared. The op calling them text is the
-            // defect, and no repair at the relay changes that.
-            let text = String::from_utf8(bytes).map_err(|_| {
-                remember(
-                    blob_refusals,
-                    RelayError::ShareOpInvalid {
-                        reason: "share write claims text content the shared bytes cannot be",
-                    },
-                )
-            })?;
+        }
+        Ok(text) => {
             let input = WriteText {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),

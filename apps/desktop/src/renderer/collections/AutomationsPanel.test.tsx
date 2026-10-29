@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import type {
   GetCollectionAutomationRunResult,
   ListCollectionAutomationRunsResult,
@@ -72,8 +73,8 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
 
 const NOTHING_UNDONE = { status: "undone" as const, reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0 };
 
-function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsResult {
-  return { status: "read", contentHash: HASH, automations, addsStay: [] };
+function read(automations: ValidAutomationSummary[], onServer?: { runs: boolean | null }): ListCollectionAutomationsResult {
+  return { status: "read", contentHash: HASH, automations, addsStay: [], ...(onServer ? { onServer } : {}) };
 }
 
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
@@ -392,7 +393,7 @@ describe("the ⚡ panel", () => {
     const user = userEvent.setup();
     render(<Panel />);
     const line = await screen.findByTestId("automation-holds-unreadable");
-    expect(line.textContent).toContain("dohc cannot read .dohc/automations/reach.json");
+    expect(line.textContent).toContain("dohc cannot read .dohc/local/automations/reach.json");
     await user.click(within(line).getByRole("button", { name: "Open folder" }));
     expect(bridge.revealAutomationHolds).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     await user.click(within(line).getByRole("button", { name: "Reset holds" }));
@@ -1064,6 +1065,27 @@ describe("a schedule's next run", () => {
     for (const id of ["off", "stuck", "stamp"]) {
       expect(screen.getByTestId(`automation-${id}`).textContent).not.toContain("Next run");
     }
+  });
+
+  it("says a Collection on the server runs there, with its next run on the server, and never asks which computer runs schedules", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    const { bridge, replaceFile } = makeBridge(read([summary(daily), summary(stamp)], { runs: true }));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-report");
+    expect(screen.getByTestId("automations-on-server").textContent).toBe("Your server runs these automations.");
+    expect(within(row).getByText(`${tomorrow} on your server`)).toBeTruthy();
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    // A server that runs no automations: each says so, and no next run or note claims otherwise.
+    replaceFile(read([summary(daily, { cannotRun: AUTOMATION_SERVER_OFF }), summary(stamp, { cannotRun: AUTOMATION_SERVER_OFF })], { runs: false }));
+    await waitFor(() => expect(screen.queryByTestId("automations-on-server")).toBeNull());
+    expect(screen.getByTestId("automation-report").textContent).toContain(AUTOMATION_SERVER_OFF);
+    expect(screen.getByTestId("automation-report").textContent).not.toContain("Next run");
+    // Unknown, as offline: no claim either way.
+    replaceFile(read([summary(daily)], { runs: null }));
+    await waitFor(() => expect(screen.getByTestId("automation-report").textContent).not.toContain(AUTOMATION_SERVER_OFF));
+    expect(screen.queryByTestId("automations-on-server")).toBeNull();
+    expect(screen.getByTestId("automation-report").textContent).not.toContain("Next run");
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
   });
 
   it("does not ask which computer runs schedules when nothing here is scheduled", async () => {
@@ -2968,6 +2990,18 @@ describe("an automation's runs", () => {
       workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_server", deletes: null, onServer: true,
     });
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Deleted 1 added record. History can restore them."));
+  });
+
+  it("shows a server run whose changes its lost copy may not have sent, with nothing to run again or undo", async () => {
+    const error = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
+    const lost = run({ claimId: "atc_lost", state: "failed", error, unsentChangesLost: true });
+    makeBridge(read([summary(stamp)]), [], { serverRuns: [lost] });
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    const row = await screen.findByTestId("automation-run-server-atc_lost");
+    expect(within(row).getByText(error)).toBeTruthy();
+    expect(within(row).getByLabelText("Failed")).toBeTruthy();
+    expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Undo" })).toBeNull();
   });
 
   it("pages the server independently and keeps its older rows when the head refreshes", async () => {

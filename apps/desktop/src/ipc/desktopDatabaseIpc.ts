@@ -9,6 +9,7 @@ import { registerWorkspaceDatabaseIpcHandlers } from "./workspaceDatabaseIpc";
 import { databaseImportOperations } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
+import { localStateOpened } from "../workspaces/workspaceLocalState";
 import { assertDatabaseImportFile, assertDatabaseImportUnchanged, type DatabaseImportRecord } from "../workspaces/databaseImportUndo";
 import type { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 
@@ -29,7 +30,7 @@ export function registerDesktopDatabaseIpcHandlers<
   shareViewFiles: Pick<ShareViewFiles, "read">;
   workerDatabaseReader(signal?: AbortSignal): OwnedWorkspaceDatabaseReader;
   editWorkspaceDatabaseInWorker(input: {
-    rootPath: string;
+    workspace: Workspace;
     relativePath: string;
     edit: DatabaseEdit;
     author: ChangeAuthor;
@@ -79,17 +80,23 @@ export function registerDesktopDatabaseIpcHandlers<
         files: shareViewFiles,
         databaseReader: workerDatabaseReader(operation.signal),
       }).readDatabasePage(input.relativePath, input.table, input.offset),
+    // Right after launch the engine may still be preparing `.dohc/local`,
+    // which holds the edit's operation counter. The edit waits for that open
+    // before it takes the lease, so a stalled open holds up only this edit.
     // Serialize edits with Undo without invalidating queued writes: database edits do not change paths.
-    edit: (operation, input) => withExclusiveWorkspaceOperation(operation.workspace.rootPath, () =>
-      editWorkspaceDatabaseInWorker({
-        rootPath: operation.workspace.rootPath,
-        relativePath: input.relativePath,
-        edit: input.edit,
-        author: { kind: "user", userId: "local" },
-        nowMs: input.nowMs,
-        operationId: input.operationId,
-        signal: operation.signal,
-      }), { markOnSuccess: false }),
+    edit: async (operation, input) => {
+      await localStateOpened(operation.workspace, operation.signal);
+      return withExclusiveWorkspaceOperation(operation.workspace.rootPath, () =>
+        editWorkspaceDatabaseInWorker({
+          workspace: operation.workspace,
+          relativePath: input.relativePath,
+          edit: input.edit,
+          author: { kind: "user", userId: "local" },
+          nowMs: input.nowMs,
+          operationId: input.operationId,
+          signal: operation.signal,
+        }), { markOnSuccess: false });
+    },
     now: () => Date.now(),
     createId: randomUUID,
   });

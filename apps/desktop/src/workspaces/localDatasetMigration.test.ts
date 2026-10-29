@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,11 @@ import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import type { Request, Response } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
+import { deferred } from "../testing/deferred";
+import { readLocalStateFrom } from "./workspaceLocalState";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -30,7 +36,9 @@ const roots: string[] = [], hosts: LocalDatasetHost[] = [];
 async function open(extra: Partial<LocalDatasetHostOptions> = {}) {
   const workspaceRoot = extra.workspaceRoot ?? await mkdtemp(join(tmpdir(), "dohc-migration-test-"));
   if (!extra.workspaceRoot) roots.push(workspaceRoot);
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra });
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...extra, holder: extra.holder ?? unguardedCollections });
   hosts.push(host); return { host, workspaceRoot };
 }
 function fixture() {
@@ -61,6 +69,22 @@ afterEach(async () => {
 });
 
 describe("owner Collection migration", () => {
+  it("migrates and reopens records in a 153-character workspace folder", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "dohc-migration-")); roots.push(parent);
+    const workspaceRoot = join(parent, "w".repeat(153 - parent.length - 1));
+    expect(workspaceRoot).toHaveLength(153);
+    await mkdir(workspaceRoot);
+    const { host } = await open({ workspaceRoot }), f = fixture(), first = await activate(host, f);
+    await host.action(call(first, id(6), { name: "Camera" }, "add"));
+    f.next();
+    const review = await prepare(host, f), migrated = await host.approveMigration(approval(review));
+    await host.close();
+    const restarted = (await open({ workspaceRoot })).host;
+    expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([
+      { id: expect.any(String), name: "Camera migrated", note: null },
+    ]);
+  });
+
   it("commits reviewed bytes once, retains recovery history, and restores the new schema after restart", async () => {
     const { host, workspaceRoot } = await open(), f = fixture(), first = await activate(host, f);
     await host.action(call(first, id(6), { name: "Camera" }, "add"));
@@ -82,7 +106,7 @@ describe("owner Collection migration", () => {
     expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera migrated", note: null }]);
     await expect(restarted.query(call(first, id(5)))).rejects.toThrow(/Its owner must approve this access again/);
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
+    const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"), { readOnly: true });
     try {
       expect(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog_history").get()!.count).toBe(1);
       expect(db.prepare("SELECT count(*) AS count FROM dohc_dataset_checkpoint_history").get()!.count).toBe(1);
@@ -176,7 +200,7 @@ describe("owner Collection migration", () => {
   it("routes owner IPC and CLI review/approval through the same actual host", async () => {
     const { host } = await open(), f = fixture(); await activate(host, f); f.next();
     const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
-    const handler = createDatasetHandler({ flushSourceCapture: async () => [], withWorkspaceOperation: async (_caller, _id, work) => {
+    const handler = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), withWorkspaceOperation: async (_caller, _id, work) => {
       let active = true;
       try { return await work({ workspace, signal, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
       finally { active = false; }
@@ -187,5 +211,67 @@ describe("owner Collection migration", () => {
     if (prepared.kind !== "migration-prepared") throw new Error("Missing migration review");
     const migrated = await handler("owner", { workspaceId: "w", action: "approveMigration", ...approval(prepared) });
     expect(DatasetResult.parse(migrated).kind).toBe("migrated");
+  });
+});
+
+// A daemon whose opens prepare `.dohc/local` as the engine's do.
+class Daemon implements EngineDaemonClient {
+  async sendRequest(request: Request): Promise<Response> {
+    if (request.method === "workspace.open") {
+      const { rootDir } = request.params as { rootDir: string };
+      await mkdir(join(rootDir, ".dohc", "local"), { recursive: true });
+      return { id: request.id, result: { workspace: "handle", localStateReady: true } };
+    }
+    if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+    throw new Error(`Unexpected method: ${request.method}`);
+  }
+  close(): void {}
+}
+
+// The store opens only once an engine open prepared `.dohc/local`, and its
+// host holds its worker folder from then on. A staged export still takes its
+// folder each time, after the open that let the store open may have ended.
+describe("a Collection export during an engine run", () => {
+  // A host opened while an earlier open had prepared `.dohc/local`, in the attachment the sessions below open.
+  async function reopened(workspace: { workspaceId: string; rootPath: string; attachmentId: symbol }, first: LocalDatasetHost) {
+    // Windows can't take the worker folder while the first host holds it.
+    await first.close();
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: workspace.rootPath,
+      attachmentId: workspace.attachmentId, capacityBytes: 1024 * 1024, compile: compileFixture });
+    hosts.push(host);
+    return host;
+  }
+
+  it("refuses at once when a rebind closes the open before the export takes its folder", async () => {
+    const first = await open(), f = fixture();
+    await activate(first.host, f);
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
+    const host = await reopened(workspace, first.host);
+    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
+    try {
+      readLocalStateFrom(sessions);
+      // The dataset IPC exports inside an engine run. A rebind's close waits for that run.
+      const inRun = deferred<void>(), proceed = deferred<void>();
+      const exported = sessions.run(workspace, async () => { inRun.resolve(); await proceed.promise; return host.prepareExport(id(1)); });
+      await inRun.promise;
+      const closing = sessions.closeWorkspaceBinding(workspace);
+      proceed.resolve();
+      await expect(exported).rejects.toThrow("dohc did not prepare this Collection's recovery file because the workspace has not finished opening.");
+      await closing;
+    } finally { await sessions.closeAll(); }
+  });
+
+  it("refuses once the open deadline passes when the open's preparation never settles", async () => {
+    const first = await open(), f = fixture();
+    await activate(first.host, f);
+    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
+    const host = await reopened(workspace, first.host);
+    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+    // The open's own preparation stalls, before the daemon deadline starts. Nothing closes these sessions: a close would wait for that open.
+    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockReturnValue(new Promise<void>(() => {}));
+    readLocalStateFrom(sessions);
+    void sessions.run(workspace, async () => undefined).catch(() => undefined);
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    await expect(host.prepareExport(id(1))).rejects.toThrow("dohc did not prepare this Collection's recovery file because the workspace has not finished opening.");
   });
 });

@@ -36,12 +36,33 @@ async fn applied_restore(
     sequence: i64,
 ) -> NativeRestoreApplication {
     let point = Ydoc::wire();
-    point.apply(&vector("rich-unicode")).unwrap();
-    let markdown = point.project(ContentKind::Richdoc).unwrap().content;
+    let reader = f.doc.has_reader_source();
+    let baseline = if reader {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-collab/tests/reader-restore.json"
+        ))
+        .unwrap();
+        serde_json::from_value(vector["pointStateBytes"].clone()).unwrap()
+    } else {
+        vector("rich-unicode")
+    };
+    point.apply(&baseline).unwrap();
+    let projection = point.project(ContentKind::Richdoc).unwrap().content;
+    let markdown = if reader {
+        point
+            .markdown_source(&point.markdown_source_reference().unwrap())
+            .unwrap()
+    } else {
+        projection.clone()
+    };
     let fence = f
         .owner
         .fence_restore(
             NativeRestoreFence {
+                point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: f.binding.lineage_claim_id.clone(),
+                },
                 operation_id: "restore-settlement".into(),
                 relay_database_namespace: "relay".into(),
                 old_binding: f.binding.clone(),
@@ -65,7 +86,7 @@ async fn applied_restore(
             journal_cursor: 0,
             receipt_digest: f.binding.lineage_claim_id.clone(),
             markdown_digest: hex_sha256(markdown.as_bytes()),
-            projection_digest: hex_sha256(markdown.as_bytes()),
+            projection_digest: hex_sha256(projection.as_bytes()),
         },
     };
     let proposal = f
@@ -677,7 +698,22 @@ impl Fixture {
             .unwrap();
         let doc = Ydoc::wire();
         doc.apply(&bytes).unwrap();
-        let markdown = doc.project(ContentKind::Richdoc).unwrap().content;
+        let markdown = if doc.has_reader_source() {
+            let config =
+                serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+            actor
+                .configure_reader_resolver(Arc::new(
+                    dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                        dohc_engine_reader::Reader::new(Some(config)),
+                    )),
+                ))
+                .await
+                .unwrap();
+            doc.markdown_source(&doc.markdown_source_reference().unwrap())
+                .unwrap()
+        } else {
+            doc.project(ContentKind::Richdoc).unwrap().content
+        };
         let binding = LiveObjectBinding {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
@@ -1077,7 +1113,7 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
             added,
             owner_authority(),
             2,
-            agent("trip-agent ✈", "owner"),
+            agent("trip-agent âœˆ", "owner"),
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
@@ -1107,7 +1143,7 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
     assert_eq!(
         latest_authors(&f),
         serde_json::json!([
-            {"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1},
+            {"kind":"agent","agentId":"trip-agent âœˆ","onBehalfOf":"owner","depth":1},
             {"kind":"named","userId":"friend","grantId":"grant","grantGeneration":1},
             {"kind":"unattributed"},
         ])
@@ -1353,6 +1389,10 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         f.owner
             .fence_restore(
                 NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: 0,
+                        receipt_digest: f.binding.lineage_claim_id.clone()
+                    },
                     operation_id: "restore-settlement".into(),
                     relay_database_namespace: "relay".into(),
                     old_binding: f.binding.clone(),
@@ -1871,6 +1911,10 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
         connection_id: "connection".into(),
     };
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2000,6 +2044,10 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
     let mut f = Fixture::new().await;
     let terminal = f.apply_folder_scope().await;
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2031,6 +2079,10 @@ async fn restore_fence_accepts_terminal_history_under_an_earlier_selector() {
 async fn restore_fence_recovers_first_commit_after_reconnect_without_readoption() {
     let f = Fixture::new().await;
     let input = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore-reconnected".into(),
         relay_database_namespace: "relay".into(),
         old_binding: f.binding.clone(),
@@ -2191,6 +2243,10 @@ async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
             connection_id: "connection".into(),
         };
         let input = NativeRestoreFence {
+            point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore".into(),
             relay_database_namespace: "relay".into(),
             old_binding: f.binding.clone(),
@@ -2983,6 +3039,10 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
             .owner
             .fence_restore(
                 NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: 0,
+                        receipt_digest: f.binding.lineage_claim_id.clone(),
+                    },
                     operation_id: "restore".into(),
                     relay_database_namespace: "relay".into(),
                     old_binding: f.binding.clone(),
@@ -3226,7 +3286,7 @@ fn summary(samples: &[f64]) -> serde_json::Value {
 /// 64th, never a full-body replacement.
 fn history_edit(doc: &Ydoc, i: usize) -> Vec<u8> {
     if i % 64 == 63 {
-        doc.richdoc_append_paragraph(&format!("Revision {i}: ünïcødé ✓ 🚀"))
+        doc.richdoc_append_paragraph(&format!("Revision {i}: Ã¼nÃ¯cÃ¸dÃ© âœ“ ðŸš€"))
     } else {
         history_status(doc, i)
     }
@@ -3474,7 +3534,7 @@ impl Fixture {
         let mut terminal = None;
         for (index, update) in updates.iter().enumerate() {
             let cursor = after + index + 1;
-            let authority = if cursor % 8 == 0 {
+            let authority = if cursor.is_multiple_of(8) {
                 ServerDerivedLiveUpdateAuthority::Link {
                     principal_id: "link-principal".into(),
                     grant_id: "link-grant".into(),
@@ -4192,4 +4252,107 @@ async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
             },
         )
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the staged bundle"]
+async fn reader_restore_dispatches_outside_the_actor_at_every_phase() {
+    let vector: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-restore.json"
+    ))
+    .unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(vector["pointStateBytes"].clone()).unwrap();
+    let source = vector["source"].as_str().unwrap().to_owned();
+    let path = "notes/reader.md";
+    let f = Fixture::build(false, bytes, path, |store| {
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: path.into(),
+                    text: source.clone(),
+                    moment_id: "received-file".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 0,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    })
+    .await;
+    let actor = f.supervisor.open(&f.db, 2).unwrap().actor;
+    let fresh = || {
+        let config =
+            serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+        let reader = Arc::new(dohc_engine_reader::Reader::new(Some(config)));
+        (
+            Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+                reader.clone(),
+            )),
+            reader,
+        )
+    };
+    let (resolver, reader) = fresh();
+    actor.configure_reader_resolver(resolver).await.unwrap();
+    let update = f.doc.richdoc_append_paragraph("later accepted paragraph");
+    let terminal = f.apply(7, update).await;
+    let input = applied_restore(&f, Some(terminal), 1).await;
+    assert!(reader.dispatch_count() > 0, "preparation dispatches");
+    let (resolver, reader) = fresh();
+    actor.configure_reader_resolver(resolver).await.unwrap();
+    f.owner
+        .apply_restore(
+            input.clone(),
+            restore_coordinate(),
+            2_000_000,
+            100,
+            25,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reader.dispatch_count() > 0,
+        "replayed application revalidates"
+    );
+    let (resolver, reader) = fresh();
+    actor.configure_reader_resolver(resolver).await.unwrap();
+    let settlement = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(reader.dispatch_count() > 0, "settlement revalidates");
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join(path)).unwrap(),
+        source
+    );
+    let (resolver, reader) = fresh();
+    actor.configure_reader_resolver(resolver).await.unwrap();
+    let resumed = f
+        .owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input,
+                settlement_id: settlement.settlement_id,
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            40,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.binding.restore_fence_generation, 1);
+    assert!(reader.dispatch_count() > 0, "resume revalidates");
+    f.supervisor.close(&f.db).unwrap();
 }

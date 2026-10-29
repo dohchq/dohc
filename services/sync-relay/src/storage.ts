@@ -3,6 +3,7 @@ import {liveValidation} from "./liveValidation";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import * as replicaHistoryReads from "./replicaHistoryReads";
+import {createReplicaLinkReadService} from "./replicaLinkReadService";
 import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
@@ -17,6 +18,7 @@ import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
 import * as firstOpenStorage from "./storage/firstOpenEligibility";
 import type {FirstOpenHistoryReader, FirstOpenSource} from "./storage/firstOpenHistory";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
+import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -129,6 +131,7 @@ import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetH
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
+import * as linkChatStorage from "./storage/linkChat";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -357,6 +360,7 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  createReplicaLinkReadService(...args:Parameters<SyncRelayStorage["createReplicaLinkReadService"]>) {return createReplicaLinkReadService(this,...args);}
   readonly newDiscussionId: () => string;
   private readingLiveAuthority = false;
 
@@ -439,11 +443,53 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       logStorage.appendLogBatchInTransaction(this, {workspaceId: source.workspaceId, originId, ops: [{...op}], guard});
     });
   }
+  hasServiceHostConflictEffect(input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1]) {
+    return serviceHostFeedStorage.hasServiceHostConflictEffect(this, input);
+  }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);
   }
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
+  recordServiceKeptEdits(input: Parameters<typeof serviceKeptEditsStorage.recordServiceKeptEdits>[1]) {
+    return serviceKeptEditsStorage.recordServiceKeptEdits(this, input);
+  }
+  forgetServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.forgetServiceKeptEdits(this, queue);
+  }
+  releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}) {
+    return serviceKeptEditsStorage.releaseServiceKeptEdits(this, document);
+  }
+  listServiceKeptEdits(workspaceId: string, after?: number) {
+    return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId, after);
+  }
+  readServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.readServiceKeptEdits(this, queue);
+  }
+  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.readServiceKeptEditsRefusal(this, input);
+  }
+  serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number) {
+    return serviceKeptEditsStorage.serviceKeptEditsOf(this, document, after);
+  }
+  markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
+  }
+  endServiceKeptEditsRetry(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, queue);
+  }
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}) {
+    return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);
+  }
+  observeServiceKeptEditsCheckpoint(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue, frozenCheckpoint: string | null) {
+    return serviceKeptEditsStorage.observeServiceKeptEditsCheckpoint(this, queue, frozenCheckpoint);
+  }
+  serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document, identity);
+  }
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsStoreHeld(this, workspaceId, identity);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -744,6 +790,38 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }) {
     automationHostStorage.recordAutomationServerProgress(this, input);
+  }
+
+  recordAutomationServerRunChanging(input: Parameters<typeof automationHostStorage.recordAutomationServerRunChanging>[1]) {
+    automationHostStorage.recordAutomationServerRunChanging(this, input);
+  }
+
+  endAutomationServerRun(input: automationHostStorage.AutomationServerRun) {
+    return automationHostStorage.endAutomationServerRun(this, input);
+  }
+
+  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }) {
+    return this.readTx(() => automationHostStorage.endedAutomationServerRuns(this, input));
+  }
+
+  confirmAutomationServerRunsSent(input: Parameters<typeof automationHostStorage.confirmAutomationServerRunsSent>[1]) {
+    automationHostStorage.confirmAutomationServerRunsSent(this, input);
+  }
+
+  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    automationHostStorage.markAutomationServerRunsLost(this, input);
+  }
+
+  lostAutomationServerRuns(input: Parameters<typeof automationHostStorage.lostAutomationServerRuns>[1]) {
+    return this.readTx(() => automationHostStorage.lostAutomationServerRuns(this, input));
+  }
+
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }) {
+    return this.readTx(() => automationHostStorage.unreportedLostAutomationServerRuns(this, input));
+  }
+
+  reportAutomationServerRunsLost(input: Parameters<typeof automationHostStorage.reportAutomationServerRunsLost>[1]) {
+    automationHostStorage.reportAutomationServerRunsLost(this, input);
   }
 
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
@@ -1529,6 +1607,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   appendBrowserChatBatch(input: Parameters<typeof logStorage.appendBrowserChatBatch>[1]): AppendLogBatchResult {
     return logStorage.appendBrowserChatBatch(this, input);
+  }
+
+  appendLinkChatPost(input: Parameters<typeof linkChatStorage.appendLinkChatPost>[1]): linkChatStorage.AppendLinkChatPostResult {
+    return linkChatStorage.appendLinkChatPost(this, input);
   }
 
   fetchLogCoordinate(input: {

@@ -1,5 +1,5 @@
 use super::{
-    ActorHandle,
+    ActorHandle, HeldReader,
     journal::journal_moment_outbound_with_batch_in_tx,
     materialization::{
         MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
@@ -27,6 +27,7 @@ use std::{
 
 #[derive(Debug)]
 pub struct HistoryOperation {
+    pub kind: Option<&'static str>,
     pub operation_id: String,
     pub version_id: String,
     pub moments: Vec<OperationMoment>,
@@ -43,6 +44,104 @@ pub struct HistoryUndoResult {
 }
 
 impl ActorHandle {
+    pub async fn duplicate_file(
+        &self,
+        input: dohc_engine_domain::DuplicateFile,
+        root: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<HistoryOperation, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                let policy = crate::search::read_engine_search_policy(&root);
+                let outcome = store.write_with(
+                    faults.as_ref(),
+                    |tx| -> Result<HistoryOperation, RuntimeError> {
+                        dohc_engine_domain::ensure_no_pending_undo_in(tx, &input.workspace_id)?;
+                        let replay: bool = tx
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                                [format!("duplicate_{}", input.operation_id)],
+                                |r| r.get(0),
+                            )
+                            .map_err(StorageError::corrupt_public)?;
+                        if !replay {
+                            for path in [&input.from_path, &input.to_path] {
+                                dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                                    tx,
+                                    &input.workspace_id,
+                                    &input.version_id,
+                                    path,
+                                )?;
+                                super::capture::ensure_no_pending_undo_placement(
+                                    tx,
+                                    &input.workspace_id,
+                                    path,
+                                )?;
+                            }
+                        }
+                        let m = dohc_engine_domain::duplicate_file_in_tx(tx, &input)?;
+                        if !replay {
+                            publish_undo_member(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &policy,
+                                &m,
+                                input.now_ms,
+                                false,
+                            )?;
+                        }
+                        Ok(HistoryOperation {
+                            kind: Some("file-duplicate"),
+                            operation_id: input.operation_id.clone(),
+                            version_id: input.version_id.clone(),
+                            moments: dohc_engine_domain::operation_moments_in(
+                                tx,
+                                &input.workspace_id,
+                                &input.version_id,
+                                &input.operation_id,
+                            )?,
+                        })
+                    },
+                )?;
+                match outcome {
+                    TxnOutcome::Committed(result) => Ok(result),
+                    TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+                }
+            })
+        })
+        .await
+    }
+
+    pub async fn history_undo_open_writes(
+        &self,
+        ws: String,
+        operation: String,
+    ) -> Result<HashSet<String>, RuntimeError> {
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&ws)?
+                .version_id;
+            store.read_with(|conn| {
+                let mut objects = HashSet::new();
+                for member in operation_moments_in(conn, &ws, &version, &operation)? {
+                    if member.operation == "write"
+                        && !dohc_engine_domain::is_duplicate_in(
+                            conn,
+                            &ws,
+                            &operation,
+                            member.moment_order,
+                        )?
+                    {
+                        objects.insert(member.object_id);
+                    }
+                }
+                Ok(objects)
+            })
+        })
+        .await
+    }
+
     pub async fn preflight_history_undo(
         &self,
         ws: String,
@@ -50,11 +149,11 @@ impl ActorHandle {
         request: String,
         author: Option<String>,
     ) -> Result<Option<HistoryUndoResult>, RuntimeError> {
-        let db = self
-            .run(|store, _| Ok(store.database_path().to_path_buf()))
-            .await?;
+        // Read after the actor's earlier work.
+        self.run(|_, _| Ok(())).await?;
+        let held = self.location();
         tokio::task::spawn_blocking(move || {
-            let mut store = EngineStore::open_read_only(&db)?;
+            let mut store = HeldReader::open(held)?;
             store
                 .read_with(|conn| conn.execute_batch("BEGIN"))
                 .map_err(StorageError::corrupt_public)?;
@@ -228,12 +327,18 @@ impl ActorHandle {
         operation: String,
     ) -> Result<HistoryOperation, RuntimeError> {
         self.run(move |store, _| {
-            let version_id = VersionedTextStore::new(store)
-                .get_active_version(&ws)?
-                .version_id;
+            let duplicate_version: Option<String> = store.read_with(|conn| conn.query_row(
+                "SELECT m.version_id FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3",
+                params![format!("duplicate_{operation}"),ws,operation], |r| r.get(0)).optional().map_err(StorageError::corrupt_public))?;
+            let kind = duplicate_version.as_ref().map(|_| "file-duplicate");
+            let version_id = match duplicate_version {
+                Some(version) => version,
+                None => VersionedTextStore::new(store).get_active_version(&ws)?.version_id,
+            };
             let moments =
                 store.read_with(|conn| operation_moments_in(conn, &ws, &version_id, &operation))?;
             Ok(HistoryOperation {
+                kind,
                 operation_id: operation,
                 version_id,
                 moments,
@@ -253,35 +358,80 @@ impl ActorHandle {
     where
         F: FnMut(&[OperationMoment]) + Send,
     {
+        let checkpoint = self
+            .run(|store, _| Ok(Arc::new(store.checkpoint_cycle())))
+            .await;
+        let Ok(checkpoint) = checkpoint else {
+            result.materialized = false;
+            return result;
+        };
         result.materialized = true;
+        let mut busy_deadline = None;
         // Each actor turn finishes a bounded placement batch, then yields to other work.
         for members in result.moments.chunks(8) {
-            let selected = members.to_vec();
-            let ws = ws.clone();
-            let version = result.version_id.clone();
-            let root = root.clone();
-            let recorder = Arc::clone(&recorder);
-            match self
-                .run(move |store, _| {
-                    place_undo_members(
-                        store,
-                        &ws,
-                        &version,
-                        &selected,
-                        &root,
-                        recorder.as_ref(),
-                        &dohc_engine_storage::NoFaults,
-                        now,
-                    )
-                })
-                .await
-            {
-                Ok(true) => on_placed(members),
-                Ok(false) => result.materialized = false,
-                Err(error) => {
-                    eprintln!("engine: Undo committed; placement will retry: {error}");
+            loop {
+                if busy_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     result.materialized = false;
-                    break;
+                    return result;
+                }
+                let selected = members.to_vec();
+                let ws = ws.clone();
+                let version = result.version_id.clone();
+                let root = root.clone();
+                let recorder = Arc::clone(&recorder);
+                match self
+                    .run(move |store, _| {
+                        place_undo_members(
+                            store,
+                            &ws,
+                            &version,
+                            &selected,
+                            &root,
+                            recorder.as_ref(),
+                            &dohc_engine_storage::NoFaults,
+                            now,
+                        )
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        on_placed(members);
+                        break;
+                    }
+                    Ok(false) => {
+                        result.materialized = false;
+                        break;
+                    }
+                    Err(error) if error.is_file_locked() => {
+                        // Match the desktop's budget from its first busy answer.
+                        let deadline = *busy_deadline.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10)
+                        });
+                        #[cfg(test)]
+                        turns::tests::checkpoint_wait(&result.compensation_operation_id).await;
+                        // Committed placement keeps its leases while waiting outside the actor.
+                        let checkpoint = Arc::clone(&checkpoint);
+                        if !matches!(
+                            tokio::time::timeout_at(
+                                deadline,
+                                tokio::task::spawn_blocking(move || checkpoint())
+                            )
+                            .await,
+                            Ok(Ok(_))
+                        ) {
+                            result.materialized = false;
+                            return result;
+                        }
+                        tokio::time::sleep_until(deadline.min(
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+                        ))
+                        .await;
+                    }
+                    Err(error) => {
+                        eprintln!("engine: Undo committed; placement remains pending: {error}");
+                        result.materialized = false;
+                        return result;
+                    }
                 }
             }
         }
@@ -352,14 +502,52 @@ fn check_undo_ownership(
     conn: &rusqlite::Connection,
     ws: &str,
     version: &str,
+    operation: &str,
     m: &OperationMoment,
 ) -> Result<(), RuntimeError> {
+    let duplicate = dohc_engine_domain::is_duplicate_in(conn, ws, operation, m.moment_order)?;
+    let mut m = m.clone();
+    if m.operation == "write" && !duplicate {
+        m.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![ws,version,m.object_id], |r| r.get(0)).optional().map_err(StorageError::corrupt_public)?
+            .ok_or(DomainError::UndoRefused {path:m.path,reason:"linking document removed"})?;
+        m.before_path = None;
+    }
     for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
+        if let Err(error) = check_path_ownership(conn, ws, version, &m.object_id, path) {
+            if duplicate
+                && matches!(
+                    error,
+                    RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive)
+                )
+            {
+                return Err(DomainError::UndoRefused {path: path.into(), reason: "This copy is a shared live file. Continue editing at its current location"}.into());
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+pub(super) fn check_path_ownership(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    object: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    if path == "shared-with-me" || path.starts_with("shared-with-me/") {
+        return Err(DomainError::UndoRefused {
+            path: path.into(),
+            reason: "received share path",
+        }
+        .into());
+    }
+    {
         let held: Option<String> = conn
             .query_row(
                 "SELECT path FROM capture_file_holds
              WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",
-                params![ws, path, m.object_id],
+                params![ws, path, object],
                 |r| r.get(0),
             )
             .optional()
@@ -374,6 +562,35 @@ fn check_undo_ownership(
         dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
     }
     Ok(())
+}
+
+fn link_inverse_input(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    m: &OperationMoment,
+) -> Result<String, RuntimeError> {
+    let (before,after,head,path): (String,String,String,String) = conn.query_row(
+        "SELECT m.payload_before_blob_sha256,m.payload_after_blob_sha256,s.blob_sha256,s.path FROM moments m
+         JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=?2 AND s.object_id=m.object_id
+         WHERE m.workspace_id=?1 AND m.moment_id=?3",params![ws,version,m.moment_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(StorageError::corrupt_public)?
+        .ok_or(DomainError::UndoRefused {path:m.path.clone(),reason:"linking document removed"})?;
+    let load = |sha: &str| {
+        dohc_engine_storage::text::read(conn, sha).map_err(StorageError::corrupt_public)
+    };
+    crate::links::rewrite::inverse_budgeted(&load(&before)?, &load(&after)?, &load(&head)?)
+        .map_err(|()| DomainError::UndoRefused {
+            path: path.clone(),
+            reason: "link diff budget exceeded",
+        })?
+        .ok_or(
+            DomainError::UndoRefused {
+                path,
+                reason: "link changed after rename",
+            }
+            .into(),
+        )
 }
 
 fn rename_head_sha(
@@ -425,6 +642,7 @@ fn place_undo_members(
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             now,
             faults,
@@ -432,10 +650,16 @@ fn place_undo_members(
             false,
         )
     })?;
-    let all_complete = jobs.iter().all(|id| {
-        matches!(store.load_materialization_job(id), Ok(Some(job)) if job.status == JobStatus::Complete)
-    });
-    Ok(summary.failed == 0 && summary.parked == 0 && all_complete)
+    if summary.store_busy > 0 {
+        return Err(StorageError::FileLocked.into());
+    }
+    for id in jobs {
+        if !matches!(store.load_materialization_job(&id)?, Some(job) if job.status == JobStatus::Complete)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(summary.failed == 0 && summary.parked == 0)
 }
 
 #[cfg(test)]
@@ -473,16 +697,15 @@ pub(super) fn test_undo_in_turns(
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, now)?.actor;
     let link_drain = actor.hold_link_drain();
+    // Keyed by the fixture's path: on a Mac the actor's store opens by its
+    // folder's ID.
+    let hook = fixture_hooks().lock().unwrap().remove(&db);
     let outcome = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 tokio::runtime::Runtime::new().unwrap().block_on(async {
                     actor
                         .run(|store, _| {
-                            let hook = fixture_hooks()
-                                .lock()
-                                .unwrap()
-                                .remove(store.database_path());
                             if let Some(hook) = hook {
                                 hook(store);
                             }
@@ -500,6 +723,7 @@ pub(super) fn test_undo_in_turns(
                             now,
                             [Arc::default(), Arc::default()],
                             Arc::new(()),
+                            None,
                             crate::CancellationToken::new(),
                         )
                         .await?;
@@ -1441,9 +1665,49 @@ fn publish_undo_member(
     policy: &crate::search::SearchPolicySnapshot,
     m: &dohc_engine_domain::MomentRecord,
     now: i64,
+    live: bool,
 ) -> Result<(), DomainError> {
     let mut journal_eligibility = None;
-
+    if m.operation == dohc_engine_domain::MomentOp::Delete {
+        let sha = m
+            .before_binary_sha256
+            .as_ref()
+            .or(m.before_blob_sha256.as_ref())
+            .ok_or(DomainError::FileNotFound)?;
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
+        enqueue_delete_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id: binary_rollback_job_identity(ws, version_id, &m.moment_id),
+                workspace_id: ws.into(),
+                target_path: m.path.clone(),
+                content_sha256: sha.clone(),
+                preimage: Preimage::Present(sha.clone()),
+                target_generation: m.moment_order,
+                now_ms: now,
+            },
+        )?;
+        journal_moment_outbound_with_batch_in_tx(
+            tx,
+            ws,
+            &m.moment_id,
+            false,
+            &mut journal_eligibility,
+        )?;
+        return Ok(());
+    }
     let (path, text, kind, sha): (String, Option<String>, String, String) = tx
         .query_row(
             "SELECT s.path,b.sha256,s.content_kind,
@@ -1469,17 +1733,21 @@ fn publish_undo_member(
     } else {
         dohc_engine_sync::ResultingHead::BinaryOrAbsent
     };
-    dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-        tx,
-        ws,
-        version_id,
-        &m.object_id,
-        head,
-        None,
-        None,
-        now,
-    )
-    .map_err(|e| DomainError::Storage(StorageError::persist_public(std::io::Error::other(e))))?;
+    if !live {
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            tx,
+            ws,
+            version_id,
+            &m.object_id,
+            head,
+            None,
+            None,
+            now,
+        )
+        .map_err(|e| {
+            DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+        })?;
+    }
     if let Some(text) = text.as_deref() {
         crate::search::index::insert_file_search_index_with_policy(
             tx,
@@ -1503,7 +1771,13 @@ fn publish_undo_member(
         workspace_id: ws.into(),
         target_path: path,
         content_sha256: sha.clone(),
-        preimage: Preimage::Absent,
+        preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
+            m.before_blob_sha256
+                .clone()
+                .map_or(Preimage::Absent, Preimage::Present)
+        } else {
+            Preimage::Absent
+        },
         target_generation: m.moment_order,
         now_ms: now,
     };
@@ -1521,15 +1795,21 @@ fn publish_undo_member(
             },
         )?;
     }
-    journal_moment_outbound_with_batch_in_tx(
-        tx,
-        ws,
-        &m.moment_id,
-        false,
-        &mut journal_eligibility,
-    )?;
+    if !live {
+        journal_moment_outbound_with_batch_in_tx(
+            tx,
+            ws,
+            &m.moment_id,
+            false,
+            &mut journal_eligibility,
+        )?;
+    }
     Ok(())
 }
 
 #[path = "history_undo_turns.rs"]
-mod turns;
+pub(super) mod turns;
+
+#[cfg(test)]
+#[path = "duplicate_tests.rs"]
+mod duplicate_tests;

@@ -143,7 +143,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
         }}
       >
         <div>
-          <h2 id="delete-server-account-title" className="m-0 text-sm font-semibold">
+          <h2 id="delete-server-account-title" className="m-0 text-base font-semibold">
             Delete {preview?.email ?? props.email} on this server?
           </h2>
           <p className="m-0 mt-1 font-mono text-[11px] text-subtle" data-testid="server-account-delete-server">{server}</p>

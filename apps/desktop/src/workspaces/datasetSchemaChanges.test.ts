@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHos
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 
@@ -31,7 +33,9 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
 async function fixture(initial: DatasetDefinition = definition, remote = false) {
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
-  const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
+  // Workers and exports live in .dohc/local, which an engine open prepares.
+  await openedLocalState({ workspaceId: "w", rootPath: root });
+  const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024, compile: compileFixture });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
   const files = new Map(Object.entries(generateDatasetSources(initial).files));
   const adapter = sourceCaptureAdapter(files);
@@ -41,7 +45,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
   let alterSources: ((paths: string[]) => void) | undefined;
   const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, prepareMigrationCandidate() { throw new Error("Local store is fenced"); }, approveMigrationCandidate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
-  const handler = createDatasetHandler({ flushSourceCapture: async () => [], withWorkspaceOperation: async (_caller, _id, work) => {
+  const handler = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), withWorkspaceOperation: async (_caller, _id, work) => {
     let active = true;
     try { return await work({ workspace, signal, scope, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
     finally { active = false; }
@@ -139,7 +143,7 @@ it("refuses a button from a shared view before writing any source", async () => 
   const written: string[] = [];
   const shareView = { shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false,
     grantedSelector: { paths: ["people"], versionId: null, access: "edit" } };
-  const recipient = createDatasetHandler({ flushSourceCapture: async () => [], hostForWorkspace: async () => f.host,
+  const recipient = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), hostForWorkspace: async () => f.host,
     withWorkspaceOperation: async (_caller, _id, work) => work({ workspace: { workspaceId: "w", shareView }, signal: new AbortController().signal, assertCurrent() {} }),
     withAdapter: async (_workspace, work) => work(f.adapter),
     createSources: async (_workspace, sources) => { written.push(...Object.keys(sources)); } });

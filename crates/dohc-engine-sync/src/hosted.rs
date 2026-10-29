@@ -62,6 +62,12 @@ pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";
 /// ([`backfill_path_held`]). Its document waits until that one moves.
 pub(crate) const BACKFILL_PATH_HELD: &str = "hosted-backfill-path-held";
 
+/// A moment of a ready document that would move it to another spelling of a
+/// path another document in the scope holds here ([`wait_for_occupant_in_tx`]).
+/// The pass holds its document there, as [`BACKFILL_PATH_HELD`] does, until
+/// that one moves.
+pub(crate) const PATH_HELD_IN_SCOPE: &str = "hosted-path-held-in-scope";
+
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
@@ -364,9 +370,13 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 /// Hold back a moment that would take `path` while a hosted document that
 /// left the scope still holds it here. That document may still settle work
 /// against its head there, so the path stays its own until it parks and its
-/// file is gone; the moment waits and applies after. An ordinary replica
-/// holds nothing back.
-pub(crate) fn wait_for_departed_occupant_in_tx(
+/// file is gone; the moment waits and applies after.
+///
+/// Also hold back a moment that would move its document onto another
+/// spelling of a path another document of the scope holds
+/// ([`spelling_holder`]). A disk that ignores case gives both one file
+/// (#2036). An ordinary replica holds nothing back.
+pub(crate) fn wait_for_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
@@ -376,6 +386,11 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
     if held_by_departed(tx, workspace_id, version_id, object_id, path)? {
         return Err(SyncError::RetryableState {
             reason: PATH_HELD_BY_DEPARTED,
+        });
+    }
+    if spelling_holder(tx, workspace_id, version_id, object_id, path)?.is_some() {
+        return Err(SyncError::RetryableState {
+            reason: PATH_HELD_IN_SCOPE,
         });
     }
     Ok(())
@@ -480,6 +495,11 @@ pub(crate) fn held_before_routing(
 /// neither applies nor opens a conflict: its document's read stops there,
 /// and the document is held, until the other document moves. A ready
 /// document's op meets ordinary occupancy instead.
+///
+/// The same holds for another spelling of the path ([`spelling_holder`]): a
+/// disk that ignores case keeps one file for both, so two documents there
+/// would write each other's file (#2036). A document at exactly the path is
+/// named first.
 pub(crate) fn backfill_path_held(
     conn: &Connection,
     unready: &BTreeSet<String>,
@@ -505,11 +525,84 @@ pub(crate) fn backfill_path_held(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
+    let held_by = match held_by {
+        Some(held_by) => Some(held_by),
+        None => spelling_holder(conn, &op.workspace_id, version_id, object_id, path)?,
+    };
     Ok(held_by.map(|held_by| HostedHold::PathHeld {
         path: path.to_owned(),
         held_by,
     }))
 }
+
+/// The first other document of the scope by id whose head or path alias in
+/// `version_id` collides with `path` as capture holds match paths, by another
+/// spelling or as a folder above or inside it, when `object_id` would move
+/// to `path`. A document already there meets no new collision, so two that
+/// already collide hold neither, and an edit reads nothing more. An ordinary
+/// replica has none.
+fn spelling_holder(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<Option<String>, SyncError> {
+    if !is_hosted(conn, workspace_id)? {
+        return Ok(None);
+    }
+    let at: Option<String> = conn
+        .query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, version_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if at.as_deref() == Some(path) {
+        return Ok(None);
+    }
+    let first = path.split('/').next().unwrap_or(path);
+    let prefix = first
+        .is_ascii()
+        .then(|| dohc_engine_files::floor::collision_key(first));
+    let mut statement = conn
+        .prepare_cached(SPELLING_HOLDERS_SQL)
+        .map_err(SyncError::corrupt)?;
+    let occupants = statement
+        .query_map(
+            params![workspace_id, version_id, object_id, prefix],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(SyncError::corrupt)?;
+    for occupant in occupants {
+        let (held_by, held) = occupant.map_err(SyncError::corrupt)?;
+        use dohc_engine_files::path_is_held;
+        if held != path && (path_is_held(&held, path) || path_is_held(path, &held)) {
+            return Ok(Some(held_by));
+        }
+    }
+    Ok(None)
+}
+
+/// Every head and path alias in one version, by document, of a document of
+/// the scope other than `?3` that could collide with a path whose first
+/// segment has the collision key `?4`. Two paths collide only when their
+/// first segments do, so an ASCII path must start with `?4` in ASCII
+/// lowercase. A path with other characters is always read, since only its
+/// full key can tell, as is every path when `?4` is `NULL`. `?1` is the
+/// workspace and `?2` the version.
+const SPELLING_HOLDERS_SQL: &str = "SELECT o.object_id,o.path FROM \
+       (SELECT object_id,path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+        UNION ALL SELECT object_id,path FROM path_aliases \
+          WHERE workspace_id=?1 AND version_id=?2) o \
+     WHERE o.object_id<>?3 \
+       AND (?4 IS NULL OR lower(substr(o.path,1,length(?4)))=?4 \
+         OR length(o.path)<>length(CAST(o.path AS BLOB))) \
+       AND EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h \
+         ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
+         WHERE d.workspace_id=?1 AND d.object_id=o.object_id) \
+     ORDER BY o.object_id";
 
 /// Record the withheld before side of a moment this transaction applied. A
 /// moment the apply only deferred has no row yet and records on its replay.

@@ -10,17 +10,8 @@ pub(crate) struct Candidates {
     pub unchecked: Vec<String>,
 }
 
-pub(crate) fn candidates(
-    conn: &Connection,
-    ws: &str,
-    version: &str,
-    target: &str,
-    kinds: &[&str],
-) -> Result<Candidates, StorageError> {
-    let keys = serde_json::to_string(&path_keys(target)).expect("string pairs serialize to JSON");
-    let mut stmt = conn.prepare_cached(
-        "WITH candidates AS (SELECT DISTINCT k.object_id FROM json_each(?3) probe
-         JOIN link_occurrence_keys k INDEXED BY link_occurrence_probe
+pub(super) const CANDIDATES_SQL: &str = "WITH candidates AS (SELECT DISTINCT k.object_id FROM json_each(?3) probe
+         CROSS JOIN link_occurrence_keys k INDEXED BY link_occurrence_probe
            ON k.workspace_id=?1 AND k.version_id=?2 AND k.key_kind=json_extract(probe.value,'$[0]') AND k.key=json_extract(probe.value,'$[1]')
          JOIN link_sources s ON s.workspace_id=k.workspace_id AND s.version_id=k.version_id AND s.object_id=k.object_id AND s.index_key=k.index_key
          JOIN links l ON l.workspace_id=k.workspace_id AND l.version_id=k.version_id AND l.object_id=k.object_id AND l.index_key=k.index_key AND l.ordinal=k.ordinal
@@ -29,10 +20,19 @@ pub(crate) fn candidates(
          UNION SELECT object_id FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND (status='unindexed' OR parser_generation<>?4))
          SELECT candidate.object_id,MIN(a.path),MAX(coalesce(s.status='unindexed',0))
          FROM candidates candidate
-         JOIN path_aliases a ON a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=candidate.object_id
+         JOIN path_aliases a INDEXED BY idx_path_aliases_workspace_object ON a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=candidate.object_id
          LEFT JOIN link_sources s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id
-         GROUP BY candidate.object_id"
-    ).map_err(sql)?;
+         GROUP BY candidate.object_id";
+
+pub(crate) fn candidates(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+    target: &str,
+    kinds: &[&str],
+) -> Result<Candidates, StorageError> {
+    let keys = serde_json::to_string(&path_keys(target)).expect("string pairs serialize to JSON");
+    let mut stmt = conn.prepare_cached(CANDIDATES_SQL).map_err(sql)?;
     let objects = stmt
         .query_map(
             params![
@@ -92,6 +92,9 @@ pub(crate) struct Source {
 }
 
 impl Source {
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.head.text.as_deref()
+    }
     /// Run off the actor. This result is for resolution, never index publication.
     pub(crate) fn parse(self) -> Result<parser::Parsed, StorageError> {
         parser::parse(self.work, Some(self.head))
@@ -121,5 +124,6 @@ pub(crate) fn read_source(
         version: version.into(),
         object: object.into(),
     };
-    Ok(head(conn, &work, true)?.map(|head| Source { work, head }))
+    // The index's alias seed may still be incomplete.
+    Ok(head(conn, &work, true, true)?.map(|head| Source { work, head }))
 }

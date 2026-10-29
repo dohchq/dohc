@@ -86,6 +86,6 @@ export class ReplicaManifest {
       files:changedRows.filter((f):f is ReplicaCurrentView["files"][number]=>"contentKind" in f),
       omitted:changedRows.filter((f):f is ReplicaCurrentView["omitted"][number]=>!("contentKind" in f))},before,next.texts,smallChange);
     next.view=view;
-    return {next,view,changed,structural,predecessor,observations};
+    return {next,view,changed,structural,predecessor,observations,readChanges:[...before,...changedRows]};
   }
 }

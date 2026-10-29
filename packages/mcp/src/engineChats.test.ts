@@ -97,6 +97,7 @@ const results = {
     groups: [
       {
         id: "channel-1",
+        channelWireId: "wire",
         name: "General",
         slug: "general",
         kind: "group" as const,
@@ -352,7 +353,7 @@ describe("desktop CLI proxy", () => {
 
       await expect(readChat(ctx, { threadId: thread.id })).resolves.toMatchObject({
         ok: false,
-        reason: expect.stringContaining("Invalid discriminator value"),
+        reason: expect.stringContaining("invalid_union"),
       });
       // A malformed write response is never widened into a success.
       await expect(

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { privateFolder } from "./private-folder.test-helper";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -29,7 +30,7 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"]; workerRoot?:string } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
@@ -50,7 +51,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
-    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,queueMs:options.queueMs,onMaintenanceError:options.onMaintenanceError });
+    directory: privateFolder(options.workerRoot ?? join(directory, "workers")), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,queueMs:options.queueMs,onMaintenanceError:options.onMaintenanceError });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
@@ -214,7 +215,7 @@ it("starts no wait when a replay fails because the caller lost access",async()=>
     if(command.command.kind==="applyBatch"&&revoke){revoke=false;f.db.prepare("UPDATE grants SET allowed=0").run();}
     controls.deliver();
   });
-  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch}});
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   await expect(supervisor.invoke(read)).rejects.toThrow("denied");
@@ -273,6 +274,18 @@ it("migrates an approved dataset through the real worker and recovers its new sc
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved",note:"migrated"}]);expect(launches).toBe(2);
   expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
   expect((await f.invoke({id:"before",value:"saved"})).replayed).toBe(true);
+});
+it.each([125, 153])("migrates records in a long workspace folder (%i characters)",async length=>{
+  const parent=await mkdtemp(join(tmpdir(),"dohc-migration-"));
+  cleanups.push(()=>rm(parent,{recursive:true,force:true}));
+  const workspaceRoot=join(parent,"w".repeat(length-parent.length-1));
+  expect(workspaceRoot).toHaveLength(length);
+  const f=await fixture({workerRoot:join(workspaceRoot,".dohc","local","datasets","workers")});
+  await f.invoke({id:"before",value:"saved"});
+  const migrated=await f.supervisor.migrate(migration(f));
+  expect(migrated.revision).toBe(2);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved",note:"migrated"}]);
+  expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
 });
 it("refuses migration after another queued write advances the approved preview",async()=>{
   const f=await fixture(),input=migration(f);
@@ -431,7 +444,7 @@ it("recovers from a materialization cache and replays only its tail while retain
   expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
   expect(balance).toBe(f.db.prepare("SELECT storage_bytes FROM dohc_dataset_materializations").get()!.storage_bytes);
   await f.supervisor.close();
-  const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,materializationEvents:2});
+  const reopened=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},maintenanceStorage:storage,materializationEvents:2});
   cleanups.push(()=>reopened.close());
   const input={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   expect((await reopened.invoke(input)).result).toHaveLength(3);
@@ -490,7 +503,7 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
   for(const round of [1,2]) {
-    const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,replayCacheMs});
+    const supervisor=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},maintenanceStorage:storage,replayCacheMs});
     try {
       expect((await supervisor.invoke(read)).result).toEqual(swapped);
       // The request returns only once the replay's cache is installed.
@@ -520,7 +533,7 @@ async function failingReopens(options:Partial<DatasetSupervisorOptions>) {
   const f=await fixture();
   await f.invoke({id:"one",value:"saved"});
   await f.supervisor.close();
-  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},nowMs:()=>state.now,...options});
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},nowMs:()=>state.now,...options});
   cleanups.push(()=>supervisor.close());
   const read=()=>supervisor.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize});
   return {state,read};
@@ -582,7 +595,7 @@ it.each(["quota","seal"] as const)("waits to reopen when a mandatory replay chec
     events(input:Parameters<DatasetJournal["events"]>[0]){return f.journal.events({...input,limit:1});},
     ...(stage==="seal"?{async sealMaterializationCheckpoint():Promise<never>{throw new Error("disk full");}}:{}),
   };
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,"workers"),runtime:{launch},replayCacheMs:0,onMaintenanceError(){},
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},replayCacheMs:0,onMaintenanceError(){},
     maintenanceStorage:{authorize(){},account(){if(stage==="quota")throw new Error("quota full");}}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
@@ -604,7 +617,7 @@ it("waits to reopen when a mandatory replay checkpoint cannot be saved",async()=
   await f.invoke({id:"two",value:"saved"},{idempotencyKey:"two"});
   await f.supervisor.close();
   const journal={...f.journal,events(input:Parameters<DatasetJournal["events"]>[0]){return f.journal.events({...input,limit:1});}};
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,"workers"),runtime:{launch},
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},
     maintenanceStorage:{authorize(){},account(){}},replayCacheMs:0,onMaintenanceError(){}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
@@ -729,7 +742,7 @@ it.each(["chunk", "full hash", "missing marker", "wrong marker", "schema"])("fal
     f.journal.cacheMaterialization({expected:cache.cursor,checkpoint:stage,authorize:f.authorize,account(){}});
   }
   const replayed:number[]=[],errors:unknown[]=[];
-  const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),onMaintenanceError:(_scope,error)=>errors.push(error),runtime:{launch:launcher((command,controls)=>{
+  const reopened=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),onMaintenanceError:(_scope,error)=>errors.push(error),runtime:{launch:launcher((command,controls)=>{
     if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));controls.deliver();
   })}});
   cleanups.push(()=>reopened.close());
@@ -760,7 +773,7 @@ it("replaces a rejected cache after a costly replay, so the next reopen does not
   });
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   for(let round=0;round<2;round++) {
-    const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,replayCacheMs:0,onMaintenanceError(){}});
+    const reopened=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},maintenanceStorage:storage,replayCacheMs:0,onMaintenanceError(){}});
     try {expect((await reopened.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);}
     finally {await reopened.close();}
   }
@@ -812,7 +825,7 @@ it("stages and restores a large materialization through bounded chunks",async()=
   await f.invoke({id:"new"});await f.invoke({}, {readOnly:true});
   await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull(),workerWait);await f.supervisor.close();
   const journal={...f.journal,materializationBlob(input:Parameters<DatasetJournal["materializationBlob"]>[0]){const bytes=f.journal.materializationBlob(input);if(bytes)restored.push(bytes.byteLength);return bytes;}};
-  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,"workers")});cleanups.push(()=>reopened.close());
+  const reopened=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers"))});cleanups.push(()=>reopened.close());
   expect((await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize})).result).toEqual([{count:1501}]);
   expect(staged.length).toBeGreaterThan(1);expect(restored.length).toBeGreaterThan(1);
   expect(Math.max(...staged,...restored)).toBeLessThanOrEqual(1024*1024);
@@ -973,7 +986,7 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
       child.send(message as object);
     },kill(){child.kill('SIGKILL');}};
   };
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},nowMs:()=>clock,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},nowMs:()=>clock,
     replayCacheMs:0,maintenanceStorage:{authorize(){},account(){}}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -991,7 +1004,7 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   expect(applied).toEqual(Array.from({length:64},(_,index)=>index+1));
   expect(saved).toEqual(applied);
   await supervisor.close();
-  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch}});
+  const reopened=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch}});
   try{expect((await reopened.invoke(read)).revision).toBe(64);expect(applied).toHaveLength(64);}
   finally{await reopened.close();}
   expect(closedPids.sort()).toEqual(pids.sort());
@@ -1040,7 +1053,7 @@ it.each([
       return cached;
     },
   };
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},maxWorkers:2,replayCacheMs:interval,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},maxWorkers:2,replayCacheMs:interval,
     materializationEvents:1,maintenanceStorage:{authorize(){},account(){}}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -1068,7 +1081,7 @@ it.each([
     if(afterCheckpoint)expect(cached?.cursor.revision).toBe(1);else expect(cached).toBeNull();
     expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize}).every(stage=>stage.scope.datasetId!==f.scope.datasetId)).toBe(true);
   } finally {release();await occupying;await supervisor.close();time.mockRestore();}
-  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch}});
+  const reopened=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch}});
   try {
     const result=await reopened.invoke(read);
     expect(result.revision).toBe(events);
@@ -1111,7 +1124,7 @@ async function unsavedTailFixture(mode:"busy"|"blocked") {
       controls.deliver();
     },undefined,pids,closedPids)(options);
   };
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},maxWorkers:1,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},maxWorkers:1,
     replayCacheMs:0,materializationEvents:1,nowMs:()=>state.clock,maintenanceStorage:{authorize(){},account(){}},onMaintenanceError});
   cleanups.push(async()=>{release();await supervisor.close();});
   const readInput={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -1192,7 +1205,7 @@ it("backs off when a final replay cache failure stops its worker before capture"
     controls.deliver();
   },undefined,pids,closedPids);
   const onMaintenanceError=vi.fn();
-  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,'workers'),runtime:{launch},
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},
     replayCacheMs:0,nowMs:()=>clock,maintenanceStorage:{authorize(){},account(){}},onMaintenanceError});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -1217,7 +1230,7 @@ it.each(['quota','seal'] as const)("returns a completed replay when its final ca
   cleanups.push(async()=>{time.mockRestore();});
   const journal=stage==='seal'?{...f.journal,async sealMaterializationCheckpoint(){throw Error('disk full');}}:f.journal;
   const onMaintenanceError=vi.fn();
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),replayCacheMs:0,maxWorkers:1,nowMs:()=>0,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),replayCacheMs:0,maxWorkers:1,nowMs:()=>0,
     maintenanceStorage:{authorize(){},account(){if(stage==='quota')throw Error('quota full');}},onMaintenanceError});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -1246,7 +1259,7 @@ it("retains an earlier recovery checkpoint when a later chunk cannot be sealed",
   const journal={...f.journal,async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
     if(++seals===2&&broken)throw Error('disk full');return f.journal.sealMaterializationCheckpoint(input);
   }};
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},nowMs:()=>clock,replayCacheMs:0,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},nowMs:()=>clock,replayCacheMs:0,
     maintenanceStorage:{authorize(){},account(){}},onMaintenanceError(){}});
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
@@ -1279,7 +1292,7 @@ it("measures benign 64-event recovery including a fully installed checkpoint",as
   const journal={...f.journal,cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
     const result=f.journal.cacheMaterialization(input);checkpointMs=Date.now()-checkpointStarted;return result;
   }};
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},replayCacheMs:1000,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},replayCacheMs:1000,
     maintenanceStorage:{authorize(){},account(){}}});
   const started=Date.now();
   try{
@@ -1317,7 +1330,7 @@ it.each([{nextCost:50,replayMs:100,saved:[1,9,11]},{nextCost:20,replayMs:100,sav
       const value=f.journal.cacheMaterialization(input);saved.push(value.cursor.revision);return value;
     },
   };
-  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},replayCacheMs:100,
+  const supervisor=await createDatasetSupervisor({journal,directory: privateFolder(join(f.directory, "workers")),runtime:{launch},replayCacheMs:100,
     maintenanceStorage:{authorize(){},account(){}}});
   cleanups.push(()=>supervisor.close());
   const result=await supervisor.invoke({scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize});
@@ -1326,4 +1339,37 @@ it.each([{nextCost:50,replayMs:100,saved:[1,9,11]},{nextCost:20,replayMs:100,sav
   // Cheaper checkpoints lower that interval, bounded by replayCacheMs.
   // Save a costly replay's final tail; a 99 ms whole replay stays uncached.
   expect(saved).toEqual(expected);
+});
+
+it("holds no folder until its host gives one, then takes it once for every worker",async()=>{
+  const f=await fixture(),root=join(f.directory,"later");let ready=false,asked=0,startups=0;
+  const supervisor=await createDatasetSupervisor({journal:f.journal,
+    directory:async()=>{asked++;if(!ready)throw new Error("The host has not prepared this folder.");await mkdir(root,{recursive:true});return root;},
+    startup(){startups++;}});
+  cleanups.push(()=>supervisor.close());
+  expect(startups).toBe(0);
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner" as const},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  // The host's own words, with no reopen wait counted against the Collection.
+  await expect(supervisor.invoke(read)).rejects.toThrow("The host has not prepared this folder.");
+  await expect(supervisor.invoke(read)).rejects.toThrow("The host has not prepared this folder.");
+  expect(await readdir(f.directory)).not.toContain("later");
+  ready=true;await supervisor.invoke(read);await supervisor.invoke({...read,idempotencyKey:"again"});
+  expect(startups).toBe(1);expect(asked).toBe(4);
+  expect(await readdir(root)).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite",".dohc-worker-session.json"]));
+});
+
+it("holds its folder, and runs startup maintenance, before a first preview reserves anything",async()=>{
+  const f=await fixture(),root=join(f.directory,"later");let ready=false,balance=0;
+  const storage={authorize(){},account({bytes}:{bytes:number}){balance+=bytes;}};
+  const supervisor=await createDatasetSupervisor({journal:f.journal,maintenanceStorage:storage,
+    directory:async()=>{if(!ready)throw new Error("The host has not prepared this folder.");await mkdir(root,{recursive:true});return root;},
+    // What a host's exclusive startup does: reclaim every stage nothing retains.
+    startup(){f.journal.reclaimCheckpointStages({authorize:f.authorize,account:storage.account,retain:()=>false});}});
+  cleanups.push(()=>supervisor.close());
+  ready=true;
+  const candidate=await supervisor.prepareMigration({...migration(f),authorityKey:"owner"});
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(2);
+  await supervisor.discardMigration({scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize});
+  expect(balance).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
 });

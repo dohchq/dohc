@@ -1,6 +1,6 @@
 import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
-import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
+import {parseRestoreAdmission, verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
@@ -10,7 +10,7 @@ import {createHash} from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import { policy, hash, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
+import { policy, hash, cleanupLiveDeliveryFixtures, restore } from "./liveCommittedDeliveryTestSupport.js";
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
@@ -25,6 +25,7 @@ import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import * as restoreProof from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
+import {LiveRestoreTooLarge, liveRestoreValidator, runLiveRestoreWork, type LiveRestoreRun, type LiveRestoreValidator} from "../../../services/sync-relay/src/liveRestoreValidation.js";
 import {canonicalVersionedAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
@@ -110,6 +111,28 @@ it("bounds restore proposal metadata and refuses corrupt native source manifests
   } finally {f.close();}
 });
 
+it.each(["journalCursor", "receiptDigest"] as const)("refuses a proposal that substitutes the fenced %s", field => {
+  const f = proposalSourcesFixture("bootstrap", "device");
+  try {
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(f.proposal), f.input)).not.toThrow();
+    const receipt = {...f.proposal, point: {...f.proposal.point,
+      [field]: field === "journalCursor" ? f.proposal.point.journalCursor + 1 : "f".repeat(64)}};
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input)).toThrow();
+  } finally {f.close();}
+});
+
+it.each(["journalCursor", "receiptDigest"] as const)("refuses an admission that substitutes the fenced %s", async field => {
+  const f = await admittedRestoreFixture();
+  try {
+    const saved = f.raw.prepare("SELECT admission_json FROM sync_relay_live_restore_lifecycles").get()!;
+    const receipt = parseRestoreAdmission(JSON.parse(String(saved.admission_json)));
+    expect(() => parseRestoreAdmission(receipt)).not.toThrow();
+    if (field === "journalCursor") receipt.preparation.point.journalCursor++;
+    else receipt.preparation.point.receiptDigest = "f".repeat(64);
+    expect(() => parseRestoreAdmission(receipt)).toThrow();
+  } finally {f.close();}
+});
+
 // The agent the fixture's native update attribution names.
 const nativeAgent = {agentId: "owner-device", onBehalfOf: "owner", depth: 64};
 function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBinding"], bytes: Uint8Array, sequence: number) {
@@ -179,7 +202,7 @@ it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "device"]]
         expect(JSON.parse(Buffer.from(bytes.subarray(4)).toString())).toEqual({fence: f.receipt.fence, point: f.receipt.point});
         return {response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)};
       });
-      const prepare = new LiveRestorePreparation(preparationConfig());
+      const prepare = new LiveRestorePreparation(preparationConfig(), restore);
       const options = {store: f.store, lookup: f.lookup, deliveryKind: kind,
         connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
       const outcome = await prepare.prepare(options);
@@ -194,7 +217,7 @@ it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "device"]]
 it("holds restore preparation capacity across transport and releases it after cancellation or proof refusal", async () => {
   const f = contentProposalFixture();
   try {
-    const prepare = new LiveRestorePreparation(preparationConfig()), abort = new AbortController();
+    const prepare = new LiveRestorePreparation(preparationConfig(), restore), abort = new AbortController();
     let release!: (value: {response: {result: {status: string}}; bytes: Buffer}) => void;
     const pending = new Promise<{response: {result: {status: string}}; bytes: Buffer}>(resolve => {release = resolve;});
     let started!: () => void;
@@ -208,10 +231,10 @@ it("holds restore preparation capacity across transport and releases it after ca
     abort.abort(new Error("caller retired"));
     release({response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)});
     await expect(first).rejects.toThrow("caller retired");
-    expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+    expect(await f.store.readStopRestoreProposal(f.input, restore)).toBeNull();
     sendLiveRestore.mockResolvedValueOnce({response: {result: {status: "prepared"}}, bytes: Buffer.from([0])});
     await expect(prepare.prepare(options)).rejects.toThrow();
-    expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+    expect(await f.store.readStopRestoreProposal(f.input, restore)).toBeNull();
     await expect(prepare.prepare(options)).resolves.toMatchObject({kind: "prepared", replayed: false});
   } finally {f.close();}
 });
@@ -223,7 +246,7 @@ it("requires explicit restore preparation limits and snapshots the configured va
   expect(() => parseLiveRestoreConfig({...config, maxBytes: Number.MAX_SAFE_INTEGER})).toThrow();
   expect(() => parseLiveRestoreConfig({...config, workingReserveBytes: 0})).toThrow();
   const mutable = {...config, validation: {...config.validation}};
-  const prepare = new LiveRestorePreparation(mutable);
+  const prepare = new LiveRestorePreparation(mutable, restore);
   mutable.validation.maxStructVisits = 1;
   expect(prepare.config.validation.maxStructVisits).toBe(config.validation.maxStructVisits);
 });
@@ -235,7 +258,7 @@ it.each(["bootstrap", "owner"] as const)("holds %s delivery exclusion until rest
     const started = Promise.withResolvers<void>();
     const sendLiveRestore = vi.fn(async () => {started.resolve(); return release.promise;});
     const connection = {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.coordinate,
-      deadlineMs: 1000, nextRequestId: () => 1, restore: new LiveRestorePreparation(preparationConfig())};
+      deadlineMs: 1000, nextRequestId: () => 1, restore: new LiveRestorePreparation(preparationConfig(), restore)};
     const make = (restore: LiveRestorePreparation | undefined) => kind === "bootstrap"
       ? new LiveCommittedDelivery(f.storage, f.history, {...connection, restore})
       : new OwnerCommittedDelivery(f.storage, f.history, {...connection, restore,
@@ -258,7 +281,7 @@ it("releases preparation capacity when the drain returns pending", async () => {
     f.fence();
     const sendRequest = vi.fn(async () => ({result: {status: "pending", reason: "Owner is busy."}}));
     const sendLiveRestore = vi.fn();
-    const preparation = new LiveRestorePreparation(preparationConfig());
+    const preparation = new LiveRestorePreparation(preparationConfig(), restore);
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
       connection: {client: {sendRequest, sendLiveRestore} as never, workspace: "native-workspace", host: f.coordinate,
         deadlineMs: 1000, nextRequestId: () => 1}};
@@ -274,7 +297,7 @@ it("refuses stale authority after native preparation without recording a proposa
     const release = Promise.withResolvers<{response: {result: {status: string}}; bytes: Buffer}>();
     const started = Promise.withResolvers<void>();
     const sendLiveRestore = vi.fn(async () => {started.resolve(); return release.promise;});
-    const preparation = new LiveRestorePreparation(preparationConfig());
+    const preparation = new LiveRestorePreparation(preparationConfig(), restore);
     const preparing = preparation.prepare({store: f.store, lookup: f.lookup, deliveryKind: "owner",
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.coordinate,
         deadlineMs: 1000, nextRequestId: () => 1}});
@@ -290,7 +313,7 @@ it("refuses stale authority after native preparation without recording a proposa
 it("enforces the aggregate byte reservation before the operation count is full", async () => {
   const f = contentProposalFixture();
   try {
-    const preparation = new LiveRestorePreparation({...preparationConfig(), maxOperations: 2});
+    const preparation = new LiveRestorePreparation({...preparationConfig(), maxOperations: 2}, restore);
     const release = Promise.withResolvers<{response: {result: {status: string}}; bytes: Buffer}>();
     const started = Promise.withResolvers<void>();
     const sendLiveRestore = vi.fn(async () => {started.resolve(); return release.promise;});
@@ -303,6 +326,153 @@ it("enforces the aggregate byte reservation before the operation count is full",
     release.resolve({response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)});
     await expect(preparing).resolves.toMatchObject({kind: "prepared", replayed: false});
     await expect(preparation.prepare(options)).resolves.toMatchObject({kind: "prepared", replayed: true});
+  } finally {f.close();}
+});
+
+type ContentProposal = ReturnType<typeof contentProposalFixture>;
+const restorePaths = ["read", "review", "record", "admission", "reviewed admission"] as const;
+/** Records first when `path` needs a stored proposal, then returns the call under test. */
+async function restorePath(f: ContentProposal, path: typeof restorePaths[number]) {
+  const recorded = path === "record" ? null : await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
+  const review = {...f.input, maxOutputBytes: 1_000_000};
+  return (validator: LiveRestoreValidator): Promise<unknown> => path === "read" ? f.store.readStopRestoreProposal(f.input, validator)
+    : path === "review" ? f.store.readStopRestoreReview(review, validator)
+    : path === "record" ? f.store.recordStopRestoreProposal(f.input, f.encoded, validator, 200)
+    : path === "admission" ? f.store.admitStopRestoreProposal(f.input, recorded!.proposalDigest, validator, 201)
+    : f.store.admitReviewedStopRestoreProposal(review, recorded!.proposalDigest, validator, 201);
+}
+/** Validates in this process. Asks for each of `digests` first, then runs `change` during the final run. */
+const validatingWhile = (change: () => void, digests: readonly string[] = []) => liveRestoreValidator(async work => {
+  const digest = digests.find(digest => !work.answers.has(digest));
+  if (digest !== undefined) return {kind: "needs-artifact", digest};
+  change();
+  return runLiveRestoreWork(work, policy);
+});
+const artifactText = (name: string) => new TextEncoder().encode(`${name} artifact\n`);
+const presentArtifact = artifactText("present"), absentArtifact = artifactText("absent");
+const answeredArtifacts = [hash(presentArtifact), hash(absentArtifact)];
+/** Adds `bytes` to the restored object's artifact history, below its current moment. */
+function addArtifact(f: Pick<ContentProposal, "raw" | "document" | "capture">, bytes: Uint8Array, sequence: number) {
+  f.raw.prepare("INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(bytes), bytes.length, bytes);
+  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES ('workspace',?,?,?,'main',?,?,'text',?,0)`).run(f.document.objectId, sequence, `artifact-${sequence}`, f.capture.selected.binding.currentPath, hash(bytes), bytes.length);
+}
+
+it.each(restorePaths)("completes %s while other workspaces write during validation", async path => {
+  const f = contentProposalFixture();
+  try {
+    addArtifact(f, presentArtifact, 0);
+    const call = await restorePath(f, path);
+    let writes = 0;
+    const result = await call(validatingWhile(() => {
+      f.raw.prepare("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, 'other', 0)").run(`other-${++writes}`);
+      f.raw.exec("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+1");
+    }, answeredArtifacts));
+    expect(writes).toBe(1);
+    expect(result).not.toBeNull();
+    expect(f.raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").get()!.phase).toBe(path.endsWith("admission") ? "relay-admitted" : "native-fenced");
+  } finally {f.close();}
+});
+
+const evidenceChanges: readonly (readonly [string, () => ContentProposal, (f: ContentProposal) => void])[] = [
+  ["operation row", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_restore_operations SET native_receipt_json=json_set(native_receipt_json,'$.recordedAtMs',101)")],
+  ["first journal row", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1")],
+  ["accepted history tip", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=(SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal)")],
+  ["native source author", () => contentProposalFixture("owner", "device", false, true),
+    f => f.raw.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=NULL WHERE delivery_id=?").run(f.acceptedNative!.source.deliveryId)],
+  ["source moment", () => contentProposalFixture(),
+    f => f.raw.exec("UPDATE sync_relay_object_moments SET moment_id='replaced' WHERE relay_seq=1")],
+  ["bootstrap source", () => contentProposalFixture("bootstrap", "device"),
+    f => f.raw.exec("UPDATE sync_relay_live_delivery_bootstraps SET projected_markdown_byte_length=projected_markdown_byte_length+1")],
+  ["fetched artifact membership", () => contentProposalFixture(),
+    f => f.raw.exec("DELETE FROM sync_relay_object_moments WHERE relay_seq=0")],
+  ["absent artifact", () => contentProposalFixture(), f => addArtifact(f, absentArtifact, -1)],
+];
+it.each(restorePaths.flatMap(path => evidenceChanges.map(([name, make, change]) => [path, name, make, change] as const)))(
+  "refuses %s when its %s changes during validation", async (path, _name, make, change) => {
+    const f = make();
+    try {
+      addArtifact(f, presentArtifact, 0);
+      const call = await restorePath(f, path);
+      let changed: ReturnType<typeof proposalRows> | undefined;
+      await expect(call(validatingWhile(() => {change(f); changed = proposalRows(f);}, answeredArtifacts)))
+        .rejects.toThrow("Relay evidence changed during validation.");
+      expect(changed).toBeDefined();
+      expect(proposalRows(f)).toEqual(changed);
+    } finally {f.close();}
+  });
+
+it.each(restorePaths.filter(path => path !== "record"))("refuses %s when its stored proposal is rewritten at the same length during validation", async path => {
+  const f = contentProposalFixture();
+  try {
+    addArtifact(f, presentArtifact, 0);
+    const call = await restorePath(f, path);
+    let changed: ReturnType<typeof proposalRows> | undefined;
+    await expect(call(validatingWhile(() => {
+      f.raw.exec(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(length(proposal_bytes))`); changed = proposalRows(f);
+    }, answeredArtifacts))).rejects.toThrow("Relay evidence changed during validation.");
+    expect(proposalRows(f)).toEqual(changed);
+    f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=?`).run(f.encoded);
+    await expect(call(validatingWhile(() => {}, answeredArtifacts))).resolves.not.toBeNull();
+  } finally {f.close();}
+});
+
+it.each(["removed", "added"] as const)("refuses point completion when an answered artifact is %s during validation", async change => {
+  const f = contentProposalFixture();
+  try {
+    addArtifact(f, presentArtifact, 0);
+    const changing = validatingWhile(() => change === "removed" ? f.raw.exec("DELETE FROM sync_relay_object_moments WHERE relay_seq=0")
+      : addArtifact(f, absentArtifact, -1), answeredArtifacts);
+    await expect(f.store.resolveStopRestorePoint(f.input, changing)).rejects.toThrow("Relay evidence changed during validation.");
+    const resolved = await f.store.resolveStopRestorePoint(f.input, validatingWhile(() => {}, answeredArtifacts));
+    expect(resolved.point).toEqual(f.receipt.point);
+  } finally {f.close();}
+});
+
+it("refuses a restore whose validation runs out of heap, keeping its fence and proposal for an explicit retry", async () => {
+  const f = contentProposalFixture();
+  try {
+    const recorded = await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200), before = proposalRows(f);
+    const run = vi.fn<LiveRestoreRun>(async () => ({kind: "capacity-refused"})), exhausted = liveRestoreValidator(run);
+    await expect(f.store.readStopRestoreProposal(f.input, exhausted)).rejects.toBeInstanceOf(LiveRestoreTooLarge);
+    await expect(f.store.admitStopRestoreProposal(f.input, recorded.proposalDigest, exhausted, 201)).rejects.toBeInstanceOf(LiveRestoreTooLarge);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(proposalRows(f)).toEqual(before);
+    expect(f.raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").get()!.phase).toBe("native-fenced");
+    expect((await f.store.admitStopRestoreProposal(f.input, recorded.proposalDigest, restore, 201)).phase).toBe("relay-admitted");
+  } finally {f.close();}
+});
+
+it.each(["expired", "cancelled"])("cancels review validation when the review is %s, returns no content and releases capacity", async ending => {
+  const f = await repeatedReviewFixture();
+  try {
+    const held = Promise.withResolvers<AbortSignal>();
+    let first = true;
+    const validator = liveRestoreValidator((work, signal) => {
+      if (!first) return Promise.resolve(runLiveRestoreWork(work, policy));
+      first = false; held.resolve(signal!);
+      // The first validation runs until its signal ends it.
+      return new Promise<never>((_, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), {once: true}));
+    });
+    const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: 40}, validator), abort = new AbortController();
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
+      connection: {client: {} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 60_000, nextRequestId: () => 1}};
+    if (ending === "expired") vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      const review = driver.review({...options, signal: abort.signal});
+      const signal = await held.promise;
+      if (ending === "expired") vi.advanceTimersByTime(60_000);
+      else abort.abort(new Error("disconnected"));
+      await expect(review).rejects.toThrow(ending === "expired" ? "Restore review expired." : "disconnected");
+      expect(signal.aborted).toBe(true);
+    } finally {vi.useRealTimers();}
+    // Only one preparation fits, so a second review proves the first released its reservation.
+    const lease = await driver.review(options);
+    expect(lease.review!.proposalDigest).toBe(f.saved.proposalDigest);
+    lease.close();
   } finally {f.close();}
 });
 
@@ -321,7 +491,7 @@ const proposalRows = (f: Pick<ReturnType<typeof contentProposalFixture>,"raw"|"j
   operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),
   documents: f.raw.prepare("SELECT * FROM sync_relay_live_documents").all()});
 
-it("persists a generated owner rewrite with two retained native updates and refuses missing or changed pending bytes", () => {
+it("persists a generated owner rewrite with two retained native updates and refuses missing or changed pending bytes", async () => {
   const f = contentProposalFixture("owner", "device", true);
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
   try {
@@ -330,21 +500,21 @@ it("persists a generated owner rewrite with two retained native updates and refu
     const altered = f.bytes.nativeSourceBytes.map(bytes => bytes.slice());altered[0]![0] ^= 1;
     for (const nativeSourceBytes of [altered, [f.bytes.nativeSourceBytes[1]!, f.bytes.nativeSourceBytes[0]!]]) {
       const bad = encodeNativeRestoreProposal(JSON.stringify(f.receipt), {...f.bytes, nativeSourceBytes}, f.input);
-      expect(() => f.store.recordStopRestoreProposal(f.input, bad, policy, 200)).toThrow();
+      await expect(f.store.recordStopRestoreProposal(f.input, bad, restore, 200)).rejects.toThrow();
       expect(proposalRows(f)).toEqual(before);
     }
     const omitted = {...f.receipt, nativeSources: [], nativeSourceManifestDigest: jsonHash([f.receipt.fence, []])};
     const noNative = encodeNativeRestoreProposal(JSON.stringify(omitted), {...f.bytes, nativeSourceBytes: []}, f.input);
-    expect(() => f.store.recordStopRestoreProposal(f.input, noNative, policy, 200)).toThrow(/frozen context/);
+    await expect(f.store.recordStopRestoreProposal(f.input, noNative, restore, 200)).rejects.toThrow(/frozen context/);
     expect(proposalRows(f)).toEqual(before);
-    const recorded = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const recorded = await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     expect(recorded.replayed).toBe(false);
-    expect(f.store.readStopRestoreProposal(f.input, policy)!.receipt.nativeSources).toEqual(f.receipt.nativeSources);
+    expect((await f.store.readStopRestoreProposal(f.input, restore))!.receipt.nativeSources).toEqual(f.receipt.nativeSources);
     f.close();closed = true;
     reopened = openSyncRelayStorage(f.path);
     const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
-    expect(store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
-    expect(store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toEqual({...recorded, replayed: true});
+    expect((await store.readStopRestoreProposal(f.input, restore))!.bytes).toEqual(f.encoded);
+    expect(await store.recordStopRestoreProposal(f.input, f.encoded, restore, 201)).toEqual({...recorded, replayed: true});
   } finally {if (!closed) f.close();reopened?.close();}
 });
 
@@ -381,13 +551,13 @@ it("accepts native human, agent, automation and absent attribution at their dept
 });
 
 it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "service"], ["owner", "device"]] as const)(
-  "persists the generated %s proposal on %s and replays its bytes after relay restart", (kind, mode) => {
+  "persists the generated %s proposal on %s and replays its bytes after relay restart", async (kind, mode) => {
     const f = contentProposalFixture(kind, mode);
     let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
     try {
-      expect(f.store.readStopRestoreProposal(f.input, policy)).toBeNull();
+      expect(await f.store.readStopRestoreProposal(f.input, restore)).toBeNull();
       const before = proposalRows(f);
-      const recorded = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      const recorded = await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
       expect(recorded).toEqual({proposalDigest: hash(f.encoded), candidateDigest: hash(f.bytes.candidateBytes), recordedAtMs: 200, replayed: false});
       const after = proposalRows(f), row = after.proposals[0]!;
       expect(after.journal).toEqual(before.journal);
@@ -395,59 +565,59 @@ it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "service"]
       expect(after.documents).toEqual(before.documents);
       expect(after.usage).toBe(Number(before.usage) + Number(row.accounted_bytes));
       expect(row.proposal_bytes).toEqual(f.encoded);
-      expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 1_000_000)).toEqual({...recorded, replayed: true});
+      expect(await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 1_000_000)).toEqual({...recorded, replayed: true});
       expect(proposalRows(f)).toEqual(after);
-      const read = f.store.readStopRestoreProposal(f.input, policy)!;
+      const read = (await f.store.readStopRestoreProposal(f.input, restore))!;
       expect(read).toMatchObject({bytes: f.encoded, receipt: f.receipt, proposalDigest: recorded.proposalDigest, recordedAtMs: 200});
       read.bytes.fill(0);
-      expect(f.store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
+      expect((await f.store.readStopRestoreProposal(f.input, restore))!.bytes).toEqual(f.encoded);
       f.close();closed = true;
       reopened = openSyncRelayStorage(f.path);
       const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
-      expect(store.readStopRestoreProposal(f.input, policy)!.bytes).toEqual(f.encoded);
-      expect(store.recordStopRestoreProposal(f.input, f.encoded, policy, 999)).toEqual({...recorded, replayed: true});
+      expect((await store.readStopRestoreProposal(f.input, restore))!.bytes).toEqual(f.encoded);
+      expect(await store.recordStopRestoreProposal(f.input, f.encoded, restore, 999)).toEqual({...recorded, replayed: true});
       expect((reopened as StorageContext).db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()!.usage_bytes).toBe(after.usage);
     } finally {if (!closed) f.close();reopened?.close();}
   });
 
-it("charges the full framed proposal exactly once and refuses one byte beyond workspace quota", () => {
+it("charges the full framed proposal exactly once and refuses one byte beyond workspace quota", async () => {
   const f = contentProposalFixture();
   try {
     const digest = hash(f.encoded), candidate = hash(f.bytes.candidateBytes), at = 200;
     const charge = f.encoded.byteLength + Buffer.byteLength(JSON.stringify(["restore-test", "restore", "workspace", digest, candidate, at, Number.MAX_SAFE_INTEGER, "f".repeat(64)]));
     const before = proposalRows(f);
     f.context.options.workspaceQuotaBytes = Number(before.usage) + charge - 1;
-    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at)).toThrow(/quota/);
+    await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, at)).rejects.toThrow(/quota/);
     expect(proposalRows(f)).toEqual(before);
     f.context.options.workspaceQuotaBytes++;
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, at);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, at);
     expect(f.journalRows().usage).toBe(f.context.options.workspaceQuotaBytes);
     expect(f.raw.prepare(`SELECT accounted_bytes FROM ${proposalTable}`).get()!.accounted_bytes).toBe(charge);
-    expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201).replayed).toBe(true);
+    expect((await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 201)).replayed).toBe(true);
     expect(f.journalRows().usage).toBe(f.context.options.workspaceQuotaBytes);
   } finally {f.close();}
 });
 
 it.each(["before-insert", "after-insert", "ignored-insert", "ignored-usage", "failed-usage"])(
-  "rolls back proposal and quota changes after %s", boundary => {
+  "rolls back proposal and quota changes after %s", async boundary => {
     const f = contentProposalFixture();
     try {
       const usage = boundary.endsWith("usage"), timing = boundary === "after-insert" ? "AFTER" : "BEFORE";
       const action = boundary.startsWith("ignored") ? "IGNORE" : "ABORT,'injected proposal failure'";
       f.raw.exec(`CREATE TRIGGER reject_proposal ${timing} ${usage ? "UPDATE ON sync_relay_workspace_usage" : `INSERT ON ${proposalTable}`} BEGIN SELECT RAISE(${action}); END`);
       const before = proposalRows(f);
-      expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200)).toThrow();
+      await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200)).rejects.toThrow();
       expect(proposalRows(f)).toEqual(before);
       f.raw.exec("DROP TRIGGER reject_proposal");
-      expect(f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200).replayed).toBe(false);
+      expect((await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200)).replayed).toBe(false);
     } finally {f.close();}
   });
 
 it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded time", "same-width recorded time"])(
-  "rejects corrupted stored proposal %s on read and replay without mutation", damage => {
+  "rejects corrupted stored proposal %s on read and replay without mutation", async damage => {
     const f = contentProposalFixture();
     try {
-      f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
       if (damage === "bytes") {const bad = f.encoded.slice();bad[bad.length - 1] ^= 1;f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=?`).run(bad);}
       if (damage === "proposal digest") f.raw.prepare(`UPDATE ${proposalTable} SET proposal_sha256=?`).run("f".repeat(64));
       if (damage === "candidate digest") f.raw.prepare(`UPDATE ${proposalTable} SET candidate_sha256=?`).run("f".repeat(64));
@@ -455,13 +625,13 @@ it.each(["bytes", "proposal digest", "candidate digest", "charge", "recorded tim
       if (damage === "recorded time") f.raw.exec(`UPDATE ${proposalTable} SET recorded_at_ms=1000000`);
       if (damage === "same-width recorded time") f.raw.exec(`UPDATE ${proposalTable} SET recorded_at_ms=999`);
       const before = proposalRows(f);
-      expect(() => f.store.readStopRestoreProposal(f.input, policy)).toThrow();
-      expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toThrow();
+      await expect(f.store.readStopRestoreProposal(f.input, restore)).rejects.toThrow();
+      await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 201)).rejects.toThrow();
       expect(proposalRows(f)).toEqual(before);
     } finally {f.close();}
   });
 
-it("captures restore proposal budgets once before validation and persistence", () => {
+it("captures restore proposal budgets once before validation and persistence", async () => {
   const f = contentProposalFixture();
   try {
     const reads = new Map<string, number>();
@@ -472,35 +642,35 @@ it("captures restore proposal budgets once before validation and persistence", (
       }
       return Reflect.get(target, key, receiver);
     }});
-    expect(f.store.recordStopRestoreProposal(input, f.encoded, policy, 200).replayed).toBe(false);
+    expect((await f.store.recordStopRestoreProposal(input, f.encoded, restore, 200)).replayed).toBe(false);
     expect(reads).toEqual(new Map([["maxBytes", 1], ["maxEvents", 1]]));
   } finally {f.close();}
 });
 
-it("refuses a second proposal for the operation and bounded or foreign reads without mutation", () => {
+it("refuses a second proposal for the operation and bounded or foreign reads without mutation", async () => {
   const f = contentProposalFixture();
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     const before = proposalRows(f);
     const changed = encodeNativeRestoreProposal(JSON.stringify({...f.receipt, finalContentDigest: "e".repeat(64)}), f.bytes, f.input);
-    expect(() => f.store.recordStopRestoreProposal(f.input, changed, policy, 201)).toThrow();
+    await expect(f.store.recordStopRestoreProposal(f.input, changed, restore, 201)).rejects.toThrow();
     for (const patch of [{maxBytes: f.encoded.byteLength - 1}, {maxEvents: 1}, {ownerUserId: "foreign"},
       {workspaceId: "foreign"}, {host: {...f.input.host, connectionId: "foreign"}}]) {
-      expect(() => f.store.readStopRestoreProposal({...f.input, ...patch}, policy)).toThrow();
-      expect(() => f.store.recordStopRestoreProposal({...f.input, ...patch}, f.encoded, policy, 201)).toThrow();
+      await expect(f.store.readStopRestoreProposal({...f.input, ...patch}, restore)).rejects.toThrow();
+      await expect(f.store.recordStopRestoreProposal({...f.input, ...patch}, f.encoded, restore, 201)).rejects.toThrow();
     }
     expect(proposalRows(f)).toEqual(before);
   } finally {f.close();}
 });
 
-it("checks stored proposal length before materializing an oversized saved payload on read or replay", () => {
+it("checks stored proposal length before materializing an oversized saved payload on read or replay", async () => {
   const f = contentProposalFixture();
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(?)`).run(f.input.maxBytes + 1);
     const before = proposalRows(f), prepare = vi.spyOn(f.context.db, "prepare");
-    expect(() => f.store.readStopRestoreProposal(f.input, policy)).toThrow(/bounds/);
-    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 201)).toThrow();
+    await expect(f.store.readStopRestoreProposal(f.input, restore)).rejects.toThrow(/bounds/);
+    await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 201)).rejects.toThrow();
     const proposalReads = prepare.mock.calls.map(([sql]) => sql).filter(sql => sql.includes(`FROM ${proposalTable}`));
     expect(proposalReads).toHaveLength(2);
     expect(proposalReads.every(sql => sql.includes("length(proposal_bytes)"))).toBe(true);
@@ -509,7 +679,7 @@ it("checks stored proposal length before materializing an oversized saved payloa
   } finally {vi.restoreAllMocks();f.close();}
 });
 
-it("rechecks closed admission inside the proposal write transaction and rolls back late authority drift", () => {
+it("rechecks closed admission inside the proposal write transaction and rolls back late authority drift", async () => {
   const f = contentProposalFixture();
   try {
     const before = proposalRows(f), transaction = f.context.tx.bind(f.context);
@@ -517,7 +687,7 @@ it("rechecks closed admission inside the proposal write transaction and rolls ba
       f.context.db.prepare("UPDATE sync_relay_live_documents SET admission_state='open'").run();
       return run();
     }));
-    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200)).toThrow();
+    await expect(f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200)).rejects.toThrow();
     expect(proposalRows(f)).toEqual(before);
   } finally {vi.restoreAllMocks();f.close();}
 });
@@ -546,10 +716,10 @@ it("frames exact byte views, snapshots caller storage, and refuses truncation, i
   } finally {f.close();}
 });
 
-it.each(["table", "index", "parent"])("rejects damaged proposal schema %s", damage => {
+it.each(["table", "index", "parent"])("rejects damaged proposal schema %s", async damage => {
   const f = contentProposalFixture();
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     if (damage === "table") f.raw.exec(`DROP TABLE ${proposalTable}`);
     if (damage === "index") f.raw.exec(`CREATE INDEX unexpected_proposal ON ${proposalTable}(recorded_at_ms)`);
     if (damage === "parent") {
@@ -559,10 +729,10 @@ it.each(["table", "index", "parent"])("rejects damaged proposal schema %s", dama
   } finally {f.close();}
 });
 
-it("workspace deletion removes the proposal and its usage row through existing cascades", () => {
+it("workspace deletion removes the proposal and its usage row through existing cascades", async () => {
   const f = contentProposalFixture();
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     f.write(db => {db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'").run();});
     expect(f.raw.prepare(`SELECT * FROM ${proposalTable}`).all()).toEqual([]);
     expect(f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual([]);
@@ -1315,6 +1485,7 @@ it.each(["bootstrap", "owner"] as const)("records a funded native fence for %s a
     const before = f.journalRows().usage;
     const operation = readStopRestore(f.context, f.lookup)!;
     expect(operation.phase).toBe("old-cut-applied");
+    expect(f.receipt.operation.point).toEqual({journalCursor:operation.intent.restorePointCursor,receiptDigest:operation.intent.restorePointReceiptDigest});
     expect(operation.nativeReceipt).toBeNull();
     expect(f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toEqual(f.receipt);
     expect(f.journalRows().usage).toBe(before);
@@ -1346,6 +1517,9 @@ it.each(["service", "device"] as const)("requires the durable empty-cut origin b
 });
 
 const corruptNativeReceipts: [string, (receipt: NativeRestoreFenceReceipt) => void][] = [
+  ["selected cursor", r => {r.operation.point.journalCursor++;}],
+  ["selected receipt", r => {r.operation.point.receiptDigest = "f".repeat(64);}],
+  ["old receipt without selected point", r => {delete (r.operation as Partial<typeof r.operation>).point;}],
   ["operation ID", r => {r.operation.operationId = "other";}],
   ["namespace", r => {r.operation.relayDatabaseNamespace = "other";}],
   ["workspace", r => {r.operation.oldBinding = {...r.operation.oldBinding, workspaceId: "other"};}],
@@ -1397,8 +1571,8 @@ for (const saved of [false,true]) {
 it("serves the exact retained restore admission and checkpoint before native application", async () => {
   const f = contentProposalFixture("owner", "device", true);
   try {
-    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const lifecycle = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const proposed = await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
+    const lifecycle = await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, restore, 201);
     expect(lifecycle.application).toBeNull();
     const raw = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1").get()!;
     const decoded = decodeJournalRow(f.context.db, raw);
@@ -1418,13 +1592,13 @@ it("serves the exact retained restore admission and checkpoint before native app
   } finally {f.close();}
 });
 
-it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",(kind,mode)=>{
+it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",async (kind,mode)=>{
   const f=contentProposalFixture(kind,mode,kind==="owner");
   try {
-    const proposed=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=f.journalRows();
+    const proposed=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200),before=f.journalRows();
     // Coverage window statements are cached per database, so the row bound lives in the cost test.
     const prepare=vi.spyOn(f.context.db,"prepare");
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201);
+    const admitted=await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,restore,201);
     const provenanceReads=prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.includes("sync_relay_live_update_struct_provenance") && /^\s*SELECT/i.test(sql));
     expect(provenanceReads.length).toBeGreaterThan(0);
     expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql) ||
@@ -1439,7 +1613,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     expect(admitted.admitted.authorSnapshot).toEqual([]);
     expect(admitted.admitted.checkpointCoverage?.filter(entry => entry.author.kind === "unattributed"))
       .toHaveLength(1);
-    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205)).toEqual(admitted);
+    expect(await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,restore,205)).toEqual(admitted);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
       hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
@@ -1457,7 +1631,7 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     const after=f.journalRows();
     expect(f.store.acknowledgeStopRestoreResume(f.input,resume)).toEqual(resumed);
     expect(f.store.acknowledgeStopRestoreReplacement(f.input,application)).toEqual(resumed);
-    expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,210)).toEqual(resumed);
+    expect(await f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,restore,210)).toEqual(resumed);
     expect(f.journalRows()).toEqual(after);
     const read=f.storage.readLiveUpdateJournalCut({document:f.document});expect(read.kind).toBe("cut");
     if (kind==="owner") {
@@ -1471,22 +1645,22 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
   }finally{f.close();}
 });
 
-it("starts a fresh restore author window at the 960-identity checkpoint band", () => {
+it("starts a fresh restore author window at the 960-identity checkpoint band", async () => {
   const f = contentProposalFixture("owner", "device", false, false, false, 960);
   try {
     const accepted = f.store.captureStopRestoreAcceptedCut(f.input);
     expect(accepted.checkpoint.cursor).toBe(960);
     expect(accepted.events).toEqual([]);
-    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const proposed = await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
+    const admitted = await f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, restore, 201);
     expect(admitted.admitted.authorSnapshot).toEqual([]);
     expect(admitted.admitted.checkpointCoverage?.map(entry => entry.author)).toEqual([{kind: "unattributed"}]);
   } finally {f.close();}
 });
 
-function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true) {
-  const f=contentProposalFixture(kind,"device",pending),proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
-  const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+async function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true) {
+  const f=contentProposalFixture(kind,"device",pending),proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
+  const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);
   const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
     admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
     hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:f.input.host.instanceId,connectionId:f.input.host.connectionId},recordedAtMs:202};
@@ -1503,8 +1677,8 @@ const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"jou
   operations:f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),owners:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all(),
   edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
 
-function repeatedReviewFixture(rounds = 1) {
-  const f = admittedRestoreFixture("owner", "deleted");
+async function repeatedReviewFixture(rounds = 1) {
+  const f = await admittedRestoreFixture("owner", "deleted");
   try {
     f.complete();
     for (let round = 1; ; round++) {
@@ -1526,9 +1700,9 @@ function repeatedReviewFixture(rounds = 1) {
         originEvidenceDigest: f.store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
         nativeSources: [], nativeSourceManifestDigest: jsonHash([receipt, []])};
       const second = buildContentProposal({...f, input, lookup, receipt, proposal});
-      const saved = f.store.recordStopRestoreProposal(input, second.encoded, policy, at + 3);
+      const saved = await f.store.recordStopRestoreProposal(input, second.encoded, restore, at + 3);
       if (round === rounds) return {...second, first: f, saved, reviewInput: {...input, maxOutputBytes: 1_000_000}};
-      const admitted = f.store.admitStopRestoreProposal(input, saved.proposalDigest, policy, at + 4);
+      const admitted = await f.store.admitStopRestoreProposal(input, saved.proposalDigest, restore, at + 4);
       const application = {...f.application, fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest,
         nativeSourceManifestDigest: admitted.nativeSourceManifestDigest, admitted: admitted.admitted,
         localHeadSequence: receipt.localHeadSequence + 1, recordedAtMs: at + 5};
@@ -1545,9 +1719,9 @@ function repeatedReviewFixture(rounds = 1) {
 }
 
 it("parses the complete leased storage review through the desktop owner restore contract", async () => {
-  const f = repeatedReviewFixture(2);
+  const f = await repeatedReviewFixture(2);
   try {
-    const before = lifecycleRows(f), driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: 40});
+    const before = lifecycleRows(f), driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: 40}, restore);
     const sendLiveRestore = vi.fn(async () => {throw Error("review must not write to the host");});
     const lease = await driver.review({store: f.store, lookup: f.lookup, deliveryKind: "owner",
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}});
@@ -1571,12 +1745,12 @@ it("parses the complete leased storage review through the desktop owner restore 
   } finally {f.close();}
 });
 
-it("reads the selected accepted edit time and author from authenticated storage into the desktop review", () => {
+it("reads the selected accepted edit time and author from authenticated storage into the desktop review", async () => {
   const f = contentProposalFixture("owner", "device", false, false, true);
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     const input = {...f.input, maxOutputBytes: 1_000_000}, before = lifecycleRows(f);
-    const review = OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy));
+    const review = OwnerRestoreReview.parse(await f.store.readStopRestoreReview(input, restore));
     const selected = f.raw.prepare(`SELECT received_at_ms,principal_kind,principal_id,grant_id,grant_generation
       FROM sync_relay_live_update_journal WHERE journal_cursor=?`).get(f.intent.restorePointCursor)!;
     expect(review.point).toMatchObject({journalCursor: f.intent.restorePointCursor, receiptDigest: f.intent.restorePointReceiptDigest});
@@ -1594,18 +1768,18 @@ it("reads the selected accepted edit time and author from authenticated storage 
       const saved = f.raw.prepare("SELECT received_at_ms,principal_id FROM sync_relay_live_update_journal WHERE journal_cursor=?")
         .get(f.intent.restorePointCursor)!;
       f.raw.prepare(damage).run(f.intent.restorePointCursor);
-      expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+      await expect(f.store.readStopRestoreReview(input, restore)).rejects.toThrow();
       f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=?,principal_id=? WHERE journal_cursor=?")
         .run(saved.received_at_ms, saved.principal_id, f.intent.restorePointCursor);
-      expect(OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy))).toEqual(review);
+      expect(OwnerRestoreReview.parse(await f.store.readStopRestoreReview(input, restore))).toEqual(review);
     }
   } finally {f.close();}
 });
 
 it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "budget", "changed-after-review", "cancelled-after-review"])("confirms only an authenticated complete host restore review: %s", async state => {
-  const f = repeatedReviewFixture();
+  const f = await repeatedReviewFixture();
   try {
-    const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: state === "budget" ? 3 : 40});
+    const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: state === "budget" ? 3 : 40}, restore);
     const sendLiveRestore = vi.fn(async () => {throw Error("simulated transport loss after admission");});
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
@@ -1654,14 +1828,14 @@ it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "bud
   } finally {f.close();}
 });
 
-it("returns a complete private review across a restore checkpoint, including already-deleted native work", () => {
-  const f = repeatedReviewFixture();
+it("returns a complete private review across a restore checkpoint, including already-deleted native work", async () => {
+  const f = await repeatedReviewFixture();
   try {
     expect(f.receipt.acceptedHistory.suffix).toHaveLength(0);
     expect(f.receipt.acceptedHistory.checkpoint.eventCount).toBe(3);
     expect(Y.decodeUpdate(f.first.bytes.nativeSourceBytes[1]!).structs).toHaveLength(0);
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_source_ranges WHERE source_ordinal=1").get()!.n).toBe(0);
-    const before = lifecycleRows(f), review = f.store.readStopRestoreReview(f.reviewInput, policy)!;
+    const before = lifecycleRows(f), review = (await f.store.readStopRestoreReview(f.reviewInput, restore))!;
     expect(review.proposalDigest).toBe(f.saved.proposalDigest);
     expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([1, 2, 3]);
     expect(review.priorRestoreCuts).toEqual([{operationId: "restore", proposalDigest: f.first.proposal.proposalDigest,
@@ -1680,10 +1854,10 @@ it("returns a complete private review across a restore checkpoint, including alr
   } finally {f.close();}
 });
 
-it("retains overlapping authenticated prior restore cuts without duplicating accepted events or deletion-only sources", () => {
-  const f = repeatedReviewFixture(2);
+it("retains overlapping authenticated prior restore cuts without duplicating accepted events or deletion-only sources", async () => {
+  const f = await repeatedReviewFixture(2);
   try {
-    const before = lifecycleRows(f), review = f.store.readStopRestoreReview(f.reviewInput, policy)!;
+    const before = lifecycleRows(f), review = (await f.store.readStopRestoreReview(f.reviewInput, restore))!;
     expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([1, 2, 3, 4]);
     expect(review.priorRestoreCuts.map(cut => ({operationId: cut.operationId, selected: cut.selectedTerminal?.journalCursor ?? 0,
       frozen: cut.frozenTerminal?.journalCursor ?? 0, restored: cut.restoreJournalCursor,
@@ -1699,8 +1873,8 @@ it("retains overlapping authenticated prior restore cuts without duplicating acc
 });
 
 it.each(["owner", "workspace", "host", "events", "bytes", "output", "metadata", "missing-event", "historical-proposal", "restore-marker"])(
-  "refuses the complete restore review for %s without admitting a replacement", damage => {
-    const f = repeatedReviewFixture();
+  "refuses the complete restore review for %s without admitting a replacement", async damage => {
+    const f = await repeatedReviewFixture();
     try {
       const input = structuredClone(f.reviewInput);
       if (damage === "owner") input.ownerUserId = "foreign";
@@ -1714,30 +1888,30 @@ it.each(["owner", "workspace", "host", "events", "bytes", "output", "metadata", 
       if (damage === "historical-proposal") f.raw.exec("UPDATE sync_relay_live_restore_proposals SET proposal_bytes=zeroblob(length(proposal_bytes)) WHERE operation_id='restore'");
       if (damage === "restore-marker") f.raw.exec("UPDATE sync_relay_live_update_journal SET restore_operation_id=NULL WHERE journal_cursor=3");
       const before = lifecycleRows(f);
-      expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+      await expect(f.store.readStopRestoreReview(input, restore)).rejects.toThrow();
       expect(lifecycleRows(f)).toEqual(before);
     } finally {f.close();}
   });
 
-it("enforces complete serialized review output bytes and reports current native sources separately", () => {
+it("enforces complete serialized review output bytes and reports current native sources separately", async () => {
   const f = contentProposalFixture("owner", "device", true);
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
     const input = {...f.input, maxOutputBytes: 1_000_000};
-    const review = f.store.readStopRestoreReview(input, policy)!;
+    const review = (await f.store.readStopRestoreReview(input, restore))!;
     const outputBytes = Buffer.byteLength(JSON.stringify(review));
-    expect(f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes}, policy)).toEqual(review);
-    expect(() => f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes - 1}, policy)).toThrow("output budget");
+    expect(await f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes}, restore)).toEqual(review);
+    await expect(f.store.readStopRestoreReview({...input, maxOutputBytes: outputBytes - 1}, restore)).rejects.toThrow("output budget");
     expect(review.nativeSources).toHaveLength(2);
     expect(review.nativeSources.every(source => source.occurrences[0]!.context === "current-fence")).toBe(true);
   } finally {f.close();}
 });
 
-it("associates an acknowledged native source with its single accepted delivery in the complete review", () => {
+it("associates an acknowledged native source with its single accepted delivery in the complete review", async () => {
   const f = contentProposalFixture("owner", "device", false, true);
   try {
-    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
-    const review = f.store.readStopRestoreReview({...f.input, maxOutputBytes: 1_000_000}, policy)!;
+    await f.store.recordStopRestoreProposal(f.input, f.encoded, restore, 200);
+    const review = (await f.store.readStopRestoreReview({...f.input, maxOutputBytes: 1_000_000}, restore))!;
     const source = f.acceptedNative!.source;
     expect(review.acceptedEvents.filter(event => event.metadata.accepted.receipt.deliveryId === source.deliveryId)).toHaveLength(1);
     expect(review.nativeSources).toHaveLength(1);
@@ -1746,8 +1920,8 @@ it("associates an acknowledged native source with its single accepted delivery i
   } finally {f.close();}
 });
 
-it.each(["metadata", "provenance"])("preflights actual historical %s before materializing an oversized review row", damage => {
-  const f = repeatedReviewFixture();
+it.each(["metadata", "provenance"])("preflights actual historical %s before materializing an oversized review row", async damage => {
+  const f = await repeatedReviewFixture();
   try {
     if (damage === "metadata") f.raw.prepare("UPDATE sync_relay_live_update_journal SET selector_paths_json=? WHERE journal_cursor=1")
       .run(JSON.stringify(["x".repeat(200_000)]));
@@ -1759,13 +1933,13 @@ it.each(["metadata", "provenance"])("preflights actual historical %s before mate
       if (sql.startsWith("SELECT journal_cursor,relay_database_namespace,")) throw Error("materialized review row before preflight");
       return prepare(sql);
     });
-    try {expect(() => f.store.readStopRestoreReview({...f.reviewInput, maxBytes: 100_000}, policy)).toThrow("byte bounds");}
+    try {await expect(f.store.readStopRestoreReview({...f.reviewInput, maxBytes: 100_000}, restore)).rejects.toThrow("byte bounds");}
     finally {spy.mockRestore();}
   } finally {f.close();}
 });
 
-it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",damage=>{
-  const f=admittedRestoreFixture(),doc=new Y.Doc({gc:false});
+it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending source attribution complete after restore: %s",async damage=>{
+  const f=await admittedRestoreFixture(),doc=new Y.Doc({gc:false});
   try{
     f.complete();
     const checkpoint=f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!;
@@ -1786,15 +1960,15 @@ it.each(["none","all deleted","one deleted","manifest changed"])("keeps pending 
     }
   }finally{doc.destroy();f.close();}
 });
-it("allows ordinary admission from a restored checkpoint with no pending source rows",()=>{
-  const f=admittedRestoreFixture("bootstrap",false),doc=new Y.Doc({gc:false});
+it("allows ordinary admission from a restored checkpoint with no pending source rows",async ()=>{
+  const f=await admittedRestoreFixture("bootstrap",false),doc=new Y.Doc({gc:false});
   try{
     f.complete();Y.applyUpdate(doc,f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!.validation_checkpoint_bytes as Uint8Array);
     doc.getMap("frontmatter").set("after","restored");expect(f.storage.commitLiveUpdateJournal(f.journalCapture(Y.encodeStateAsUpdate(doc),"ordinary")).result.kind).toBe("accepted");
   }finally{doc.destroy();f.close();}
 });
-it.each(["application","settlement","resume"])("refuses changed %s evidence without advancing the restore or quota",stage=>{
-  const f=admittedRestoreFixture();
+it.each(["application","settlement","resume"])("refuses changed %s evidence without advancing the restore or quota",async stage=>{
+  const f=await admittedRestoreFixture();
   try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
@@ -1805,29 +1979,29 @@ it.each(["application","settlement","resume"])("refuses changed %s evidence with
     expect(call).toThrow();expect(lifecycleRows(f)).toEqual(before);
   }finally{f.close();}
 });
-it("funds all restore receipts before admission and keeps the journal unchanged on quota refusal",()=>{
+it("funds all restore receipts before admission and keeps the journal unchanged on quota refusal",async ()=>{
   const f=contentProposalFixture();
   try{
-    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f),original=f.context.options.workspaceQuotaBytes;
+    const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200),before=lifecycleRows(f),original=f.context.options.workspaceQuotaBytes;
     f.context.options.workspaceQuotaBytes=Number(before.usage)+1;
-    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow(/quota/);expect(lifecycleRows(f)).toEqual(before);
+    await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201)).rejects.toThrow(/quota/);expect(lifecycleRows(f)).toEqual(before);
     f.context.options.workspaceQuotaBytes=original;
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);
     expect(admitted.phase).toBe("relay-admitted");
     expect(Number(f.raw.prepare("SELECT receipt_reservation_bytes FROM sync_relay_live_restore_lifecycles").get()!.receipt_reservation_bytes)).toBeGreaterThan(0);
   }finally{f.close();}
 });
-it.each(["admission","source","usage"])("rolls back the replacement journal and all metadata after ignored %s write",boundary=>{
+it.each(["admission","source","usage"])("rolls back the replacement journal and all metadata after ignored %s write",async boundary=>{
   const f=contentProposalFixture("owner","device",true);
   try{
-    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),table=boundary==="admission"?"sync_relay_live_restore_lifecycles":boundary==="source"?"sync_relay_live_restore_source_ranges":"sync_relay_workspace_usage";
+    const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200),table=boundary==="admission"?"sync_relay_live_restore_lifecycles":boundary==="source"?"sync_relay_live_restore_source_ranges":"sync_relay_workspace_usage";
     f.raw.exec(`CREATE TRIGGER ignore_restore BEFORE ${boundary==="usage"?"UPDATE":"INSERT"} ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
     const before=lifecycleRows(f);
-    expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow();expect(lifecycleRows(f)).toEqual(before);
+    await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201)).rejects.toThrow();expect(lifecycleRows(f)).toEqual(before);
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("recovers the exact restore after relay restart before %s acknowledgement",stage=>{
-  const f=admittedRestoreFixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined,closed=false;
+it.each(["application","settlement","resume"])("recovers the exact restore after relay restart before %s acknowledgement",async stage=>{
+  const f=await admittedRestoreFixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined,closed=false;
   try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
@@ -1836,21 +2010,21 @@ it.each(["application","settlement","resume"])("recovers the exact restore after
     expect(f.complete(store).phase).toBe("resumed");expect(store.readStopRestoreLifecycle(f.input)!.resume).toEqual(f.resume);
   }finally{if(!closed)f.close();reopened?.close();}
 });
-it("retains original owner binding and operation history across a second stop",()=>{
-  const f=admittedRestoreFixture();
+it("retains original owner binding and operation history across a second stop",async ()=>{
+  const f=await admittedRestoreFixture();
   try{
     f.complete();f.raw.exec("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'");
     const second={...f.intent,operationId:"second-restore",expectedFence:2,expectedGrantGeneration:6};
     const begun=beginStopRestore(f.context,second,300);expect(begun.previousOperationId).toBe(f.input.operationId);
     const lookup={...f.lookup,operationId:second.operationId};advanceStopRestoreFence(f.context,lookup,301);
     const before=lifecycleRows(f);
-    expect(f.store.admitStopRestoreProposal(f.input,f.proposal.proposalDigest,policy,302).resume).toEqual(f.resume);
+    expect((await f.store.admitStopRestoreProposal(f.input,f.proposal.proposalDigest,restore,302)).resume).toEqual(f.resume);
     expect(f.store.acknowledgeStopRestoreResume(f.input,f.resume).resume).toEqual(f.resume);expect(lifecycleRows(f)).toEqual(before);
     expect(f.raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toMatchObject({admission_state:"closed",restore_fence_generation:3});
   }finally{f.close();}
 });
-it("workspace deletion cascades through admitted restore history",()=>{
-  const f=admittedRestoreFixture();
+it("workspace deletion cascades through admitted restore history",async ()=>{
+  const f=await admittedRestoreFixture();
   try{
     f.complete();f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'");
     for(const table of ["sync_relay_live_restore_lifecycles","sync_relay_live_restore_source_ranges","sync_relay_live_restore_operations","sync_relay_live_update_journal"])
@@ -1858,17 +2032,21 @@ it("workspace deletion cascades through admitted restore history",()=>{
   }finally{f.close();}
 });
 
-it("hashes copied restore state before entering the SQLite writer",()=>{
+it("hashes copied restore state before entering the SQLite writer",async ()=>{
   const f=contentProposalFixture("owner","device",true),prototype=Object.getPrototypeOf(createHash("sha256"));
-  const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;
+  const update=prototype.update,tx=f.context.tx.bind(f.context);let writing=false;const hashed:Uint8Array[]=[];
+  // The writer may hash stored evidence to compare it, never the state it admits.
   const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){
-    if(writing && typeof args[0]!=="string")throw Error("copied state hash inside writer");
+    if(writing && args[0] instanceof Uint8Array)hashed.push(new Uint8Array(args[0]));
     return Reflect.apply(update,this,args);
   });
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   try{
-    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
-    expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201).phase).toBe("relay-admitted");
+    const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
+    expect((await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201)).phase).toBe("relay-admitted");
+    const admitted=f.raw.prepare("SELECT update_bytes,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id=?").get(f.input.operationId)!;
+    for(const copied of [admitted.update_bytes,admitted.validation_checkpoint_bytes] as Uint8Array[])
+      expect(hashed.some(bytes=>Buffer.compare(bytes,copied)===0)).toBe(false);
   }finally{hashSpy.mockRestore();txSpy.mockRestore();f.close();}
 });
 it("finds existing owner delivery only after authorization and refuses damaged origin",()=>{
@@ -1884,8 +2062,8 @@ it("finds existing owner delivery only after authorization and refuses damaged o
   }finally{f.close();}
 });
 
-it("precharges retained restore evidence before materializing an oversized admission",()=>{
-  const f=admittedRestoreFixture();
+it("precharges retained restore evidence before materializing an oversized admission",async ()=>{
+  const f=await admittedRestoreFixture();
   try{
     f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_json=?").run(JSON.stringify({payload:"x".repeat(f.input.maxBytes)}));
     const before=lifecycleRows(f),spy=vi.spyOn(f.context.db,"prepare");
@@ -1906,23 +2084,23 @@ function retainedLifecyclePayloadBytes(db:StorageContext["db"],operationId:strin
     (journal.update_bytes as Uint8Array).byteLength+(journal.validation_checkpoint_bytes as Uint8Array).byteLength+
     Number(journal.accepted_metadata_bytes)+Number(lifecycle.receipt_reservation_bytes);
 }
-it("rolls back admission one byte below its funded read budget and can retry to completion",()=>{
+it("rolls back admission one byte below its funded read budget and can retry to completion",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);
   try {
-    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=lifecycleRows(f);
+    const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200),before=lifecycleRows(f);
     let required=0;
     const dryRun=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{
       run();required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);throw Error("measured rollback");
     }));
-    try{expect(()=>f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201)).toThrow("measured rollback");}finally{dryRun.mockRestore();}
+    try{await expect(f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201)).rejects.toThrow("measured rollback");}finally{dryRun.mockRestore();}
     expect(lifecycleRows(f)).toEqual(before);expect(required).toBeGreaterThan(f.encoded.length);
     let reachedAdmission=false;
     const observe=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{try{return run();}catch(error){
       reachedAdmission=f.context.db.prepare("SELECT 1 FROM sync_relay_live_restore_lifecycles WHERE operation_id=?").get(f.input.operationId)!==undefined;throw error;
     }}));
-    try{expect(()=>f.store.admitStopRestoreProposal({...f.input,maxBytes:required-1},proposal.proposalDigest,policy,201)).toThrow();}finally{observe.mockRestore();}
+    try{await expect(f.store.admitStopRestoreProposal({...f.input,maxBytes:required-1},proposal.proposalDigest,restore,201)).rejects.toThrow();}finally{observe.mockRestore();}
     expect(reachedAdmission).toBe(true);expect(lifecycleRows(f)).toEqual(before);
-    const admitted=f.store.admitStopRestoreProposal({...f.input,maxBytes:required},proposal.proposalDigest,policy,201);
+    const admitted=await f.store.admitStopRestoreProposal({...f.input,maxBytes:required},proposal.proposalDigest,restore,201);
     expect(admitted.phase).toBe("relay-admitted");
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
@@ -1937,15 +2115,15 @@ it("rolls back admission one byte below its funded read budget and can retry to 
     expect(f.store.acknowledgeStopRestoreResume(budget,resume).phase).toBe("resumed");
   }finally{f.close();}
 });
-it("charges operation payloads once when reading a resumed lifecycle at its exact byte budget",()=>{
-  const f=admittedRestoreFixture();try{
+it("charges operation payloads once when reading a resumed lifecycle at its exact byte budget",async ()=>{
+  const f=await admittedRestoreFixture();try{
     f.complete();const required=retainedLifecyclePayloadBytes(f.context.db,f.input.operationId);
     expect(f.store.readStopRestoreLifecycle({...f.input,maxBytes:required})!.phase).toBe("resumed");
     expect(()=>f.store.readStopRestoreLifecycle({...f.input,maxBytes:required-1})).toThrow();
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("keeps %s recoverable when configured evidence capacity is reduced",stage=>{
-  const f=admittedRestoreFixture();try{
+it.each(["application","settlement","resume"])("keeps %s recoverable when configured evidence capacity is reduced",async stage=>{
+  const f=await admittedRestoreFixture();try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
     const before=lifecycleRows(f),input={...f.input,maxBytes:retainedLifecyclePayloadBytes(f.context.db,f.input.operationId)-1};
@@ -1955,8 +2133,8 @@ it.each(["application","settlement","resume"])("keeps %s recoverable when config
     expect(f.complete().phase).toBe("resumed");
   }finally{f.close();}
 });
-it.each(["application","settlement","resume"])("rolls back %s if its retained budget becomes unreadable before commit",stage=>{
-  const f=admittedRestoreFixture();try{
+it.each(["application","settlement","resume"])("rolls back %s if its retained budget becomes unreadable before commit",async stage=>{
+  const f=await admittedRestoreFixture();try{
     if(stage!=="application")f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
     if(stage==="resume")f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
     const column=stage==="application"?"application_json":stage==="settlement"?"settlement_json":"resume_json";
@@ -1967,35 +2145,38 @@ it.each(["application","settlement","resume"])("rolls back %s if its retained bu
     expect(lifecycleRows(f)).toEqual(before);f.raw.exec("DROP TRIGGER shrink_restore_budget");expect(f.complete().phase).toBe("resumed");
   }finally{f.close();}
 });
-it.each(["proposal","admission"])("rejects a same-length source rewrite by another connection before %s writer entry",stage=>{
+it.each(["proposal","admission"])("rejects a same-length source rewrite by another connection before %s writer entry",async stage=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context);let changed:ReturnType<typeof lifecycleRows>|undefined;
   try {
-    const proposal=stage==="admission"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):null;
+    const proposal=stage==="admission"?await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200):null;
     const spy=vi.spyOn(f.context,"tx").mockImplementation(run=>{
       const row=f.raw.prepare("SELECT journal_cursor,update_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor LIMIT 1").get()!;
       const bytes=new Uint8Array(row.update_bytes as Uint8Array);bytes[bytes.length-1]^=1;
       f.raw.prepare("UPDATE sync_relay_live_update_journal SET update_bytes=? WHERE journal_cursor=?").run(bytes,row.journal_cursor);changed=lifecycleRows(f);
       return tx(run);
     });
-    try{expect(()=>stage==="proposal"?f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200):f.store.admitStopRestoreProposal(f.input,proposal!.proposalDigest,policy,201)).toThrow(/changed during validation/);}finally{spy.mockRestore();}
+    try{await expect(stage==="proposal"?f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200):f.store.admitStopRestoreProposal(f.input,proposal!.proposalDigest,restore,201)).rejects.toThrow(/changed during validation/);}finally{spy.mockRestore();}
     expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
   }finally{f.close();}
 });
-it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes in the writer",()=>{
+// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged, and compare the stored proposal in SQL; ACKs read none.
+it("keeps restore writers to one stored-proposal comparison and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
-  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false;
+  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,acknowledging=false,compared=0;
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
-    if(writing && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
-    if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
+    if(writing && acknowledging && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
+    if(writing && /SELECT\s+proposal_bytes=\? AS proposal_matches\b/.test(sql))compared++;
+    else if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
     return prepare(sql);
   });
-  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing)throw Error("byte comparison in writer");return compare(a,b);});
-  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
+  const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing && acknowledging)throw Error("byte comparison in writer");return compare(a,b);});
+  const hashSpy=vi.spyOn(prototype,"update").mockImplementation(function(this:unknown,...args:unknown[]){if(writing&&acknowledging&&typeof args[0]!=="string")throw Error("byte hash in writer");return Reflect.apply(update,this,args);});
   try {
-    const proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
-    expect(f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200).replayed).toBe(true);
-    const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
+    const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
+    expect((await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200)).replayed).toBe(true);
+    const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);acknowledging=true;
+    expect(compared).toBe(1);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
       localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
     const settlement={settlementId:"\\".repeat(512),previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,localYDocSequence:application.localHeadSequence,
@@ -2008,7 +2189,7 @@ it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comp
 });
 
 
-function restorePublication(f: ReturnType<typeof admittedRestoreFixture>, bytes: Uint8Array,
+function restorePublication(f: Awaited<ReturnType<typeof admittedRestoreFixture>>, bytes: Uint8Array,
   terminal: number, id: string, previous = 0, before = String(f.raw.prepare("SELECT baseline_projected_sha256 FROM sync_relay_live_documents").get()!.baseline_projected_sha256), originSeq = 0) {
   const document = f.document, row = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!;
   const binding = {...f.admitted.admitted.accepted.binding};
@@ -2033,7 +2214,7 @@ function restorePublication(f: ReturnType<typeof admittedRestoreFixture>, bytes:
 }
 
 it("publishes hosted settlement at a verified closed restore fence and chains the next ordinary settlement", async () => {
-  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  const f = await admittedRestoreFixture(), doc = new Y.Doc({gc: false});
   try {
     const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
@@ -2060,7 +2241,7 @@ it("publishes hosted settlement at a verified closed restore fence and chains th
 });
 
 it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid hosted restore proof: %s", async damage => {
-  const f = admittedRestoreFixture();
+  const f = await admittedRestoreFixture();
   try {
     const terminal = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!.validation_checkpoint_bytes as Uint8Array;
@@ -2079,7 +2260,7 @@ it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid ho
 afterAll(async () => {await liveValidation.close();});
 
 it.each(["accepted-base", "forged-before", "skipped-cut", "changed-base-admission", "damaged-base-cut"])("restarts hosted chain from authenticated recovered binding base: %s", async variant => {
-  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  const f = await admittedRestoreFixture(), doc = new Y.Doc({gc: false});
   try {
     const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
     const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;

@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
@@ -22,13 +22,13 @@ async fn open(
     if !capture {
         params["captureMode"] = json!("none");
     }
-    let result = transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, "workspace.open", None, params),
-        )
-        .await
-        .expect("open");
+    let result = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, "workspace.open", None, params),
+    )
+    .await
+    .expect("open");
     serde_json::from_value(result.result["workspace"].clone()).unwrap()
 }
 fn stats(mut values: Vec<f64>) -> Value {

@@ -24,6 +24,8 @@ vi.mock("./renderer/bridge", async () => {
     readUsageRecord: async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] }),
     getWorkspaceSettings: async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" }),
     getUserSettingsFilePath: async () => "/fixture/settings.json",
+    readWorkspaceTrust: async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false }),
+    onWorkspaceTrustChanged: () => () => {},
     onUpdateState: () => () => {},
     getUpdateState: async () => ({ status: "idle", message: "fixture", currentVersion: "1.2.3", channel: "latest", canCheck: false, canInstall: false }),
   }) };

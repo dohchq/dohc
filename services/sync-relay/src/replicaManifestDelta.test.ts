@@ -1,6 +1,6 @@
 import {afterEach,expect,it,vi} from "vitest";
 import {createReplicaSupervisor} from "./replicaSupervisor";
-import {closeTestStorages,sha256,tempRoot,testStorage,inspectDatabase,storagePath} from "./testing";
+import {closeTestStorages,seedLinkGrant,sha256,tempRoot,testStorage,inspectDatabase,storagePath} from "./testing";
 import type {ReplicaCurrentViewPage} from "@dohc/workspace-engine-client/daemon";
 import {ReplicaCurrentViewRefused,forgetReplicaCurrentViewStoredCache} from "./storage/replicaCurrentViews";
 import type {StorageContext} from "./storage/context";
@@ -8,6 +8,55 @@ import {ReplicaManifest} from "./replicaManifest";
 import * as shareSelector from "@dohc/security-contract/share-selector";
 
 afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
+it("R4 review: publish notifies once; unchanged persists and History samples stay quiet",async()=>{
+  const f=await fixture(3),notified=vi.fn();f.supervisor.subscribeReadChanges(notified);
+  seedLinkGrant(f.storage,{shareId:"s",grantId:"link",secretHash:"hash"});
+  const input={grantId:"link",generation:1};
+  const service=f.storage.createReplicaLinkReadService(f.supervisor,{holdReader(){}},{wakeLog(){}},()=>({lastSettledKnown:false,lastSettledAtMs:null}));
+  const cursor=service.inventory(input,()=>input).nextCursor;
+  vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
+  try {
+    f.update({});await f.supervisor.activate("w");expect(notified).not.toHaveBeenCalled();
+    expect(service.feed(input,()=>input,cursor,500)).toMatchObject({ops:[],nextCursor:cursor});
+    f.update({files:[{...f.files[0]!,sha256:sha256("edit"),byteLength:4}],texts:[{sha256:sha256("edit"),text:"edit"}]});
+    await f.supervisor.activate("w");expect(notified).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);expect(notified).toHaveBeenCalledTimes(1);
+    vi.spyOn(f.storage,"nextReplicaHistoryPinAt").mockReturnValueOnce(Date.now()+100).mockReturnValue(null);
+    const history=vi.spyOn(f.storage,"sampleReplicaHistory");
+    f.update({files:[{...f.files[1]!,path:"docs/renamed.md"}]});await f.supervisor.activate("w");
+    expect(notified).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100);expect(history).toHaveBeenCalled();expect(notified).toHaveBeenCalledTimes(2);
+  }finally{service.close();await f.supervisor.close();vi.restoreAllMocks();}
+});
+
+it("R4 review: a replacement manifest resets removals absent from the stored base",async()=>{
+  const f=await fixture(3),notified=vi.fn(),store=f.storage.storeReplicaCurrentView.bind(f.storage);f.supervisor.subscribeReadChanges(notified);
+  try {
+    vi.spyOn(f.storage,"storeReplicaCurrentView").mockImplementationOnce((lease,view,observations)=>store(lease,{...view,files:view.files.filter(row=>row.objectId!=="new")},observations));
+    f.update({files:[{...f.files[0]!,objectId:"new",path:"docs/new.md"}]});await f.supervisor.activate("w");
+    expect(f.supervisor.currentReadView("w")!.view.files).toHaveLength(4);
+    notified.mockClear();f.update({delta:false,files:f.files});await f.supervisor.activate("w");
+    expect(notified).toHaveBeenCalledOnce();expect(notified.mock.calls[0]![2]).toEqual([]);expect(notified.mock.calls[0]![3]).toBe(true);
+  }finally{await f.supervisor.close();vi.restoreAllMocks();}
+});
+
+it("R4 review: feed waits after a persist refusal until another publish",async()=>{
+  const f=await fixture(3);
+  seedLinkGrant(f.storage,{shareId:"s",grantId:"link",secretHash:"hash"});
+  const input={grantId:"link",generation:1};
+  const service=f.storage.createReplicaLinkReadService(f.supervisor,{holdReader(){}},{wakeLog(){}},()=>({lastSettledKnown:false,lastSettledAtMs:null}));
+  vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
+  try {
+    service.inventory(input,()=>input);
+    f.update({files:[{...f.files[0]!,sha256:sha256("edit"),byteLength:4}],texts:[{sha256:sha256("edit"),text:"edit"}]});await f.supervisor.activate("w");
+    const cursor=service.inventory(input,()=>input).nextCursor;
+    vi.spyOn(f.storage,"storeReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});
+    await vi.advanceTimersByTimeAsync(2000);
+    for(let i=0;i<3;i++)expect(service.feed(input,()=>input,cursor,500)).toMatchObject({ops:[],nextCursor:cursor,hasMore:false});
+    f.update({delta:false,files:[]});await f.supervisor.activate("w");
+    expect(service.feed(input,()=>input,cursor,500).ops).toContainEqual(expect.objectContaining({opKind:"files.reset"}));
+  }finally{service.close();await f.supervisor.close();vi.restoreAllMocks();}
+});
 it("prepares each replacement path once across collection and the first list",async()=>{
   const f=await fixture(100);
   try {
@@ -69,10 +118,10 @@ it("advances the restart header after the stored cache changes identity",async()
     expect(advance).toHaveBeenCalledTimes(1);
     expect(f.storage.readReplicaCurrentView("w")).toMatchObject({revision:2,logCursor:1});
     const input={...f.input,grantId:"new"};
-    expect(f.storage.listReplicaHistoryPins(input,f.supervisor)).toMatchObject({status:"ready"});
+    expect(f.storage.listReplicaHistoryPins(input,f.supervisor)).toMatchObject({status:"denied"});
     await f.supervisor.evict("w");
     forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
-    expect(f.storage.listReplicaHistoryPins(input)).toMatchObject({status:"ready"});
+    expect(f.storage.listReplicaHistoryPins(input)).toMatchObject({status:"denied"});
     expect(f.errors).toEqual([]);
   } finally {await f.supervisor.close();}
 });

@@ -13,10 +13,13 @@ description = "SQLite storage for the workspace engine: one writable connection 
 # lane (provably zero overhead). Enabled by `dohc-engine-testkit` for the
 # in-process crash tier and by `cargo test --workspace` via feature unification.
 fault-injection = []
+# Builds stores an older build left, for other crates' tests.
+test-support = []
 
 [dependencies]
-# `hooks` counts open work and search changes; `functions` exposes the search counter.
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
+# `hooks` counts open work and search changes; `functions` exposes the search counter;
+# `backup` copies an earlier store for its recovery copy.
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions", "backup"] }
 sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a
@@ -33,6 +36,11 @@ fs4 = "1"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 # The barrier flush that orders a materialized file before the commits after it.
 dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Opens a store reached through the folder the engine holds, with the VFS
+# that keeps that path.
+dohc-linux-files = { path = "../dohc-linux-files" }
 
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }

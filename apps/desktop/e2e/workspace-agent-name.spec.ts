@@ -5,7 +5,8 @@ import { writeFile } from "node:fs/promises";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import { installFakeAgentTools } from "./helpers/agentTools";
+import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, trustOpenWorkspace } from "./helpers/workspace";
 
 test("a named agent replies to a group mention with its owner on hover and focus", async ({}, testInfo) => {
   test.setTimeout(180_000);
@@ -13,8 +14,9 @@ test("a named agent replies to a group mention with its owner on hover and focus
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
-    desktop = await launchDesktopApp({ workspace: temp });
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
     const page = desktop.page;
     await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-add-agent-open").click();
@@ -25,12 +27,12 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await page.getByTestId("chats-add-agent-command").fill(command);
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await expect(page.getByTestId("chats-my-agent-name")).toHaveText("Nova");
+    await expect(page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').getByTestId("chats-my-agent-name")).toHaveText("Nova");
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("Agent name check");
     await page.getByTestId("chats-new-channel-name").press("Enter");
     const view = page.locator("main");
-    await view.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await view.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await view.getByTestId("chats-new-thread-composer").press("Enter");
     const reply = view.getByTestId("chats-comment-bubble").filter({ hasText: "done: checked the exports" });
     await expect(reply).toBeVisible();

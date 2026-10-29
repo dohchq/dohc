@@ -85,6 +85,45 @@ describe("server automation draft declarations", () => {
 });
 
 describe("closing a settled revision", () => {
+  it.each(["untouched", "edited"])("settles an absent lineage on close only after an edit (%s)", async state => {
+    const edited = state === "edited";
+    const engine = new YdocLoopbackEngine();
+    const settle = vi.fn();
+    const onSettleError = vi.fn();
+    const provider = await openEngineYdocProviderSession({
+      transport: {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.settle) {
+            settle();
+            // The daemon refuses NoMarker until the first durable update.
+            if (!engine.requests.some(request => request.method === YDOC_METHOD.recordUpdate)) {
+              throw new DaemonRefusalError({
+                code: "INVALID_PARAMS", message: "workspace operation failed", retry: "no",
+              }, undefined);
+            }
+          }
+          return engine.sendRequest(request);
+        },
+      },
+      workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      contentKind: "plaintext", onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined, onSettleError,
+    });
+    expect(provider.head).toBe("absent");
+    expect(provider.lineage).toBe("absent");
+    if (edited) {
+      await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first edit")));
+    }
+
+    await expect(provider.close()).resolves.toBeUndefined();
+
+    expect(settle).toHaveBeenCalledTimes(edited ? 1 : 0);
+    expect(onSettleError).not.toHaveBeenCalled();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.close)).toHaveLength(1);
+  });
+
   async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
     const engine = seedPlaintextEngine("seed");
     const provider = await openEngineYdocProviderSession({
@@ -694,6 +733,7 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   const provider = await openEngineYdocProviderSession({
     transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
     workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    largeSeed: {workspaceId: "workspace-1", maxBytes: original.length},
     onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
   });
   const owner = provider.nativeOwner!;
@@ -820,37 +860,68 @@ describe("seeding an absent lineage", () => {
     expect(recordedUpdates(engine, true)).toEqual([]);
     adapter.dispose();
   });
-});
 
-it.each([undefined, true] as const)("tells the engine a replacement's file existed only when it did (%s)", async fileExisted => {
-  const engine = seedPlaintextEngine("seed");
-  const provider = await openEngineYdocProviderSession({
-    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
-      sendRequest: request => engine.sendRequest(request)},
-    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
-    ...(fileExisted ? {fileExisted} : {}),
-    onRemoteUpdate: () => {}, scheduleSettle: () => () => {},
-  });
-  await provider.evict();
-  const open = engine.requests.find(request => request.method === YDOC_METHOD.open);
-  expect(open?.params).toEqual({versionId: VERSION, path: PATH, contentKind: "plaintext", ...(fileExisted ? {fileExisted} : {})});
-});
+  describe("a seed past the in-band cap", () => {
+    const longPath = "notes/long.md";
+    const content = "# Long\n\n" + "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    const largeSeed = { workspaceId: "workspace-1", maxBytes: 64 * 1024 };
+    const seedLongNote = () => {
+      const engine = new YdocLoopbackEngine();
+      engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: longPath, content, contentKind: "richdoc" });
+      return engine;
+    };
+    const openLong = (adapter: YdocLiveAdapter, withLargeSeed: boolean) =>
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: longPath,
+        contentKind: "richdoc",
+        ...(withLargeSeed ? { largeSeed } : {}),
+      });
 
-it.each([false, true])("reports a write by the settling close a refused release escalates to (settled first: %s)", async settledFirst => {
-  // The engine refuses to release a dirty local-only lineage, and the provider
-  // escalates to a settling close that writes the file. A settled lineage
-  // releases at once, and that close writes nothing.
-  const engine = seedPlaintextEngine("seed"), closeMaterialized = vi.fn();
-  const provider = await openEngineYdocProviderSession({
-    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
-      sendRequest: request => engine.sendRequest(request)},
-    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
-    onRemoteUpdate: () => {}, onCloseMaterialized: closeMaterialized, scheduleSettle: () => () => {},
+    it("reads it as a blob within the open's limit and seeds the same document", async () => {
+      expect(Buffer.byteLength(content)).toBeGreaterThan(48 * 1024);
+      const engine = seedLongNote();
+      const adapter = new YdocLiveAdapter(engine);
+      await expect(openLong(adapter, false)).rejects.toThrow("ydoc-seed-too-large");
+
+      const session = await openLong(adapter, true);
+      expect(engine.requests.filter((request) => request.method === "versionedText.readBlob")).toHaveLength(1);
+      expect(recordedUpdates(engine, true)).toHaveLength(1);
+      const opened = new Y.Doc();
+      Y.applyUpdate(opened, session.initialUpdate);
+      expect(ydocProjection.yDocToMarkdown(opened)).toBe(
+        ydocProjection.yDocToMarkdown(ydocProjection.markdownToYDoc(content)),
+      );
+      await session.close({ settle: false });
+      adapter.dispose();
+    });
+
+    it("refuses a blob that does not match the digest the open named", async () => {
+      const engine = seedLongNote();
+      const blobReads = new Set<number>();
+      const transport: EngineTransport = {
+        helloAck: engine.helloAck,
+        onEvent: (handler) => engine.onEvent(handler),
+        onBlob: (handler) =>
+          engine.onBlob((blob) => {
+            if (!blobReads.has(blob.requestId)) return handler(blob);
+            const bytes = new Uint8Array(blob.bytes);
+            bytes[0] = bytes[0]! ^ 1;
+            handler({ ...blob, bytes });
+          }),
+        async sendRequest(request) {
+          if (request.method === "versionedText.readBlob") blobReads.add(request.id);
+          return engine.sendRequest(request);
+        },
+      };
+      const adapter = new YdocLiveAdapter(transport);
+      await expect(openLong(adapter, true)).rejects.toThrow("does not match the digest");
+      expect(recordedUpdates(engine, true)).toEqual([]);
+      expect(engine.activeSessionIds()).toEqual([]);
+      adapter.dispose();
+    });
   });
-  await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "edit ")), {idempotencyKey: "edit-key", armSettle: false});
-  if (settledFirst) await provider.settleNow();
-  await provider.close({settle: false});
-  expect(closeMaterialized).toHaveBeenCalledTimes(settledFirst ? 0 : 1);
 });
 
 describe("scene artifact seed admission", () => {
@@ -1100,7 +1171,7 @@ describe("YdocLiveAdapter", () => {
     );
     expect(engine.activeSessionIds()).toHaveLength(1);
 
-    await expect(session.close()).resolves.toEqual({ materialized: false });
+    await expect(session.close()).resolves.toBeUndefined();
     expect(engine.activeSessionIds()).toHaveLength(0);
 
     const reopened = await adapter.openSession({
@@ -1363,6 +1434,57 @@ describe("YdocLiveAdapter", () => {
     });
     expect(result).toMatchObject({ seq: 1 });
     expect(session.doc.getText("plainText").toString()).toBe("xabc");
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  // The state before an edit is encoded only when the note already holds a
+  // U+FFFD. One that arrives remotely between two local edits must count.
+  it("counts a remote U+FFFD that lands between two local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(1, "\uFFFD");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "b" });
+    expect(session.doc.getText("plainText").toString()).toBe("ba\uFFFD");
+    expect(engine.recordedUpdates).toHaveLength(2);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("rejects a masked split after a remote U+FFFD lands between local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "\uFFFD\uFFFD😀");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 2);
+        text.insert(1, "x");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
     expect(engine.recordedUpdates).toHaveLength(1);
 
     await session.close({ settle: true });
@@ -2387,7 +2509,7 @@ describe("YdocLiveAdapter", () => {
       message: expect.stringContaining(resyncFailure.message),
       cause: recordFailure,
     });
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
 
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
     expect(() =>
@@ -2738,6 +2860,99 @@ describe("YdocLiveAdapter", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  // Native owner delivery holds the live settlement capacity while it reads or
+  // applies a frame, and an owner draft's resync needs the same capacity. The
+  // engine refuses the resync at once, and the slot frees without any action.
+  it("waits out occupied live capacity before a settle without surfacing a settle error", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine("seed");
+      const capacity = { held: true };
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+          ? { ...event, payload: { sessionId: (event.payload as { sessionId: string }).sessionId, resyncRequired: true } }
+          : event)),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.resync && capacity.held) throw refusal;
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, provider.initialUpdate);
+      const vector = Y.encodeStateVector(peer);
+      peer.getText("plainText").insert(0, "remote ");
+      // The invalidation's own resync is refused, which leaves the session stale.
+      engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+      await vi.advanceTimersByTimeAsync(0);
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      capacity.held = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "remote seed" })]);
+      expect(settleErrors).toEqual([]);
+      expect(provider.doc.getText("plainText").toString()).toBe("remote seed");
+      peer.destroy();
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
+  // An owner draft's journal write and its recovery resync need the same
+  // capacity. A settle that replays edits left unsent can meet it mid-replay.
+  it("waits out occupied live capacity while a settle replays unsent edits, and sends each edit once", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine();
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      let refuse = (_key: string) => true;
+      const sent: string[] = [];
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            sent.push(request.idempotencyKey ?? "");
+            if (refuse(request.idempotencyKey ?? "")) throw refusal;
+          }
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      await expect(provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first ")),
+        { idempotencyKey: "first" })).rejects.toBe(refusal);
+      await expect(provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc),
+        text => text.insert(text.length, "second")), { idempotencyKey: "second" })).rejects.toBe(refusal);
+      // The replay lands the first edit, then the capacity is taken once.
+      let refused = false;
+      refuse = key => key === "second" && !refused && (refused = true);
+      sent.length = 0;
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "first second" })]);
+      expect(settleErrors).toEqual([]);
+      // The retry resends only the edit the engine did not take.
+      expect(sent).toEqual(["first", "second", "second"]);
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
   it("surfaces a persistent store refusal when its total budget expires", async () => {
     vi.useFakeTimers();
     try {
@@ -2937,27 +3152,32 @@ describe("YdocLiveAdapter", () => {
   it("keeps resending while the store stays busy, and never settles without the text", async () => {
     // The poisoned-chain regression, and the ordering guard with it: no settle
     // may commit while the engine is still missing the text.
-    // Three refusals: the write, its recovery replay, and rung one's resend.
-    // Rung two then finds the store free.
-    const { provider, settled, scheduler } = await openAgainstABusyJournal(
-      "typed against a stubborn store",
-      3,
-    );
+    // Three refusals: the write, its recovery replay, and the settle's first
+    // resend. The settle waits out the busy store and resends.
+    vi.useFakeTimers();
+    try {
+      const { provider, settled, settleErrors, scheduler, methods } = await openAgainstABusyJournal(
+        "typed against a stubborn store",
+        3,
+      );
+      const writes = () => methods.filter(method => method === YDOC_METHOD.recordUpdate).length;
 
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    // Rung one resent and was refused again. Nothing settled behind it.
-    expect(settled).toEqual([]);
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await vi.advanceTimersByTimeAsync(0);
+      // The settle resent and was refused again. Nothing settled behind it.
+      expect(writes()).toBe(3);
+      expect(settled).toEqual([]);
 
-    // The contention clears; the next rung resends and the settle carries it.
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    expect(settled).toHaveLength(1);
-    expect(settled[0]?.content).toContain("typed against a stubborn store");
+      // The contention clears; the settle resends and carries the text.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(writes()).toBe(4);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.content).toContain("typed against a stubborn store");
+      expect(settleErrors).toEqual([]);
 
-    await provider.close({ settle: false });
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
   it("refuses to release a session still holding text the engine never got", async () => {
@@ -4406,8 +4626,8 @@ describe("YdocLiveAdapter", () => {
     // settle first, which is what covers it.
     await provider.close({ settle: true });
 
-    expect(settled.content).toBe("seed local");
-    expect(settled.projection).toEqual({
+    expect(settled?.content).toBe("seed local");
+    expect(settled?.projection).toEqual({
       contentKind: "plaintext",
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       destructive: false,
@@ -4860,7 +5080,7 @@ describe("the ydoc.open deadline", () => {
     });
     engine.markSessionReplicated(session.sessionId);
 
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5043,7 +5263,7 @@ describe("the ydoc.open deadline", () => {
       insert: "typed content",
     });
     engine.markSessionReplicated(session.sessionId);
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5090,7 +5310,7 @@ describe("the ydoc.open deadline", () => {
       "captured text",
     );
 
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
     adapter.dispose();
   });
 
@@ -5114,7 +5334,7 @@ describe("the ydoc.open deadline", () => {
       insert: "typed, closed with no settle flag at all: ",
     });
 
-    await expect(session.close()).resolves.toEqual({ materialized: true });
+    await expect(session.close()).resolves.toBeUndefined();
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5340,7 +5560,7 @@ describe("the ydoc.open deadline", () => {
       objectId: session.objectId,
     });
 
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
     adapter.dispose();
   });
 
@@ -5436,7 +5656,7 @@ describe("the ydoc.open deadline", () => {
       objectId: OBJECT_ID,
     });
 
-    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
+    await expect(session.close({ settle: false })).resolves.toBeUndefined();
     adapter.dispose();
   });
 
@@ -5566,7 +5786,7 @@ describe("the ydoc.open deadline", () => {
       "captured content",
     );
 
-    await expect(session.close({ settle: true })).resolves.toEqual({ materialized: true });
+    await expect(session.close({ settle: true })).resolves.toBeUndefined();
     // The settle succeeds — and since the session's only update is the
     // declared seed of the untouched captured file, it succeeds without
     // rewriting the artifact.

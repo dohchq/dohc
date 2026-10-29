@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import type {LiveUpdateStructRange} from "@dohc/live-session-contract";
 import {compareLiveRestoreContent} from "./liveRestoreContent.js";
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
-import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
+import {restoreValidators} from "./liveRestoreValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
 
 type Selected = Parameters<typeof resolveLiveRestorePoint>[0];
@@ -45,10 +45,10 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
   const binding = capture.selected.binding;
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
-  const pointValidation = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: binding.currentPath, checkpoint: point});
+  const pointValidation = restoreValidators(policy, capture.selected.artifact).registration({document, currentPath: binding.currentPath, checkpoint: point});
   if (pointValidation.kind !== "accepted") throw new Error(`Restore proposal point refused: ${pointValidation.reason}.`);
   // The point is a separate native full state. Compare normalized state, including deletion history.
-  const result = compareLiveRestoreContent({document, currentPath: binding.currentPath,
+  const result = compareLiveRestoreContent({document, currentPath: binding.currentPath, artifact: capture.selected.artifact,
     accepted: {target: capture.accepted.target, checkpoint: capture.accepted.checkpoint.bytes, suffix: capture.accepted.events.map(e => e.updateBytes)},
     point: {target: capture.selected.target, checkpoint: capture.selected.checkpoint.bytes, suffix: capture.selected.events.map(e => e.updateBytes)},
     nativeSources: native, frozenState: frozen, candidate, replacementRanges: receipt.replacementRanges,
@@ -94,7 +94,7 @@ function projectValidatedReview(capture: ProposalCapture, frozenBytes: Uint8Arra
   const binding = capture.selected.binding;
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
-  const registration = createLiveMarkdownRegistrationValidator(policy);
+  const registration = restoreValidators(policy, capture.selected.artifact).registration;
   const frozen = registration({document,currentPath:binding.currentPath,checkpoint:frozenBytes});
   const restored = registration({document,currentPath:binding.currentPath,checkpoint:content.stateUpdate});
   if (frozen.kind !== "accepted" || restored.kind !== "accepted") throw new Error("Restore review content refused.");

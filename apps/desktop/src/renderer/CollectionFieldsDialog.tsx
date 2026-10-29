@@ -24,6 +24,8 @@ export interface CollectionFieldsDialogProps {
   onChooseButton?(field: string): void;
   /** A button named for an action was approved: the ⚡ builder opens on what it does. */
   onButtonAdded?(field: string): void;
+  /** The type a new field starts with. */
+  addType?: FieldType;
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
@@ -37,7 +39,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
   // Buttons get their own controls. Names stay unique across every field.
   const columns = table ? datasetColumnFields(table) : [];
   const [kind, setKind] = useState<DatasetSchemaChange["kind"]>("addField"), [name, setName] = useState("");
-  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>("text");
+  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>(props.addType ?? "text");
   const [required, setRequired] = useState(false), [unique, setUnique] = useState(false), [hasDefault, setHasDefault] = useState(false);
   const [defaultText, setDefaultText] = useState(""), [options, setOptions] = useState("");
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
@@ -98,7 +100,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     }} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
   return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
     onSubmit={event => { event.preventDefault(); void prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
-    <h2 id="collection-fields-title" className="m-0 text-sm font-semibold text-ink">Fields and names</h2>
+    <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">Fields and names</h2>
     <label className="text-[12px] text-muted">Change<select aria-label="Change" disabled={pending} className={`${selectClass} mt-1 w-full`} value={kind} onChange={event => {
       const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
       if (next === "changeField") { selectField(fieldId); return; }

@@ -7,8 +7,10 @@ import {
   type RefObject,
 } from "react";
 import { useFocusReturn } from "./ui/focusReturn";
+import { focusedElementIn } from "./ui/focusedElement";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
+import { matchesShortcut } from "../shortcuts/shortcutRegistry";
 
 type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | "tabIndex"> & {
   "data-testid"?: string;
@@ -46,7 +48,9 @@ export function OverlayFrame(props: {
         ref={props.panelRef}
         tabIndex={-1}
         data-focus-surface="dialog"
-        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0`}
+        // The panel holds focus only until Tab reaches its controls, which
+        // show their own ring, so the whole dialog never wears one.
+        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0 outline-none`}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}
@@ -55,11 +59,14 @@ export function OverlayFrame(props: {
   );
 }
 
-// Shared modal scaffold: dimmed backdrop that closes on click, with an inner
-// panel that swallows clicks. Used by the command palette, quick-open, new
-// file dialog, and cloud panel so close/backdrop behavior — and this keyboard behavior — stays identical everywhere.
+// Shared modal scaffold: a dimmed backdrop and a panel, with one close and
+// keyboard behavior everywhere. Escape, ⌘W on macOS, and the dialog's own
+// controls close it; a press on the backdrop does nothing, so a stray click never throws
+// away what someone typed. A picker, which holds nothing worth keeping,
+// sets closeOnBackdrop.
 export function Overlay(props: {
   onClose?: () => void;
+  closeOnBackdrop?: boolean;
   children: ReactNode;
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
@@ -83,7 +90,7 @@ export function Overlay(props: {
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    if (panel && (props.appearance === "warning" || !panel.contains(document.activeElement))) panel.focus();
+    if (panel && (props.appearance === "warning" || !panel.contains(focusedElementIn(panel)))) panel.focus();
   }, []);
 
   useEffect(() => {
@@ -94,6 +101,14 @@ export function Overlay(props: {
         // One Escape closes one surface: a menu or a control's tooltip open
         // inside the dialog takes this one, and the next reaches the dialog.
         if (event.target instanceof Element && event.target.closest("[role='menu'], [data-tooltip-open]")) return;
+        event.stopPropagation();
+        onCloseRef.current?.();
+        return;
+      }
+      // macOS closes a dialog with ⌘W, as it closes a window. A dialog with no
+      // onClose still takes the chord, so the menu never closes what is behind it.
+      if (window.dohcDesktop?.platform === "darwin" && matchesShortcut(event, "close-tab", "darwin")) {
+        event.preventDefault();
         event.stopPropagation();
         onCloseRef.current?.();
         return;
@@ -110,7 +125,7 @@ export function Overlay(props: {
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
-      onBackdropClick={props.onClose}
+      onBackdropClick={props.closeOnBackdrop ? props.onClose : undefined}
     >
       {props.children}
     </OverlayFrame>

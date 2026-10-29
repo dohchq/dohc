@@ -2,7 +2,7 @@ import type { HistoryCursor } from "./versionedWireContract";
 function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, operationId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
 import type { JsonValue, Request, Response } from "../protocol";
 import {
@@ -31,6 +31,52 @@ import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
+
+it.each([false, true])("forwards request cancellation without dropping its answer or closing the shared client: %s", async outcome => {
+  let finish!: (response: Response) => void;
+  let refuse!: (error: Error) => void;
+  let request!: Request;
+  const close = vi.fn();
+  const client = {close, sendRequest: vi.fn((input: Request, _signal?: AbortSignal, _progress?: () => void, cancelSignal?: AbortSignal) => {
+    expect(cancelSignal).toBe(cancel.signal);
+    request = input;
+    return new Promise<Response>((resolve, reject) => {finish = resolve; refuse = reject;});
+  })};
+  const adapter = new VersionedLiveAdapter(client, WORKSPACE, {workspaceId: WORKSPACE});
+  const cancel = new AbortController();
+  let settled = false;
+  const answer = adapter.rewriteHistoryLinks({workspaceId: WORKSPACE, operationId: "operation", requestId: "same-key", cancelSignal: cancel.signal});
+  void answer.then(() => {settled = true;}, () => {settled = true;});
+  cancel.abort();
+  await Promise.resolve();
+  expect(client.sendRequest.mock.calls[0]![3]?.aborted).toBe(true);
+  expect(settled).toBe(false);
+  expect(close).not.toHaveBeenCalled();
+  expect(request).not.toHaveProperty("cancelSignal");
+  if (outcome === true) {
+    refuse(new EngineRequestError(request.id, {code: "CANCELLED", message: "cancelled", retry: "no"}));
+    await expect(answer).rejects.toMatchObject({wireCode: "CANCELLED"});
+  } else {
+    const receipt = {documents: 1, links: 1, unchecked: [], uncheckedCount: 0, complete: true};
+    finish({id: request.id, result: receipt});
+    expect(await answer).toEqual(receipt);
+  }
+  expect(close).not.toHaveBeenCalled();
+});
+
+it("sends the link rewrite request identity and author in the correct fields", async () => {
+  const requests: Request[] = [];
+  const reply = {documents: 2, links: 4, unchecked: ["open.md"], uncheckedCount: 1, complete: false};
+  const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+    requests.push(request);
+    return {id: request.id, result: reply};
+  }}, WORKSPACE, {workspaceId: WORKSPACE});
+  expect(await adapter.rewriteHistoryLinks({workspaceId: WORKSPACE, operationId: "dohc-operation:rename", requestId: "rewrite-retry", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}})).toEqual(reply);
+  expect(requests[0]).toMatchObject({method: "history.rewriteLinks", idempotencyKey: "rewrite-retry", params: {operationId: "dohc-operation:rename", author: {kind: "agent", agentId: "mover", onBehalfOf: "owner"}}});
+  expect(requests[0]?.params).not.toHaveProperty("requestId");
+  await expect(adapter.rewriteHistoryLinks({workspaceId: "other", operationId: "dohc-operation:rename", requestId: "retry"})).rejects.toThrow();
+  expect(requests).toHaveLength(1);
+});
 
 type VersionedRequestCase = {
   method: VersionedMethod;
@@ -373,7 +419,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
     },
   },
   {
@@ -382,7 +428,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.captureFlush,
-    valid: { settled: true, running: true, degraded: false, heldFiles: [] },
+    valid: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] },
   },
   {
     method: WORKSPACE_METHOD.captureSetAuthor,
@@ -402,7 +448,7 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 
 describe("VersionedLiveAdapter", () => {
   it("retries a held path with the real flush and retried result", async () => {
-    const result = { settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
+    const result = { deferredWrites: [], settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
       requests.push(request); return { id: request.id, result };
@@ -2179,11 +2225,11 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   const requests: Request[]=[];
   const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
     requests.push(request);
-    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{kind:"file-duplicate"})}};
   }};
   const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
   await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
-  await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"});
+  expect(await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"})).toMatchObject({kind:"file-duplicate"});
   await adapter.undoHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted",requestId:"retry"});
   expect(requests[0]?.params).toEqual({operationId:"dohc-operation:minted"});
   expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});

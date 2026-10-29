@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
@@ -33,6 +35,9 @@ import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
+import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
+import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
+import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -43,8 +48,12 @@ import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { versionConflictForIpc } from "../ipc/engineHistoryIpc";
+import { workspaceVersionForIpc } from "../ipc/workspaceVersionsIpc";
+import type { createVersionRounds } from "../versionRounds";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
@@ -61,10 +70,20 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  chatLinks: NonNullable<CliServerOptions["chatLinks"]>;
   chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
+  ownerLiveRecovery?: {
+    keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
+    /** With an incident, saves exactly that row's kept edits. */
+    save(workspace: RegistryEntry, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
+    /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
+    stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
+  };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -82,13 +101,16 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "listKeptCopies" | "saveKeptCopy"
-      | "listVersions" | "writeAuthoredFile"
+      | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
+      | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
+      | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
-    dispatchedAgentRun(workspaceId: string): boolean;
+    dispatchedAgent(workspaceId: string): string | null;
+    dispatchedRunId(workspaceId: string): string | null;
+    agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -120,6 +142,9 @@ interface DesktopCliServerDependencies<State> {
   localUserDisplayName(): string;
   localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
+  notifyNoticesChanged(): void;
+  /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
+  versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
     workspaceId: string,
     target?: ChatRelayIdentityTarget,
@@ -156,6 +181,23 @@ export function createDesktopCliServer<State>(
     chatDispatchService,
     rememberPendingCliRunMessageLink,
   } = dependencies;
+
+  // A lossy note's file text, or null for any other file. The check runs in
+  // the projection worker, which remembers it by the text's SHA-256. A file
+  // that isn't there has nothing on disk to rewrite; the edit's own check
+  // covers its session. Any other failed or partial read refuses.
+  async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
+    let read: Awaited<ReturnType<typeof readWorkspaceText>>;
+    try {
+      read = await readWorkspaceText(rootPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+      throw new Error(unreadNoteRefusal(path), { cause: error });
+    }
+    if (read.truncated) throw new Error(unreadNoteRefusal(path));
+    const digest = createHash("sha256").update(read.text).digest("hex");
+    return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
+  }
 
   // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
   // resolves the registry workspace, and chat writes go through the same
@@ -215,10 +257,30 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
+          linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
+            history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
       });
       return finish();
+    };
+    // Save recovery copy, Try again and Stop again under the admission the
+    // window's IPC uses: this attachment, the original workspace, and main's
+    // own record of the kept edits, found by path. The caller names nothing else.
+    const ownerLiveRecovery = dependencies.ownerLiveRecovery;
+    const withOwnerLiveRecovery = <Result>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<Result>) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        assertOriginalWorkspace(operation.workspace);
+        const result = await work(operation);
+        operation.assertCurrent();
+        return result;
+      });
+    const keptEditsAt = (workspaceId: string, path: string, incident: string) => {
+      const kept = ownerLiveRecovery?.keptEdits(workspaceId).find(row => row.path === path && row.incident === incident);
+      if (!kept) throw new Error(`dohc has no kept edits for ${path}. List kept edits again to check it.`);
+      return kept;
     };
     const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
@@ -229,7 +291,7 @@ export function createDesktopCliServer<State>(
       });
     return {
       workspaceId: workspace.workspaceId,
-      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
+      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
       ...(dependencies.stopWorkspaceSync ? { stopSync: author =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
@@ -343,6 +405,10 @@ export function createDesktopCliServer<State>(
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
         return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
       }),
+      duplicateFile: (path, origin, requestId) => withPathChange(requestId, async (operation, options) => {
+        const copied = await duplicateWorkspaceFile(operation, path, agentWriteAuthor(origin), options.capture);
+        return async () => ({ok: true as const, ...copied});
+      }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
       deletePath: async (path, origin, requestId) => {
@@ -356,6 +422,10 @@ export function createDesktopCliServer<State>(
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          // A lossy note reads as its file, not as the editor's canonical
+          // Markdown, which leaves out the parts dohc can't show.
+          const file = await lossyNoteText(workspace.rootPath, live.path);
+          if (file !== null) return { path: live.path, markdown: file };
           const markdown = live.state
             ? await documentProjection.run({ kind: "read", state: live.state })
             : await documentProjection.run({
@@ -369,8 +439,13 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
+            assertEditable: async (resolved) => {
+              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+                throw new Error(lossyNoteRefusal(resolved));
+              }
+            },
             change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
@@ -401,6 +476,8 @@ export function createDesktopCliServer<State>(
               workspaceId: workspace.workspaceId,
               path,
               origin,
+              // This verb wrote the file empty just above.
+              assertEditable: async () => undefined,
               change: (state, { keepBlocks }) =>
                 documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
             });
@@ -417,10 +494,102 @@ export function createDesktopCliServer<State>(
       ...(sharedViewOf(workspace.workspaceId)
         ? {}
         : {
+            versions: {
+              list: async () => {
+                const snapshot = await capture.listVersions();
+                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+              },
+              compare: async (versionId, afterPath) => {
+                // Unreadable rules hide every file, as the desktop's History does.
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const admitted = historyPathAdmission(policy);
+                // A page continues after its last path, which can be a hidden
+                // file. Continue after the last shown file instead, and read
+                // past pages that show none.
+                let after = afterPath;
+                for (;;) {
+                  const page = await capture.compareVersions(versionId, after === undefined ? {} : { afterPath: after });
+                  const files = page.files
+                    .filter(file => !file.protected && admitted(file.path))
+                    .map(({ protected: _protected, ...file }) => file);
+                  if (page.nextAfterPath === null) return { files, nextAfterPath: null };
+                  if (files.length > 0) return { files, nextAfterPath: files[files.length - 1]!.path };
+                  after = page.nextAfterPath;
+                }
+              },
+              conflicts: async (afterConflictId) => {
+                const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+                if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
+                const page = await capture.listOpenConflictsPage(afterConflictId);
+                const admitted = historyPathAdmission(policy);
+                // After a rename, a side can sit at another path than its conflict.
+                const shown = (conflict: (typeof page.conflicts)[number]) =>
+                  [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                return {
+                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  nextAfterConflictId: page.nextAfterConflictId,
+                };
+              },
+              // Each change tells the windows what changed, as the versions
+              // IPC handlers do for the window's own changes. Each closes the
+              // editors' documents before it can fail, so a failed change
+              // still has the windows reopen on whichever version is active.
+              create: name => dependencies.versionRound(workspace.workspaceId, async () => {
+                const snapshot = await capture.createVersion(name);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                const created = snapshot.versions.find(version => version.id === snapshot.activeVersionId)!;
+                return { id: created.id, name: created.name };
+              }, { done: created => ({ activeVersionId: created.id }), failed: {} }),
+              switch: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
+                const switched = await capture.switchVersion(versionId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return switched;
+              }, { done: switched => ({ activeVersionId: switched.activeVersionId }), failed: {} }),
+              merge: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
+                const merged = await capture.mergeVersionIntoMain(versionId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return merged;
+              }, { done: () => ({}), failed: {} }),
+              resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
+                await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }
+                  : resolution.keep === "current" ? { kind: "keep-current" } : { kind: "apply-incoming" });
+                // As the window's resolve does: the other computer hears of it
+                // promptly, and Notices drops a resolved sync conflict.
+                activity.queueCloudSync(workspace.workspaceId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                dependencies.notifyNoticesChanged();
+              }, { done: () => ({}), failed: {} }),
+            },
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
             },
+            retainedCopies: {
+              list: () => capture.listRetainedCopies(),
+              delete: (copies) => capture.deleteRetainedCopies(copies),
+            },
+            ...(ownerLiveRecovery ? {
+              keptEdits: {
+                list: () => withOwnerLiveRecovery(async operation =>
+                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier, saveOnly }) =>
+                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}), ...(saveOnly ? { saveOnly } : {}) }))),
+                saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
+                retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
+                  const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  if (kept.saveOnly && kept.recovery !== "unreadable") throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
+                  await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
+                }),
+                // Only a Stop that kept the edits runs again; any other Stop belongs to Live documents.
+                stopAgain: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
+                  const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
+                  if (kept.recovery !== "not-written" && kept.recovery !== "stopping") {
+                    throw new Error(`No Stop of ${path} is waiting to run again. List kept edits again to check it.`);
+                  }
+                  return await ownerLiveRecovery.stopAgain(operation, { path, objectId: kept.objectId, recovery: kept.recovery });
+                }),
+              },
+            } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
@@ -485,6 +654,7 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
+      chatLinks: (workspace,input) => readLinks(workspace,current=>dependencies.chatLinks(current,input)),
       chatFileMentions: (workspace, input) => readLinks(workspace, current => dependencies.chatFileMentions(current, input)),
       links: {
         edges: (workspace, input) => readLinks(workspace, current => dependencies.links.edges(current, input)),
@@ -495,7 +665,9 @@ export function createDesktopCliServer<State>(
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
-      dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
+      dispatchedAgent: (workspaceId) => activity.dispatchedAgent(workspaceId),
+      dispatchedRunId: (workspaceId) => activity.dispatchedRunId(workspaceId),
+      agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

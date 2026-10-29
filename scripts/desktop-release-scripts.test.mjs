@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
-  chmod,
   mkdir,
   mkdtemp as createTemporaryDirectory,
   readFile,
@@ -18,6 +17,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { load } from "js-yaml";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
+import { NIGHTLY_AGENT_LABEL, nightlyAgentDefinition, nightlyDecision, runNightly, runTitle, verifiedNightly, waitForQueue, waitForRun } from "./release-nightly.mjs";
+import { LOCK_BUSY, heldLockOptions, releaseLockHeld } from "./release-lock.mjs";
 
 const temporaryDirectories = [];
 async function mkdtemp(prefix) {
@@ -44,7 +45,7 @@ import {
 } from "./mock-update-server.mjs";
 import { scriptsWithoutChunkIds, sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 import {
-  DEFAULT_KEYCHAIN, PUBLISH_JOB, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
+  DEFAULT_KEYCHAIN, PREFLIGHT_JOB, PUBLISH_JOB, SAVED_PASSWORD_SERVICE, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
   macFileNames, macUploadPlan, parseMacReleaseArgs, preflightMacRelease, publishMacFiles, releaseEnvironment, signatureChecks,
   signingEnvironment, unlockReleaseKeychain, unlockedSigning, uploadCommands, verifyKeptFiles, withReleaseKeychain, RELEASE_REPOSITORY, releaseMac,
 } from "./release-desktop-macos.mjs";
@@ -92,13 +93,12 @@ test("release platform selection defaults to every workflow platform and leaves 
   assert.deepEqual(desktopReleaseTargets("windows-linux"), both);
   const [windows, linux] = both;
   assert.deepEqual(desktopReleaseTargets("windows"), [windows]);
-  assert.deepEqual(windows.runner, ["self-hosted", "windows", "x64"]);
+  assert.equal(windows.runner, "windows-2025");
   assert.equal(windows.target, "x86_64-pc-windows-msvc");
   assert.deepEqual(desktopReleaseTargets("linux"), [linux]);
-  assert.deepEqual(linux.runner, ["self-hosted", "linux", "x64"]);
+  assert.equal(linux.runner, "ubuntu-24.04");
   assert.equal(linux.target, "x86_64-unknown-linux-gnu");
   assert.equal(linux.require_signing, "0");
-  for (const target of both) assert.equal(target.runner[0], "self-hosted");
   for (const platforms of ["mac", "macos", "all"]) assert.throws(() => desktopReleaseTargets(platforms), /Invalid release platforms/);
 });
 
@@ -139,20 +139,33 @@ test("a nightly publishes every platform the workflow builds", () => {
   assert.doesNotThrow(() => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases: [] }));
 });
 
-test("at most one nightly publishes per UTC day, counted by when it published", () => {
+test("at most one nightly publishes per nightly day, which starts at 18:00 UTC, counted by when it published", () => {
   const now = new Date("2026-10-19T09:00:00Z");
   const check = (releases, at = now) => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases, now: at });
-  // A run that started before midnight and published after it holds the day it published on.
-  const lateRun = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
-  assert.throws(() => check([lateRun]), (error) => error.message.startsWith("v0.1.1-nightly.20261018.37.1 published at 2026-10-19T00:30:00Z, so 2026-10-19 (UTC) already has its nightly."));
-  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /2026-10-19 \(UTC\) already has its nightly/);
-  // A draft never reached an updater, and earlier days and stable releases do not count.
+  // Last night's scheduled nightly refuses a morning dispatch, and says when the next one can publish.
+  const lastNight = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-18T20:30:00Z");
+  assert.throws(() => check([lastNight]), (error) => error.message ===
+    "v0.1.1-nightly.20261018.37.1 published at 2026-10-18 20:30 UTC, and one nightly publishes per nightly day, which starts at 18:00 UTC. The next nightly can publish from 2026-10-19 18:00 UTC. Before then, use dry_run=true.");
+  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /can publish from 2026-10-19 18:00 UTC/);
+  // A nightly published by hand before 18:00 UTC doesn't hold back that evening's scheduled one.
+  const manual = publishedRelease("v0.1.1-nightly.20261019.38.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
+  assert.throws(() => check([manual]), /can publish from 2026-10-19 18:00 UTC/);
+  assert.doesNotThrow(() => check([manual], new Date("2026-10-19T20:00:00Z")));
+  // On 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still publishes.
+  const morning = publishedRelease("v0.1.1-nightly.20261026.152.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-26T07:00:00Z");
+  assert.doesNotThrow(() => check([morning], new Date("2026-10-26T20:00:00Z")));
+  // The day turns at 18:00 UTC exactly.
+  const beforeTurn = publishedRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"], "2026-10-19T17:59:00Z");
+  assert.throws(() => check([beforeTurn], new Date("2026-10-19T17:59:59Z")), /can publish from 2026-10-19 18:00 UTC/);
+  assert.doesNotThrow(() => check([beforeTurn], new Date("2026-10-19T18:00:00Z")));
+  const atTurn = publishedRelease("v0.1.1-nightly.20261019.40.1", ["nightly.yml"], "2026-10-19T18:00:00Z");
+  assert.throws(() => check([atTurn], new Date("2026-10-20T17:59:59Z")), /can publish from 2026-10-20 18:00 UTC/);
+  // A draft never reached an updater, and earlier nightly days and stable releases do not count.
   assert.doesNotThrow(() => check([
     draftRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"]),
-    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T23:59:59Z"),
+    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T17:59:59Z"),
     publishedRelease("v0.1.0", ["latest.yml"], "2026-10-19T08:00:00Z"),
   ]));
-  assert.doesNotThrow(() => check([lateRun], new Date("2026-10-20T00:00:01Z")));
 });
 
 test("publication history fails closed on incomplete input", () => {
@@ -177,7 +190,7 @@ test("the publication check exits unsuccessfully when a release breaks a rule", 
   const { stdout } = await promisify(execFile)(process.execPath, args);
   assert.match(stdout, /meets the publication rules/);
   await writeHistory(new Date().toISOString());
-  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /already has its nightly/.test(error.stderr));
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /The next nightly can publish from/.test(error.stderr));
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -331,6 +344,13 @@ test("resolve-desktop-release prints release metadata when run as a command", as
     "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
   ]);
   assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
+  const matrix = output => JSON.parse(/^matrix=(.*)$/m.exec(output)[1]);
+  assert.deepEqual(matrix(stdout), desktopReleaseTargets());
+  const linux = await runReleaseScript("resolve-desktop-release.mjs", [
+    "--root", root, "--channel", "nightly", "--platforms", "linux", "--date", "20260621",
+    "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
+  ]);
+  assert.deepEqual(matrix(linux.stdout), desktopReleaseTargets("linux"));
 });
 
 // Node resolves links in the entry path before it sets import.meta.url, so a
@@ -423,10 +443,10 @@ function workflowValues(value) {
 function releaseExpression(expression, needs, secrets = {}, inputs = {}, matrix = {}) {
   // These release guards use string comparisons and operators shared by Actions and JavaScript.
   assert.match(expression, /^\$\{\{[\s\S]*\}\}$/u);
-  return Function("needs", "secrets", "inputs", "matrix", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix, JSON.parse);
+  return Function("needs", "secrets", "inputs", "matrix", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix);
 }
 
-test("desktop releases start only by dispatch, run on self-hosted Windows and Linux runners, and preserve unsigned package smoke", () => {
+test("desktop releases start only by dispatch, use pinned GitHub images, and preserve unsigned package smoke", () => {
   const { jobs } = releaseWorkflow;
   assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
   assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
@@ -434,47 +454,46 @@ test("desktop releases start only by dispatch, run on self-hosted Windows and Li
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  // Cloud runners stay off (AGENTS.md). Packaging runs on the matrix preflight
-  // selects from the release targets. Every other job runs on the Linux runner
-  // for a Linux dispatch and on the Windows runner otherwise.
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
-  // Windows and WSL share one PC, so a combined dispatch packages one platform at a time.
-  assert.equal(jobs.build.strategy["max-parallel"], "${{ inputs.platforms == 'windows-linux' && 1 || 4 }}");
-  assert.match(releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"').run, /--platforms "\$DISPATCH_PLATFORMS"/);
+  assert.equal(jobs.build.strategy["max-parallel"], undefined, "platform builds can run in parallel");
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
-  for (const [name, job] of Object.entries(jobs)) {
-    const runners = name === "build"
-      ? desktopReleaseTargets("windows-linux").map(target => target.runner)
-      : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
-    if (name !== "build") {
-      assert.deepEqual(runners, dispatchPlatforms.map(platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"]),
-        `${name} runs on the Linux runner only for a Linux dispatch`);
-    }
-    assert.ok(runners.length > 0, `${name} has a runner`);
-    for (const runner of runners) {
-      assert.ok(Array.isArray(runner), `${name} has explicit runner labels`);
-      assert.ok(runner.includes("self-hosted"));
-      assert.ok(runner.some(label => ["linux", "windows"].includes(label)));
-      assert.ok(runner.includes("x64"));
-    }
+  // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
+  for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
+    const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
+    assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
+    assert.equal(job.steps[toolchain].if, undefined);
+    assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
+    // GitHub's Windows TEMP is a short 8.3 path; every later step uses the runner's own temp folder.
+    const temp = job.steps.findIndex(step => step.name === "Use the runner's temp folder");
+    assert.ok(temp >= 0 && temp < job.steps.findIndex(step => step.name === "Install"), "TEMP is set before anything runs");
+    assert.equal(job.steps[temp].if, "runner.os == 'Windows'");
+    assert.match(job.steps[temp].run, /TEMP=\$RUNNER_TEMP[\s\S]*TMP=\$RUNNER_TEMP/);
   }
+  const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
+  for (const platforms of dispatchPlatforms) {
+    assert.deepEqual(desktopReleaseTargets(platforms).map(target => target.runner),
+      (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(hostedImage));
+  }
+  assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(jobs.preflight["runs-on"], {}, {}, { platforms })), dispatchPlatforms.map(hostedImage),
+    "preflight runs on Linux only for a Linux dispatch");
+  for (const job of [jobs["unused-version"], jobs.publish]) assert.equal(job["runs-on"], "ubuntu-24.04");
 
-  // Desktop tests need the built runtime exports and the native engine.
+  // Desktop tests need the built runtime exports and the native engine. The
+  // PR gate's runner runs the package's unit and script tests with its retries.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);
-  const desktopTests = releaseStep(jobs.preflight, "test:unit --maxWorkers=4");
+  const desktopTests = releaseStep(jobs.preflight, "node scripts/verification/js-tests.mjs --prepared --package @dohc/desktop");
   for (const prepare of ["pnpm --filter @dohc/app-backend-runtime build", "pnpm qa:prepare -- --engine-only"]) {
     assert.ok(preflightOrder(releaseStep(jobs.preflight, prepare)) < preflightOrder(desktopTests), `desktop tests run after ${prepare}`);
   }
   assert.equal(desktopTests.env.DOHC_REQUIRE_ENGINE_E2E, "1");
-  releaseStep(jobs.preflight, "pnpm --filter @dohc/desktop test:scripts");
 
   // Draft and published versions must both be refused before packaging.
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
   assert.equal(jobs["unused-version"].permissions.contents, "write");
   // Publishing checks the release history: a nightly ships every workflow platform at
-  // most once a UTC day, and a channel keeps every platform it has published. The check
-  // runs before packaging, and again in Publish, because a run can publish after midnight.
+  // most once a nightly day, and a channel keeps every platform it has published. The check
+  // runs before packaging, and again in Publish, because a run can publish after the nightly day turns.
   const rulesBeforePackaging = releaseStep(jobs["unused-version"], "check-desktop-release-publication.mjs");
   const rulesBeforePublishing = releaseStep(jobs.publish, "check-desktop-release-publication.mjs");
   assert.equal(rulesBeforePackaging.if, "needs.preflight.outputs.dry_run != 'true'");
@@ -825,6 +844,32 @@ test("the source map upload leaves a PostHog host the release did not set unset,
   );
 });
 
+test("the source map upload leaves PowerShell 7's module path out of the CLI's environment on Windows", () => {
+  for (const name of ["PSModulePath", "PSMODULEPATH"]) {
+    const env = { ...SOURCE_MAP_ENV, [name]: "C:\\Program Files\\PowerShell\\7\\Modules", PATH: "/bin" };
+    const windows = sourceMapUpload(env, "win32").env;
+    assert.equal(Object.keys(windows).some((key) => key.toUpperCase() === "PSMODULEPATH"), false);
+    assert.equal(windows.PATH, "/bin");
+    for (const platform of ["darwin", "linux"]) assert.equal(sourceMapUpload(env, platform).env[name], env[name]);
+  }
+});
+
+test("a dry run installs and runs the CLI with the release's environment, and uploads nothing", async () => {
+  const dryRun = { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", POSTHOG_CLI_HOST: "", PSModulePath: "C:\\Modules", PATH: "/bin" };
+  const upload = sourceMapUpload(dryRun, "win32");
+  assert.deepEqual(upload.args, ["dlx", "--allow-build=@posthog/cli", "@posthog/cli@0.18.10", "--version"]);
+  assert.deepEqual(upload.env, { DOHC_SOURCE_MAPS_DRY_RUN: "true", DOHC_POSTHOG_KEY: "", POSTHOG_CLI_API_KEY: "", PATH: "/bin" });
+  // The Mac's release passes its shell's environment on, so a DRY_RUN left there must not skip a real upload.
+  assert.equal(sourceMapUpload({ ...SOURCE_MAP_ENV, DRY_RUN: "true" }).dryRun, undefined);
+
+  // A dry run's build has no PostHog key, so its files carry no chunk ID.
+  const directories = await builtDist({ injected: false });
+  const calls = [];
+  uploadSourceMaps(dryRun, (command, args) => { calls.push(args); return { status: 0 }; }, directories);
+  assert.deepEqual(calls, [upload.args]);
+  assert.throws(() => uploadSourceMaps(dryRun, () => ({ status: 1 }), directories), /failed with exit code 1/);
+});
+
 test("the source map upload fails when a script the reports name ships without its chunk ID", async () => {
   const directories = await builtDist({ injected: false });
   assert.deepEqual(scriptsWithoutChunkIds(directories).map((path) => path.replaceAll("\\", "/").split("/").at(-1)).sort(), [
@@ -851,12 +896,13 @@ test("upload-desktop-source-maps skips without a PostHog key and fails without u
   );
 });
 
-test("the release injects source maps for every build that names PostHog before packaging, and never in a dry run", () => {
+test("the release injects source maps for every build that names PostHog before packaging, and a dry run only runs the CLI", () => {
   const job = releaseWorkflow.jobs.build;
   const build = releaseStep(job, "pnpm build:desktop");
   const upload = releaseStep(job, "upload-desktop-source-maps.mjs");
   const packaging = releaseStep(job, "electron-builder");
-  assert.equal(upload.if, "needs.preflight.outputs.dry_run != 'true'");
+  assert.equal(upload.if, undefined);
+  assert.equal(upload.env.DOHC_SOURCE_MAPS_DRY_RUN, "${{ needs.preflight.outputs.dry_run }}");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
   // The upload sees the key and dist the build compiled in.
   for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {
@@ -990,10 +1036,11 @@ const HEAD_COMMIT = "e".repeat(40);
 const IDENTITY = "Developer ID Application: Example Maker (TEAM123456)";
 const KEYCHAIN = "/Users/maker/Library/Keychains/dohc-release.keychain-db";
 const NIGHTLY_TAG = "v0.1.1-nightly.20261019.42.1";
+const PREFLIGHT_START = "2026-10-19T04:00:00Z";
 const lines = values => values.map(value => JSON.stringify(value)).join("\n") + "\n";
 const publishJobs = (overrides = {}) => ({
   "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines([
-    { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT },
+    { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, started_at: PREFLIGHT_START },
     { name: "Publish", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, ...overrides },
   ]) },
 });
@@ -1016,6 +1063,7 @@ function fakeMac(answers = {}) {
     "gh variable list": { stdout: JSON.stringify([{ name: "DOHC_POSTHOG_KEY", value: "phc_abcdefghij0123456789" }, { name: "POSTHOG_CLI_PROJECT_ID", value: "42" }]) },
     "security find-generic-password -s dohc-posthog-cli-api-key": { stdout: "" },
     "security find-generic-password -s dohc-posthog-cli-api-key -w": { stdout: "phx_fixture\n" },
+    "security find-generic-password -s dohc-release-keychain-password": { status: 44, stderr: "The specified item could not be found in the keychain." },
     "security find-identity -v -p codesigning": { stdout: `  1) ${"A".repeat(40)} "${IDENTITY}"\n     1 valid identities found\n` },
     "xcrun notarytool history --keychain-profile": { stdout: "{\"history\":[]}" },
     ...answers,
@@ -1050,6 +1098,7 @@ test("the Mac release command reads its release from a version or tag and a chan
 test("the Mac release relies on the workflow's Publish job running only after Preflight passes on refs/heads/main", () => {
   const { jobs } = releaseWorkflow;
   assert.equal(jobs.publish.name, PUBLISH_JOB);
+  assert.equal(jobs.preflight.name, PREFLIGHT_JOB);
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.publish, jobs.build]) assert.ok([job.needs].flat().includes("preflight"), "Publish runs only after Preflight");
   assert.ok([jobs.publish.needs].flat().includes("build"));
@@ -1065,7 +1114,7 @@ test("the Mac release preflight ties the tag to a dispatched run's Publish job o
   assert.equal(plan.reporting.POSTHOG_CLI_API_KEY, undefined, "the PostHog key is read only after unlocking");
   for (const call of [
     `gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs?head_sha=${RELEASE_COMMIT}&event=workflow_dispatch&per_page=100 --jq .workflow_runs[] | {id, run_number, event}`,
-    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs?filter=all&per_page=100 --jq .jobs[] | {name, conclusion, run_attempt, head_sha}",
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs?filter=all&per_page=100 --jq .jobs[] | {name, conclusion, run_attempt, head_sha, started_at}",
     `gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}...${MAIN_COMMIT} --jq .status`,
     `gh api repos/dohchq/dohc/compare/${HEAD_COMMIT}...${MAIN_COMMIT} --jq .status`,
     `security find-certificate -a -c Developer ID Application -Z ${KEYCHAIN}`,
@@ -1101,6 +1150,28 @@ test("the Mac release preflight refuses another host, a release it cannot read, 
   await assert.rejects(preflight({ ...stableRelease, ...publishJobs({ conclusion: "skipped" }) }, {}, ["--version", "0.1.0", "--channel", "latest"]),
     /no dispatched Desktop Release run published that commit from main/);
   await assert.rejects(preflight({ [`gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}`]: { stdout: "diverged\n" } }), new RegExp(`${RELEASE_COMMIT}, the commit of ${NIGHTLY_TAG.replaceAll(".", "\\.")}, is not on main at ${MAIN_COMMIT}`));
+});
+
+test("the Mac release preflight accepts a nightly that a re-run of its failed jobs published", async () => {
+  // Each attempt gives its Preflight's start time and its Publish job's conclusion.
+  const attempts = (...list) => ({
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines(list.flatMap(([startedAt, publish], index) => [
+      { name: "Preflight", conclusion: "success", run_attempt: index + 1, head_sha: RELEASE_COMMIT, started_at: startedAt },
+      { name: "Publish", conclusion: publish, run_attempt: index + 1, head_sha: RELEASE_COMMIT },
+    ])) },
+  });
+  const preflight = (answers, tag = NIGHTLY_TAG) =>
+    preflightMacRelease(parseMacReleaseArgs(["--version", tag, "--channel", "nightly", "--keychain", KEYCHAIN]), { run: fakeMac(answers).run, ...macHost() });
+  const unpublished = attempt => new RegExp(`no dispatched Desktop Release run 42, attempt ${attempt}, published that commit from main`);
+  // Later attempts kept attempt 1's Preflight, so they published the version attempt 1 stamped.
+  assert.equal((await preflight(attempts([PREFLIGHT_START, "skipped"], [PREFLIGHT_START, "success"]))).commit, RELEASE_COMMIT);
+  assert.equal((await preflight(attempts([PREFLIGHT_START, "skipped"], [PREFLIGHT_START, "failure"], [PREFLIGHT_START, "success"]))).commit, RELEASE_COMMIT);
+  // Attempt 2 ran its own Preflight, so it published its own version.
+  await assert.rejects(preflight(attempts([PREFLIGHT_START, "skipped"], ["2026-10-19T05:00:00Z", "success"])), unpublished(1));
+  // Without start times, nothing shows that attempt 2 kept attempt 1's Preflight.
+  await assert.rejects(preflight(attempts([null, "skipped"], [null, "success"])), unpublished(1));
+  // Attempt 2 kept attempt 1's Preflight and stamped no version of its own, so nothing published a tag that names it.
+  await assert.rejects(preflight(attempts([PREFLIGHT_START, "success"], [PREFLIGHT_START, "failure"]), "v0.1.1-nightly.20261019.42.2"), unpublished(2));
 });
 
 test("a real Mac release runs only from a clean checkout on main, and a dry run says where it runs from", async () => {
@@ -1162,7 +1233,11 @@ test("the release keychain unlocks through security in a terminal, and otherwise
   const steps = [];
   const step = async (command, args) => { steps.push([command, ...args].join(" ")); };
   const locks = [];
-  const run = (command, args) => { locks.push([command, ...args].join(" ")); return { status: 0, stdout: "", stderr: "" }; };
+  const run = (command, args) => {
+    if (args[0] === "find-generic-password") return { status: 44, stdout: "", stderr: "The specified item could not be found in the keychain." };
+    locks.push([command, ...args].join(" "));
+    return { status: 0, stdout: "", stderr: "" };
+  };
   const unlock = (keychainStatus, options = {}, relock = false) =>
     unlockReleaseKeychain(plan, "Packaging", { keychainStatus, step, run, interactive: true, cancelled: () => false, ...options }, { relock });
   await unlock(statuses([7]));
@@ -1190,7 +1265,92 @@ test("the release keychain unlocks through security in a terminal, and otherwise
   await assert.rejects(unlock(statuses([2]), { interactive: false, cancelled: () => true, wait, now: () => 0 }), /Stopped while waiting/);
 });
 
-test("the Mac release command loads only tracked files and Node's own modules, and uploads to the repository the updater reads", async () => {
+test("a password saved in the login keychain unlocks the release keychain without anyone at the Mac", async () => {
+  const plan = { keychain: KEYCHAIN };
+  let open = false;
+  let saved = 'keychain: "/Users/maker/Library/Keychains/login.keychain-db"\npassword: "pass "word" %s"\n';
+  const calls = [];
+  const unlocks = [];
+  const keychain = {
+    keychainStatus: () => (open ? 7 : 2),
+    step: async () => assert.fail("nobody is asked for the password"),
+    run: (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (args[0] === "lock-keychain") open = false;
+      return { status: 0, stdout: "", stderr: saved };
+    },
+    interactive: true,
+    cancelled: () => false,
+    wait: async () => assert.fail("nothing waits for someone to unlock the keychain"),
+    unlockWith: (path, password) => { unlocks.push([path, password.toString()]); open = true; return { status: 0, stderr: "" }; },
+  };
+  const lookup = `security find-generic-password -s ${SAVED_PASSWORD_SERVICE} -g`;
+  await unlockReleaseKeychain(plan, "Checking the signing identity", keychain);
+  assert.deepEqual(calls, [lookup]);
+  assert.deepEqual(unlocks, [[KEYCHAIN, 'pass "word" %s']], "a quoted password passes as saved");
+
+  // Before packaging, an open keychain is locked, then unlocked with the saved password again.
+  calls.length = 0;
+  await unlockReleaseKeychain(plan, "Packaging", keychain, { relock: true });
+  assert.deepEqual(calls, [`security lock-keychain ${KEYCHAIN}`, lookup]);
+  assert.equal(unlocks.length, 2);
+  assert.equal(open, true);
+
+  // security prints a password with a backslash, a control character, or non-ASCII text as hex.
+  open = false;
+  saved = 'password: 0x70C3A4737377C3B67264  "p\\303\\244ssw\\303\\266rd"\n';
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, "pässwörd"]);
+  open = false;
+  saved = "password: 0xC3A4 \n";
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, "ä"], "hex with no printable character has no quoted form");
+  open = false;
+  saved = "password: \n";
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, ""], "an empty password");
+  open = false;
+  saved = 'password: "0x41  "A""\n';
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, '0x41  "A"'], "a quoted password that looks like hex stays as typed");
+
+  open = false;
+  saved = 'keychain: "/Users/maker/Library/Keychains/login.keychain-db"\n';
+  await assert.rejects(unlockReleaseKeychain(plan, "Packaging", keychain), /did not unlock the release keychain: security printed no password/);
+  saved = 'password: "pass"\n';
+  await assert.rejects(
+    unlockReleaseKeychain(plan, "Packaging", { ...keychain, unlockWith: () => ({ status: 51, stderr: "The user name or passphrase you entered is not correct." }) }),
+    /dohc-release-keychain-password in the login keychain did not unlock the release keychain: The user name or passphrase/,
+  );
+  await assert.rejects(unlockReleaseKeychain(plan, "Packaging", { ...keychain, unlockWith: () => ({ status: 0, stderr: "" }) }), /did not unlock the release keychain/,
+    "a keychain that stays locked fails even when security reports success");
+});
+
+// The fake security is a POSIX shell script. The unlock it stands in for runs only on macOS.
+test("the saved password reaches security on its input, in a session of its own, and never in its arguments", { skip: process.platform === "win32" }, async t => {
+  const bin = await mkdtemp(join(tmpdir(), "dohc-security-"));
+  const record = join(bin, "record");
+  // A session leader's process group is its own process ID, and a new session has no terminal.
+  await writeFile(join(bin, "security"), `#!/bin/sh
+printf '%s\\n' "$*" > "${record}"
+[ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ] && ! (true < /dev/tty) 2>/dev/null && echo own-session >> "${record}"
+cat >> "${record}"
+`, { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  t.after(() => { process.env.PATH = path; });
+  const password = 'pass "word" \\ %s';
+  await unlockReleaseKeychain({ keychain: KEYCHAIN }, "Packaging", {
+    keychainStatus: () => (existsSync(record) ? 7 : 2),
+    run: () => ({ status: 0, stdout: "", stderr: `password: 0x${Buffer.from(password).toString("hex").toUpperCase()}  "escaped"\n` }),
+    step: async () => assert.fail("nobody is asked for the password"),
+    interactive: true,
+    cancelled: () => false,
+  });
+  assert.equal(readFileSync(record, "utf8"), `unlock-keychain ${KEYCHAIN}\nown-session\n${password}\n`);
+});
+
+test("the Mac release command and the nightly job load only tracked files and Node's own modules, and upload to the repository the updater reads", async () => {
   const seen = new Set();
   const visit = async path => {
     if (seen.has(path)) return;
@@ -1200,7 +1360,9 @@ test("the Mac release command loads only tracked files and Node's own modules, a
       else assert.match(specifier, /^node:/, `${path} imports ${specifier} from node_modules`);
     }
   };
+  // The nightly job runs from a clean clone of main, which has no node_modules.
   await visit(fileURLToPath(new URL("./release-desktop-macos.mjs", import.meta.url)));
+  await visit(fileURLToPath(new URL("./release-nightly.mjs", import.meta.url)));
   assert.ok(seen.size > 1);
   const { publish } = load(await readFile(new URL("../apps/desktop/electron-builder.yml", import.meta.url), "utf8"));
   assert.equal(RELEASE_REPOSITORY, `${publish.owner}/${publish.repo}`);
@@ -1440,38 +1602,321 @@ test("a real Mac release opens the release keychain only to check signing and to
   assert.equal(existsSync(join(workRoot, "v0.1.0")), false, "a finished upload keeps no files");
 });
 
-test("release-desktop-macos refuses incomplete arguments when run as a command", async () => {
+// HOME moves the command's lock into a temporary directory, so the test never takes this Mac's real one.
+test("release-desktop-macos refuses incomplete arguments when run as a command, even while a release holds the lock", async t => {
+  const home = await mkdtemp(join(tmpdir(), "dohc-release-home-"));
+  if (process.platform === "darwin") {
+    await mkdir(join(home, "dohc-release"));
+    const holder = spawn("/usr/bin/perl", ["-e", '$| = 1; open(my $lock, ">>", shift) or die; flock($lock, 2) or die; print "held\\n"; sleep 60', join(home, "dohc-release/release.lock")], { stdio: ["ignore", "pipe", "inherit"] });
+    t.after(() => holder.kill("SIGKILL"));
+    await new Promise(resolve => holder.stdout.once("data", resolve));
+  }
   await assert.rejects(
-    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
+    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"], { HOME: home }),
     (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
   );
 });
 
-// A Linux desktop build leaves apps/desktop/resources/engine-reader/<generation>
-// read-only (stage-engine-reader.mjs), and checkout cannot clean a workspace
-// that holds it. Every job can land on the Linux runner, so each one makes it
-// writable before checkout.
-test("every release job lets checkout remove an earlier build's read-only reader folder", async () => {
+test("release checkouts do not persist credentials", () => {
   for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
-    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
-    assert.ok(checkout > 0, `${name} prepares its workspace before checkout`);
-    const prepare = job.steps[checkout - 1];
-    assert.equal(prepare.if, "runner.os != 'Windows'", `${name} skips the step on Windows, where the folder stays writable`);
-    assert.equal(prepare.shell, "bash");
-    assert.match(prepare.run, /reader="\$\{GITHUB_WORKSPACE\}\/apps\/desktop\/resources\/engine-reader"/);
+    const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"));
+    assert.ok(checkout, `${name} checks out the release commit`);
+    assert.equal(checkout.with["persist-credentials"], false);
   }
+});
+
+const NIGHTLY_HEAD = "a".repeat(40);
+const YESTERDAY = { tag: "v0.1.1-nightly.20261019.41.1", commit: "b".repeat(40), publishedAt: "2026-10-19T20:30:00Z", assets: ["nightly.yml", "nightly-linux.yml", "nightly-mac.yml"] };
+const TONIGHT = Date.parse("2026-10-20T20:00:00Z");
+
+test("the nightly job dispatches only a new main that passed verification", () => {
+  const night = { head: NIGHTLY_HEAD, verifiedHead: NIGHTLY_HEAD, lastNightly: YESTERDAY, now: TONIGHT };
+  assert.deepEqual(nightlyDecision(night), { kind: "dispatch" });
+  assert.deepEqual(nightlyDecision({ ...night, lastNightly: null }), { kind: "dispatch" }, "the first nightly needs no earlier one");
+
+  const quiet = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
+  assert.deepEqual([quiet.kind, quiet.report], ["skip", false], "a night with nothing new is not reported");
+  // A nightly published by hand before 18:00 UTC leaves tonight's to go ahead.
+  assert.deepEqual(nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T01:00:00Z" } }), { kind: "dispatch" });
+  assert.deepEqual(nightlyDecision({ ...night, now: Date.parse("2026-10-26T20:00:00Z"), lastNightly: { ...YESTERDAY, publishedAt: "2026-10-26T07:00:00Z" } }), { kind: "dispatch" },
+    "on 26 October a nightly dispatched by hand published at about 07:00 UTC, and that evening's run still dispatches");
+  // One published after 18:00 UTC is tonight's, so main stays unpublished, and that is reported.
+  const sameDay = nightlyDecision({ ...night, lastNightly: { ...YESTERDAY, publishedAt: "2026-10-20T19:00:00Z" } });
+  assert.deepEqual([sameDay.kind, sameDay.report], ["skip", true]);
+  assert.equal(sameDay.reason, "v0.1.1-nightly.20261019.41.1 published at 2026-10-20 19:00 UTC, and one nightly publishes per nightly day, which starts at 18:00 UTC. main's head aaaaaaaaa stays unpublished until the next nightly, which can publish from 2026-10-21 18:00 UTC.");
+
+  const unverified = nightlyDecision({ ...night, verifiedHead: "c".repeat(40) });
+  assert.deepEqual([unverified.kind, unverified.report], ["skip", true]);
+  assert.match(unverified.reason, /has not passed on main's head aaaaaaaaa; its last pass is ccccccccc/);
+  assert.match(nightlyDecision({ ...night, verifiedHead: null }).reason, /has not passed/);
+
+  // A dry run publishes nothing, so it skips publication and verification rules.
+  assert.deepEqual(nightlyDecision({ ...night, verifiedHead: null, lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD }, dryRun: true }), { kind: "dispatch" });
+});
+
+test("only a full nightly verification of main counts as verified", () => {
+  const pass = (request, state = "passed") => ({ request: { nightly: true, full: true, scope: "all", gates: { rust: true, js: true }, ...request }, status: { state } });
+  assert.equal(verifiedNightly([pass({ head: "1" }), pass({ head: "2" })]).request.head, "2");
+  assert.equal(verifiedNightly([pass({ head: "1" }), pass({ head: "2" }, "failed")]).request.head, "1");
+  for (const narrower of [{ full: false }, { scope: "js" }, { gates: { rust: false, js: true } }, { nightly: false }]) {
+    assert.equal(verifiedNightly([pass({ head: "2", ...narrower })]), null, JSON.stringify(narrower));
+  }
+});
+
+// Answers the commands the nightly job runs. The job's run is 9. Run 8 ran
+// earlier, and run 10 is someone else's dispatch that starts at the same time.
+function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNightly = YESTERDAY, views = null, status = "", compare = "identical", dryRun = false, dispatchFails = false, dispatchLost = false } = {}) {
+  const calls = [];
+  const tag = "v0.1.1-nightly.20261020.42.1";
+  let dispatched = false;
+  let viewCount = 0;
+  const tags = { ...(lastNightly ? { [lastNightly.tag]: lastNightly.commit } : {}), [tag]: runHead };
+  const viewAnswers = views ?? [{ status: "in_progress", jobs: [] }, { status: "in_progress", jobs: [] }, { status: "completed", conclusion, jobs: [] }];
+  const run = (command, args) => {
+    const line = [command, ...args].join(" ");
+    calls.push(line);
+    const ok = stdout => ({ status: 0, stdout, stderr: "" });
+    if (line === "git status --porcelain") return ok(status);
+    if (line === "git rev-parse HEAD") return ok(`${"e".repeat(40)}\n`);
+    if (line.startsWith("gh api repos/dohchq/dohc/compare/")) return ok(`${compare}\n`);
+    if (line.startsWith("gh api repos/dohchq/dohc/git/ref/heads/main")) return ok(`${NIGHTLY_HEAD}\n`);
+    if (line.startsWith("gh api --paginate repos/dohchq/dohc/releases")) return ok(lastNightly ? `${JSON.stringify({ tag: lastNightly.tag, publishedAt: lastNightly.publishedAt, assets: lastNightly.assets })}\n` : "");
+    if (line.startsWith("gh api repos/dohchq/dohc/commits/refs/tags/")) return ok(`${tags[args[1].split("/").pop()]}\n`);
+    if (line.startsWith("gh run list")) {
+      const earlier = { databaseId: 8, headSha: YESTERDAY.commit, url: "https://github.com/dohchq/dohc/actions/runs/8", displayTitle: "Desktop Release" };
+      // Someone's stable release for the same commit, dispatched at the same time.
+      const others = { databaseId: 10, headSha: NIGHTLY_HEAD, url: "https://github.com/dohchq/dohc/actions/runs/10", displayTitle: `Desktop Release latest for ${NIGHTLY_HEAD}` };
+      const ours = { databaseId: 9, headSha: runHead, url: "https://github.com/dohchq/dohc/actions/runs/9", displayTitle: runTitle(NIGHTLY_HEAD, dryRun) };
+      return ok(JSON.stringify(dispatched ? [others, ours, earlier] : [earlier]));
+    }
+    if (line.startsWith("gh workflow run")) {
+      if (dispatchFails) return { status: 1, stdout: "", stderr: "HTTP 500" };
+      dispatched = true;
+      // GitHub accepted the dispatch, but gh lost the response.
+      return dispatchLost ? { status: 1, stdout: "", stderr: "connection reset" } : ok("");
+    }
+    if (line.startsWith("gh run view 9")) {
+      const answer = viewAnswers[Math.min(viewCount++, viewAnswers.length - 1)];
+      return answer === "error" ? { status: 1, stdout: "", stderr: "HTTP 502" } : ok(JSON.stringify(answer));
+    }
+    if (line.startsWith("gh run cancel 9")) return ok("");
+    if (line.startsWith("gh api repos/dohchq/dohc/releases?per_page=20")) {
+      return ok(`${JSON.stringify({ tag, publishedAt: "2026-10-20T21:10:00Z", url: `https://github.com/dohchq/dohc/releases/tag/${tag}` })}\n${JSON.stringify({ tag: YESTERDAY.tag, publishedAt: YESTERDAY.publishedAt, url: "" })}\n`);
+    }
+    throw new Error(`The nightly job ran an unexpected command: ${line}`);
+  };
+  return { run, calls, tag };
+}
+
+function nightlyHost(fake, extra = {}) {
+  let clock = TONIGHT;
+  const macs = [];
+  return {
+    macs,
+    deps: {
+      run: fake.run, root: "/queue", log: () => {}, now: () => clock, wait: async ms => { clock += ms; },
+      queueIdle: async () => true, verifiedHead: () => NIGHTLY_HEAD, addMacFiles: tag => { macs.push(tag); return 0; }, ...extra,
+    },
+  };
+}
+
+test("a nightly dispatches Desktop Release for main's verified commit, follows its own run, and adds the macOS files to the release it published", async () => {
+  const fake = fakeNightly();
+  const host = nightlyHost(fake);
+  const report = await runNightly({}, host.deps);
+  assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=false -f commit=${NIGHTLY_HEAD}`));
+  assert.ok(fake.calls.some(call => call.startsWith("gh run view 9")), "it follows the run titled with its commit, not another dispatch that started then");
+  assert.ok(!fake.calls.some(call => call.startsWith("gh run view 10")));
+  assert.deepEqual(host.macs, [fake.tag], "the macOS files go to the release the run published");
+  assert.match(report, new RegExp(`^Published \\[${RegExp.escape(fake.tag)}\\]\\(.+\\) from aaaaaaaaa for Windows, Linux and macOS \\(\\[run\\]\\(https://github.com/dohchq/dohc/actions/runs/9\\)\\)\\.$`));
+});
+
+test("a nightly publishes nothing on a quiet night, a busy queue, a moved main, a failed run, or a checkout that is not clean main", async () => {
+  const quiet = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD } });
+  assert.equal(await runNightly({}, nightlyHost(quiet).deps), null);
+  assert.ok(!quiet.calls.some(call => call.startsWith("gh workflow run")));
+
+  const busy = fakeNightly();
+  assert.match(await runNightly({}, nightlyHost(busy, { queueIdle: async () => false }).deps), /verification queue was still busy/);
+  assert.ok(!busy.calls.some(call => call.startsWith("gh api repos/dohchq/dohc/git/ref")), "nothing reads GitHub or dispatches while verification runs");
+
+  // The workflow refuses to build a commit other than the requested one, so no cancel is needed.
+  const moved = fakeNightly({ runHead: "d".repeat(40), conclusion: "failure" });
+  const movedHost = nightlyHost(moved);
+  assert.match(await runNightly({}, movedHost.deps), /main moved to ddddddddd after the checks passed on aaaaaaaaa, so \[Desktop Release\]\(.+\) refused to build it\. Nothing was published\./);
+  assert.ok(!moved.calls.some(call => call.startsWith("gh run cancel")));
+  assert.deepEqual(movedHost.macs, []);
+
+  const failed = fakeNightly({ conclusion: "failure" });
+  const failedHost = nightlyHost(failed);
+  assert.match(await runNightly({}, failedHost.deps), /ended with "failure"\. Nothing was published\./);
+  assert.deepEqual(failedHost.macs, []);
+
+  await assert.rejects(runNightly({}, nightlyHost(fakeNightly({ status: " M scripts/release-nightly.mjs" })).deps), /checkout the job runs from has changes/);
+  await assert.rejects(runNightly({}, nightlyHost(fakeNightly({ compare: "diverged" })).deps), /which is not on main/);
+});
+
+test("a nightly keeps following its run through gh errors, and leaves a run still going at its limit to finish", async () => {
+  let clock = 0;
+  const options = { wait: async ms => { clock += ms; }, now: () => clock, limitMs: 3000, pollMs: 1000 };
+  const flaky = fakeNightly({ views: ["error", "error", { status: "completed", conclusion: "success" }] });
+  assert.equal(await waitForRun(flaky.run, 9, options), "success");
+
+  clock = 0;
+  const going = fakeNightly({ views: [{ status: "queued" }] });
+  assert.equal(await waitForRun(going.run, 9, options), null);
+  assert.equal(clock, 3000);
+  assert.ok(!going.calls.some(call => call.startsWith("gh run cancel")), "cancelling could interrupt a publish, so the job never cancels");
+
+  clock = 0;
+  await assert.rejects(waitForRun(fakeNightly({ views: ["error"] }).run, 9, { ...options, failureLimit: 3 }), /could not read the run 3 times in a row: HTTP 502/);
+
+  const lost = fakeNightly({ views: ["error"] });
+  assert.match(await runNightly({}, nightlyHost(lost).deps), /lost track of \[Desktop Release\]\(.+\) for aaaaaaaaa: .+If it publishes, the next night adds its macOS files\./);
+
+  const stuck = fakeNightly({ views: [{ status: "queued" }] });
+  const stuckHost = nightlyHost(stuck);
+  assert.match(await runNightly({}, stuckHost.deps), /was still going after 6 hours\. Check the run on GitHub\. If it publishes, the next night adds its macOS files\./);
+  assert.deepEqual(stuckHost.macs, []);
+});
+
+test("a nightly adds missing macOS files to the newest nightly first, except to the legacy June nightly", async () => {
+  const missing = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD, assets: ["nightly.yml", "nightly-linux.yml"] } });
+  const host = nightlyHost(missing);
+  assert.match(await runNightly({}, host.deps), /^Added the macOS files to v0\.1\.1-nightly\.20261019\.41\.1, which published without them\.$/);
+  assert.deepEqual(host.macs, [YESTERDAY.tag]);
+
+  const failing = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD, assets: ["nightly.yml"] } });
+  const report = await runNightly({}, nightlyHost(failing, { addMacFiles: () => 1 }).deps);
+  assert.match(report, /adding the macOS files to v0\.1\.1-nightly\.20261019\.41\.1 failed with exit code 1/);
+  assert.match(report, /node scripts\/release-desktop-macos\.mjs --version v0\.1\.1-nightly\.20261019\.41\.1 --channel nightly/);
+
+  // A later step that fails still reports the repair.
+  const thenFails = fakeNightly({ lastNightly: { ...YESTERDAY, assets: ["nightly.yml"] }, dispatchFails: true });
+  assert.match(await runNightly({}, nightlyHost(thenFails).deps), /^Added the macOS files to v0\.1\.1-nightly\.20261019\.41\.1, which published without them\.\n\nThe nightly job stopped: gh workflow run failed, and no run titled "Desktop Release nightly for a+" appeared within 5 minutes:\nHTTP 500$/);
+
+  const legacy = fakeNightly({ lastNightly: { tag: "v0.1.1-nightly.20260622.15.1", commit: NIGHTLY_HEAD, publishedAt: "2026-06-22T09:42:56Z", assets: ["latest.yml"] } });
+  const legacyHost = nightlyHost(legacy);
+  assert.equal(await runNightly({}, legacyHost.deps), null);
+  assert.deepEqual(legacyHost.macs, []);
+});
+
+test("a nightly follows its run when gh loses the dispatch's response", async () => {
+  const lost = fakeNightly({ dispatchLost: true });
+  const host = nightlyHost(lost);
+  assert.match(await runNightly({}, host.deps), /^Published \[v0\.1\.1-nightly\.20261020\.42\.1\]/);
+  assert.deepEqual(host.macs, [lost.tag]);
+});
+
+test("a nightly whose macOS files fail reports the command that finishes them", async () => {
+  const fake = fakeNightly();
+  const report = await runNightly({}, nightlyHost(fake, { addMacFiles: () => 1 }).deps);
+  assert.match(report, /^Published \[.+\]\(.+\) for Windows and Linux \(\[run\]\(.+\)\), but adding the macOS files to .+ failed with exit code 1/);
+  assert.match(report, new RegExp(`node scripts/release-desktop-macos\\.mjs --version ${RegExp.escape(fake.tag)} --channel nightly`));
+});
+
+test("a nightly dry run dispatches with dry_run=true, does not wait for verification, and adds no macOS files", async () => {
+  const fake = fakeNightly({ lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD }, dryRun: true });
+  const host = nightlyHost(fake, { queueIdle: async () => assert.fail("a dry run does not wait for the queue"), verifiedHead: () => assert.fail("a dry run needs no verification") });
+  assert.match(await runNightly({ dryRun: true }, host.deps), /dry run of Desktop Release passed for aaaaaaaaa/);
+  assert.ok(fake.calls.includes(`gh workflow run desktop-release.yml -R dohchq/dohc --ref main -f channel=nightly -f platforms=windows-linux -f dry_run=true -f commit=${NIGHTLY_HEAD}`));
+  assert.deepEqual(host.macs, []);
+});
+
+test("the nightly job waits for the verification queue to finish, up to its limit", async () => {
+  let clock = 0;
+  const wait = async ms => { clock += ms; };
+  const states = [["running"], ["queued", "passed"], ["passed", "failed"]];
+  assert.equal(await waitForQueue("/queue", { requests: () => (states.shift() ?? []).map(state => ({ status: { state } })), wait, now: () => clock, pollMs: 1000 }), true);
+  assert.equal(clock, 2000);
+  clock = 0;
+  assert.equal(await waitForQueue("/queue", { requests: () => [{ status: { state: "running" } }], wait, now: () => clock, limitMs: 5000, pollMs: 1000 }), false);
+  assert.equal(clock, 5000);
+});
+
+test("release commands on the Mac take one lock, hand it to the macOS command they start, and lose it only with the last process holding it", { skip: process.platform === "win32" }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-release-lock-"));
+  // A pid file holds a positive pid or does not exist. Signalling 0 would hit this test's own process group.
+  const pidOf = role => {
+    const pid = Number(readFileSync(join(dir, `${role}.pid`), "utf8"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`${role}.pid holds no pid`);
+    return pid;
+  };
+  // Whatever the outcome, stop every command this test started.
+  t.after(() => {
+    for (const role of ["parent", "child", "other", "graceful"]) {
+      try { process.kill(pidOf(role), "SIGKILL"); } catch { /* not started or already gone */ }
+    }
+  });
+  const lock = join(dir, "release.lock");
+  const script = join(dir, "hold.mjs");
+  const lockModule = pathToFileURL(fileURLToPath(new URL("./release-lock.mjs", import.meta.url))).href;
+  // A release command: "parent" starts a child release command under its hold, as the nightly job starts the macOS command.
+  await writeFile(script, `import { spawn } from "node:child_process";
+import { renameSync, writeFileSync } from "node:fs";
+import { heldLockOptions, underReleaseLock } from ${JSON.stringify(lockModule)};
+const [lock, role, dir] = process.argv.slice(2);
+const locked = await underReleaseLock(lock);
+if (locked !== null) process.exit(locked);
+if (role === "parent") spawn(process.execPath, [process.argv[1], lock, "child", dir], heldLockOptions(lock));
+if (role === "graceful") process.on("SIGTERM", () => setTimeout(() => { writeFileSync(dir + "/cleaned", ""); process.exit(0); }, 200));
+// Written whole, then renamed, so a reader never sees an empty pid file.
+writeFileSync(dir + "/" + role + ".pid.tmp", String(process.pid));
+renameSync(dir + "/" + role + ".pid.tmp", dir + "/" + role + ".pid");
+setInterval(() => {}, 1000);
+`);
+  const clean = { ...process.env, DOHC_RELEASE_LOCK_HELD: "", DOHC_RELEASE_LOCK_FD: "" };
+  const until = async (check, what) => {
+    for (const deadline = Date.now() + 10_000; !check(); await new Promise(resolve => setTimeout(resolve, 50))) if (Date.now() > deadline) assert.fail(what);
+  };
+  const competing = () => promisify(execFile)(process.execPath, [script, lock, "other", dir], { timeout: 10_000, env: clean }).then(() => 0, error => error.code);
+
+  const job = spawn(process.execPath, [script, lock, "parent", dir], { stdio: "ignore", env: clean });
+  await until(() => existsSync(join(dir, "child.pid")), "the child release command never started");
+  assert.equal(await competing(), LOCK_BUSY, "a release run by hand does not start while the job runs");
+  process.kill(pidOf("parent"), "SIGKILL");
+  await new Promise(resolve => job.once("exit", resolve));
+  assert.equal(await competing(), LOCK_BUSY, "the child still holds the lock after the job is killed");
+  process.kill(pidOf("child"), "SIGKILL");
+  await until(() => !releaseLockHeld(lock), "the lock outlived the last process holding it");
+
+  // A signal sent to the command someone started reaches the run under the lock, which cleans up before the command exits.
+  const started = spawn(process.execPath, [script, lock, "graceful", dir], { stdio: "ignore", env: clean });
+  await until(() => existsSync(join(dir, "graceful.pid")), "the run under the lock never started");
+  const exited = new Promise(resolve => started.once("exit", code => resolve(code)));
+  started.kill("SIGTERM");
+  assert.equal(await exited, 0);
+  assert.equal(existsSync(join(dir, "cleaned")), true);
+  assert.equal(releaseLockHeld(lock), false);
+  assert.throws(() => heldLockOptions(lock, clean), /does not hold/);
+});
+
+test("the nightly LaunchAgent runs at 04:00 in the login session from a clean checkout of main, and reports when it cannot update it", () => {
+  const definition = nightlyAgentDefinition({ checkout: "/Users/maker/dohc-release/driver", source: "git@github.com:dohchq/dohc.git", queue: "/Users/maker/dev/worktrees/_verification", logPath: "/Users/maker/dohc-release/nightly.log", path: "/usr/bin:/bin" });
+  assert.match(definition, new RegExp(`<key>Label</key><string>${RegExp.escape(NIGHTLY_AGENT_LABEL)}</string>`));
+  assert.match(definition, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
+  assert.match(definition, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>0<\/integer>/);
+  // A failure is reported through gh, so no code from the checkout runs before main is in it.
+  assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec gh issue comment 2281 -R dohchq\/dohc --body "\$3"/);
+  assert.match(definition, /if \[ "\$attempt" = 3 \]; then exec gh issue comment 2281 -R dohchq\/dohc --body "\$2"; fi/);
+  assert.doesNotMatch(definition, /release-nightly\.mjs report/);
+  assert.match(definition, /exec node scripts\/release-nightly\.mjs run<\/string><string>\/Users\/maker\/dohc-release\/driver<\/string><string>git@github\.com:dohchq\/dohc\.git<\/string><string>&gt; \[!NOTE\]\n&gt; Posted by the nightly release job.+could not fetch main in \/Users\/maker\/dohc-release\/driver, so nothing ran tonight\. See \/Users\/maker\/dohc-release\/nightly\.log\.<\/string><string>.+could not check out main in .+<\/string><\/array>/s);
+  assert.match(definition, /git fetch --quiet "\$1" refs\/heads\/main/, "it fetches the main branch from the repository install checked, not the clone's origin");
+  assert.match(definition, /<key>DOHC_VERIFICATION_QUEUE_ROOT<\/key><string>\/Users\/maker\/dev\/worktrees\/_verification<\/string>/);
+  assert.match(definition, /<key>StandardOutPath<\/key><string>\/Users\/maker\/dohc-release\/nightly\.log<\/string>/);
+});
+
+test("Desktop Release names the requested commit in its run title and builds nothing when main is elsewhere", async () => {
+  assert.equal(runTitle(NIGHTLY_HEAD, false), `Desktop Release nightly for ${NIGHTLY_HEAD}`);
+  assert.equal(runTitle(NIGHTLY_HEAD, true), `Desktop Release nightly dry run for ${NIGHTLY_HEAD}`);
+  assert.equal(releaseWorkflow["run-name"], "Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}");
+  assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.commit.required, false);
+  const [guard] = releaseWorkflow.jobs.preflight.steps;
+  assert.equal(guard.name, "Check the requested commit", "the guard runs before anything else in preflight");
+  assert.equal(guard.if, "inputs.commit != ''");
+  assert.equal(guard.env.REQUESTED_COMMIT, "${{ inputs.commit }}");
   if (process.platform === "win32") return;
-  // Run the step itself against a workspace an earlier build left behind.
-  const workspace = await createTemporaryDirectory(join(tmpdir(), "dohc-release-workspace-"));
-  const generation = join(workspace, "apps/desktop/resources/engine-reader/generation");
-  await mkdir(generation, { recursive: true });
-  await writeFile(join(generation, "reader.cjs"), "reader");
-  await chmod(join(generation, "reader.cjs"), 0o444);
-  await chmod(generation, 0o555);
-  const step = releaseWorkflow.jobs.build.steps.find(candidate => candidate.name === "Let checkout remove an earlier build's reader folder");
-  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
-  await rm(workspace, { recursive: true });
-  assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
-  // A fresh runner has no workspace yet.
-  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
+  const check = (requested, actual) => promisify(execFile)("bash", ["-euo", "pipefail", "-c", guard.run], { env: { ...process.env, REQUESTED_COMMIT: requested, GITHUB_SHA: actual } });
+  await check(NIGHTLY_HEAD, NIGHTLY_HEAD);
+  await assert.rejects(check(NIGHTLY_HEAD, "d".repeat(40)), error => error.code === 1 && /not the requested commit/.test(error.stdout));
 });

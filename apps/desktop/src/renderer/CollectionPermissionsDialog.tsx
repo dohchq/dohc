@@ -60,7 +60,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
   }
   return <Overlay onClose={busy ? undefined : onClose}><section role="dialog" aria-modal="true" aria-labelledby="collection-access-title"
     className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-140 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5">
-    <h2 id="collection-access-title" className="m-0 text-sm font-semibold text-ink">Collection access</h2>
+    <h2 id="collection-access-title" className="m-0 text-base font-semibold text-ink">Collection access</h2>
     <p className="m-0 text-[13px] text-muted">Choose who can use this Collection and which actions they can run.</p>
     <form className="flex flex-col gap-3" onSubmit={event => { event.preventDefault(); void change(); }}>
       <label className="text-[12px] text-muted">Person<select aria-label="Collection access person" value={grantId} disabled={busy}

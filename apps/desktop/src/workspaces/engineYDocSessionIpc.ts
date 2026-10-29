@@ -2,13 +2,14 @@ import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isYdocArtifactAssetsInvalidRefusal,
+  YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
 } from "@dohc/workspace-engine-client";
@@ -67,7 +68,9 @@ import {
   YDocSessionClosedError,
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
+  isYDocOutsideWriteWaitingError,
   isYDocSessionUnreleasedError,
+  isConflictStaleTargetCause,
   isVolumeSharesNewFilesCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
@@ -96,6 +99,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
+  saveDeletedFileAgain?(path: string): Promise<boolean>;
   openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause, failure?: unknown) => void}): Promise<EngineYDocSessionProvider>;
 }
 
@@ -138,9 +142,11 @@ interface EngineYDocSessionIpcOptions {
 }
 
 // Why the file refuses writes. The engine names a volume that adds sharing
-// permissions to new files; otherwise the file is checked. A missing file, or
-// one that cannot be checked, names no reason.
-function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureReason {
+// permissions to new files; otherwise the file is checked. The engine refuses
+// a save over a file that is gone, so a missing file with that refusal was
+// deleted outside dohc. A shared view's file is its host's, so only a local
+// file says so. A file that cannot be checked names no reason.
+function saveFailureReason(absolutePath: string, failure: unknown, shared: boolean): SaveFailureReason {
   if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
@@ -148,6 +154,7 @@ function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureR
   } catch (error) {
     if (isPrivacyDenial(error)) return "privacy-denied";
     const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return !shared && isConflictStaleTargetCause(failure) ? "deleted" : null;
     return code === "EACCES" || code === "EPERM" ? "read-only" : null;
   }
 }
@@ -157,6 +164,7 @@ interface SessionEvent {
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
+  changedOutside?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["changedOutside"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -286,6 +294,12 @@ export interface LiveDocumentEdit {
    * typing in the document.
    */
   change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  /**
+   * Throws when the document at the resolved `path` is a lossy note
+   * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
+   * It runs before any session opens or anything changes.
+   */
+  assertEditable(path: string): Promise<void>;
   origin: LiveDocumentEditOrigin;
 }
 
@@ -677,6 +691,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
           signals.emit(event);
@@ -716,7 +731,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               // one or two access calls, made only on a failure, so the notice
               // can name it.
               const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure) }
+                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure, shared) }
                 : undefined;
               publish(() => emit({
                 state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),
@@ -738,6 +753,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onObjectChanged: () => {
               publish(() => markObjectChanged());
+            },
+            onChangedOutside: (unsaved) => {
+              publish(() => emit({
+                state: unsaved ? "changed-on-disk" : "saved", seq: saveSeq.dirtySeq, changedOutside: { unsaved },
+              }));
             },
           });
         } catch (error) {
@@ -883,12 +903,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       throw new Error("This document belongs to another workspace.");
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
+    const of = { sender, generation: renderer.generation };
+    if (input.recreateFile) {
+      try {
+        authority.assertCurrent();
+        return await this.#saveDeletedFileAgain(authority.workspace, input.path, of);
+      } finally {
+        authority.release();
+      }
+    }
     let settle: Promise<unknown>;
     try {
       authority.assertCurrent();
-      const held = this.#owner.documentSession(
-        authority.workspace.attachmentId, input.path, { sender, generation: renderer.generation },
-      );
+      const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
       settle = held.session.provider.settleNow();
@@ -896,6 +923,24 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       authority.release();
     }
     await settle;
+    return "settled";
+  }
+
+  // Save it again, on a document whose file was deleted outside dohc. Its
+  // session can outlive its tab: the close was refused, so the session still
+  // holds the text, and saving lets that close finish.
+  async #saveDeletedFileAgain(
+    workspace: EngineYDocWorkspace,
+    path: string,
+    of: { sender: EngineYDocIpcSender; generation: number },
+  ): Promise<RetrySaveResult> {
+    const held = this.#owner.documentSession(workspace.attachmentId, path, of);
+    const closed = held ? undefined : this.#owner.failedRelease(workspace.attachmentId, path, of);
+    if (held?.session.deleted || !(held || closed)) return "closed";
+    const capture = this.#isSharedView(workspace) ? null : this.#captureFor(workspace);
+    if (!(await capture?.saveDeletedFileAgain?.(path))) return "closed";
+    const release = await closed?.retry();
+    if (release?.kind === "failed") throw release.error;
     return "settled";
   }
 
@@ -1020,6 +1065,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<AppliedEdit> {
+    await input.assertEditable(path);
     const attachment = workspace.attachmentId;
     const held = this.#owner.documentSession(attachment, path);
     if (held) return await this.#editHeld(held, path, input);
@@ -1305,6 +1351,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return this.#fileMutationPort;
   }
 
+  /**
+   * Changes a document's live editing for a main-side door, as the window
+   * does once its editors closed: refused while an editor holds the
+   * document, and an editor that opens meanwhile waits for the change.
+   */
+  async withLiveEditingChange<T>(authorityId: symbol, path: string, change: () => Promise<T>): Promise<T> {
+    try {
+      return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
+    } catch (error) {
+      if (!(error instanceof LiveDocumentOwnedError)) throw error;
+      throw new Error(`${path} is open in an editor. Close it in dohc, then try again.`, { cause: error });
+    }
+  }
+
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
@@ -1382,6 +1442,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   #openRefusal(error: unknown): OpenResult {
     if (isCaptureFileHeldRefusal(error)) return unavailableOpen({ captureHeld: true });
+    if (isYDocOutsideWriteWaitingError(error)) return unavailableOpen({ outsideWriteWaiting: true });
     if (isYDocPathNotInVersionError(error)) {
       return unavailableOpen({ notInVersion: true });
     }
@@ -1406,11 +1467,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 }
 
-// Journals one main-side edit on a live document session and settles it, so
-// the edit is in the engine and the file when the caller hears back. The
-// update is computed off this thread against the session's state and reaches
-// the editor as a remote update, which merges with anything the person typed
-// meanwhile.
+export const DOCUMENT_EDIT_PENDING_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+
+// Admit the edit before reporting a pending owner draft as saved. The editor
+// receives the admitted update, merged with what the person typed meanwhile.
 async function applyDocumentEdit(
   provider: EngineYDocSessionProvider,
   path: string,
@@ -1424,24 +1484,32 @@ async function applyDocumentEdit(
   });
   if (update === null) return { changed: false };
   session.assertSame();
-  let armed = false;
-  provider.applyLocalUpdate(update, () => {
-    armed = true;
-  }, input.origin);
+  const admitted = await provider.applyDecidedLocalUpdate(() => {
+    session.assertSame();
+    return update;
+  }, undefined, { ...input.origin, idempotencyKey: randomUUID() });
+  if (!admitted) throw new Error(`The engine did not accept the edit to ${path}.`);
+  let pending = false;
   session.show(update);
   try {
     await settleNow.call(provider);
   } catch (error) {
-    if (!armed) throw error;
-    // The session's journal holds the edit and a later settle saves it.
-    // Sending the edit again could apply it twice.
-    const cause = error instanceof Error ? error.message : String(error);
-    throw new LiveDocumentEditAppliedError(
-      `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
-      { cause: error },
-    );
+    if (error instanceof YdocOwnerDraftPendingError) {
+      pending = true;
+    } else {
+      // The session's journal holds the edit and a later settle saves it.
+      // Sending the edit again could apply it twice.
+      const cause = error instanceof Error ? error.message : String(error);
+      // Over a change made outside dohc, the disk version stands when the
+      // document reloads or closes, and the edit stays in History.
+      throw new LiveDocumentEditAppliedError(
+        isConflictStaleTargetCause(error)
+          ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+          : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+        { cause: error },
+      );
+    }
   }
-  if (!armed) throw new Error(`The engine did not accept the edit to ${path}.`);
   // Someone who removed or reshaped a block while the edit went into it takes
   // the edit's text with the block. That merge is correct for the document,
   // but the agent must not hear that its text is there.
@@ -1454,6 +1522,8 @@ async function applyDocumentEdit(
   // before the edit can still be on its way from their editor, and waiting
   // for it would only move the moment: they can change the block again right
   // after. So the answer says so instead of promising the text stays.
+  if (pending) return { changed: true, warning: session.keepBlocks
+    ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}` : DOCUMENT_EDIT_PENDING_WARNING };
   return session.keepBlocks ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING } : { changed: true };
 }
 

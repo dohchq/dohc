@@ -8,8 +8,11 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type Oper
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { deferred } from "../testing/deferred";
 import { readDeleteRecovery } from "./workspaceDeleteRecovery";
+import { readMoveRecovery } from "./workspaceMoveRecovery";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import type { PathChangeOptions } from "./workspaceFileMoves";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -26,6 +29,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   await write("folder/tracked.txt");
   await write("folder/assets/plain.txt");
   const operation = { workspace: { workspaceId: "owner", rootPath, shareView: undefined as unknown, readOnly: false }, signal: new AbortController().signal, assertCurrent: vi.fn() };
+  await openedLocalState(operation.workspace);
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, _authored, work) => work({
     policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async () => trackedPaths, delete: vi.fn(async () => "delete-moment"),
   } as never) };
@@ -42,7 +46,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
     for (let start = 0; start < trackedPaths.length; start += 100) await Promise.all(trackedPaths.slice(start, start + 100).map(path => write(path)));
     return { operationId: input.operationId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: otherId, deduped: false, materialized: true };
   });
-  const history = { readHistoryPage, undoHistoryOperation };
+  const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})), readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})), readHistoryPage, undoHistoryOperation };
   const remove = async () => {
     const result = await deleteWorkspacePathByHand(operation, "folder", person, { capture, requestId: "delete", trashItem: async () => { throw new Error("OS refused"); }, markDeleted: vi.fn() });
     expect(result.undo).toEqual({ available: true }); return result.operationId!;
@@ -57,7 +61,7 @@ it.each([".env", ".git/config", "node_modules/pkg/index.js", "link"])("refuses t
     await symlink(outside, join(f.rootPath, "folder/assets/link"), process.platform === "win32" ? "junction" : "dir");
   } else await f.write(`folder/assets/${hidden}`);
   const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const before = await readFile(sidecar, "utf8");
   const result = await f.undo(id, true);
   expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("contains a link or a reserved, secret, or excluded path") });
@@ -98,21 +102,21 @@ it("refuses unknown ids and invalid ids without an engine Undo or record creatio
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: "This operation is not in History." });
   expect(await f.undo("11111111-1111-4111-8111-111111111111")).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
-  expect(await readdir(join(f.rootPath, ".dohc"))).toEqual([]);
+  expect(await readdir(join(f.rootPath, ".dohc/local"))).toEqual([]);
 });
 it("reads a move's references without contents and scopes its cursor", async () => {
   const f = await fixture();
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ momentId: "move", operation: "rename", path: "folder/after.txt", beforePath: "folder/before.txt", body: "never return this" }], protectedMoments: [], nextCursor: null } as never);
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history)).toEqual({ ok: true, operationId: otherId, members: [{ momentId: "move", operation: "rename", path: "folder/after.txt", beforePath: "folder/before.txt" }], nextCursor: null });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history, {agent: true})).toEqual({ ok: true, operationId: otherId, members: [{ momentId: "move", operation: "rename", path: "folder/after.txt", beforePath: "folder/before.txt" }], nextCursor: null });
   f.history.readHistoryPage.mockClear();
   const cursor = Buffer.from(JSON.stringify({ workspaceId: "other", operationId: otherId })).toString("base64url");
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor }, f.history)).toMatchObject({ ok: false });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor }, f.history, {agent: true})).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled();
 });
 it.each(["readOnly", "shareView"] as const)("refuses both operations in %s workspaces before engine calls", async kind => {
   const f = await fixture(); if (kind === "readOnly") f.operation.workspace.readOnly = true; else f.operation.workspace.shareView = {};
   expect(await f.undo(otherId)).toMatchObject({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history)).toMatchObject({ ok: false });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history, {agent: true})).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it("passes a different author's lost-reply refusal through unchanged", async () => {
@@ -124,7 +128,7 @@ it("passes a different author's lost-reply refusal through unchanged", async () 
 
 it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//host/share", "//host/share/x", "\\\\host\\share\\x"])("refuses hostile recovery paths before walking (%s)", async hostile => {
   const f = await fixture(); const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const original = JSON.parse(await readFile(sidecar, "utf8"));
   for (const patch of [{ base: hostile }, { paths: [hostile] }, { emptyFolders: [hostile] },
     { copies: [{ path: hostile, dev: 0, ino: 0, birthtimeMs: 0, size: 0 }] },
@@ -132,27 +136,27 @@ it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//
     const body = JSON.stringify({ ...original, ...patch });
     await writeFile(sidecar, body);
     expect(await f.undo(id, true)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery paths are invalid." });
-    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery paths are invalid." });
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true})).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery paths are invalid." });
     expect(await readFile(sidecar, "utf8")).toBe(body);
   }
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it.each(["{", "null", "{}", "directory", "wrong id", "invalid staged"])("never exposes corrupt sidecar parser errors (%s)", async body => {
   const f = await fixture(); const id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   if (body === "directory") { await rm(sidecar); await mkdir(sidecar); }
   else if (body === "wrong id" || body === "invalid staged") {
     const record = JSON.parse(await readFile(sidecar, "utf8"));
     await writeFile(sidecar, JSON.stringify({ ...record, ...(body === "wrong id" ? { operationId: otherId } : { staged: "nested/staged" }) }));
   } else await writeFile(sidecar, body);
-  const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." };
+  const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash." };
   expect(await f.undo(id, true)).toEqual(refusal);
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery record is invalid." });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true})).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery record is invalid." });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it.each(["!", Buffer.from("null").toString("base64url"), Buffer.from("{}").toString("base64url")])("refuses malformed cursors without parser text (%s)", async cursor => {
   const f = await fixture();
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor }, f.history)).toEqual({
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor }, f.history, {agent: true})).toEqual({
     ok: false, reason: "Cannot read this operation page. Use the cursor from the previous page.",
   });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled();
@@ -165,18 +169,18 @@ it("lets the engine reject a cursor from an inactive version", async () => {
     expect(input.cursor).toEqual(cursor);
     throw new Error("This History cursor belongs to another version.");
   });
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url") }, f.history))
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url") }, f.history, {agent: true}))
     .toEqual({ ok: false, reason: "This History cursor belongs to another version." });
 });
 it.each([SyntaxError, TypeError])("does not expose %s messages from History decoding", async ErrorType => {
   const f = await fixture(); f.history.readHistoryPage.mockRejectedValue(new ErrorType("raw parser detail"));
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history)).toEqual({
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history, {agent: true})).toEqual({
     ok: false, reason: "dohc could not read this operation. Check the workspace, then try again.",
   });
 });
 it("reports missing recovery for a delete and unsupported for another operation", async () => {
   const f = await fixture();
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "rename", path: "folder/a.txt", beforePath: "folder/b.txt" }], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -190,13 +194,13 @@ it.runIf(process.env.DOHC_OPERATION_TIMING === "1").each(["mixed", "tracked"])("
     const id = await f.remove();
     console.log("TIMING_RUN " + mode + " " + run + " deleted 5000 files");
     let start = performance.now();
-    let page = await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history);
+    let page = await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true});
     expect(page.ok).toBe(true);
     reads.push(performance.now() - start);
     let pages = 1, members = page.ok ? page.members.length : 0;
     while (page.ok && page.nextCursor) {
       start = performance.now();
-      page = await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor: page.nextCursor }, f.history);
+      page = await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor: page.nextCursor }, f.history, {agent: true});
       subsequentPages.push(performance.now() - start);
       expect(page.ok).toBe(true); pages++; members += page.ok ? page.members.length : 0;
     }
@@ -219,7 +223,7 @@ it("admits new files and folders while reading without superseding their writes"
   const f = await fixture(), entered = deferred<void>(), release = deferred<void>();
   const page = { moments: [{ momentId: "m", operation: "delete", path: "folder/tracked.txt" }], nextCursor: null };
   f.history.readHistoryPage.mockImplementation(async () => { entered.resolve(); await release.promise; return page as never; });
-  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history);
+  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history, {agent: true});
   await entered.promise;
   let writes = 0;
   const writing = withStaleSensitiveWorkspaceOperation(f.rootPath, async () => {
@@ -234,14 +238,14 @@ it("admits new files and folders while reading without superseding their writes"
 it("checks recovery only on the first read page and still checks later members", async () => {
   const f = await fixture(), id = await f.remove();
   const cursor = Buffer.from(JSON.stringify({ workspaceId: "owner", operationId: id, objectId: null, versionId: "main" })).toString("base64url");
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true, withoutHistory: ["folder/assets"] });
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true})).toMatchObject({ ok: true, withoutHistory: ["folder/assets"] });
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   await writeFile(sidecar, "{");
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor }, f.history)).toEqual({
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor }, f.history, {agent: true})).toEqual({
     ok: true, operationId: id, members: [{ momentId: "delete-moment", operation: "delete", path: "folder/tracked.txt", beforePath: "folder/tracked.txt" }], nextCursor: null,
   });
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ momentId: "hidden", operation: "delete", path: ".env" }], nextCursor: null } as never);
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor }, f.history)).toMatchObject({ ok: false });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id, cursor }, f.history, {agent: true})).toMatchObject({ ok: false });
 });
 it("rechecks a saved Undo's named paths without walking restored directories", async () => {
   const f = await fixture(), id = await f.remove();
@@ -265,13 +269,13 @@ it.each(["delete", "rename"])("uses the settled person refusal without checking 
   await symlink(outside, join(f.rootPath, "folder"), process.platform === "win32" ? "junction" : "dir");
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: kind, path: "folder/tracked.txt" }], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: kind === "delete"
-    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." : missingMove });
+    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." : missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
 it.each(["linux", "darwin"])("accepts colon names in recovery records on %s", async platform => {
   const f = await fixture(), id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const record = JSON.parse(await readFile(sidecar, "utf8"));
   record.base = "a:notes"; record.paths = ["a:notes/file.txt"]; record.emptyFolders = [];
   await writeFile(sidecar, JSON.stringify(record));
@@ -283,16 +287,16 @@ it.each(["linux", "darwin"])("accepts colon names in recovery records on %s", as
 });
 it.each([".", "..", "/root", "nested/name", "nested\\name"])("refuses a staged name that is not one safe path component (%s)", async staged => {
   const f = await fixture(), id = await f.remove();
-  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const record = JSON.parse(await readFile(sidecar, "utf8"));
   await writeFile(sidecar, JSON.stringify({ ...record, staged }));
-  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." });
+  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash." });
 });
 
 it("stops a person missing-record lookup at the first delete page", async () => {
   const f = await fixture();
   f.history.readHistoryPage.mockResolvedValueOnce({ moments: [{ operation: "delete", path: "folder/tracked.txt" }], nextCursor: { workspaceId: "owner", operationId: otherId, objectId: null, versionId: "main" } } as never);
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
@@ -302,4 +306,131 @@ it("successfully undoes a saved file move through operation History", async () =
     { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
   expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
   expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
+});
+
+it.each([false, true])("undoes Duplicate through the engine ledger with a stable request, agent=%s", async byAgent => {
+  const f = await fixture();
+  f.history.readHistoryOperation.mockResolvedValue({operationId: otherId, versionId: "main", momentCount: 1, kind: "file-duplicate"} as never);
+  f.history.readHistoryPage.mockResolvedValue({moments: [{momentId: "copy", operation: "write", path: "folder/tracked.txt"}], nextCursor: null} as never);
+  f.history.undoHistoryOperation.mockResolvedValue({operationId: otherId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: otherId, deduped: false, materialized: true});
+  expect(await f.undo(otherId, byAgent)).toMatchObject({ok: true, tracked: {state: "restored"}, remaining: []});
+  expect(await f.undo(otherId, byAgent)).toMatchObject({ok: true});
+  expect(f.history.undoHistoryOperation.mock.calls.map(([input]) => input.requestId)).toEqual(["duplicate-undo:" + otherId, "duplicate-undo:" + otherId]);
+  f.history.undoHistoryOperation.mockRejectedValue(new Error("Cannot undo folder/tracked.txt: copy changed after Duplicate"));
+  expect(await f.undo(otherId, byAgent)).toMatchObject({ok: false, reason: expect.stringContaining("folder/tracked.txt")});
+});
+
+it("does not treat an unrelated single write as Duplicate", async () => {
+  const f = await fixture();
+  f.history.readHistoryPage.mockResolvedValue({moments:[{operation:"write",path:"folder/tracked.txt"}],nextCursor:null} as never);
+  expect(await f.undo(otherId)).toMatchObject({ok:false,reason:"This operation is not in History."});
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+
+// A recovery record decides where Undo writes and what it puts back, so dohc
+// reads it only from `.dohc/local/trash`, and only as a file of this user's
+// that no one else can change. Anything else reads as an invalid record or a
+// folder to fix: Undo refuses with words and changes nothing.
+const untrustedRecords = [
+  ["writable by others", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
+  ["hard-linked", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
+  ["another user's", "Cannot undo the delete. This workspace's .dohc belongs to another user. Make it and everything in it yours again, then try again."],
+  ["under a linked .dohc/local", "Cannot undo the delete. This workspace's .dohc/local is a link. Put what it links to in its place, then try again."],
+  ["under a linked trash", "Cannot undo the delete. Its recovery record is invalid. Restore files from History, the system trash, or .dohc/local/trash."],
+] as const;
+it.skipIf(process.platform === "win32").each(untrustedRecords)("refuses a recovery record %s and changes nothing", async (kind, reason) => {
+  const f = await fixture(), id = await f.remove();
+  const trash = join(f.rootPath, ".dohc/local/trash");
+  const sidecar = join(trash, (await readdir(trash)).find(name => name.endsWith(".json"))!);
+  const elsewhere = await createTestScratch("history-untrusted-record-");
+  let uid: ReturnType<typeof vi.spyOn> | undefined;
+  if (kind === "writable by others") await filesystem.chmod(sidecar, 0o666);
+  if (kind === "hard-linked") await filesystem.link(sidecar, join(elsewhere, "second-name.json"));
+  if (kind === "another user's") uid = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+  const moved = kind === "under a linked .dohc/local" ? join(f.rootPath, ".dohc/local") : kind === "under a linked trash" ? trash : undefined;
+  if (moved) {
+    await rename(moved, join(elsewhere, "moved"));
+    await symlink(join(elsewhere, "moved"), moved, "dir");
+  }
+  const before = await readdir(elsewhere, { recursive: true });
+  try {
+    expect(await f.undo(id)).toEqual({ ok: false, reason });
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: false}))
+      .toEqual({ ok: false, reason: reason.replace("Cannot undo the delete.", "Cannot read this operation.").replace(" Restore files from History, the system trash, or .dohc/local/trash.", "") });
+  } finally { uid?.mockRestore(); }
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readdir(elsewhere, { recursive: true })).toEqual(before);
+});
+
+// A trash dohc can't look into may hold the record, so Undo names the folder
+// instead of calling the record missing. chmod can't hide a folder from root,
+// and Windows has no such mode.
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("refuses Undo when it can't look into .dohc, and changes nothing", async () => {
+  const f = await fixture(), id = await f.remove();
+  const dohc = join(f.rootPath, ".dohc");
+  await filesystem.chmod(dohc, 0o600);
+  try {
+    expect(await f.undo(id)).toEqual({ ok: false,
+      reason: "Cannot undo the delete. This workspace's .dohc/local can't be read. Make sure you can open it, then try again." });
+  } finally { await filesystem.chmod(dohc, 0o700); }
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("reads delete and move records only from .dohc/local/trash, never an old .dohc/trash", async () => {
+  const f = await fixture(), id = await f.remove();
+  await f.write("before.txt", "kept edits");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+    { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toMatchObject({ from: "before.txt", to: "after.txt" });
+  await rename(join(f.rootPath, ".dohc/local/trash"), join(f.rootPath, ".dohc/trash"));
+  expect(await readDeleteRecovery(f.rootPath, id)).toBeUndefined();
+  expect(await readMoveRecovery(f.rootPath, moved.operationId!)).toBeUndefined();
+  expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("refuses Undo of a delete or rename before the workspace's open prepares .dohc/local, and changes nothing", async () => {
+  const f = await fixture(), id = await f.remove();
+  await f.write("before.txt", "kept edits");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+    { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+  readLocalStateFrom(null);
+  // On Windows nothing in `.dohc/local` is read before the open holds it, so
+  // dohc can't yet tell what it would undo.
+  const notOpened = (what: string) => process.platform === "win32"
+    ? "dohc has not finished opening this workspace. Try again when it opens."
+    : `dohc did not undo the ${what} because the workspace has not finished opening. Try again when it opens.`;
+  expect(await f.undo(id)).toEqual({ ok: false, reason: notOpened("delete") });
+  expect(await f.undo(moved.operationId!)).toEqual({ ok: false, reason: notOpened("rename") });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  await expect(stat(join(f.rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
+  // Elsewhere reading needs no open, and the records wait for the next one.
+  const read = await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: false});
+  expect(read).toMatchObject(process.platform === "win32" ? { ok: false } : { ok: true, withoutHistory: ["folder/assets"] });
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/assets"], remaining: [] });
+  expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
+  expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
+});
+
+// A saved Undo still restoring asks History again on each retry, and saves
+// what it learns, so the retry waits for the open as a first Undo does.
+it("checks readiness before a retried delete Undo asks History to finish restoring", async () => {
+  const f = await fixture(), id = await f.remove();
+  f.history.undoHistoryOperation.mockImplementationOnce(async input => ({ operationId: input.operationId, versionId: "main", momentCount: 1,
+    notRestored: [], compensationOperationId: otherId, deduped: false, materialized: false }));
+  expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restoring" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) });
+  expect(await f.undo(id)).toEqual({ ok: false,
+    reason: "dohc did not undo the delete because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
+  await openedLocalState(f.operation.workspace);
+  expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restored" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
+  expect(await readDeleteRecovery(f.rootPath, id)).toMatchObject({ result: { tracked: { state: "restored" } } });
 });

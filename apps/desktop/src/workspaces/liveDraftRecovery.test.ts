@@ -8,7 +8,7 @@ import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/exc
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
-import { hasRetainedLiveDraft, hasWorkspaceLiveDrafts, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
+import { hasRetainedLiveDraft, hasWorkspaceLiveDrafts, listLiveDraftRecovery, preserveLiveDraft, preserveUnsentLiveDraft, removeLiveDraft, removeLiveDraftCopies, removeWorkspaceLiveDrafts, workspaceDraftStore } from "./liveDraftRecovery";
 import { readTypingCheckpoints, writeTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 const snapshotSha = (update: Uint8Array) => createHash("sha256").update(update).digest("hex");
 
@@ -114,12 +114,14 @@ it("includes a draft saved after the initial dismiss scan in the reply", async (
   const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
   const seen = (await listLiveDraftRecovery(directory, "workspace"))[0]!;
+  // Establish ordering without comparing a fractional file time with Date.now().
+  await utimes(join(directory, `${seen.recordId}.json`), new Date(0), new Date(0));
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(rm).mockImplementationOnce(async (path, options) => {
     await actual.rm(path, options);
     await preserveLiveDraft(directory, "workspace", {...draft, text: "saved during dismiss"});
   });
-  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), 1000, "a.txt", seen.recordId))
     .resolves.toEqual([expect.objectContaining({text: "saved during dismiss"})]);
 });
 
@@ -239,7 +241,8 @@ it("stops blocking a path after its recovery is discarded and preserves other dr
   const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
   await preserveLiveDraft(directory, "other", draft);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.md");
+  for (const name of await readdir(directory)) await utimes(join(directory, name), new Date(0), new Date(0));
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), 1000, "a.md");
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
   expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(true);
 });
@@ -544,3 +547,84 @@ it("recovery text matches the witnessed settled artifact, including frontmatter 
   expect((await listLiveDraftRecovery(directory, "workspace"))[0]!.text).toBe(source);
   doc.destroy();
 });
+
+// dohc#2308. The capture sets a deleted file's text aside, and removes the
+// draft once a save writes the file. Notices follows through one event.
+it("tells only the workspace's windows after a write and a removal, and nothing after a failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-draft-events-")); directories.push(directory);
+  const sent: string[] = [];
+  const window = (name: string) => ({webContents: {name, isDestroyed: () => false,
+    send: (channel: string, payload: unknown) => { sent.push(`${name} ${channel} ${JSON.stringify(payload)}`); }}});
+  const store = workspaceDraftStore(directory, "workspace", {
+    all: () => [window("this"), window("other")],
+    workspaceIdOf: (contents) => contents.name === "this" ? "workspace" : "other-workspace",
+  });
+  const doc = new Y.Doc();
+  doc.getText("plainText").insert(0, "first");
+  const draft = {path: "notes/a.md", objectId: "object", contentKind: "plaintext" as const, doc};
+  const event = 'this desktop:live-draft-recovery-changed {"workspaceId":"workspace"}';
+
+  const first = await store.preserveUnsentState({...draft, reason: "deleted"});
+  expect(sent).toEqual([event]);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.reason)).toEqual(["deleted"]);
+  // The same text again is the same draft, written again.
+  const second = await store.preserveUnsentState({...draft, reason: "deleted"});
+  expect(second.split(":")[0]).toBe(first.split(":")[0]);
+  // The older write's handle leaves the draft written again.
+  await store.discardUnsentState(first);
+  expect(sent).toEqual([event, event]);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["first"]);
+
+  vi.mocked(rm).mockRejectedValueOnce(Object.assign(new Error("busy"), {code: "EBUSY"}));
+  await expect(store.discardUnsentState(second)).rejects.toThrow("busy");
+  await expect(store.preserveUnsentState({...draft, path: ".env"})).rejects.toThrow("cannot enter draft recovery");
+  expect(sent).toEqual([event, event]);
+
+  await store.discardUnsentState(second);
+  expect(sent).toEqual([event, event, event]);
+  expect(await listLiveDraftRecovery(directory, "workspace")).toEqual([]);
+});
+
+// A removal and a write of the same draft never overlap: the write renames
+// its file before it counts itself, and a removal in that gap would delete
+// the text it just wrote.
+it("keeps a draft written again while an older write's removal waits", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-draft-order-")); directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const draft = {path: "a.md", objectId: "object", contentKind: "plaintext" as const, text: "kept", update};
+  const older = await preserveLiveDraft(directory, "workspace", draft);
+  const held = deferredVoid();
+  const reached = deferredVoid();
+  const actualRm = vi.mocked(rm).getMockImplementation()!;
+  vi.mocked(rm).mockImplementation(async (path, options) => {
+    if (String(path).endsWith(".tmp")) { reached.resolve(); await held.promise; }
+    return await actualRm(path, options);
+  });
+  const writing = preserveLiveDraft(directory, "workspace", draft);
+  await reached.promise;
+  const removing = removeLiveDraft(directory, older);
+  held.resolve();
+  expect(await writing).not.toBe(older);
+  await expect(removing).resolves.toBe(false);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["kept"]);
+});
+
+// A removal frees nothing for reuse: a write after it gets a handle no queued
+// removal still holds.
+it("keeps a draft written again after a removal, when an older removal of it comes later", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-draft-reuse-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", contentKind: "plaintext" as const, text: "kept", update: new Uint8Array([0, 0])};
+  const first = await preserveLiveDraft(directory, "workspace", draft);
+  await expect(removeLiveDraft(directory, first)).resolves.toBe(true);
+  const second = await preserveLiveDraft(directory, "workspace", draft);
+  expect(second).not.toBe(first);
+  await expect(removeLiveDraft(directory, first)).resolves.toBe(false);
+  expect((await listLiveDraftRecovery(directory, "workspace")).map(record => record.text)).toEqual(["kept"]);
+  await expect(removeLiveDraft(directory, second)).resolves.toBe(true);
+});
+
+function deferredVoid() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return {promise, resolve};
+}

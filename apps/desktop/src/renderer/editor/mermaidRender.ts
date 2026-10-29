@@ -41,7 +41,7 @@ type MermaidBlock = {
 export function computeMermaidBlocks(doc: ProseMirrorNode): MermaidBlock[] {
   const blocks: MermaidBlock[] = []
   doc.descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return
+    if (!isCodeBlockNode(node)) return !node.isTextblock // inline content holds no codeBlock
     if (normalizeLanguage(node.attrs.language) !== 'mermaid') return false
     blocks.push({ pos, end: pos + node.nodeSize, text: node.textContent })
     return false // codeBlock content is plain text — nothing to descend into

@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  renderCliResult,
   renderGroups,
   renderGrep,
   renderInbox,
   renderShowMarkdown,
   renderThreads,
-  type ShowResult,
 } from "./render";
+import type { CliShowThreadResult as ShowResult } from "./protocol";
 import {
   formatMessageHandle,
   renderThreadMarkdown,
 } from "./threadMarkdown";
+
+it("prints operation link progress and the committed History receipt", () => {
+  const operation = {ok: true as const, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", members: [], nextCursor: null};
+  expect(renderCliResult("historyOperation", {...operation, links: {state: "updating"}})).toBe("Updating links…");
+  expect(renderCliResult("historyOperation", {...operation, links: {state: "done", documents: 3, unchecked: ["source.md"], uncheckedCount: 2}}))
+    .toBe("Link updates committed in History: 3 documents. Disk writes follow.\n2 linking documents not checked.\nNot checked: source.md");
+});
 
 const engineering = {
   id: "ch_123",
@@ -140,8 +148,8 @@ describe("markdown renderers", () => {
     expect(
       renderGroups({
         groups: [
-          engineering,
-          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
+          { ...engineering, channelWireId: "wire" },
+          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent", channelWireId: null },
         ],
       }),
     ).toMatchInlineSnapshot(`
@@ -231,5 +239,53 @@ describe("markdown renderers", () => {
         context: 0,
       }),
     ).toBe("th_8f2k1c\nth_other");
+  });
+
+  it("renders a group's stream with each post's replies, the read mark, and the older page", () => {
+    const sam = { kind: "human" as const, displayName: "Sam" };
+    const scout = { kind: "agent" as const, displayName: "Scout" };
+    const markdown = renderShowMarkdown({
+      stream: {
+        group: engineering,
+        items: [
+          {
+            position: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
+            threadId: "th_1",
+            message: { id: "msg_1", author: sam, body: "Plan the trip", createdAtMs: 1_000, attachments: [] },
+            post: {
+              replyCount: 2,
+              repliers: [{ author: scout, lastReplyAtMs: 3_000 }],
+              lastReplyAtMs: 3_000,
+              latestAgentReply: { id: "msg_3", author: scout, createdAtMs: 3_000, bodyExcerpt: "Booked the train." },
+              openDecisionCount: 1,
+            },
+          },
+          {
+            position: { createdAtMs: 4_000, lane: "chat", id: "msg_4" },
+            threadId: "th_chat",
+            message: {
+              id: "msg_4", author: sam, body: "Who is driving?", createdAtMs: 4_000, attachments: [],
+              agentRequests: [{ agentId: "default", state: "failed", failureReason: "no-reply" }],
+            },
+          },
+        ],
+        nextBefore: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
+        readPosition: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
+      },
+    });
+    expect(markdown).toBe([
+      "# #engineering",
+      "older: --before 1000:posts:th_1",
+      "",
+      "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
+      "Plan the trip",
+      "> **Scout** · 1970-01-01T00:00:03.000Z · msg_3: Booked the train.",
+      "",
+      "--- read up to here ---",
+      "",
+      "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply)",
+      "Who is driving?",
+      "",
+    ].join("\n"));
   });
 });

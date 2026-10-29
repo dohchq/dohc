@@ -22,12 +22,16 @@ let currentLook: LookSettings = DEFAULT_USER_SETTINGS;
 // Counts applied settings, so a late startup read cannot undo newer ones.
 let lookRevision = 0;
 
-// The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
-// every theme flip to main. Best-effort: a platform without an overlay (or a
-// test without the bridge) just ignores it.
-function applyTheme(theme: "light" | "dark"): void {
-  document.documentElement.dataset.theme = theme;
-  void window.dohcDesktop?.setTitlebarTheme?.({ theme }).catch(() => undefined);
+// The block controls clear a list number's period and space (styles.css): 2ch
+// in a monospaced font, 1ch otherwise. An installed font is measured; where no
+// canvas can measure (a test DOM), it counts as proportional.
+function numberSuffix(fontFamily: string): string | null {
+  if (fontFamily === "mono") return "2";
+  if ((EDITOR_FONTS as readonly string[]).includes(fontFamily)) return null;
+  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  if (!context) return null;
+  context.font = `100px "${fontFamily}", ${getComputedStyle(document.documentElement).getPropertyValue("--font-sans")}`;
+  return context.measureText(".").width === context.measureText("0").width ? "2" : null;
 }
 
 function setProperty(name: string, value: string | null): void {
@@ -36,15 +40,36 @@ function setProperty(name: string, value: string | null): void {
   else if (style.getPropertyValue(name) !== value) style.setProperty(name, value);
 }
 
+// Gives the whole window its new colors in one frame. A control that fades
+// its colors, such as the active tab, would otherwise fade from the old
+// colors while the rest of the window changes at once, so the transitions
+// this change starts end at once.
+function applyColors(theme: "light" | "dark", accent: string | null): void {
+  const root = document.documentElement;
+  if (root.dataset.theme !== theme || root.style.getPropertyValue("--dohc-accent") !== (accent ?? "")) {
+    const running = new Set(document.getAnimations());
+    root.dataset.theme = theme;
+    setProperty("--dohc-accent", accent);
+    // Reading the animations resolves the new styles, which starts the
+    // transitions; the frame would resolve them anyway.
+    for (const animation of document.getAnimations()) {
+      if (animation instanceof CSSTransition && !running.has(animation)) animation.finish();
+    }
+  }
+  // The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
+  // every theme flip to main. Best-effort: a platform without an overlay (or
+  // a test without the bridge) just ignores it.
+  void window.dohcDesktop?.setTitlebarTheme?.({ theme }).catch(() => undefined);
+}
+
 function applyLook(look: LookSettings): void {
   currentLook = look;
   const { appearance, editor } = look;
   const theme = effectiveThemeMode(appearance.themeMode, media?.matches ?? false);
-  applyTheme(theme);
-  // Inline, so it wins over both theme blocks in styles.css; a theme flip
-  // runs this again for the other theme's readable shade.
-  setProperty(
-    "--dohc-accent",
+  // The accent is inline, so it wins over both theme blocks in styles.css;
+  // a theme flip runs this again for the other theme's readable shade.
+  applyColors(
+    theme,
     appearance.accentColor === null ? null : readableAccent(appearance.accentColor, theme),
   );
   setProperty(
@@ -54,6 +79,7 @@ function applyLook(look: LookSettings): void {
       : `"${editor.fontFamily}", var(--font-sans)`,
   );
   setProperty("--dohc-editor-font-size", `${editor.fontSize}px`);
+  setProperty("--dohc-editor-number-suffix", numberSuffix(editor.fontFamily));
   // appearance.zoomLevel is deliberately not applied here: zoom is a window
   // property main owns (windowZoom.ts) — main applies it on window load, on
   // every zoom step, and on every settings save.
@@ -63,7 +89,7 @@ function applyLook(look: LookSettings): void {
 export function applyLookSettings(settings: DesktopUserSettings): void {
   lookRevision += 1;
   applyLook(settings);
-  setChosenColors(settings.appearance);
+  setChosenColors(settings);
 }
 
 /**

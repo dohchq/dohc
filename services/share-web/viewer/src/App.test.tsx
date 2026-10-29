@@ -948,6 +948,29 @@ describe("App", () => {
     expect(logRequests).toBe(2);
   });
 
+  it.each([
+    ["lost answer", () => new Response(JSON.stringify({ ok: false, code: "link_unavailable" }), { status: 503 })],
+    ["lost connection", () => Promise.reject(new TypeError("Failed to fetch"))],
+  ])("offers Try again when the first files answer is a %s, not an ended link", async (_label, fail) => {
+    let inventories = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return ++inventories === 1 ? await fail() : currentPage([], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => buttonNamed("Try again") !== undefined);
+    expect(container.querySelector("[role=alert]")?.textContent).toBe(
+      "dohc couldn't open the shared files. Check your connection, then choose Try again.Try again",
+    );
+    clickButton("Try again");
+    await settle(() => container.querySelector(".viewer") !== null);
+    expect(inventories).toBe(2);
+    expect(container.textContent).not.toContain("couldn't open");
+  });
+
   it("renders a successful empty share instead of refusing it", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -1530,8 +1553,42 @@ describe("App", () => {
 
     expect(blobRequests).toBe(12);
     expect(container.querySelector("main.content")?.textContent).toBe(
-      "This file isn't available right now.",
+      "This file isn't available right now.Try again",
     );
+  });
+
+  it("repeats a file read that failed in transit when the person chooses Try again", async () => {
+    const file: SharedFile = { path: "readme.md", blobSha256: "5".repeat(64), contentKind: "text" };
+    const blobSignals: AbortSignal[] = [];
+    let finishRetry: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        blobSignals.push(init!.signal!);
+        if (blobSignals.length === 1) return jsonResponse({ ok: false, code: "link_unavailable" }, 503);
+        return await new Promise<Response>((resolve) => { finishRetry = resolve; });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => buttonNamed("Try again") !== undefined);
+    expect(container.querySelector("main.content [role=alert]")?.textContent).toBe(
+      "This file isn't available right now.Try again",
+    );
+    clickButton("Try again");
+    await settle(() => finishRetry !== undefined);
+    expect(container.querySelector("main.content")?.textContent).toBe("Loading file");
+    await act(async () => {
+      finishRetry!(new Response("# Readme\n\nBack again."));
+    });
+    await settle(() => container.querySelector("article.markdown")?.textContent?.includes("Back again.") === true);
+    expect(blobSignals).toHaveLength(2);
+    // Try again replaces the failed read's controller, as a new selection does.
+    expect(blobSignals.map((signal) => signal.aborted)).toEqual([true, false]);
+    expect(container.querySelector("main.content [role=alert]")).toBeNull();
   });
 
   it("cancels a throttled file blob retry when the selection changes", async () => {
@@ -1840,6 +1897,43 @@ describe("App", () => {
       "No files in this share yet.",
     );
     expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it.each([429, 503])("offers Try again after an exchange answered %i for the whole retry budget, and repeats it with the scrubbed secret", async (status) => {
+    vi.useFakeTimers();
+    const secret = "q".repeat(43);
+    history.replaceState(null, "", `/s/#${secret}`);
+    const exchangeBodies: string[] = [];
+    let busy = true;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") {
+        exchangeBodies.push(String(init?.body));
+        return busy ? new Response(null, { status }) : jsonResponse({ session: SESSION });
+      }
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => exchangeBodies.length === 1);
+    expect(location.hash).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+
+    expect(exchangeBodies).toHaveLength(12);
+    expect(container.textContent).not.toContain("This link isn't available.");
+    expect(container.textContent).toContain("dohc couldn't open the shared files.");
+    expect(location.hash).toBe("");
+
+    busy = false;
+    clickButton("Try again");
+    await settle(() => container.querySelector(".viewer") !== null);
+    expect(exchangeBodies.slice(-1)).toEqual([JSON.stringify({ secret })]);
+    expect(location.pathname).toBe(`/s/${SESSION}`);
+    expect(location.hash).toBe("");
   });
 
   it("refuses a 404 exchange without retrying", async () => {
@@ -4337,6 +4431,8 @@ describe("App", () => {
         return new Response("# Commented file\n\nFile bytes stay read-only.");
       }
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      // Not a Group share's link, so it has no channel.
+      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
       unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
     });
@@ -4361,6 +4457,47 @@ describe("App", () => {
 
     expect(activitySignal).toBeInstanceOf(AbortSignal);
     expect(activitySignal?.aborted).toBe(true);
+  });
+
+  it("shows a Group link's channel in place of the share discussion", async () => {
+    const file: SharedFile = { path: "team/plan.md", blobSha256: "6".repeat(64), contentKind: "text" };
+    // The files' answer names the link's channel, so the viewer never opens the share discussion.
+    const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+      channel: { channelWireId: "wire" } };
+    const paths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      paths.push(path);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, viewMeta);
+      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
+      if (path === "/api/view/meta") return jsonResponse(viewMeta);
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("# Plan");
+      if (path === "/api/view/chat/channels") {
+        return jsonResponse({ shareId: "share", profileName: null, channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }] });
+      }
+      if (path.startsWith("/api/view/chat/messages?") && !path.includes("since=")) {
+        return jsonResponse({ shareId: "share", channelWireId: "wire", nextCursor: 3, olderCursor: null, messages: [{
+          relaySeq: 2, messageId: "m2", threadId: "t", authorDisplayName: "Sam", authorKind: "link",
+          authorOwnerDisplayName: null, createdAtMs: 1, body: "Count me in", bodyTooLarge: false,
+        }] });
+      }
+      if (path.startsWith("/api/view/discussion")) return new Promise<Response>(() => undefined);
+      if (path.startsWith("/api/view/chat/messages?")) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() => container.textContent?.includes("Count me in") === true);
+    expect(container.querySelector(".link-channel h2")?.textContent).toBe("Team");
+    expect(container.querySelector('.link-channel [role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
+    expect(container.querySelector('.link-channel textarea[name="body"]')).toBeNull();
+    expect(container.querySelector(".link-channel")?.textContent).toContain("You can read this channel but not post.");
+    expect(container.querySelector(".comments-panel:not(.link-channel)")).toBeNull();
+    expect(paths.filter(path => path.startsWith("/api/view/discussion"))).toEqual([]);
   });
 
   it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {
@@ -4492,6 +4629,7 @@ describe("App", () => {
       }
       if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
       unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path}`);
     }));
@@ -4601,16 +4739,17 @@ describe("App", () => {
       );
     });
 
-    it("refuses only after the two-minute 429 retry budget", async () => {
+    it("offers Try again, not an ended link, after the two-minute 429 retry budget", async () => {
       vi.useFakeTimers();
       const logPaths: string[] = [];
+      let throttled = true;
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const path = requestPath(input);
         if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
         if (path === "/api/view/current") return currentPage([], 0);
         if (path === "/api/view/log?since=0&limit=500") {
           logPaths.push(path);
-          return new Response(null, { status: 429 });
+          return throttled ? new Response(null, { status: 429 }) : logPage([]);
         }
         throw new Error(`Unexpected request: ${path}`);
       });
@@ -4621,18 +4760,24 @@ describe("App", () => {
         await vi.advanceTimersByTimeAsync(119_999);
       });
 
-      expect(container.textContent).not.toContain("This link isn't available.");
+      expect(buttonNamed("Try again")).toBeUndefined();
       expect(logPaths).toHaveLength(11);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1);
       });
 
-      expect(container.textContent).toContain("This link isn't available.");
+      expect(container.textContent).not.toContain("This link isn't available.");
+      expect(container.textContent).toContain("dohc couldn't open the shared files.");
       expect(logPaths).toHaveLength(12);
+
+      throttled = false;
+      clickButton("Try again");
+      await settle(() => container.querySelector(".viewer") !== null);
+      expect(container.querySelector("main.content")?.textContent).toBe("No files in this share yet.");
     });
 
-    it("refuses a non-429 log failure without retrying", async () => {
+    it("offers Try again for a non-429 log failure without retrying it unasked", async () => {
       vi.useFakeTimers();
       const logPaths: string[] = [];
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -4647,9 +4792,9 @@ describe("App", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await renderApp();
+      await renderApp(() => buttonNamed("Try again") !== undefined);
 
-      expect(container.textContent).toContain("This link isn't available.");
+      expect(container.textContent).toContain("dohc couldn't open the shared files.");
       expect(logPaths).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(0);
     });
