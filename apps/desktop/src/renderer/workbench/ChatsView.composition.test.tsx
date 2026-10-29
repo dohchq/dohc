@@ -67,7 +67,7 @@ describe("ChatsView agents' chats", () => {
     expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
   });
 
-  it("renders under Agents, stays out of the group list, and calls a chat with no Settings agent Your agent", async () => {
+  it("renders under Agents, stays out of the group list, calls a chat with no Settings agent Your agent, and opens on its conversation", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -83,6 +83,9 @@ describe("ChatsView agents' chats", () => {
       ],
       fileThreads: [],
     });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" ? [] : [thread({ channelId: "channel-agent" })],
+    }));
     renderView();
 
     const agentSection = await screen.findByTestId("chats-my-agent-section");
@@ -94,10 +97,78 @@ describe("ChatsView agents' chats", () => {
 
     await user.click(screen.getByTestId("chats-my-agent"));
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Your agent");
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Chat", "Posts"]);
+    expect(screen.getByTestId("chats-group-lane-chat").getAttribute("aria-selected")).toBe("true");
     expect(
-      (screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).placeholder,
+      (screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).placeholder,
     ).toBe("Message your agent…");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    // Older posts stay readable under Posts, which takes no new ones.
+    await user.click(screen.getByTestId("chats-group-lane-posts"));
+    expect(await screen.findByTestId("chats-thread")).toBeTruthy();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+
+  it.each([
+    ["names the agent", "Nova the very thorough trip planning assistant", "Message Nova the very thorough trip planning assistant…"],
+    ["falls back without a name", undefined, "Message your agent…"],
+  ])("%s in its DM's composer, as its row does", async (_case, agentName, placeholder) => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView(vi.fn(), vi.fn(), agentName ? { userSettings: settingsWithAgent({ name: agentName }) } : {});
+    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe(agentName ?? "Your agent");
+    await user.click(screen.getByTestId("chats-my-agent"));
+    expect(((await screen.findByTestId("chats-lane-composer")) as HTMLTextAreaElement).placeholder).toBe(placeholder);
+  });
+
+  it("shows a new message in an agent DM's conversation", async () => {
+    const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
+    const conversation = thread({ id: "conversation", channelId: agentDm.id, title: "" });
+    const sent = message({ id: "message-new", threadId: conversation.id, body: "Book the train" });
+    let started = false;
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentDm], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" && started ? [conversation] : [],
+    }));
+    bridgeMock.listChatMessages.mockImplementation(async () => ({ messages: started ? [sent] : [] }));
+    bridgeMock.startChannelThread.mockImplementation(async () => {
+      started = true;
+      return { thread: conversation, message: sent, viewerAuthorId: "author-me" };
+    });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-my-agent"));
+    const composer = await screen.findByTestId("chats-lane-composer");
+    await waitFor(() => expect((composer as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(composer, { target: { value: "Book the train" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(await screen.findByText("Book the train")).toBeTruthy();
+    expect(bridgeMock.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: agentDm.id, body: "Book the train", lane: "chat",
+    }));
+    expect(bridgeMock.startChannelThread.mock.lastCall?.[0]).not.toHaveProperty("title");
+  });
+
+  it("keeps a poll drafted in an agent DM across a switch to Posts", async () => {
+    const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentDm], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-my-agent"));
+    const composer = await screen.findByTestId("chats-lane-composer");
+    await waitFor(() => expect((composer as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(composer, { target: { value: "Lunch?" } });
+    fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
+    ["Soup", "Salad"].forEach((choice, index) => {
+      fireEvent.change(screen.getAllByTestId("chats-lane-poll-choice")[index]!, { target: { value: choice } });
+    });
+    fireEvent.click(screen.getByTestId("chats-group-lane-posts"));
+    fireEvent.click(screen.getByTestId("chats-group-lane-chat"));
+    expect(((await screen.findByTestId("chats-lane-composer")) as HTMLTextAreaElement).value).toBe("Lunch?");
+    expect(screen.getAllByTestId("chats-lane-poll-choice").map((input) => (input as HTMLInputElement).value)).toEqual(["Soup", "Salad"]);
   });
 
   it("names a set-up agent under Agents and offers Manage, with no card in the conversation", async () => {
@@ -158,7 +229,9 @@ describe("ChatsView agents' chats", () => {
       ],
       fileThreads: [],
     });
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-scout", channelId: "chat-scout", title: "Check links" })] });
+    bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
+      threads: input.lane === "chat" ? [] : [thread({ id: "thread-scout", channelId: "chat-scout", title: "Check links" })],
+    }));
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ threadId: "thread-scout", body: "Check the links" })] });
     const settings = settingsWithAgent({ name: "Nova" });
     renderView(vi.fn(), vi.fn(), {
@@ -184,6 +257,8 @@ describe("ChatsView agents' chats", () => {
     await user.click(rows[1]!);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Ranger");
     expect(screen.getByTestId("chats-channel-agent-mark").className).toContain("text-hue-teal");
+    // An older post, under Posts, names the agent too.
+    await user.click(screen.getByTestId("chats-group-lane-posts"));
     await user.click(await screen.findByTestId("chats-thread"));
     expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Ranger · thread");
     expect(screen.getByText("Ranger", { selector: "span.text-subtle" })).toBeTruthy();
@@ -228,6 +303,9 @@ describe("ChatsView agents' chats", () => {
     expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("ready");
     expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runs codex");
     expect(screen.getByTestId("chats-agent-screen-runner").title).toBe("codex exec");
+    // Its DM opens on its conversation, which names it too.
+    expect(screen.getByTestId("chats-group-lane-chat").getAttribute("aria-selected")).toBe("true");
+    expect(((await screen.findByTestId("chats-lane-composer")) as HTMLTextAreaElement).placeholder).toBe("Message Codex…");
 
     // An agent that's off says so about itself, even while the first agent is on.
     await user.click(await screen.findByTestId("chats-channel-back"));
@@ -236,7 +314,7 @@ describe("ChatsView agents' chats", () => {
     await user.click(scout);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Scout");
     expect(screen.getByTestId("chats-agent-screen").dataset.state).toBe("needs-setup");
-    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner configured · dispatch is off");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Chat runner is off in Settings");
   });
 
   it("names the program a runner command starts, with the whole command on hover", () => {
@@ -793,16 +871,6 @@ describe("ChatsView agent offer", () => {
     await user.type(screen.getByTestId("chats-new-thread-composer"), "check it{Enter}");
     await screen.findByTestId("chats-thread-view");
     expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
-  });
-
-  it("names dispatch's cause and opens Settings → Agents when no runner command is set", async () => {
-    const user = userEvent.setup();
-    const onSetupAgent = vi.fn();
-    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false, agents: [] }, onSetupAgent));
-    await user.click(await screen.findByTestId("chats-channel"));
-    expect((await pickAgent(user, "chats-new-thread")).dataset.state).toBe("no-command");
-    await user.click(screen.getByTestId("composer-agent-offer-setup"));
-    expect(onSetupAgent).toHaveBeenCalledOnce();
   });
 
   it("follows a thread's dispatch once read, and leaves when another thread opens", async () => {

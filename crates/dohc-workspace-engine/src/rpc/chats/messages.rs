@@ -6,6 +6,7 @@ use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
+use crate::rpc::chats::stream::with_agent_requests;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
 use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
@@ -851,7 +852,16 @@ impl EngineService {
             ),
         )
         .await?;
-        let row_values: Vec<Value> = page.messages.iter().map(message_json).collect();
+        let row_values: Vec<Value> = page
+            .messages
+            .iter()
+            .map(|message| {
+                with_agent_requests(
+                    message_json(message),
+                    page.agent_requests.get(&message.message_id),
+                )
+            })
+            .collect();
         let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         let next_after = if truncated {

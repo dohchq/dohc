@@ -4,6 +4,19 @@ import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult } from "./bridgeContract";
+import { OwnerLiveDocumentsResult } from "./bridgeContract";
+
+it("bounds recovery replies with room for the capped restore queues", () => {
+  const rows = Array.from({length: 384}, (_, index) => ({objectId: "object", path: "note.md", reason: "restore-fenced",
+    storedOn: "this-computer", incident: `queue-${index}:delivery:0`, recovery: "paused", saveOnly: true}));
+  const status = {state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+    historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveQuarantines: rows};
+  expect(SyncStatusResult.parse(status).ownerLiveQuarantines).toEqual(rows);
+  expect(SyncStatusResult.safeParse({...status, ownerLiveQuarantines: [...rows, rows[0]]}).success).toBe(false);
+  const documents = rows.slice(0, 256).map(({reason: _reason, recovery, ...row}) => ({...row, status: "ready", canResume: false, quarantine: recovery}));
+  expect(OwnerLiveDocumentsResult.parse({documents, nextCursor: null}).documents).toEqual(documents);
+  expect(OwnerLiveDocumentsResult.safeParse({documents: [...documents, documents[0]], nextCursor: null}).success).toBe(false);
+});
 
 describe("live draft recovery replies", () => {
   const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};

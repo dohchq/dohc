@@ -1362,6 +1362,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
   });
   const retry = vi.fn(async (workspace: RegistryEntry, objectId: string, _incident: string) => {
     const found = kept[workspace.workspaceId]?.find(candidate => candidate.objectId === objectId);
+    if (found?.recovery === "unreadable") return;
     if (!found || (found.recovery !== "paused" && !(found.storedOn === "server" && found.recovery === "copied"))) throw new Error("This document changed. Open Live documents to check it.");
     found.recovery = "retrying";
   });
@@ -1410,6 +1411,26 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
+  it("lists each restore queue as save-only and saves the exact incident", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = ["old-1:delivery:0", "old-2:delivery:0"].map(incident =>
+      ({...f.row("object-plan", "notes/plan.md", incident), reason: "restore-fenced", saveOnly: true}));
+    const expected = f.kept.workspace.map(({objectId: _objectId, ...row}) => row);
+    expect(await f.doors[door].list()).toEqual({ok: true, keptEdits: expected});
+    expect(await f.doors[door].save("notes/plan.md", "old-2:delivery:0")).toMatchObject({ok: true, keptEdits: "kept"});
+    expect(f.save).toHaveBeenLastCalledWith(expect.objectContaining({workspaceId: "workspace"}), "notes/plan.md", "old-2:delivery:0");
+    const refused = await f.doors[door].retry("notes/plan.md", "old-1:delivery:0");
+    expect(refused).toMatchObject({ok: false});
+    expect(JSON.stringify(refused)).toContain("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
+    expect(f.retry).not.toHaveBeenCalled();
+  });
+  it("retries reading an unreadable save-only queue without sending its edits", async () => {
+    const f = await keptEditsFixture();
+    const incident = "unreadable:old-queue:incomplete";
+    f.kept.workspace = [{...f.row("object-plan", "notes/plan.md", incident, "unreadable"), saveOnly: true}];
+    expect(await f.doors[door].retry("notes/plan.md", incident)).toMatchObject({ok: true});
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({workspaceId: "workspace"}), "object-plan", incident);
+  });
   it("lists only this workspace's kept edits, without the engine's object ids", async () => {
     const f = await keptEditsFixture();
     expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [

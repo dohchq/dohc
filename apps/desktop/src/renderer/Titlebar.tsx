@@ -20,8 +20,16 @@ type TitlebarPanelToggle = {
   onToggle: () => void;
 };
 
-// Shared by centered quick-open and the left group's available width.
-const QUICK_OPEN_WIDTH = "max(0px, min(20rem, 40vw, 100vw - 640px))";
+// Shared by centered quick-open and the left group's available width. Below
+// 1100px, where the names would start to cut, quick-open narrows to its icon
+// and shortcut; the header sets the width for both.
+const QUICK_OPEN_WIDTH = "var(--quick-open-width)";
+// Centered, unless the names at their floors reach it: then it starts 12px
+// after them, as the left group ends 12px before it. Its right edge stays,
+// so it gives up width, and its word, before it moves right.
+const QUICK_OPEN_LEFT = `max(50% - ${QUICK_OPEN_WIDTH} / 2, anchor(--titlebar-names-end right, 0px) + 12px)`;
+const QUICK_OPEN_MIN_WIDTH = "5rem";
+const QUICK_OPEN_END = `max(50% + ${QUICK_OPEN_WIDTH} / 2, ${QUICK_OPEN_LEFT} + ${QUICK_OPEN_MIN_WIDTH})`;
 
 function LayoutToggle(props: {
   label: string;
@@ -115,7 +123,7 @@ export function Titlebar(props: {
   return (
     <header
       data-testid={desktopPins.titlebar}
-      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel"
+      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel [--quick-open-width:20rem] [anchor-scope:--titlebar-names-end] max-[1100px]:[--quick-open-width:5rem]"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}
@@ -152,7 +160,9 @@ export function Titlebar(props: {
               aria-expanded={switcherOpen}
               title={workspaceName(props.workspace)}
               onClick={() => setSwitcherOpen((open) => !open)}
-              className="titlebar-no-drag flex h-7 min-w-0 items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
+              // Each name keeps its padding and three letters with an
+              // ellipsis, or all of it when shorter.
+              className="titlebar-no-drag flex h-7 min-w-[calc-size(max-content,min(size,4rem))] items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
             >
               {/* Truncate the name before the version and the saved dot. */}
               <span data-testid="status-workspace" className="min-w-0 max-w-48 truncate">
@@ -160,13 +170,17 @@ export function Titlebar(props: {
               </span>
             </button>
             {/* The slash belongs to the version, so it shows only once the
-                picker has a version to name. */}
+                picker has a version to name. Its floor holds the slash, the
+                version's icons and three letters with an ellipsis. */}
             {props.version ? (
-              <span className="flex min-w-0 items-center gap-0.5 empty:hidden before:text-[13px] before:text-subtle before:content-['/']">
+              <span className="flex min-w-[calc-size(max-content,min(size,7.5rem))] items-center gap-0.5 empty:hidden before:text-[13px] before:text-subtle before:content-['/']">
                 {props.version}
               </span>
             ) : null}
             {props.workspaceStatus}
+            {/* Where the names and their status end, past the group's edge
+                when their floors overflow it. Go to… stays clear of it. */}
+            <span aria-hidden className="-ml-0.5 w-0 self-stretch [anchor-name:--titlebar-names-end]" />
             {switcherOpen ? (
               <ul
                 role="listbox"
@@ -241,27 +255,31 @@ export function Titlebar(props: {
         ) : null}
       </div>
 
-      {/* Keep quick-open centered independently of the workspace name. */}
       {props.onQuickOpen ? (
         <button
           type="button"
           data-testid="titlebar-quick-open"
+          title="Go to…"
           onClick={props.onQuickOpen}
-          style={{ width: QUICK_OPEN_WIDTH }}
-          className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
+          style={{ left: QUICK_OPEN_LEFT, right: `calc(50% - ${QUICK_OPEN_WIDTH} / 2)`, minWidth: QUICK_OPEN_MIN_WIDTH }}
+          className="@container titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
-          <Search size={12} aria-hidden />
-          <span className="truncate">Go to…</span>
-          <kbd className="ml-auto font-sans text-[11px]">{quickOpenShortcut}</kbd>
+          <Search size={12} aria-hidden className="shrink-0" />
+          <span className="truncate @max-[8.5rem]:sr-only">Go to…</span>
+          <kbd className="ml-auto whitespace-nowrap font-sans text-[11px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}
 
-      {/* Ends 12px before quick-open, as the left group starts 12px after it. */}
+      {/* Starts 12px after quick-open, wherever the names put it, and ends
+          16px before the window controls, as it would in the row. Buttons
+          that can't fit run toward the window controls, not over quick-open. */}
       {hasRightGroup ? (
         <div
           data-testid="titlebar-right-group"
-          className="ml-auto flex flex-1 items-center justify-end gap-2"
-          style={props.onQuickOpen ? { maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${rightInset} - 28px)` } : undefined}
+          className={`flex items-center justify-end-safe gap-2 ${props.onQuickOpen ? "absolute inset-y-0" : "ml-auto flex-1"}`}
+          style={props.onQuickOpen
+            ? { left: `calc(${QUICK_OPEN_END} + 12px)`, right: `calc(${rightInset} + 16px)` }
+            : undefined}
         >
           {/* The button's own box: its width decides whether the label fits. */}
           {props.update ? <div className="@container flex min-w-7 flex-1 justify-end">{props.update}</div> : null}
@@ -300,7 +318,7 @@ export function Titlebar(props: {
           macOS has no right-side controls. */}
       <div
         aria-hidden
-        className={`${hasRightGroup ? "ml-2" : "ml-auto"} h-full shrink-0`}
+        className={`${hasRightGroup && !props.onQuickOpen ? "ml-2" : "ml-auto"} h-full shrink-0`}
         style={{ width: rightInset }}
       />
     </header>

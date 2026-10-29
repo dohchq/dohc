@@ -3415,6 +3415,19 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("agent_ids.sql"),
         sets_user_version: None,
     },
+    // A group's stream pages its posts by creation time, and its
+    // conversation's top-level messages by time without reading the replies
+    // inside it.
+    Migration {
+        ordinal: 72,
+        id: "v2-chat-stream-order",
+        sql: "CREATE INDEX idx_chat_threads_channel_lane_created \
+              ON chat_threads(workspace_id, channel_id, lane, created_at_ms, thread_id); \
+              CREATE INDEX idx_chat_messages_thread_top_created \
+              ON chat_messages(workspace_id, thread_id, created_at_ms, message_id) \
+              WHERE parent_message_id IS NULL;",
+        sets_user_version: None,
+    },
     Migration {
         ordinal: 73,
         id: "v2-replication-conflict-resolution-index",
@@ -4584,6 +4597,10 @@ mod tests {
             (
                 "v2-agent-ids",
                 "3886571a320da5555e255b174f102a40f1ee3bffe51c58d7ad31614757b67718",
+            ),
+            (
+                "v2-chat-stream-order",
+                "ed7263ecdfa09bd3eba5c1177a3f9df1be700e864d8903a3547af9f60e5853c6",
             ),
             (
                 "v2-replication-conflict-resolution-index",
