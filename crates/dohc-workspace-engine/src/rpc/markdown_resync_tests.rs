@@ -165,9 +165,10 @@ async fn markdown_hold_resync_emits_parked_record_facts_after_checker_failure() 
         .await
         .unwrap_err();
     assert_eq!(failed.code, ErrorCode::Internal);
+    // The reader treats a mismatched reply as a crash, and the engine retries a crash once.
     assert_eq!(
         failed_reader.dispatch_count(),
-        checks_before_settle + 1,
+        checks_before_settle + 2,
         "the witness checker failed after the append committed"
     );
     let accepted = counts();
