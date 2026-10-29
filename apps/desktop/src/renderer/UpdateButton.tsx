@@ -58,10 +58,17 @@ export function updateFailureTitle(step: UpdateAction, version: string | undefin
   return `dohc could not ${step === "download" ? "download" : "install"} update ${version ?? ""}`.trimEnd();
 }
 
+// What a failure main reports says happened.
+function reportedFailureTitle(failure: NonNullable<UpdateStateEvent["failure"]>, version: string | undefined): string {
+  return failure.notInstalled ? `dohc didn't install update ${failure.notInstalled}` : updateFailureTitle(failure.step, version);
+}
+
 // The updater's sentence, or the step that failed when main reports one.
 export function updateStatusLine(state: UpdateStateEvent): string {
   if (!state.failure) return state.message;
-  const title = updateFailureTitle(state.failure.step, state.version);
+  const title = reportedFailureTitle(state.failure, state.version);
+  // One sentence, so it names dohc once.
+  if (state.failure.notInstalled && state.currentVersion) return `${title} and is still on version ${state.currentVersion}.`;
   return readError(state.message).words ? `${title}. ${state.message}` : `${title}.`;
 }
 
@@ -190,13 +197,14 @@ export function useUpdateFailureNotices(
     shown.current = key;
     const quiet = toastedFailures.has(failure.id);
     toastedFailures.add(failure.id);
-    const title = updateFailureTitle(failure.step, state.version);
+    const title = reportedFailureTitle(failure, state.version);
     report({
       kind: "update",
       quiet,
       ...(readError(state.message).words ? { title, message: state.message } : { message: `${title}.` }),
       ...(state.installCommand ? { command: state.installCommand } : {}),
-      details: [["Cause", state.message]],
+      // dohc does not know why an update it opened without did not install.
+      details: failure.notInstalled ? [] : [["Cause", state.message]],
       retry: () => void run(failure.step),
     });
   }, [state, scope, report, clear, run]);
