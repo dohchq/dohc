@@ -24,7 +24,6 @@ type AppsViewProps = ComponentProps<typeof AppsView>;
 type SitePreviewPageProps = ComponentProps<typeof LazySitePreviewPage>;
 
 export interface ShellSidePanelProps {
-  askAgent?: AppsViewProps["askAgent"];
   customize: (part: CustomizePart) => void;
   wb: WorkbenchState;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;

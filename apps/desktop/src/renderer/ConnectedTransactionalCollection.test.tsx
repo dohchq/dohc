@@ -335,6 +335,7 @@ describe("a dataset table's ⚡ panel", () => {
   it("names the automations file from Customize… once dohc finds the dataset's folder", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset });
     backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "missing" });
     renderPage();
     const customize = await screen.findByRole("button", { name: "Customize…" });
     customize.focus();
@@ -342,8 +343,9 @@ describe("a dataset table's ⚡ panel", () => {
     // The tab shows the table, so the dialog names it too.
     const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
     expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
-    // Without a workspace shell there is no agent to ask.
-    expect(within(dialog).queryByTestId("ask-agent")).toBeNull();
+    // No automation yet, so no file to open.
+    expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(customize);

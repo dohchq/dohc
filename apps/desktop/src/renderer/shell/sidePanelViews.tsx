@@ -148,7 +148,6 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
             onOpenPath={context.openPathWithHeading}
             onCreateFirstApp={context.createFirstApp}
             receivedShareWorkspace={context.shareView !== null}
-            {...(context.askAgent ? { askAgent: context.askAgent } : {})}
           />
         </Suspense>
       </SkeletonSlot>

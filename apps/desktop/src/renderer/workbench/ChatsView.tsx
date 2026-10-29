@@ -3,7 +3,6 @@ import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
-import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import {
@@ -537,9 +536,6 @@ export function ChatsView(props: {
   // Unsent drafts to restore alongside initialNav (same handoff, same
   // apply-once timing).
   initialDrafts?: ChatsDrafts;
-  // The new-post composer takes focus when it mounts, such as after dohc put
-  // a request to the person's agent in it.
-  focusNewPost?: boolean;
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
@@ -4441,7 +4437,8 @@ export function ChatsView(props: {
     );
   }
 
-  const agentReady = props.agentSetup ? agentIsSetUp(props.agentSetup) : false;
+  // The Agents list's rule: a name to post as, and a runner that starts it.
+  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
@@ -4758,7 +4755,6 @@ export function ChatsView(props: {
                 onChange: setNewThreadBody,
                 poll: newThreadPoll,
                 onPollChange: (next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id }),
-                autoFocus: props.focusNewPost,
               },
             } : {})}
           />
@@ -4777,7 +4773,6 @@ export function ChatsView(props: {
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
-                  autoFocus={props.focusNewPost}
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"

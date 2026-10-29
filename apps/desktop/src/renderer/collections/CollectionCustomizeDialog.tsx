@@ -1,38 +1,31 @@
 import { X } from "lucide-react";
-import { useContext, useEffect, useRef, useState } from "react";
-import { AskAgentButton, type AgentRequest, type CollectionFile } from "../askAgent";
+import { useEffect, useRef, useState } from "react";
 import { Overlay } from "../Overlay";
 import { AUTOMATIONS_FILE } from "./AutomationsPanel";
-import { CustomizeContext } from "../settings/customize";
-import { IconButton } from "../ui/controls";
+import { CopyField } from "../ui/CopyButton";
+import { IconButton, SecondaryButton } from "../ui/controls";
+
+/** One of a Collection's own files, and what it holds. */
+export interface CollectionFile {
+  path: string;
+  holds: string;
+  // Set while the file does not exist: what makes it, said in Open's place.
+  missing?: string;
+}
 
 /**
- * A Collection's Customize…: the files that hold its setup, and the way to
- * hand a change to the person's agent. Fields and ⚡ in the header edit the
- * same files.
+ * A Collection's Customize…: the files that hold its setup, each with its
+ * path to copy and Open. Fields and ⚡ in the header edit the same files.
  */
 export function CollectionCustomizeDialog(props: {
   name: string;
   files: readonly CollectionFile[];
+  onOpenFile: (path: string) => void;
   onClose: () => void;
 }) {
-  const shellAgent = useContext(CustomizeContext)?.askAgent;
-  // Asking opens the agent's chat, and setting up opens Settings: either
-  // way this dialog is done.
-  const askAgent = shellAgent && {
-    ready: shellAgent.ready,
-    ask: (request: AgentRequest) => {
-      props.onClose();
-      shellAgent.ask(request);
-    },
-    setUp: () => {
-      props.onClose();
-      shellAgent.setUp();
-    },
-  };
   // What opened this dialog, read before Close takes focus. Dismissing it
   // returns focus there; a menu item inside a closed <details> hands it to
-  // that menu's summary. Asking or setting up moves on, so focus goes with it.
+  // that menu's summary. Open moves on to the file's tab, so focus goes with it.
   const [opener] = useState(() => (document.activeElement instanceof HTMLElement ? document.activeElement : null));
   const dismiss = () => {
     props.onClose();
@@ -48,7 +41,7 @@ export function CollectionCustomizeDialog(props: {
         aria-modal="true"
         aria-labelledby="collection-customize-title"
         data-testid="collection-customize"
-        className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-5"
+        className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-6"
       >
         <div className="flex items-center gap-2">
           <h2 id="collection-customize-title" className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink">
@@ -58,32 +51,50 @@ export function CollectionCustomizeDialog(props: {
             <X size={14} aria-hidden />
           </IconButton>
         </div>
-        <dl className="m-0 mt-4 flex flex-col gap-2">
-          {props.files.map((file) => (
-            <div key={file.path} className="grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-3">
-              <dt className="text-[12px] text-muted">{file.holds.slice(0, 1).toUpperCase() + file.holds.slice(1)}</dt>
-              <dd className="m-0 min-w-0">
-                <code title={file.path} className="block select-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
-                  {file.path}
-                </code>
-              </dd>
-            </div>
-          ))}
+        <dl className="m-0 mt-6 flex flex-col gap-3">
+          {props.files.map((file) => {
+            const name = file.path.split("/").at(-1) ?? file.path;
+            return (
+              <div key={file.path} className="flex flex-col gap-1">
+                <dt className="text-[12px] text-muted">{file.holds.slice(0, 1).toUpperCase() + file.holds.slice(1)}</dt>
+                <dd className="m-0 flex min-w-0 items-center gap-2">
+                  <div className="min-w-0 flex-1">
+                    <CopyField label={`Copy ${name} path`} copiedLabel="Path copied" getText={() => file.path}>
+                      <code title={file.path}>{file.path}</code>
+                    </CopyField>
+                  </div>
+                  {file.missing ? (
+                    <span className="shrink-0 text-[12px] text-muted">{file.missing}</span>
+                  ) : (
+                    <SecondaryButton
+                      size="compact"
+                      aria-label={`Open ${name}`}
+                      className="shrink-0"
+                      onClick={() => {
+                        props.onClose();
+                        props.onOpenFile(file.path);
+                      }}
+                    >
+                      Open
+                    </SecondaryButton>
+                  )}
+                </dd>
+              </div>
+            );
+          })}
         </dl>
-        {askAgent ? (
-          <div className="mt-4">
-            <AskAgentButton askAgent={askAgent} request={{ kind: "collection", name: props.name, files: props.files }} />
-          </div>
-        ) : null}
       </div>
     </Overlay>
   );
 }
 
+/** A Collection's automations file, which its first automation makes. */
+export function automationsFile(folder: string, made: boolean): CollectionFile {
+  const file = { path: `${folder}/${AUTOMATIONS_FILE}`, holds: "automations" };
+  return made ? file : { ...file, missing: "Made with the first automation." };
+}
+
 /** The files a document Collection keeps in its folder. */
-export function documentCollectionFiles(folder: string): CollectionFile[] {
-  return [
-    { path: `${folder}/collection.yaml`, holds: "fields and views" },
-    { path: `${folder}/${AUTOMATIONS_FILE}`, holds: "automations" },
-  ];
+export function documentCollectionFiles(folder: string, automationsMade: boolean): CollectionFile[] {
+  return [{ path: `${folder}/collection.yaml`, holds: "fields and views" }, automationsFile(folder, automationsMade)];
 }

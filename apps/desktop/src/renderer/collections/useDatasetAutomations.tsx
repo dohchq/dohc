@@ -6,6 +6,7 @@ import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   automationCount,
+  automationsFileMade,
   AutomationsButton,
   AutomationsNote,
   AutomationsPanel,
@@ -46,6 +47,8 @@ export function useDatasetAutomations(props: {
   start: (automation: Automation) => void;
   // The folder that holds the dataset's automations.yaml, once dohc finds it.
   collectionPath: string | null;
+  // False once dohc knows automations.yaml does not exist yet.
+  fileMade: boolean;
 } {
   const { workspaceId, datasetId, tableId, dataset, onError } = props;
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
@@ -141,5 +144,5 @@ export function useDatasetAutomations(props: {
       ) : found.status === "cannot-run" ? found.reason : undefined}
     </AutomationsNote>
   );
-  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath };
+  return { button, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automationsFileMade(automations.file) };
 }
