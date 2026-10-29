@@ -1,5 +1,6 @@
 import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
+import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -1612,6 +1613,21 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
+  it("returns the edits-pending Stop's two sentences with nothing left to release", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
+      reason: door === "cli" ? "dohc: Live editing didn't stop. Recent edits haven't reached the server yet.\n"
+        : "Live editing didn't stop. Recent edits haven't reached the server yet."});
+    expect(h.recorded()).toBeUndefined();
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  });
   it("lists each restore queue as save-only and saves the exact incident", async () => {
     const f = await keptEditsFixture();
     f.kept.workspace = ["old-1:delivery:0", "old-2:delivery:0"].map(incident =>

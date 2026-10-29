@@ -8,6 +8,7 @@ import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftSt
 import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
+import { pendingStopHarness } from "../../testing/ownerLiveStop.test-helper";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 import {
@@ -114,6 +115,29 @@ beforeEach(() => {
   projectionGate.pending = null;
   projectionGate.completed = 0;
   projectionGate.held = null;
+});
+
+it("reopens editors and clears the recorded Stop when recent edits have not reached the server", async () => {
+  retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  act(() => editDocument());
+  const h = pendingStopHarness("ws-1", "notes/big.md", "object");
+  await act(async () => {
+    await expect(withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, async () => {
+      expect(harness.mainText()).toBe("seed!");
+      expect(harness.closed).toContain(previous);
+      expect(retained.snapshot.outcome).toBeNull();
+      await h.actions.stop({workspaceId: "ws-1", path: "notes/big.md"}, {workspace: {workspaceId: "ws-1"}, assertCurrent() {}});
+    })).rejects.toThrow("Live editing didn't stop. Recent edits haven't reached the server yet.");
+  });
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+  expect(harness.sessionId()).not.toBe(previous);
+  expect(h.recorded()).toBeUndefined();
+  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  expect(h.ownerLiveStop).toHaveBeenLastCalledWith({workspaceId: "ws-1"}, "clear", "notes/big.md", h.document);
+  act(() => editDocument());
+  await waitFor(() => expect(harness.mainText()).toBe("seed!!"));
 });
 
 it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {

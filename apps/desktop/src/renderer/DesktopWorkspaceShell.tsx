@@ -183,6 +183,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
+import { isLiveStopEditsPending } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -973,14 +974,33 @@ export function DesktopWorkspaceShell(props: {
   // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
+      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) clearIdentity(`live-stop-edits-pending:${objectId}`);
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
       });
       return result;
     },
-    [],
+    [clearIdentity, workspaceAdmission],
   );
+  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string) => {
+    const current = () => workspaceIdRef.current === id && !workspaceAdmission.superseded;
+    const identity = `live-stop-edits-pending:${objectId}`;
+    const report = () => {
+      if (!current()) return;
+      reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
+        message: "Recent edits haven't reached the server yet.", retry});
+    };
+    const retry = () => {
+      if (!current()) return false;
+      void stopLiveDocument(id, path, objectId).catch(error => {
+        if (!current()) return;
+        if (isLiveStopEditsPending(error)) report();
+        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+      });
+    };
+    report();
+  }, [workspaceAdmission, stopLiveDocument, reportShellFailure, reportShellError]);
   const resumeLiveDocument = useCallback(
     (id: string, path: string) =>
       bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
@@ -6871,6 +6891,7 @@ export function DesktopWorkspaceShell(props: {
           retryRefusal={retryLiveShare}
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
+          onStopPending={reportPendingLiveStop}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
           {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}
