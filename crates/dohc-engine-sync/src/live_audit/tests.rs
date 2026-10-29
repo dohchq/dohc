@@ -3396,12 +3396,52 @@ fn imported_activation_publication_admits_the_preserved_event_zero_source() {
     imported_activation_publication(false, true);
 }
 
-/// An owner lineage adopted on a store that replicates as `service-origin`,
-/// from an imported activation, its adoption seed accepted at cursor 1 and
-/// acknowledged. Returns it with the source that bootstrapped the lineage,
-/// the baseline's digest, and the activation. Unless `audited_source`, the
-/// source publishes no event zero, so the adoption's is the lineage's.
-fn imported_owner(
+fn journal_ordinary_base_in_tx(
+    tx: &Transaction<'_>,
+    binding: &LiveObjectBinding,
+) -> Result<(), SyncError> {
+    let key = DocKey::new("ws", "main", "object").map_err(SyncError::corrupt)?;
+    let state: String = tx
+        .query_row(
+            "SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let origin_seq = journal_local_op_in_tx(
+        tx,
+        "ws",
+        "ydoc.update",
+        &crate::ydoc_update_payload(
+            &key,
+            &binding.current_path,
+            ContentKind::Richdoc,
+            &state,
+            &binding.lineage_claim_id,
+            None,
+            None,
+            true,
+        ),
+        100,
+    )?;
+    dohc_engine_collab::record_base_coordinate_in_tx(
+        tx,
+        dohc_engine_collab::BaseCoordinateRecord {
+            key: &key,
+            lineage_claim_id: &binding.lineage_claim_id,
+            origin_id: "owner-origin",
+            origin_seq,
+            relay_seq: None,
+            now_ms: 100,
+        },
+    )
+    .map_err(SyncError::corrupt)?;
+    Ok(())
+}
+
+/// Prepare an imported activation and its adoption cut without adopting it.
+/// Unless `audited_source`, the source publishes no event zero.
+fn prepare_imported_owner(
     preserve_baseline: bool,
     audited_source: bool,
 ) -> (
@@ -3409,10 +3449,10 @@ fn imported_owner(
     Fixture,
     String,
     dohc_engine_collab::live_update_application::ImportedOwnerActivation,
+    dohc_engine_collab::live_update_application::OwnerAdoptionCut,
 ) {
     use dohc_engine_collab::live_update_application::{
-        NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
-        capture_imported_owner_activation,
+        NativeHistoryReconstruction, OwnerAdoptionCut, capture_imported_owner_activation,
     };
     let mut source =
         fixture_with_markdown(true, preserve_baseline.then_some("Original source.\n\n"));
@@ -3431,42 +3471,7 @@ fn imported_owner(
             }
             // Only the ordinary base, as a lineage replicated before any
             // live audit.
-            let key = DocKey::new("ws", "main", "object").map_err(SyncError::corrupt)?;
-            let state: String = tx
-                .query_row(
-                    "SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(SyncError::corrupt)?;
-            let origin_seq = journal_local_op_in_tx(
-                tx,
-                "ws",
-                "ydoc.update",
-                &crate::ydoc_update_payload(
-                    &key,
-                    &binding.current_path,
-                    ContentKind::Richdoc,
-                    &state,
-                    &binding.lineage_claim_id,
-                    None,
-                    None,
-                    true,
-                ),
-                100,
-            )?;
-            dohc_engine_collab::record_base_coordinate_in_tx(
-                tx,
-                dohc_engine_collab::BaseCoordinateRecord {
-                    key: &key,
-                    lineage_claim_id: &binding.lineage_claim_id,
-                    origin_id: "owner-origin",
-                    origin_seq,
-                    relay_seq: None,
-                    now_ms: 100,
-                },
-            )
-            .map_err(SyncError::corrupt)?;
+            journal_ordinary_base_in_tx(tx, binding)?;
             Ok(())
         },
     )
@@ -3650,9 +3655,33 @@ fn imported_owner(
             working_reserve_bytes: 8 * 1024 * 1024,
         },
     };
-    adopt_owner_committed(
-        &mut store,
-        &handle,
+    let f = Fixture {
+        path,
+        store,
+        _owner: owner,
+        handle,
+        binding: source.binding.clone(),
+        input: source.input.clone(),
+        bytes: full,
+        _scratch: scratch,
+    };
+    (f, source, baseline, activation, cut)
+}
+
+fn imported_owner(
+    preserve_baseline: bool,
+    audited_source: bool,
+) -> (
+    Fixture,
+    Fixture,
+    String,
+    dohc_engine_collab::live_update_application::ImportedOwnerActivation,
+) {
+    let (mut f, source, baseline, activation, cut) =
+        prepare_imported_owner(preserve_baseline, audited_source);
+    dohc_engine_collab::live_update_application::adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
         cut,
         1_000_000,
         10,
@@ -3670,19 +3699,10 @@ fn imported_owner(
         },
     )
     .unwrap();
-    let (delivery, bytes): (String, Vec<u8>) = store.read_with(|conn| {
+    let (delivery, bytes): (String, Vec<u8>) = f.store.read_with(|conn| {
         conn.query_row("SELECT e.delivery_id,b.bytes FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.update_blob_digest WHERE e.pending=1 ORDER BY e.sequence LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(SyncError::corrupt)
     }).unwrap();
-    let mut f = Fixture {
-        path,
-        store,
-        _owner: owner,
-        handle,
-        binding: source.binding.clone(),
-        input: source.input.clone(),
-        bytes,
-        _scratch: scratch,
-    };
+    f.bytes = bytes;
     accept_named_event(&mut f, 1, delivery.clone());
     // The seed keeps its receipt; until then the host holds every later delivery.
     let outbox: String = f
@@ -3709,8 +3729,134 @@ fn imported_owner(
     (f, source, baseline, activation)
 }
 
+#[test]
+fn adopting_an_audited_source_refuses_a_second_event_zero_without_changing_local_work() {
+    use dohc_engine_collab::live_update_application::{ApplicationError, adopt_owner_committed};
+
+    let (mut f, _source, _, _, cut) = prepare_imported_owner(false, true);
+    let state = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                [
+                    "replication_log",
+                    "live_audit_bases",
+                    "live_audit_base_publications",
+                    "live_accepted_checkpoints",
+                    "live_owner_adoptions",
+                    "live_owner_activations",
+                    "live_device_application_bindings",
+                    "owner_ydoc_outboxes",
+                    "owner_ydoc_outbox_entries",
+                    "ydoc_docs",
+                    "ydoc_updates",
+                    "ydoc_snapshots",
+                    "moments",
+                    "snapshots",
+                ]
+                .map(|table| {
+                    let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
+                    let columns = stmt.column_count();
+                    stmt.query_map([], |row| {
+                        (0..columns)
+                            .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                            .collect::<Result<Vec<_>, _>>()
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                })
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+    };
+    let before = state(&f.store);
+    assert_eq!(count(&f.store, "live_audit_bases"), 1);
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 0);
+    let error = adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        cut,
+        1_000_000,
+        10,
+        260,
+        &NoFaults,
+        None,
+        |tx, namespace, binding, _| {
+            let result = journal_live_base_in_tx(tx, namespace, binding, 260);
+            assert!(matches!(
+                result,
+                Err(SyncError::InvalidInput {
+                    reason: "native event zero conflicts with imported audit"
+                })
+            ));
+            result.map(|_| ()).map_err(|error| {
+                ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error))
+            })
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, ApplicationError::Storage(_)));
+    assert_eq!(state(&f.store), before);
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 0);
+    assert_eq!(count(&f.store, "live_owner_adoptions"), 0);
+    assert_eq!(count(&f.store, "live_accepted_checkpoints"), 0);
+    let reopened = EngineStore::open(&f.path, 261).unwrap();
+    assert_eq!(state(&reopened), before);
+}
+
+#[test]
+fn a_matching_imported_event_zero_allows_publication_and_replay() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let mut echoed = published(&f);
+    echoed.origin_id = "peer-origin".into();
+    echoed.origin_seq = 0;
+    echoed.relay_seq = Some(100);
+    let result = crate::apply_replication_envelope(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &echoed,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    assert_eq!(count(&f.store, "live_audit_bases"), 1);
+    // Exercise publication with the imported record present but no local index,
+    // then the normal replay with both indexes present.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM live_audit_base_publications", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let publish = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                journal_live_base_in_tx(tx, "relay", &f.binding, 300)
+            })
+            .unwrap()
+    };
+    publish(&mut f.store);
+    let after = operations(&f.store);
+    publish(&mut f.store);
+    assert_eq!(operations(&f.store), after);
+    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
+    f.store
+        .read_with(|conn| {
+            let (imported, published): (String, String) = conn.query_row(
+                "SELECT b.record_json,p.record_json FROM live_audit_bases b JOIN live_audit_base_publications p USING(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(imported, published);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
 fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bool) {
-    let (mut f, source, baseline, activation) = imported_owner(preserve_baseline, true);
+    let (mut f, source, baseline, activation) = imported_owner(preserve_baseline, false);
     if foreign_baseline {
         VersionedTextStore::new(&mut f.store)
             .write_text(
@@ -4581,6 +4727,7 @@ fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
 /// the activation is adopted. It returns, its rows skip as redelivered, its
 /// Y.Doc holds exactly the state it parked with, and it resumes the same
 /// activation.
+/// Its source publishes only an ordinary base; audited adoption is refused.
 #[test]
 fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     use dohc_engine_collab::live_update_application::{
@@ -4598,9 +4745,9 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
         source.input.clone(),
         source.bytes.clone(),
         &NoFaults,
-        |tx, _, namespace, binding| {
+        |tx, _, _, binding| {
             crate::journal_moment_append_in_tx(tx, "ws", "bootstrap-moment")?;
-            journal_live_base_in_tx(tx, namespace, binding, 100)?;
+            journal_ordinary_base_in_tx(tx, binding)?;
             Ok(())
         },
     )

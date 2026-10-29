@@ -237,6 +237,24 @@ fn require_base_blob(conn: &Connection, record: &BaseRecord) -> Result<(), SyncE
     Ok(())
 }
 
+fn require_matching_imported_base(conn: &Connection, record: &BaseRecord) -> Result<(), SyncError> {
+    let json: Option<String> = conn
+        .query_row(
+            &format!("SELECT record_json FROM live_audit_bases WHERE {SCOPE}"),
+            scope(&record.relay_database_namespace, &record.checkpoint.binding),
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if let Some(json) = json {
+        let imported: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+        if imported != *record {
+            return Err(invalid("native event zero conflicts with imported audit"));
+        }
+    }
+    Ok(())
+}
+
 /// Called after native event zero exists, inside the same bootstrap transaction.
 /// A later enrollment caller must preserve predecessor ordering before calling this.
 pub fn journal_live_base_in_tx(
@@ -303,6 +321,7 @@ pub fn journal_live_base_in_tx(
         if record != saved {
             return Err(invalid("published native event zero changed"));
         }
+        require_matching_imported_base(tx, &saved)?;
         saved.validate(&binding.workspace_id)?;
         require_base_blob(tx, &saved)?;
         require_base_coordinate(tx, &saved)?;
@@ -428,6 +447,7 @@ pub fn journal_live_base_in_tx(
         }
     };
     let record = make_record(base_coordinate);
+    require_matching_imported_base(tx, &record)?;
     record.validate(&binding.workspace_id)?;
     require_base_blob(tx, &record)?;
     require_base_coordinate(tx, &record)?;
