@@ -3429,7 +3429,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 73,
+        ordinal: 74,
         id: "v2-markdown-write-obligations",
         sql: include_str!("markdown_write_obligations.sql"),
         sets_user_version: None,
@@ -8349,7 +8349,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let before = migration_index("v2-markdown-write-obligations");
         assert_eq!(BASELINE_MIGRATIONS[before - 1].id, "v2-chat-stream-order");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 73);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 74);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES('w','main');
             INSERT INTO versions(workspace_id,version_id,name,kind,created_at_ms) VALUES('w','main','Main','main',1);")
