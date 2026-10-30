@@ -1,3 +1,5 @@
+mod support;
+
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::owner_outbox::release::{MAX_RELEASE_BYTES, MAX_RELEASE_ENTRIES};
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
@@ -23,15 +25,25 @@ impl Fixture {
     }
 
     fn with_size(size: usize) -> Self {
-        let root = ScratchDir::new().unwrap();
-        let db = engine_db_path(&root).unwrap();
-        let mut store = EngineStore::open(&db, 0).unwrap();
+        Self::with_source(size, false)
+    }
+
+    fn with_source(size: usize, canonical: bool) -> Self {
         let source: serde_json::Value = serde_json::from_str(include_str!(
             "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
         ))
         .unwrap();
-        let mut text = source["markdown"].as_str().unwrap().to_owned();
+        let mut text = source[if canonical { "canonical" } else { "markdown" }]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let mut bytes: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+        if canonical {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
+                .unwrap();
+            bytes = doc.encode_full_state();
+        }
         if size > 0 {
             let doc = Ydoc::wire();
             doc.apply(&bytes).unwrap();
@@ -39,6 +51,13 @@ impl Fixture {
             text = doc.project(ContentKind::Richdoc).unwrap().content;
             bytes = doc.encode_full_state();
         }
+        Self::with_seed(text, bytes)
+    }
+
+    fn with_seed(text: String, bytes: Vec<u8>) -> Self {
+        let root = ScratchDir::new().unwrap();
+        let db = engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
@@ -116,46 +135,177 @@ impl Fixture {
         owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
         expected_local_sequence: i64,
     ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
-        let handle = owner
+        self.adopt_cut(owner, self.cut(expected_local_sequence, vec![], None))
+            .await
+    }
+
+    fn cut(
+        &self,
+        expected_local_sequence: i64,
+        events: Vec<AdmittedLiveUpdate>,
+        terminal_receipt: Option<LiveUpdateReceipt>,
+    ) -> OwnerAdoptionCut {
+        OwnerAdoptionCut {
+            relay_database_namespace: "relay".into(),
+            adoption_id: "adoption".into(),
+            source_moment_id: "original".into(),
+            source_digest: hex_sha256(self.text.as_bytes()),
+            source_byte_length: self.text.len() as i64,
+            baseline_moment_relay_sequence: 1,
+            baseline_registered_at_ms: 3,
+            baseline_bytes: self.bytes.clone(),
+            expected_local_sequence,
+            events,
+            terminal_receipt,
+            outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 100_000,
+            },
+        }
+    }
+
+    async fn adopt_cut(
+        &self,
+        owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+        cut: OwnerAdoptionCut,
+    ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
+        let handle = self.register(owner, "instance").await;
+        handle
+            .adopt_owner(cut, 1_000_000, 100, Arc::new(NoFaults), Arc::new(()))
+            .await
+            .unwrap();
+        handle
+    }
+
+    async fn register(
+        &self,
+        owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+        instance: &str,
+    ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
+        owner
             .register(
                 "relay".into(),
                 ApplicationHostCoordinate {
                     host_id: "host".into(),
                     host_epoch: 1,
-                    instance_id: "instance".into(),
+                    instance_id: instance.into(),
                     connection_id: "connection".into(),
                 },
                 self.binding.clone(),
             )
             .await
+            .unwrap()
+    }
+
+    /// The relay accepted an owner edit at `cursor` and the outbox drained
+    /// before the handover. The edit can preserve the projected Markdown.
+    fn edit_accepted_before_handover(
+        &mut self,
+        cursor: i64,
+        changes_content: bool,
+    ) -> OwnerAdoptionCut {
+        self.edit_accepted_before_handover_with_source(cursor, changes_content, false)
+    }
+
+    fn edit_accepted_before_handover_with_source(
+        &mut self,
+        cursor: i64,
+        changes_content: bool,
+        preserved_source: bool,
+    ) -> OwnerAdoptionCut {
+        self.doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
             .unwrap();
-        handle
-            .adopt_owner(
-                OwnerAdoptionCut {
-                    relay_database_namespace: "relay".into(),
-                    adoption_id: "adoption".into(),
-                    source_moment_id: "original".into(),
-                    source_digest: hex_sha256(self.text.as_bytes()),
-                    source_byte_length: self.text.len() as i64,
-                    baseline_moment_relay_sequence: 1,
-                    baseline_registered_at_ms: 3,
-                    baseline_bytes: self.bytes.clone(),
-                    expected_local_sequence,
-                    events: vec![],
-                    terminal_receipt: None,
-                    outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
-                        max_pending_bytes: 1_000_000,
-                        max_pending_age_ms: 100_000,
-                    },
-                },
-                1_000_000,
-                100,
-                Arc::new(NoFaults),
-                Arc::new(()),
+        if !changes_content {
+            self.doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, &self.text)
+                .unwrap();
+        }
+        if preserved_source {
+            let source = if changes_content {
+                "# Shared\n\nChanged together.\n"
+            } else {
+                &self.text
+            };
+            self.doc
+                .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+                .unwrap();
+        }
+        let update = self.doc.encode_full_state();
+        self.accepted_handover_update(cursor, update)
+    }
+
+    fn accepted_handover_update(&mut self, cursor: i64, update: Vec<u8>) -> OwnerAdoptionCut {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let limits = dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        };
+        let dohc_engine_storage::TxnOutcome::Committed(recorded) =
+            dohc_engine_collab::record_local_update(
+                &mut self.store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &update,
+                dohc_engine_collab::LocalAppend::default(),
+                &NoFaults,
+                4,
+                |_, _, _| Ok(()),
             )
-            .await
-            .unwrap();
-        handle
+            .unwrap()
+        else {
+            panic!("record crash")
+        };
+        let entry = dohc_engine_collab::append_owner_outbox(
+            &mut self.store,
+            "workspace",
+            dohc_engine_collab::OwnerOutboxAppendInput {
+                binding: self.binding.clone(),
+                base_update: self.bytes.clone(),
+                append_key: "edit".into(),
+                update: update.clone(),
+                limits,
+                created_at_ms: 4,
+            },
+        )
+        .unwrap();
+        let receipt = LiveUpdateReceipt {
+            delivery_id: entry.delivery_id.clone(),
+            update_digest: entry.update_digest.clone(),
+            journal_cursor: cursor,
+            accepting_host_epoch: 1,
+        };
+        dohc_engine_collab::acknowledge_owner_outbox(
+            &mut self.store,
+            "workspace",
+            &entry.outbox_id,
+            &[dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: entry.delivery_id,
+                update_digest: entry.update_digest,
+                journal_cursor: cursor,
+                accepting_host_epoch: 1,
+            }],
+        )
+        .unwrap();
+        let event = AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: receipt.clone(),
+                    binding: self.binding.clone(),
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "owner".into(),
+                    },
+                    received_at_ms: 4,
+                },
+                first_seen: vec![],
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
+            },
+            update_bytes: update,
+        };
+        self.cut(recorded.seq, vec![event], Some(receipt))
     }
 
     async fn record(&self, actor: &ActorHandle, update: Vec<u8>, request: &str, now_ms: i64) {
@@ -378,6 +528,7 @@ impl Fixture {
                 faults,
                 CancellationToken::new(),
                 None,
+                None,
             )
             .await
     }
@@ -487,6 +638,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     f.binding.validate_canonical().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -669,7 +821,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             )
         })
         .unwrap();
-    assert_eq!(settled.local_ydoc_sequence, head);
+    assert!(settled.local_ydoc_sequence < head);
     assert!(
         boundary.is_none_or(|boundary| boundary < head),
         "the file lacks the private edit"
@@ -710,6 +862,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     assert!(native_text.contains(SECOND));
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 4).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -773,6 +926,7 @@ async fn projection_neutral_settlements_keep_the_application_interval_bounded() 
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -855,6 +1009,7 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -951,6 +1106,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -1132,6 +1288,11 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     // A peer's ordinary edits arrive before sharing; each import writes its
     // own native projection moment.
     let mut cache = dohc_engine_collab::WriterDocCache::new();
+    cache.reader_resolver = Some(Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+            dohc_engine_reader::Reader::new(Some(support::fake_reader(&root, "witness-safe"))),
+        )),
+    ));
     for (seq, update, is_base) in [(0, &base, true), (1, &human, false), (2, &agent, false)] {
         let digest = store.put_binary_blob(update).unwrap();
         let op = ReplicationEnvelope {
@@ -1148,9 +1309,18 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
             }),
             recorded_at_ms: 10 + seq,
         };
-        let applied =
-            apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases)
-                .unwrap();
+        let applied = loop {
+            match apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases)
+            {
+                Ok(applied) => break applied,
+                Err(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending {
+                    pending, ..
+                }) => {
+                    pending.resolve().await;
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        };
         assert!(!matches!(applied.primary, ApplyDisposition::Refused(_)));
     }
     let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -1440,6 +1610,7 @@ async fn observed_owner_cannot_use_ordinary_runtime_settlement() {
     let before = f.counts();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     assert_eq!(
         f.ordinary_settle(&actor).await.err().unwrap().code(),
         "owner-outbox-frozen"
@@ -1475,6 +1646,7 @@ async fn enrolled_owner_keeps_its_lineage_when_an_old_conflict_is_resolved_after
     incoming.updated_at_ms = 3;
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     actor
         .conflict_open(
             Box::new(TextConflict {
@@ -1634,6 +1806,7 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     };
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
 
     // H1: a private draft settles locally.
     f.record(
@@ -1775,8 +1948,11 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     assert!(!moment_json.contains(SENTINEL));
 
     // The audit and its moment sit at consecutive native origin coordinates.
-    let (audit_origin, audit_seq, audit_json) =
-        journaled(&f.store, "live.audit.settlement", &settled.settlement_id);
+    let (audit_origin, audit_seq, audit_json) = journaled(
+        &f.store,
+        "live.audit.settlement",
+        settled.settlement_id.as_deref().unwrap(),
+    );
     let audit: serde_json::Value = serde_json::from_str(&audit_json).unwrap();
     assert_eq!(
         audit["record"]["momentId"],
@@ -1862,6 +2038,7 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     assert_eq!(allowed(&reopened, &published), 0);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -1915,6 +2092,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph("Private refused seed"),
@@ -2001,6 +2179,15 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
             .unwrap()
             .allowed_ops,
         1
+    );
+    let mut unaccepted = op.clone();
+    unaccepted.payload["payloadBeforeBlobSha256"] =
+        serde_json::json!(hex_sha256(b"Unaccepted content"));
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        0
     );
     assert_eq!(
         f.store
@@ -2105,6 +2292,7 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2259,6 +2447,7 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2302,7 +2491,7 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
         }) {
             // Authenticated results use the canonical admission path, not mark edits.
             echoed.settlement_admission = Some(SettlementAdmission::Refused {
-                settlement_id: settled.settlement_id.clone(),
+                settlement_id: settled.settlement_id.clone().unwrap(),
                 reason: "authorship-mismatch".into(),
             });
         }
@@ -2370,123 +2559,205 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
 }
 
 #[tokio::test]
-async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
-    let mut f = Fixture::new();
-    let key = DocKey::new("workspace", "main", "object").unwrap();
-    let limits = dohc_engine_collab::OwnerOutboxLimits {
-        max_pending_bytes: 1_000_000,
-        max_pending_age_ms: 100_000,
+async fn refused_publications_after_a_handover_keep_the_cut_across_a_restart() {
+    for changes_content in [false, true] {
+        for canonical in [false, true] {
+            unavailable_publication_after_handover(changes_content, canonical, false).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_owner_source_after_a_handover_keeps_the_cut_across_a_restart() {
+    for changes_content in [false, true] {
+        unavailable_publication_after_handover(changes_content, false, true).await;
+    }
+}
+
+async fn unavailable_publication_after_handover(
+    changes_content: bool,
+    canonical: bool,
+    terminal_source: bool,
+) {
+    use dohc_engine_sync::{
+        NoLiveLeases, SettlementAdmission, apply_replication_envelope, owner_publication_prefix,
     };
-    // The relay accepted the owner's edit and the outbox drained before adoption.
-    f.doc
-        .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
-        .unwrap();
-    let update = f.doc.encode_full_state();
-    let dohc_engine_storage::TxnOutcome::Committed(recorded) =
-        dohc_engine_collab::record_local_update(
-            &mut f.store,
-            &mut dohc_engine_collab::WriterDocCache::new(),
-            &key,
-            &update,
-            dohc_engine_collab::LocalAppend::default(),
-            &NoFaults,
-            4,
-            |_, _, _| Ok(()),
-        )
-        .unwrap()
-    else {
-        panic!("record crash")
-    };
-    let entry = dohc_engine_collab::append_owner_outbox(
-        &mut f.store,
-        "workspace",
-        dohc_engine_collab::OwnerOutboxAppendInput {
-            binding: f.binding.clone(),
-            base_update: f.bytes.clone(),
-            append_key: "edit".into(),
-            update: update.clone(),
-            limits: limits.clone(),
-            created_at_ms: 4,
-        },
-    )
-    .unwrap();
-    let receipt = LiveUpdateReceipt {
-        delivery_id: entry.delivery_id.clone(),
-        update_digest: entry.update_digest.clone(),
-        journal_cursor: 7,
-        accepting_host_epoch: 1,
-    };
-    dohc_engine_collab::acknowledge_owner_outbox(
-        &mut f.store,
-        "workspace",
-        &entry.outbox_id,
-        &[dohc_engine_collab::OwnerDeliveryReceipt {
-            delivery_id: entry.delivery_id,
-            update_digest: entry.update_digest,
-            journal_cursor: 7,
-            accepting_host_epoch: 1,
-        }],
-    )
-    .unwrap();
+    let mut f = Fixture::with_source(0, canonical);
+    let cut = f.edit_accepted_before_handover_with_source(7, changes_content, !canonical);
+    let handover_bytes = f.doc.encode_full_state();
+    let receipt = cut.terminal_receipt.clone();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
         .unwrap();
-    let handle = owner
-        .register(
-            "relay".into(),
-            ApplicationHostCoordinate {
-                host_id: "host".into(),
-                host_epoch: 1,
-                instance_id: "instance".into(),
-                connection_id: "connection".into(),
-            },
-            f.binding.clone(),
+    let handle = f.adopt_cut(&owner, cut).await;
+    let empty = f.settle(&handle, receipt).await;
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted first content"),
+        "first",
+        40,
+    )
+    .await;
+    let first_receipt = f.accept_pending(&actor, &handle, 8).await;
+    let intermediate_bytes = f.doc.encode_full_state();
+    if terminal_source {
+        f.record(
+            &actor,
+            f.doc.richdoc_append_paragraph("Private refused content"),
+            "private",
+            41,
         )
+        .await;
+        let input = f.store.read_with(|conn| conn.query_row(
+            "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1", [],
+            |r| Ok(dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+                outbox_id:r.get(0)?, delivery_id:r.get(1)?, update_digest:r.get(2)?, reason:"terminal-source-refused".into()
+            }))).unwrap();
+        actor
+            .owner_ydoc_refuse_entry(
+                "workspace".into(),
+                input,
+                42,
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let first = f.settle(&handle, Some(first_receipt)).await;
+    if !terminal_source {
+        let mut echoes =
+            dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500)
+                .unwrap();
+        let last = echoes
+            .iter()
+            .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == first.moment_id)
+            .unwrap()
+            .origin_seq;
+        for echoed in &mut echoes {
+            if echoed.origin_seq > last {
+                break;
+            }
+            echoed.relay_seq = Some(echoed.origin_seq + 1);
+            if echoed.op_kind == "moment.append" && echoed.payload["momentId"] == first.moment_id {
+                echoed.settlement_admission = Some(SettlementAdmission::Refused {
+                    settlement_id: first.settlement_id.clone().unwrap(),
+                    reason: "authorship-mismatch".into(),
+                });
+            }
+            apply_replication_envelope(
+                &mut f.store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                echoed,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_attribution_unavailable")
+            .unwrap(),
+        1
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
         .await
         .unwrap();
-    handle
-        .adopt_owner(
-            OwnerAdoptionCut {
-                relay_database_namespace: "relay".into(),
-                adoption_id: "adoption".into(),
-                source_moment_id: "original".into(),
-                source_digest: hex_sha256(f.text.as_bytes()),
-                source_byte_length: f.text.len() as i64,
-                baseline_moment_relay_sequence: 1,
-                baseline_registered_at_ms: 3,
-                baseline_bytes: f.bytes.clone(),
-                expected_local_sequence: recorded.seq,
-                events: vec![AdmittedLiveUpdate {
-                    metadata: AdmittedLiveUpdateMetadata {
-                        accepted: RelayAcceptedLiveUpdate {
-                            receipt: receipt.clone(),
-                            binding: f.binding.clone(),
-                            authority: ServerDerivedLiveUpdateAuthority::Owner {
-                                principal_id: "owner".into(),
-                            },
-                            received_at_ms: 4,
-                        },
-                        first_seen: vec![],
-                        canonical_version: None,
-                        author_snapshot: None,
-                        first_seen_deletes: None,
-                        checkpoint_coverage: None,
-                    },
-                    update_bytes: update,
-                }],
-                terminal_receipt: Some(receipt.clone()),
-                outbox_limits: limits,
+    let handle = f.register(&owner, "reloaded").await;
+    // Continue from the accepted state, leaving the refused native tail private.
+    let next_doc = Ydoc::wire();
+    next_doc.apply(&intermediate_bytes).unwrap();
+    let next_update = next_doc.richdoc_append_paragraph("Accepted next content");
+    let next_receipt = if terminal_source {
+        let (receipt, result) = deliver_declared(
+            &handle,
+            &f.binding,
+            9,
+            &next_doc.encode_full_state(),
+            AgentDeclaration {
+                agent_id: "next-agent".into(),
+                on_behalf_of: Some("owner".into()),
+                depth: 1,
             },
-            1_000_000,
-            100,
-            Arc::new(NoFaults),
-            Arc::new(()),
         )
+        .await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        receipt
+    } else {
+        f.record(&actor, next_update, "next", 50).await;
+        f.accept_pending(&actor, &handle, 9).await
+    };
+    let next = f.settle(&handle, Some(next_receipt)).await;
+    assert_eq!((next.previous_cursor, next.terminal_cursor), (7, 9));
+    let op = dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == next.moment_id)
+        .unwrap();
+    assert_eq!(op.payload["payloadBeforeBlobSha256"], empty.markdown_digest);
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    assert!(f.file().contains("Accepted first content"));
+    assert!(f.file().contains("Accepted next content"));
+    assert!(!f.file().contains("Private refused content"));
+    if !terminal_source
+        && let Some(directory) = std::env::var_os("DOHC_HANDOVER_PUBLICATION_EVIDENCE")
+    {
+        let name = format!(
+            "{}-{}refused.json",
+            if changes_content {
+                "changed"
+            } else {
+                "unchanged"
+            },
+            if canonical { "" } else { "preserved-" }
+        );
+        let evidence = serde_json::json!({
+            "baselineBytes":f.bytes, "handoverBytes":handover_bytes,
+            "intermediateBytes":intermediate_bytes, "nextBytes":next_doc.encode_full_state(), "payload":op.payload,
+        });
+        std::fs::write(
+            PathBuf::from(directory).join(name),
+            serde_json::to_vec(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
+    let mut f = Fixture::new();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
         .await
         .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
     let unload = || {
         owner.unload(
             "object".into(),
@@ -2499,6 +2770,547 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     assert_eq!(unload().await.unwrap(), Some(UnloadPending::Settlement));
     assert!(f.settle(&handle, Some(receipt)).await.materialized);
     assert_eq!(unload().await.unwrap(), None);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+/// Stored settlements and the settlement audits journaled for the relay.
+fn recorded_settlements(store: &EngineStore) -> (i64, i64) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM live_device_settlements),(SELECT COUNT(*) FROM replication_log WHERE op_kind='live.audit.settlement')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn settling_straight_after_a_handover_records_and_publishes_nothing() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let before = f.counts();
+    let empty = f.settle(&handle, None).await;
+    assert_eq!(empty.settlement_id, None);
+    assert_eq!(
+        (
+            empty.previous_cursor,
+            empty.terminal_cursor,
+            empty.application_count
+        ),
+        (0, 0, 0)
+    );
+    assert!(empty.materialized);
+    assert_eq!(f.file(), f.text);
+    assert_eq!(f.counts(), before);
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+
+    // The first accepted edit is recorded and journaled from the handover.
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted owner edit."),
+        "accepted-edit",
+        10,
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, 1).await;
+    let settled = f.settle(&handle, Some(receipt)).await;
+    assert!(settled.settlement_id.is_some());
+    assert_eq!(
+        (
+            settled.previous_cursor,
+            settled.terminal_cursor,
+            settled.application_count
+        ),
+        (0, 1, 1)
+    );
+    assert!(f.file().contains("Accepted owner edit."));
+    assert_eq!(recorded_settlements(&f.store), (1, 1));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn the_settlement_after_an_empty_one_starts_at_a_changed_handover_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, true, false)
+        .await;
+}
+
+#[tokio::test]
+async fn the_handover_settle_keeps_the_new_owners_unaccepted_edit() {
+    let mut f = Fixture::with_source(0, true);
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    f.record(
+        &actor,
+        f.doc.frontmatter_set("status", "still typing").unwrap(),
+        "typing",
+        20,
+    )
+    .await;
+    let empty = f.settle(&handle, Some(receipt)).await;
+    assert!(empty.materialized);
+    assert_eq!(empty.settlement_id, None);
+    assert_eq!(f.file(), "owner edit");
+    assert_eq!(
+        f.store
+            .read_with(|conn| conn.query_row(
+                "SELECT count(*) FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        1
+    );
+    let receipt = f.accept_pending(&actor, &handle, 8).await;
+    let settled = f.settle(&handle, Some(receipt)).await;
+    assert_eq!((settled.previous_cursor, settled.terminal_cursor), (7, 8));
+    assert!(f.file().contains("still typing"));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn the_handover_settle_refuses_an_unfolded_file_change() {
+    let mut f = Fixture::with_source(0, true);
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let text = "A file change still awaiting capture.";
+    std::fs::write(f.root.path().join(&f.binding.current_path), text).unwrap();
+    let error = handle
+        .settle(
+            Some(receipt),
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), "conflict-stale-target");
+    assert_eq!(f.file(), text);
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+/// An outside write lands while the handover settle writes the owner's
+/// accepted edit, so its materialization conflicts. Once the file holds its
+/// earlier bytes again, the next settle writes the edit, and also any edit
+/// accepted meanwhile. A head that this lineage's empty settle didn't write
+/// is never restored.
+#[derive(Clone, Copy, PartialEq)]
+enum AfterConflict {
+    Nothing,
+    AnotherEditAccepted,
+    RecordOfOtherLineage,
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_recovers_after_its_file_is_restored() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::Nothing).await;
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_recovers_after_another_edit_is_accepted() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::AnotherEditAccepted).await;
+}
+
+#[tokio::test]
+async fn an_empty_handover_settle_restores_only_its_own_lineages_head() {
+    empty_handover_settle_after_its_file_is_restored(AfterConflict::RecordOfOtherLineage).await;
+}
+
+async fn empty_handover_settle_after_its_file_is_restored(after: AfterConflict) {
+    use dohc_engine_storage::FaultInjector;
+    let mut f = Fixture::with_source(0, true);
+    let root = f.root.path().to_owned();
+    let path = root.join(&f.binding.current_path);
+    let before = std::fs::read(&path).unwrap();
+    let cut = f.edit_accepted_before_handover(7, true);
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let settle = |receipt: LiveUpdateReceipt, faults: Arc<dyn FaultInjector>| {
+        handle.settle(
+            Some(receipt),
+            100,
+            root.clone(),
+            30,
+            faults,
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+    };
+    let rival = Arc::new(PrefixRival {
+        path: path.clone(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    assert_eq!(
+        settle(receipt.clone(), rival).await.err().unwrap().code(),
+        "conflict-stale-target"
+    );
+    assert_eq!(f.file(), "rival survives");
+    assert_eq!(
+        settle(receipt.clone(), Arc::new(NoFaults))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        "conflict-stale-target"
+    );
+    assert_eq!(f.file(), "rival survives");
+    let receipt = match after {
+        AfterConflict::Nothing => receipt,
+        AfterConflict::AnotherEditAccepted => {
+            f.record(
+                &actor,
+                f.doc.richdoc_append_paragraph("Edit after the conflict."),
+                "after-conflict",
+                50,
+            )
+            .await;
+            f.accept_pending(&actor, &handle, 8).await
+        }
+        AfterConflict::RecordOfOtherLineage => {
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE live_empty_settlements SET lineage_claim_id=?1",
+                        ["0".repeat(64)],
+                    )
+                    .unwrap();
+                    Ok::<_, dohc_engine_storage::StorageError>(())
+                })
+                .unwrap();
+            receipt
+        }
+    };
+    std::fs::write(&path, &before).unwrap();
+    if after == AfterConflict::RecordOfOtherLineage {
+        assert_eq!(
+            settle(receipt, Arc::new(NoFaults))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            "conflict-stale-target"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    } else {
+        let recovered = settle(receipt, Arc::new(NoFaults)).await.unwrap();
+        assert!(recovered.materialized);
+        assert_eq!(
+            f.file(),
+            f.doc.project(ContentKind::Richdoc).unwrap().content
+        );
+        let recorded = after == AfterConflict::AnotherEditAccepted;
+        assert_eq!(recovered.settlement_id.is_some(), recorded);
+        assert_eq!(
+            recorded_settlements(&f.store),
+            if recorded { (1, 1) } else { (0, 0) }
+        );
+    }
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn the_settlement_after_an_empty_one_starts_at_an_unchanged_handover_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, true, false)
+        .await;
+}
+
+#[tokio::test]
+async fn a_changed_handover_preserves_its_markdown_source_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false, false)
+        .await;
+}
+
+#[tokio::test]
+async fn an_unchanged_handover_preserves_its_markdown_source_across_a_reload() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(false, false, false)
+        .await;
+}
+
+#[tokio::test]
+async fn a_frontmatter_handover_proves_the_settled_html_source_after_the_file_advances() {
+    the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(true, false, true)
+        .await;
+}
+
+async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reload(
+    changes_content: bool,
+    canonical: bool,
+    html: bool,
+) {
+    use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
+    let mut f = if html {
+        let snapshot = "---\ntitle: old\n---\n\nHello <b>hidden</b> world\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, snapshot)
+            .unwrap();
+        let original = doc.project(ContentKind::Richdoc).unwrap().content;
+        let mut f = Fixture::with_seed(original, doc.encode_full_state());
+        for (object, path, text, moment) in [
+            ("schema", "notes/.collection.json", "{}", "schema"),
+            (
+                "object",
+                f.binding.current_path.as_str(),
+                snapshot,
+                "before-handover",
+            ),
+        ] {
+            dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: moment.into(),
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 3,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        std::fs::write(f.root.path().join(&f.binding.current_path), snapshot).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?1",
+                    [hex_sha256(snapshot.as_bytes())],
+                )
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        f
+    } else {
+        Fixture::with_source(0, canonical)
+    };
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let cut = if html {
+        let snapshot = f.file();
+        assert_ne!(snapshot, f.text);
+        let source = snapshot.replace("title: old", "title: new");
+        f.doc
+            .frontmatter_set_preserving_markdown_source("title", "new", &source)
+            .unwrap();
+        let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        assert_eq!(f.doc.preserved_markdown_source(&projection), None);
+        assert_eq!(
+            f.doc
+                .settled_markdown_source(&projection, || Ok::<_, ()>(Some(snapshot.clone())))
+                .unwrap(),
+            Some(source)
+        );
+        f.accepted_handover_update(7, f.doc.encode_full_state())
+    } else {
+        f.edit_accepted_before_handover_with_source(7, changes_content, !canonical)
+    };
+    let handover_bytes = f.doc.encode_full_state();
+    let receipt = cut.terminal_receipt.clone().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    let empty = f.settle(&handle, Some(receipt)).await;
+    assert_eq!(
+        (
+            empty.settlement_id,
+            empty.previous_cursor,
+            empty.terminal_cursor
+        ),
+        (None, 7, 7)
+    );
+    assert!(empty.materialized);
+    assert_eq!(
+        empty.markdown_digest == hex_sha256(f.text.as_bytes()),
+        !changes_content
+    );
+    if !canonical {
+        let projected = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        assert_ne!(empty.markdown_digest, hex_sha256(projected.as_bytes()));
+        if html {
+            assert_eq!(f.doc.preserved_markdown_source(&projected), None);
+        } else {
+            assert_eq!(f.doc.preserved_markdown_source(&projected), Some(f.file()));
+        }
+    }
+    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    assert_eq!(
+        owner
+            .unload("object".into(), vec![key], f.root.path().to_owned(), 40)
+            .await
+            .unwrap(),
+        None
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.register(&owner, "reloaded").await;
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Edit after the reload."),
+        "after-reload",
+        50,
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, 8).await;
+    let next = f.settle(&handle, Some(receipt)).await;
+    assert!(next.settlement_id.is_some());
+    assert_eq!(
+        (
+            next.previous_cursor,
+            next.terminal_cursor,
+            next.application_count
+        ),
+        (7, 8, 1)
+    );
+    assert!(f.file().contains("Edit after the reload."));
+    let stored: (i64, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT previous_cursor,terminal_cursor FROM live_device_settlements",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(stored, (7, 8));
+    assert_eq!(recorded_settlements(&f.store), (1, 1));
+    // The relay holds the Markdown at the handover cut as this proof's
+    // predecessor, so the outgoing moment starts there.
+    let op = f.store.read_with(|conn| conn.query_row("SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1", [&next.moment_id], |r| Ok(ReplicationEnvelope {
+        workspace_id:"workspace".into(), origin_id:r.get(0)?, origin_seq:r.get(1)?, relay_seq:None, op_kind:"moment.append".into(), payload:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(), recorded_at_ms:r.get(3)?, settlement_admission:None, admitted_author_snapshot:None
+    }))).unwrap();
+    assert_eq!(
+        op.payload["settlementReference"]["record"]["previousCursor"],
+        7
+    );
+    assert_eq!(
+        op.payload["payloadBeforeBlobSha256"],
+        serde_json::json!(empty.markdown_digest)
+    );
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    if changes_content && !canonical {
+        let handover = Ydoc::wire();
+        handover.apply(&handover_bytes).unwrap();
+        let projected = handover.project(ContentKind::Richdoc).unwrap().content;
+        let mut canonical_before = op.clone();
+        canonical_before.payload["payloadBeforeBlobSha256"] =
+            serde_json::json!(hex_sha256(projected.as_bytes()));
+        canonical_before.payload["beforeBlobSha256"] =
+            canonical_before.payload["payloadBeforeBlobSha256"].clone();
+        assert_eq!(
+            owner_publication_prefix(&f.store, "workspace", &[canonical_before], 1_000_000)
+                .unwrap()
+                .allowed_ops,
+            usize::from(html)
+        );
+    }
+    let mut unaccepted = op.clone();
+    unaccepted.payload["payloadBeforeBlobSha256"] =
+        serde_json::json!(hex_sha256(b"Unaccepted predecessor"));
+    unaccepted.payload["beforeBlobSha256"] = unaccepted.payload["payloadBeforeBlobSha256"].clone();
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", &[unaccepted], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        0
+    );
+    if let Some(directory) = std::env::var_os("DOHC_HANDOVER_PUBLICATION_EVIDENCE") {
+        let evidence = serde_json::json!({
+            "baselineBytes": f.bytes,
+            "handoverBytes": handover_bytes,
+            "nextBytes": f.doc.encode_full_state(),
+            "payload": op.payload,
+        });
+        let name = if html {
+            "changed-html.json"
+        } else {
+            match (changes_content, canonical) {
+                (true, true) => "changed.json",
+                (false, true) => "unchanged.json",
+                (true, false) => "changed-preserved.json",
+                (false, false) => "unchanged-preserved.json",
+            }
+        };
+        std::fs::write(
+            PathBuf::from(directory).join(name),
+            serde_json::to_vec(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
@@ -2638,6 +3450,7 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
         let key = DocKey::new("workspace", "main", "object").unwrap();
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         let pending = f
             .doc
             .frontmatter_set("pending", "Owner pending edit")
@@ -2754,6 +3567,7 @@ async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
     let f = observed_release_fixture();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let update = f
         .doc
         .frontmatter_set("pending", "Frozen restore work")
@@ -2811,6 +3625,7 @@ async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2849,6 +3664,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             let f = observed_release_fixture();
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 3).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             for index in 0..count {
                 let update = f
                     .doc
@@ -2896,6 +3712,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             supervisor.close_all().unwrap();
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 31).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             if point == FaultPoint::StorageBeforePersist {
                 assert_eq!(release_snapshot(&f), before);
             }
@@ -2935,6 +3752,7 @@ async fn stop_refuses_device_hosts_and_synthetic_restore_fences_without_mutation
         if !hosted {
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 3).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             stop_action(&actor, &f, "request").await.unwrap();
             supervisor.close_all().unwrap();
         }
@@ -2949,6 +3767,7 @@ async fn stop_refuses_device_hosts_and_synthetic_restore_fences_without_mutation
         let before = f.counts();
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         let result = stop_action(&actor, &f, if hosted { "request" } else { "release" }).await;
         assert!(if hosted {
             matches!(
@@ -3023,6 +3842,7 @@ async fn pending_release_fixture_updates(
 ) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let count = updates.len();
     if let Some(first) = updates.first() {
         let entry = actor
@@ -3176,6 +3996,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
         .unwrap();
     let host = Fixture::new();
     let host_actor = supervisor.open(&host.db, 3).unwrap().actor;
+    support::configure_witness_reader(&host_actor, &host.root).await;
     let host_owner = host_actor
         .live_application_owner("workspace".into())
         .await
@@ -3290,7 +4111,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
         .unwrap();
     // The host's authenticated History boundary arrives before unbinding.
     let mut envelope=host.store.read_with(|conn| conn.query_row("SELECT payload_json,recorded_at_ms FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&saved.moment_id],|r| Ok(dohc_engine_sync::ReplicationEnvelope {
-        workspace_id:"workspace".into(),origin_id:"host".into(),origin_seq:0,relay_seq:Some(1),op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(0)?).unwrap(),recorded_at_ms:r.get(1)?,settlement_admission:Some(dohc_engine_sync::SettlementAdmission::Accepted{settlement_id:saved.settlement_id.clone()}),admitted_author_snapshot:Some(serde_json::json!([dohc_engine_collab::live_update_application::LiveAuthorEntry::from(declaration.clone())]))
+        workspace_id:"workspace".into(),origin_id:"host".into(),origin_seq:0,relay_seq:Some(1),op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(0)?).unwrap(),recorded_at_ms:r.get(1)?,settlement_admission:Some(dohc_engine_sync::SettlementAdmission::Accepted{settlement_id:saved.settlement_id.clone().unwrap()}),admitted_author_snapshot:Some(serde_json::json!([dohc_engine_collab::live_update_application::LiveAuthorEntry::from(declaration.clone())]))
     }))).unwrap();
     envelope.payload.as_object_mut().unwrap().remove("authors");
     let blobs: Vec<(String, String)> = host
@@ -3380,6 +4201,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             44,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -3761,6 +4583,7 @@ async fn stop_without_pending_entries_releases_ordinary_sized_documents() {
         let f = observed_release_fixture_with_size(size);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         stop_action(&actor, &f, "request").await.unwrap();
         let rows = stop_action(&actor, &f, "release").await.unwrap();
         assert!(rows[0].deferred.is_none());
@@ -4221,6 +5044,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     let mut f = observed_release_fixture();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     for (index, kind) in [
         "person",
         "agent",

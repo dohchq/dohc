@@ -7,7 +7,10 @@ pub(super) mod restore;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveSettlementResult {
-    pub settlement_id: String,
+    /// Absent when nothing was accepted since the owner's handover or the
+    /// first baseline: such a settlement is not published, and only its
+    /// projection is kept locally.
+    pub settlement_id: Option<String>,
     pub previous_cursor: i64,
     pub terminal_cursor: i64,
     pub application_count: usize,
@@ -50,6 +53,9 @@ pub struct LiveSettlementAudit {
     first: bool,
     restore: Option<Box<restore::RestoreAudit>>,
     replay_anchor: Option<restore::PriorAnchor>,
+    /// No settlement is stored and the relay accepted nothing since the
+    /// owner's handover or the first baseline.
+    empty: bool,
 }
 
 fn audit_error(error: ApplicationError) -> ApplicationError {
@@ -63,12 +69,43 @@ fn audit_error(error: ApplicationError) -> ApplicationError {
 }
 
 impl LiveSettlementAudit {
-    /// A compensated filesystem marker can be restored only for this retained projection.
+    pub fn markdown_retry_inputs(&self) -> serde_json::Value {
+        serde_json::to_value(crate::markdown_write_obligations::AuditedRetry {
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        })
+        .expect("audited retry inputs are serializable")
+    }
+
+    pub fn markdown_operation_id(&self) -> String {
+        crate::markdown_write_obligations::AuditedRetry {
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        }
+        .operation_id()
+    }
+
+    /// A compensated filesystem marker can be restored only for this retained
+    /// projection: the lineage's latest recorded settlement, or else its
+    /// latest empty one.
     pub fn covers_projection_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
+    ) -> Result<bool, ApplicationError> {
+        self.saved_projection_in(conn, moment, markdown, true)
+    }
+    fn saved_projection_in(
+        &self,
+        conn: &Connection,
+        moment: &str,
+        markdown: &str,
+        empty: bool,
     ) -> Result<bool, ApplicationError> {
         if let Some(restore) = &self.restore {
             return restore
@@ -92,8 +129,8 @@ impl LiveSettlementAudit {
         {
             return Err(StorageError::StateCorrupt { source: None }.into());
         }
-        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
+        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM (SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 UNION ALL SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,-1 FROM live_empty_settlements WHERE ?6 AND relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5) ORDER BY terminal_cursor DESC LIMIT 1",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,empty],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
         let Some((saved_moment, saved_markdown, sequence, binding)) = saved else {
             return Ok(false);
         };
@@ -107,13 +144,17 @@ impl LiveSettlementAudit {
     /// head, such as a pre-live imported projection, would publish its own
     /// historical before-image. A restore reuses only its own saved settlement,
     /// so its first settlement records the restore transition. Replay keeps its
-    /// exact record-time checks.
+    /// exact record-time checks. An empty settlement publishes nothing, so any
+    /// head holding its projection stands.
     pub fn reuses_head_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
     ) -> Result<bool, ApplicationError> {
+        if self.empty {
+            return Ok(true);
+        }
         if self.terminal_source {
             return Ok(false);
         }
@@ -128,10 +169,16 @@ impl LiveSettlementAudit {
         if self.replay_anchor.is_some() {
             return Ok(true);
         }
-        self.covers_projection_in(conn, moment, markdown)
+        self.saved_projection_in(conn, moment, markdown, false)
     }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
+    }
+    /// The settlement covers no accepted edit. It still projects the file,
+    /// but it is not published: the relay accepts only a settlement whose
+    /// interval holds an accepted edit. Only its projection is kept locally.
+    pub fn is_empty(&self) -> bool {
+        self.empty
     }
     /// The accepted document this settlement projects instead of the native
     /// head. Present only while this owner's own native edits wait for the
@@ -152,6 +199,23 @@ impl LiveSettlementAudit {
         let b = &self.binding;
         store.read_with(|conn| conn.query_row("SELECT settlement_id FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND moment_id=?7 AND markdown_digest=?8",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,moment,markdown],|row| row.get(0))).map_err(StorageError::persist_public)
+    }
+    /// An empty settlement publishes nothing, but its lineage keeps the
+    /// projection it committed, so a conflicted file write can be restored.
+    pub fn record_empty_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        moment: &str,
+        markdown: &str,
+    ) -> Result<(), ApplicationError> {
+        if !self.empty {
+            return Err(StorageError::StateCorrupt { source: None }.into());
+        }
+        let b = &self.binding;
+        let binding = serde_json::to_string(b).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT OR REPLACE INTO live_empty_settlements(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,moment_id,markdown_digest,local_ydoc_sequence,binding_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,moment,markdown,self.sequence,binding]).map_err(StorageError::persist_public)?;
+        Ok(())
     }
     pub fn permits_absent_bootstrap(&self, moment: &str, digest: &str) -> bool {
         self.first && moment == self.bootstrap_moment && digest == self.bootstrap_digest
@@ -268,6 +332,10 @@ impl LiveSettlementAudit {
                 return Err(corrupt());
             }
             return Ok(id);
+        }
+        // Stored settlements may start where they end. A new one must not.
+        if self.previous_cursor >= self.terminal_cursor {
+            return Err(invalid("a new settlement must cover an accepted edit"));
         }
         tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
@@ -397,7 +465,7 @@ impl LiveSettlementAudit {
 
     pub fn result(
         &self,
-        settlement_id: String,
+        settlement_id: Option<String>,
         moment_id: String,
         markdown_digest: String,
         materialized: bool,
@@ -514,9 +582,23 @@ where
         // Every native sequence since the last settlement is an accepted
         // application or one of this owner's own updates still waiting for
         // the relay. Its own later application counts by journal cursor.
-        let tail = private_tail(conn,&held,previous_sequence,head)?;
+        let tail = private_tail(conn,&held,previous_sequence,head,terminal_cursor)?;
         sequences.extend(tail.sequences.iter().copied());
+        sequences.extend(tail.accepted_sequences.iter().copied());
+        // A private boundary can retain accepted receipts across several intervals.
+        // Bound distinct native sequences by the uncovered native gap.
+        if (sequences.len() as i64) < head-previous_sequence {
+            let mut query = conn.prepare("SELECT DISTINCT local_ydoc_sequence FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor<=?6 AND local_ydoc_sequence>?7 ORDER BY journal_cursor DESC LIMIT ?8").map_err(read_sql)?;
+            let mut rows = query.query(params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,previous_cursor,previous_sequence,head-previous_sequence]).map_err(read_sql)?;
+            while let Some(row) = rows.next().map_err(read_sql)? {
+                let sequence: i64 = row.get(0).map_err(read_sql)?;
+                integer(sequence,1,head)?;
+                if sequence>previous_sequence { sequences.insert(sequence); }
+                if sequences.len() as i64 == head-previous_sequence { break; }
+            }
+        }
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
+        let covered_sequence = tail.sequences.iter().min().map_or(head, |sequence| sequence - 1);
         let accepted = if tail.any {
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
@@ -531,9 +613,11 @@ where
         };
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
-        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
+        // With nothing stored, the next settlement again starts at the origin.
+        let empty = previous.is_none() && restored_origin.is_none() && previous_cursor == terminal_cursor;
+        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
-            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
+            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor),empty })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
@@ -597,6 +681,7 @@ struct PrivateTail {
     /// Their native sequences after `previous_sequence`, each verified
     /// against its own journal row.
     sequences: Vec<i64>,
+    accepted_sequences: Vec<i64>,
     /// Whether any exists at all, before or after `previous_sequence`.
     any: bool,
     /// Whether the adoption seed is among them.
@@ -609,6 +694,7 @@ fn private_tail(
     held: &Registration,
     previous_sequence: i64,
     head: i64,
+    terminal_cursor: i64,
 ) -> Result<PrivateTail, ApplicationError> {
     let b = &held.binding;
     let adoption: Option<String> = conn.query_row("SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
@@ -634,7 +720,11 @@ fn private_tail(
         .map_err(read_sql)?;
     let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,held.namespace],|row|row.get(0)).map_err(read_sql)?;
     let gap = head - previous_sequence;
-    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
+    // Compaction can give an accepted own delivery a newer append sequence.
+    // Its retained native source still covers the original private sequence.
+    let accepted = "EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id AND a.update_digest=e.update_digest AND a.workspace_id=o.workspace_id AND a.main_version_id=o.main_version_id AND a.object_id=o.object_id AND a.lineage_claim_id=o.lineage_claim_id AND a.journal_cursor<=?10)";
+    let coverage = format!("FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND e.native_source_json IS NOT NULL AND ((e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL)) OR {accepted})");
+    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,{accepted} {coverage} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
     let mut rows = query
         .query(params![
             b.workspace_id,
@@ -645,10 +735,12 @@ fn private_tail(
             b.current_path,
             held.namespace,
             previous_sequence,
-            gap + 2
+            gap + 2,
+            terminal_cursor
         ])
         .map_err(read_sql)?;
     let mut sequences = Vec::new();
+    let mut accepted_sequences = Vec::new();
     let mut terminal = false;
     while let Some(row) = rows.next().map_err(read_sql)? {
         let length: i64 = row.get(2).map_err(read_sql)?;
@@ -659,6 +751,7 @@ fn private_tail(
         let digest: String = row.get(1).map_err(read_sql)?;
         let json: String = row.get(3).map_err(read_sql)?;
         let pending: bool = row.get(4).map_err(read_sql)?;
+        let accepted: bool = row.get(5).map_err(read_sql)?;
         let source: crate::owner_outbox::OwnerOutboxNativeSource =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
         source
@@ -678,18 +771,24 @@ fn private_tail(
             source.origin,
             crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
         );
-        terminal |= !pending
+        terminal |= !accepted
+            && !pending
             && (source.native_sequence > previous_sequence
                 || adoption_seed && previous_sequence == source.native_sequence);
         if source.native_sequence > previous_sequence {
-            if sequences.len() as i64 >= gap {
+            if (sequences.len() + accepted_sequences.len()) as i64 >= gap {
                 return Err(ApplicationError::Corrupt);
             }
-            sequences.push(source.native_sequence);
+            if accepted {
+                accepted_sequences.push(source.native_sequence);
+            } else {
+                sequences.push(source.native_sequence);
+            }
         }
     }
     Ok(PrivateTail {
         sequences,
+        accepted_sequences,
         any,
         seed,
         terminal,
@@ -868,6 +967,7 @@ mod publication_state_tests {
             first: false,
             restore: None,
             replay_anchor: None,
+            empty: false,
         };
         (dir, store, audit)
     }

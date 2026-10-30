@@ -213,6 +213,7 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
                 None,
                 super::super::super::ydoc::SettlementKind::Document,
                 false,
+                None,
             )
             .unwrap();
             assert_eq!(

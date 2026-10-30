@@ -44,17 +44,29 @@ pub struct RefusalDocument {
 pub struct RefusalNotice {
     pub notice_id: String,
     pub refusal_coordinates: Vec<RefusalCoordinate>,
-    pub origin_id: String,
-    pub origin_seq: i64,
+    pub origin_id: Option<String>,
+    pub origin_seq: Option<i64>,
     pub reason: String,
     pub document: Option<RefusalDocument>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RefusalCoordinate {
-    pub origin_id: String,
-    pub origin_seq: i64,
+#[serde(untagged, deny_unknown_fields)]
+pub enum RefusalCoordinate {
+    Replication {
+        #[serde(rename = "originId")]
+        origin_id: String,
+        #[serde(rename = "originSeq")]
+        origin_seq: i64,
+    },
+    LocalObligation {
+        #[serde(rename = "obligationOrder")]
+        obligation_order: i64,
+        #[serde(rename = "checkpointSha256")]
+        checkpoint_sha256: String,
+        #[serde(rename = "headSha256")]
+        head_sha256: Option<String>,
+    },
 }
 
 fn document(payload: &Value) -> Option<RefusalDocument> {
@@ -109,7 +121,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    rows.into_iter()
+    let mut notices = rows.into_iter()
         .map(|(origin_id, origin_seq, reason, payload, code)| {
             let payload: Value = serde_json::from_str(&payload).map_err(SyncError::corrupt)?;
             let mut document = document(&payload);
@@ -190,7 +202,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                 serde_json::json!([workspace_id, "coordinate", origin_id, origin_seq])
             };
             Ok(RefusalNotice {
-                refusal_coordinates: vec![RefusalCoordinate {
+                refusal_coordinates: vec![RefusalCoordinate::Replication {
                     origin_id: origin_id.clone(),
                     origin_seq,
                 }],
@@ -198,13 +210,60 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
                     "sync-refusal-{}",
                     hex_sha256(identity.to_string().as_bytes())
                 ),
-                origin_id,
-                origin_seq,
+                origin_id: Some(origin_id),
+                origin_seq: Some(origin_seq),
                 reason,
                 document,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, SyncError>>()?;
+    for owed in dohc_engine_collab::markdown_write_obligations::pending_in(conn, workspace_id)
+        .map_err(crate::ydoc_apply::map_collab_hard_error)?
+    {
+        let Some(checkpoint) = owed.held_checkpoint_sha256 else {
+            continue;
+        };
+        let dismissed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM markdown_write_obligation_notice_dismissals \
+             WHERE obligation_order=?1 AND checkpoint_sha256=?2 AND head_sha256 IS ?3)",
+                params![owed.order, checkpoint, owed.held_head_sha256],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if dismissed {
+            continue;
+        }
+        let identity = serde_json::json!([
+            workspace_id,
+            "lineage",
+            owed.key.version_id,
+            owed.key.object_id,
+            owed.lineage_claim_id
+        ]);
+        notices.push(RefusalNotice {
+            notice_id: format!(
+                "sync-refusal-{}",
+                hex_sha256(identity.to_string().as_bytes())
+            ),
+            refusal_coordinates: vec![RefusalCoordinate::LocalObligation {
+                obligation_order: owed.order,
+                checkpoint_sha256: checkpoint,
+                head_sha256: owed.held_head_sha256,
+            }],
+            origin_id: None,
+            origin_seq: None,
+            reason: "markdown-write-held".into(),
+            document: Some(RefusalDocument {
+                version_id: Some(owed.key.version_id),
+                object_id: owed.key.object_id,
+                lineage_claim_id: owed.lineage_claim_id,
+                path: Some(owed.path),
+                conflict_id: None,
+            }),
+        });
+    }
+    Ok(notices)
 }
 
 pub fn list_refusal_notices(
@@ -238,6 +297,19 @@ fn delete_row(
     workspace_id: &str,
     row: &RefusalNotice,
 ) -> Result<(), SyncError> {
+    for coordinate in &row.refusal_coordinates {
+        if let RefusalCoordinate::LocalObligation {
+            obligation_order,
+            checkpoint_sha256,
+            head_sha256,
+        } = coordinate
+        {
+            tx.execute("INSERT INTO markdown_write_obligation_notice_dismissals \
+                (obligation_order,checkpoint_sha256,head_sha256) VALUES (?1,?2,?3) \
+                ON CONFLICT(obligation_order) DO UPDATE SET checkpoint_sha256=excluded.checkpoint_sha256,head_sha256=excluded.head_sha256",
+                params![obligation_order,checkpoint_sha256,head_sha256]).map_err(SyncError::persist)?;
+        }
+    }
     tx.execute("DELETE FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
         params![workspace_id, row.origin_id, row.origin_seq]).map_err(SyncError::persist)?;
     Ok(())
@@ -276,7 +348,10 @@ pub(crate) fn clear_lineage_in_tx(
          AND (substr(p.reason_message,1,length(?6))=?6 \
            OR substr(p.reason_message,1,length(?7))=?7 \
            OR substr(p.reason_message,1,length(?8))=?8 \
-           OR p.reason_message IN (?9,?10)) AND EXISTS( \
+            OR p.reason_message IN (?9,?10,?11)) \
+          AND (p.reason_message != ?11 OR NOT EXISTS(SELECT 1 FROM markdown_write_obligations o \
+            WHERE o.workspace_id=?1 AND o.version_id=?5 AND o.object_id=?2 AND o.lineage_claim_id=?3 \
+              AND o.completed=0 AND o.held_checkpoint_sha256 IS NOT NULL)) AND EXISTS( \
          SELECT 1 FROM replication_log r WHERE r.workspace_id=p.workspace_id \
          AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq \
          AND COALESCE(json_extract(r.payload_json,'$.objectId'), \
@@ -294,6 +369,7 @@ pub(crate) fn clear_lineage_in_tx(
             RetainedUpdateRefusal::ProjectionTooLarge(dohc_engine_collab::ContentKind::Scene).message_prefix(),
             RetainedUpdateRefusal::ContentKindMismatch.message_prefix(),
             RetainedUpdateRefusal::InvalidContentKind.message_prefix(),
+            "markdown-write-held",
         ],
     )
     .map_err(SyncError::persist)?;
@@ -343,6 +419,61 @@ mod tests {
     use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
     use serde_json::json;
+
+    #[test]
+    fn markdown_hold_notice_dismissal_preserves_debt_and_new_checkpoints() {
+        use dohc_engine_collab::markdown_write_obligations::{
+            self as obligations, Kind, Obligation,
+        };
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE versions(workspace_id TEXT,version_id TEXT,PRIMARY KEY(workspace_id,version_id));
+             INSERT INTO versions VALUES ('ws','main');",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../../dohc-engine-storage/src/markdown_write_obligations.sql"
+        ))
+        .unwrap();
+        conn.execute_batch("CREATE TABLE replication_pending_refusals(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,\
+            reason_message TEXT,reason_code TEXT,report_id TEXT);\
+            CREATE TABLE replication_log(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,payload_json TEXT)").unwrap();
+        let mut owed = Obligation {
+            order: 0,
+            key: dohc_engine_collab::DocKey::new("ws", "main", "note").unwrap(),
+            lineage_claim_id: "claim".into(),
+            operation_id: "session".into(),
+            kind: Kind::Session,
+            path: "note.md".into(),
+            retry_inputs: json!({}),
+            held_checkpoint_sha256: Some("first".into()),
+            held_head_sha256: None,
+            source_sha256: None,
+            settled_head_sha256: None,
+        };
+        obligations::record_in(&conn, &owed, 1).unwrap();
+        let shown = rows(&conn, "ws").unwrap().remove(0);
+        assert!(matches!(
+            &shown.refusal_coordinates[0],
+            RefusalCoordinate::LocalObligation {
+                head_sha256: None,
+                ..
+            }
+        ));
+        let tx = conn.transaction().unwrap();
+        delete_row(&tx, "ws", &shown).unwrap();
+        tx.commit().unwrap();
+        assert!(rows(&conn, "ws").unwrap().is_empty());
+        assert_eq!(obligations::pending_in(&conn, "ws").unwrap().len(), 1);
+        owed.held_checkpoint_sha256 = Some("next".into());
+        obligations::record_in(&conn, &owed, 2).unwrap();
+        let next = rows(&conn, "ws").unwrap().remove(0);
+        assert_eq!(shown.notice_id, next.notice_id);
+        assert_ne!(shown.refusal_coordinates, next.refusal_coordinates);
+        assert!(rows(&conn, "other-workspace").unwrap().is_empty());
+        obligations::complete_in(&conn, &owed, 3).unwrap();
+        assert!(rows(&conn, "ws").unwrap().is_empty());
+    }
 
     fn refuse(store: &mut EngineStore, workspace: &str, object: &str, lineage: &str, seq: i64) {
         refuse_in_version(store, workspace, "main", object, lineage, seq);
@@ -459,11 +590,11 @@ mod tests {
             assert_eq!(
                 remaining[0].refusal_coordinates,
                 vec![
-                    RefusalCoordinate {
+                    RefusalCoordinate::Replication {
                         origin_id: "peer".into(),
                         origin_seq: 2
                     },
-                    RefusalCoordinate {
+                    RefusalCoordinate::Replication {
                         origin_id: "another-peer".into(),
                         origin_seq: 0
                     },
@@ -522,7 +653,7 @@ mod tests {
         }).unwrap();
         let remaining = list_refusal_notices(&store, "ws").unwrap();
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].origin_seq, 0);
+        assert_eq!(remaining[0].origin_seq, Some(0));
     }
 
     #[test]

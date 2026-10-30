@@ -49,7 +49,7 @@ import {
   IMPORT_COLLISION_RENAMES,
   IMPORT_SKIPS_LISTED,
 } from "../ipc/channels";
-import { isInside } from "../security/pathContainment";
+import { isInside, isInsideOrUnknown } from "../security/pathContainment";
 import { absentAsNull, diskSpelling } from "./diskSpelling";
 import { storedEntryPath } from "./storedEntryPath";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
@@ -1199,7 +1199,9 @@ async function screenDroppedSource(
     const real = await realpath(source);
     if (!(await linksAreOwnedHere(source))) throw new ForeignDropLinkError(source);
     if ((await realpath(source)) !== real) throw new ImportPathChangedError(source);
-    if (realMetadataRoots.some((root) => isInside(root, real))) return "workspace-data";
+    for (const root of realMetadataRoots) {
+      if (await isInsideOrUnknown(root, real)) return "workspace-data";
+    }
     return { source: real, identity: { dev: linkStat.dev, ino: linkStat.ino }, entries: folder ? [] : null };
   } catch (error) {
     if (error instanceof ForeignDropLinkError || error instanceof ImportPathChangedError) throw error;

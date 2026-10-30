@@ -685,10 +685,11 @@ impl ActorHandle {
             let read_leases = leases.clone();
             let targeted = retry.is_some();
             let (remaining, sources, skipped, admitted, locked) = self
-                .run(move |store, cache| {
+                .run_with_reader_retry(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
-                    let _admission = serial;
+                    let _admission = &serial;
+                    let mut pending = pending.clone();
                     let started = Instant::now();
                     let mut sources = Vec::new();
                     let mut skipped = Vec::new();

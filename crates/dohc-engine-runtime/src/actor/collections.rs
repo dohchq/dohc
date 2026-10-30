@@ -38,13 +38,13 @@ impl ActorHandle {
         token: CancellationToken,
         reservation: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Result<&'static str, dohc_engine_collab::OwnerOutboxError>, RuntimeError> {
-        self.run(move |store, cache| {
-            let _reservation = reservation;
+        self.run_with_reader_retry(move |store, cache| {
+            let _reservation = &reservation;
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
             if marker.lineage_claim_id != expected_lineage_claim_id {
                 return Err(CollabError::LineageWriteStale {
-                    expected: expected_lineage_claim_id,
+                    expected: expected_lineage_claim_id.clone(),
                     observed: marker.lineage_claim_id,
                 }.into());
             }
@@ -65,7 +65,7 @@ impl ActorHandle {
                     }).optional().map_err(dohc_engine_storage::StorageError::corrupt_public)
             })?;
             let Some(candidate) = candidate else { return Ok(Ok("declined")); };
-            let execution = if let Some(draft) = draft {
+            let execution = if let Some(draft) = &draft {
                 let doc = Ydoc::wire();
                 doc.apply(&draft.initial_update)?;
                 let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &path)?;
@@ -90,7 +90,7 @@ impl ActorHandle {
                                 store, cache, &key.workspace_id,
                                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                                     person_edit: false,
-                                    binding: draft.descriptor.binding,
+                                    binding: draft.descriptor.binding.clone(),
                                     expected_revision: draft.descriptor.revision,
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
                                     update, now_ms, agent_declaration: None, automation_declaration: None,
@@ -112,6 +112,7 @@ impl ActorHandle {
                 CollectionAdoptionExecution::DeclinedOversized => decline_oversized_collection_adoption(
                     store, &candidate, &key.workspace_id, &key.version_id, &dohc_engine_storage::NoFaults)?,
                 CollectionAdoptionExecution::Applied { .. } => return Ok(Ok("settled")),
+                CollectionAdoptionExecution::Held(error) => return Err(error),
                 CollectionAdoptionExecution::NeedsRichdocSeed => return Ok(Ok("declined")),
             }
             Ok(Ok("declined"))
@@ -178,7 +179,8 @@ impl ActorHandle {
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
+        let recovery = self.markdown_recovery.clone();
+        let result = self.run_blocking(move |store, cache| {
             reconcile_collections_on_store(
                 store,
                 cache,
@@ -192,8 +194,14 @@ impl ActorHandle {
                 faults.as_ref(),
                 &token,
                 committed.as_deref(),
+                &recovery,
             )
-        })
+        });
+        if super::pending_reader_preparation(&result).is_some() {
+            self.request_markdown_recovery();
+            return Ok(CollectionReconciliation::default());
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -209,7 +217,8 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = None;
-        self.run(move |store, cache| {
+        let recovery = self.markdown_recovery.clone();
+        self.run_with_reader_retry(move |store, cache| {
             reconcile_collections_on_store(
                 store,
                 cache,
@@ -223,6 +232,40 @@ impl ActorHandle {
                 faults.as_ref(),
                 &token,
                 None,
+                &recovery,
+            )
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_collections_guarded(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CollectionReconciliation, RuntimeError> {
+        self.run_with_reader_retry(move |store, cache| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                &workspace_id,
+                &version_id,
+                &root_dir,
+                Some(root_guard.as_ref()),
+                &leases,
+                self_writes.as_ref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+                None,
+                &super::markdown_recovery::MarkdownRecoverySignal::default(),
             )
         })
         .await
@@ -404,6 +447,7 @@ fn adoption_pending(error: &RuntimeError) -> bool {
 
 enum CollectionAdoptionExecution {
     Applied { changed_path: Option<String> },
+    Held(RuntimeError),
     Declined,
     DeclinedOversized,
     NeedsRichdocSeed,
@@ -531,6 +575,7 @@ mod collection_adoption_update_tests {
             &dohc_engine_storage::NoFaults,
             &CancellationToken::new(),
             None,
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
     }
 
@@ -1845,41 +1890,64 @@ fn adopt_collection_record_on_store(
         return Ok(Some(CollectionAdoptionExecution::DeclinedOversized));
     };
     validate_workspace_root(root_dir, root_guard)?;
-    let changed_path = Some(
-        ydoc_settle_on_store(
-            store,
-            doc_cache,
-            root_dir,
-            &state.key,
-            &candidate.file_path,
-            ContentKind::Richdoc,
-            false,
-            lineage_claim_id.as_deref(),
-            state.head_blob_sha256,
-            settled_content_override,
-            &format!("collection-adoption:{}", candidate.record_id),
-            self_writes,
-            now_ms,
-            faults,
-            token,
-            root_guard,
-            None,
-            None,
-            super::ydoc::SettlementKind::CollectionAdoption,
-            false,
-        )?
-        .into_settlement_for_internal_caller()?
-        .path,
-    );
+    let operation = format!("collection-adoption:{}", candidate.record_id);
+    let owed = record_collection_boundary(
+        store,
+        &state.key,
+        &candidate.file_path,
+        &operation,
+        dohc_engine_collab::markdown_write_obligations::Kind::CollectionAdoption,
+        state.head_blob_sha256.as_deref(),
+        now_ms,
+    )?;
+    let expected_head = collection_boundary_head(store, &owed, state.head_blob_sha256)?;
+    let result = ydoc_settle_on_store(
+        store,
+        doc_cache,
+        root_dir,
+        &state.key,
+        &candidate.file_path,
+        ContentKind::Richdoc,
+        false,
+        lineage_claim_id.as_deref(),
+        expected_head,
+        settled_content_override,
+        &operation,
+        self_writes,
+        now_ms,
+        faults,
+        token,
+        root_guard,
+        None,
+        None,
+        super::ydoc::SettlementKind::CollectionAdoption,
+        false,
+        None,
+    )
+    .and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller);
+    let settlement = match result {
+        Ok(settlement) => settlement,
+        Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
+            return Ok(Some(CollectionAdoptionExecution::Held(error)));
+        }
+        Err(error) => return Err(error),
+    };
+    complete_collection_boundary(store, &owed, now_ms)?;
+    let changed_path = Some(settlement.path);
     Ok(Some(CollectionAdoptionExecution::Applied { changed_path }))
 }
 
 enum CollectionRelationCleanupExecution {
     Applied(String),
+    Held(RuntimeError),
     NoChange,
     Skipped,
     LeaseHeld,
 }
+
+#[cfg(test)]
+#[path = "markdown_collection_hold_tests.rs"]
+mod markdown_collection_hold_tests;
 
 #[allow(clippy::too_many_arguments)]
 fn cleanup_collection_relation_on_store(
@@ -1999,12 +2067,26 @@ fn cleanup_collection_relation_on_store(
         )?
         .lineage_claim_id;
     }
-    let Some(update) = doc.frontmatter_drop_relation_target_preserving_markdown_source(
+    let operation = format!(
+        "collection-relation-cleanup:{}:{}:{}",
+        candidate.source_record_id, candidate.field_name, candidate.target_record_id
+    );
+    let pending = store
+        .read_with(|conn| {
+            dohc_engine_collab::markdown_write_obligations::pending_in(conn, workspace_id)
+        })?
+        .into_iter()
+        .any(|owed| {
+            owed.key == state.key
+                && owed.operation_id == operation
+                && owed.lineage_claim_id == lineage_claim_id.as_deref().unwrap_or("")
+        });
+    let update = doc.frontmatter_drop_relation_target_preserving_markdown_source(
         &candidate.field_name,
         &candidate.target_record_id,
         candidate.many,
-    )?
-    else {
+    )?;
+    if update.is_none() && !pending {
         match store.write_with(faults, |tx| {
             synchronize_collection_frontmatter_index_in_tx(
                 tx,
@@ -2021,26 +2103,39 @@ fn cleanup_collection_relation_on_store(
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
     };
-    let append = ydoc_record_update_on_store(
+    let owed = record_collection_boundary(
         store,
-        doc_cache,
         &state.key,
         &candidate.source_file_path,
-        ContentKind::Richdoc,
-        state.regime,
-        &update,
-        Some("engine".to_owned()),
-        None,
-        lineage_claim_id,
-        false,
-        None,
-        None,
-        false,
+        &operation,
+        dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup,
+        state.head_blob_sha256.as_deref(),
         now_ms,
-        faults,
-        token,
-        None,
     )?;
+    if let Some(update) = update {
+        lineage_claim_id = ydoc_record_update_on_store(
+            store,
+            doc_cache,
+            &state.key,
+            &candidate.source_file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &update,
+            Some("engine".to_owned()),
+            None,
+            lineage_claim_id,
+            false,
+            None,
+            None,
+            false,
+            now_ms,
+            faults,
+            token,
+            None,
+        )?
+        .lineage_claim_id;
+    }
+    let expected_head = collection_boundary_head(store, &owed, state.head_blob_sha256)?;
     validate_workspace_root(root_dir, root_guard)?;
     let settlement = ydoc_settle_on_store(
         store,
@@ -2050,13 +2145,10 @@ fn cleanup_collection_relation_on_store(
         &candidate.source_file_path,
         ContentKind::Richdoc,
         false,
-        append.lineage_claim_id.as_deref(),
-        state.head_blob_sha256,
+        lineage_claim_id.as_deref(),
+        expected_head,
         None,
-        &format!(
-            "collection-relation-cleanup:{}:{}:{}",
-            candidate.source_record_id, candidate.field_name, candidate.target_record_id
-        ),
+        &operation,
         self_writes,
         now_ms,
         faults,
@@ -2066,9 +2158,122 @@ fn cleanup_collection_relation_on_store(
         None,
         super::ydoc::SettlementKind::Document,
         false,
-    )?
-    .into_settlement_for_internal_caller()?;
+        None,
+    )
+    .and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller);
+    let settlement = match settlement {
+        Ok(settlement) => settlement,
+        Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
+            return Ok(CollectionRelationCleanupExecution::Held(error));
+        }
+        Err(error) => return Err(error),
+    };
+    complete_collection_boundary(store, &owed, now_ms)?;
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
+}
+
+fn record_collection_boundary(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    operation: &str,
+    kind: dohc_engine_collab::markdown_write_obligations::Kind,
+    head: Option<&str>,
+    now_ms: i64,
+) -> Result<dohc_engine_collab::markdown_write_obligations::Obligation, RuntimeError> {
+    use dohc_engine_collab::markdown_write_obligations::{self, Obligation};
+    let marker = dohc_engine_collab::read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+    if let Some(owed) = store
+        .read_with(|conn| markdown_write_obligations::pending_in(conn, &key.workspace_id))?
+        .into_iter()
+        .find(|owed| {
+            owed.key == *key
+                && owed.kind == kind
+                && owed.operation_id == operation
+                && owed.lineage_claim_id == marker.lineage_claim_id.as_deref().unwrap_or("")
+        })
+    {
+        return Ok(owed);
+    }
+    let owed = Obligation {
+        order: 0,
+        key: key.clone(),
+        lineage_claim_id: marker.lineage_claim_id.unwrap_or_default(),
+        operation_id: operation.to_owned(),
+        kind,
+        path: path.to_owned(),
+        retry_inputs: serde_json::json!({"expectedHeadSha256":head,"restoreGeneration":null,"useReader":false}),
+        held_checkpoint_sha256: None,
+        held_head_sha256: head.map(ToOwned::to_owned),
+        source_sha256: None,
+        settled_head_sha256: None,
+    };
+    match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        markdown_write_obligations::record_in(tx, &owed, now_ms)
+    })? {
+        TxnOutcome::Committed(()) => Ok(owed),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn collection_boundary_head(
+    store: &EngineStore,
+    owed: &dohc_engine_collab::markdown_write_obligations::Obligation,
+    current: Option<String>,
+) -> Result<Option<String>, RuntimeError> {
+    if current == owed.held_head_sha256
+        || (current.is_some()
+            && current == dohc_engine_collab::read_last_settled_sha(store, &owed.key)?)
+    {
+        Ok(current)
+    } else {
+        Err(DomainError::ConflictStaleTarget.into())
+    }
+}
+
+/// Returns false when the file has no snapshot.
+pub(super) fn synchronize_collection_index_from_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+) -> Result<bool, DomainError> {
+    let head = dohc_engine_domain::select_snapshot_by_path_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        path,
+    )?;
+    let Some(snapshot) = head.snapshot else {
+        return Ok(false);
+    };
+    let fields =
+        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&snapshot.text)
+            .map_or_else(|| serde_json::json!({}), |(fields, _)| fields);
+    synchronize_collection_frontmatter_index_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &fields,
+    )?;
+    Ok(true)
+}
+
+fn complete_collection_boundary(
+    store: &mut EngineStore,
+    owed: &dohc_engine_collab::markdown_write_obligations::Obligation,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        if owed.kind == dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup {
+            synchronize_collection_index_from_head_in_tx(tx, &owed.key, &owed.path)?;
+        }
+        dohc_engine_collab::markdown_write_obligations::complete_in(tx, owed, now_ms)
+            .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 /// Receives durable reconcile steps on the actor; must not re-enter it.
@@ -2077,6 +2282,12 @@ pub type CollectionCommitListener = Arc<dyn Fn(&CollectionReconciliation) + Send
 /// What one collection reconciliation changed.
 #[derive(Debug, Default)]
 pub struct CollectionReconciliation {
+    pub held_documents: Vec<(DocKey, String)>,
+    pub markdown_obligation_candidates: Vec<(
+        DocKey,
+        dohc_engine_collab::markdown_write_obligations::Kind,
+        String,
+    )>,
     /// An adoption candidate or relation-cleanup source still has a live lease.
     pub lease_held: bool,
     /// Workspace paths the reconciliation rewrote: record id adoptions and
@@ -2104,6 +2315,7 @@ fn reconcile_collections_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     committed: Option<&(dyn Fn(&CollectionReconciliation) + Send + Sync)>,
+    recovery: &super::markdown_recovery::MarkdownRecoverySignal,
 ) -> Result<CollectionReconciliation, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2145,6 +2357,46 @@ fn reconcile_collections_on_store(
     let mut changed_paths = Vec::new();
     let mut pending_seed_objects = HashSet::new();
     let mut lease_held = false;
+    let mut held_documents = Vec::new();
+    let mut markdown_obligation_candidates = Vec::new();
+    for candidate in &reconciliation.adoptions {
+        markdown_obligation_candidates.push((
+            DocKey::new(workspace_id, version_id, &candidate.object_id)?,
+            dohc_engine_collab::markdown_write_obligations::Kind::CollectionAdoption,
+            format!("collection-adoption:{}", candidate.record_id),
+        ));
+    }
+    for candidate in &reconciliation.relation_cleanups {
+        markdown_obligation_candidates.push((
+            DocKey::new(workspace_id, version_id, &candidate.source_object_id)?,
+            dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup,
+            format!(
+                "collection-relation-cleanup:{}:{}:{}",
+                candidate.source_record_id, candidate.field_name, candidate.target_record_id
+            ),
+        ));
+    }
+    if store
+        .read_with(|conn| {
+            dohc_engine_collab::markdown_write_obligations::pending_in(conn, workspace_id)
+        })?
+        .iter()
+        .any(|owed| {
+            owed.key.version_id == version_id
+                && matches!(
+                    owed.kind,
+                    dohc_engine_collab::markdown_write_obligations::Kind::CollectionAdoption
+                        | dohc_engine_collab::markdown_write_obligations::Kind::RelationCleanup
+                )
+                && !markdown_obligation_candidates
+                    .iter()
+                    .any(|(key, kind, operation)| {
+                        key == &owed.key && kind == &owed.kind && operation == &owed.operation_id
+                    })
+        })
+    {
+        recovery.request();
+    }
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -2167,6 +2419,20 @@ fn reconcile_collections_on_store(
             root_guard,
             None,
         ) {
+            Ok(Some(CollectionAdoptionExecution::Held(error))) => {
+                let held = (
+                    DocKey::new(workspace_id, version_id, &candidate.object_id)?,
+                    candidate.file_path.clone(),
+                );
+                if let Some(committed) = committed {
+                    committed(&CollectionReconciliation {
+                        held_documents: vec![held.clone()],
+                        ..Default::default()
+                    });
+                }
+                held_documents.push(held);
+                let _ = error;
+            }
             Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
                 if let Some(path) = changed_path
                     && !changed_paths.contains(&path)
@@ -2250,6 +2516,20 @@ fn reconcile_collections_on_store(
             token,
             root_guard,
         ) {
+            Ok(CollectionRelationCleanupExecution::Held(error)) => {
+                let held = (
+                    DocKey::new(workspace_id, version_id, &candidate.source_object_id)?,
+                    candidate.source_file_path.clone(),
+                );
+                if let Some(committed) = committed {
+                    committed(&CollectionReconciliation {
+                        held_documents: vec![held.clone()],
+                        ..Default::default()
+                    });
+                }
+                held_documents.push(held);
+                let _ = error;
+            }
             Ok(CollectionRelationCleanupExecution::Applied(path)) => {
                 if !changed_paths.contains(&path) {
                     if let Some(committed) = committed {
@@ -2273,6 +2553,8 @@ fn reconcile_collections_on_store(
         }
     }
     Ok(CollectionReconciliation {
+        held_documents,
+        markdown_obligation_candidates,
         lease_held,
         changed_paths,
         automation_claims,
@@ -2488,6 +2770,7 @@ mod collection_relation_cleanup_tests {
             &NoFaults,
             &CancellationToken::new(),
             None,
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
         .unwrap();
     }
@@ -2589,9 +2872,57 @@ mod collection_relation_cleanup_tests {
             None,
         )
         .unwrap();
-        // Use the old fallback bytes with the same settlement write and marker.
-        // This fixture must also exist after cleanup stops producing these bytes.
-        settle_lossy_fixture(&scratch, &mut store, &mut cache, Some(REWRITTEN.into()), 9);
+        // Seed the completed settlement from before cleanup preserved the source.
+        let content = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .canonical_content();
+        store
+            .write_with(&NoFaults, |tx| {
+                let settled = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: WORKSPACE_ID.into(),
+                        version_id: VERSION_ID.into(),
+                        object_id: SOURCE_OBJECT_ID.into(),
+                        path: PACKING.into(),
+                        text: REWRITTEN.into(),
+                        moment_id: "packing-rewritten".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 9,
+                        request_id: None,
+                    },
+                )
+                .unwrap();
+                dohc_engine_collab::author_coverage::advance_in(tx, &key, false).unwrap();
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq=?4,last_settled_sha=?5,updated_at_ms=9 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        settled.moment.moment_order,
+                        settled.snapshot.blob_sha256,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::write(scratch.path().join(PACKING), REWRITTEN).unwrap();
+        // Encodings aren't canonical, so compare the Y.Doc's content, marks and attributes.
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .canonical_content(),
+            content
+        );
         assert_eq!(
             std::fs::read(scratch.path().join(PACKING)).unwrap(),
             REWRITTEN.as_bytes()
@@ -2642,6 +2973,7 @@ mod collection_relation_cleanup_tests {
             None,
             super::super::ydoc::SettlementKind::Document,
             false,
+            None,
         )
         .unwrap()
         .into_settlement_for_internal_caller()
@@ -3023,6 +3355,7 @@ mod collection_relation_cleanup_tests {
                 &NoFaults,
                 &CancellationToken::new(),
                 None,
+                &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
             )
             .unwrap()
         };
@@ -3196,6 +3529,7 @@ mod collection_relation_cleanup_tests {
             &NoFaults,
             &CancellationToken::new(),
             Some(&committed),
+            &super::super::markdown_recovery::MarkdownRecoverySignal::default(),
         )
         .unwrap();
         assert_eq!(outcome.changed_paths, [SOURCE_PATH]);

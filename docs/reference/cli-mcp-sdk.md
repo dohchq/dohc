@@ -378,6 +378,7 @@ Edit a Markdown document through dohc. A person editing it at the same time keep
 
 Changes the workspace, so a shared view does not offer it.
 
+- `allowLossySourceSha256`: `string`
 - `path`: `string`. Required.
 - `find`: `string`
 - `replacement`: `string`. Required.

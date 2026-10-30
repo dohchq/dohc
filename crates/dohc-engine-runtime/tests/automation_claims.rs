@@ -1023,6 +1023,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
+                None,
             )
             .await
             .expect("settle the record");

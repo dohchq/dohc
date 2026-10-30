@@ -250,6 +250,44 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     await h.ipc.shutdown();
   });
+
+  it("delivers changed and absent heads only to the current renderer session", async () => {
+    const sender = new FakeSender(7);
+    const session = providerSession();
+    const h = harness(session);
+    await h.ipc.open(sender, openPayload);
+    const opened = h.capturedOpen()!;
+    opened.onHeadChanged?.("a".repeat(64));
+    expect(sender.sent.at(-1)?.payload).toMatchObject({
+      ...openPayload, headSha256: "a".repeat(64),
+    });
+    opened.onHeadChanged?.(null);
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...openPayload, headSha256: null });
+    const sent = sender.sent.length;
+    h.setGeneration(2);
+    opened.onHeadChanged?.("b".repeat(64));
+    expect(sender.sent).toHaveLength(sent);
+    await h.ipc.shutdown();
+  });
+
+  it("does not deliver an old head callback into a reopened editor for the same path", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession());
+    await h.ipc.open(sender, openPayload);
+    const old = h.capturedOpen()!;
+    await h.ipc.close(sender, {sessionId: openPayload.sessionId});
+    const reopened = {...openPayload, sessionId: "reopened-session"};
+    await h.ipc.open(sender, reopened);
+    const current = h.capturedOpen()!;
+    sender.sent.length = 0;
+
+    old.onHeadChanged?.("a".repeat(64));
+    old.onHeadChanged?.(null);
+    expect(sender.sent).toEqual([]);
+    current.onHeadChanged?.("b".repeat(64));
+    expect(sender.sent.at(-1)?.payload).toMatchObject({...reopened, headSha256: "b".repeat(64)});
+    await h.ipc.shutdown();
+  });
   it("names main's person when each request first arrives and keeps that person for its retries", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -520,7 +558,7 @@ describe("engine Y.Doc IPC adapter", () => {
   function claimHarness(initialClaim: string | null) {
     let providerClaim = initialClaim;
     const resync = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: () => () => {}, sessionId: "native-existing",
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: () => () => {}, sessionId: "native-existing",
       flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(() => resync.promise)};
     const provider = providerSession({nativeOwner, objectId: "object", versionId: "main"});
     Object.defineProperty(provider, "lineageClaimId", {get: () => providerClaim});
@@ -584,7 +622,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
-    const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
       sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
     await h.ipc.open(new FakeSender(7), openPayload);
@@ -599,7 +637,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
@@ -630,7 +668,7 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
     const owner = await h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
@@ -760,6 +798,32 @@ describe("engine Y.Doc IPC adapter", () => {
     await noSettle.ipc.open(sender, openPayload);
     await expect(noSettle.ipc.retrySave(sender, retry)).rejects.toThrow("could not start a save");
     await noSettle.ipc.shutdown();
+  });
+
+  it("forwards Edit anyway only from the current local editor and does not carry it into a reopened editor", async () => {
+    const settleNow = vi.fn(async () => ({
+      momentId: "moment-1", path: "notes/a.md", content: null, sha256: "a".repeat(64), materialized: true,
+      projection: {contentKind: "richdoc" as const, sourceStateVectorSha256: "b".repeat(64), destructive: false},
+    }));
+    const h = harness(providerSession({settleNow}));
+    const sender = new FakeSender(7);
+    const consent = {...DOCUMENT, allowLossySourceSha256: "c".repeat(64)};
+    await h.ipc.open(sender, openPayload);
+    await expect(h.ipc.retrySave(new FakeSender(8), consent)).resolves.toBe("closed");
+    await expect(h.ipc.retrySave(sender, {...consent, workspaceId: "workspace-2"})).rejects.toThrow("another workspace");
+    expect(settleNow).not.toHaveBeenCalled();
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith({allowLossySourceSha256: consent.allowLossySourceSha256});
+    h.setGeneration(2);
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("closed");
+    expect(settleNow).toHaveBeenCalledOnce();
+
+    await h.ipc.retireSender(sender, 1);
+    await h.ipc.open(sender, {...openPayload, sessionId: "reopened-session"});
+    await expect(h.ipc.retrySave(sender, DOCUMENT)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith(undefined);
+    expect(h.capturedOpen()?.allowLossySourceSha256).toBeUndefined();
+    await h.ipc.shutdown();
   });
 
   it("marks only a settle that failed to write as a save failure, and names a read-only file", async () => {
@@ -1958,7 +2022,7 @@ describe("engine Y.Doc IPC adapter", () => {
     // way the capture's canonical doc takes a journaled update.
     function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
       const doc = markdownToYDoc(markdown);
-      return providerSession({
+      const session = providerSession({
         doc,
         applyDecidedLocalUpdate: vi.fn(async (decide, onArmed) => {
           const update = decide(doc);
@@ -1976,6 +2040,7 @@ describe("engine Y.Doc IPC adapter", () => {
           trace.push("close");
         }),
       });
+      return session;
     }
 
     const pendingDraft = { binding: { workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
@@ -2251,6 +2316,103 @@ describe("engine Y.Doc IPC adapter", () => {
       );
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("settles consent without an append before retrying one capacity-refused edit", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const h = harness(session);
+      const source = "a".repeat(64);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: source }))
+        .resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(trace).toEqual(["settle", "apply", "settle", "close"]);
+      const calls = vi.mocked(session.applyDecidedLocalUpdate).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[1]![2]).toEqual(calls[0]![2]);
+      expect(session.settleNow).toHaveBeenNthCalledWith(1, { allowLossySourceSha256: source });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+    });
+
+    it("keeps a capacity-refused edit unapplied when the consent-only settlement holds", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const held = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-write-held", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(held);
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(held);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("leaves the edit unapplied when consent preparation is pending", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const pending = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-witness-check-pending", retry: "afterBackoff" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(pending);
+      const h = harness(session);
+
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(pending);
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("does not retry an edit after its lineage changes during consent settlement", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const settling = deferred<void>();
+      const release = deferred<SettleResult>();
+      vi.mocked(session.settleNow).mockImplementationOnce(() => {
+        settling.resolve();
+        return release.promise;
+      });
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const edited = h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) });
+      const refused = expect(edited).rejects.toThrow();
+      await settling.promise;
+      h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+      release.resolve({ materialized: true } as SettleResult);
+      await refused;
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      await h.ipc.shutdown();
+    });
+
+    it("does not retry capacity without consent or retry a second capacity refusal", async () => {
+      for (const allowLossySourceSha256 of [undefined, "a".repeat(64)]) {
+        const session = editableSession();
+        const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+        vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValue(capacity);
+        const h = harness(session);
+        await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256 })).rejects.toBe(capacity);
+        expect(session.applyDecidedLocalUpdate).toHaveBeenCalledTimes(allowLossySourceSha256 ? 2 : 1);
+        expect(session.settleNow).toHaveBeenCalledTimes(allowLossySourceSha256 ? 1 : 0);
+        expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      }
+    });
+
+    it("does not append an accepted edit again when consent settlement holds", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(new DaemonRefusalError({
+        code: "CONFLICT", message: "markdown-write-held", retry: "no",
+      }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) }))
+        .rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.settleNow).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
     });
 
     it.each([[false, "active"], [true, "active"], [false, "sealed"], [true, "sealed"]] as const)("reports an admitted pending edit as success, held=%s state=%s", async (held, state) => {

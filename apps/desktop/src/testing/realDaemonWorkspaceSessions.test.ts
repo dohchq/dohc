@@ -1,14 +1,32 @@
 import { rm } from "node:fs/promises";
 import type { Request } from "@dohc/workspace-engine-client";
 import type { EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
 } from "./realDaemonWorkspaceSessions";
 
+vi.mock("../workspaces/installedReaderConfig", () => ({
+  installedReaderConfig: () => "prepared-reader-config",
+}));
+
 describe("real daemon workspace sessions", () => {
+  it("launches the prepared witness checker for imported Markdown edits", async () => {
+    const launch = vi.fn(async (): Promise<EngineDaemonClient> => ({
+      close() {},
+      async sendRequest(request) { return { id: request.id, result: {} }; },
+    }));
+    const lifecycle = createRealDaemonLifecycle({ command: "engine", fileExists: () => true, launch });
+    try {
+      await lifecycle.start();
+      expect(launch).toHaveBeenCalledWith(expect.objectContaining({
+        env: expect.objectContaining({ DOHC_ENGINE_READER_CONFIG: "prepared-reader-config" }),
+      }));
+    } finally { await lifecycle.stop(); }
+  });
+
   it("gives every workspace open the shared real-daemon test deadline", async () => {
     const rootPath = await createTestScratch("dohc-real-daemon-sessions-");
     const requests: Request[] = [];

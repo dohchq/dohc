@@ -23,6 +23,30 @@ use std::time::Instant;
 pub(crate) mod restore;
 pub(crate) mod sync;
 
+fn forwarded_owner_consent(
+    sessions: &Mutex<HashMap<String, super::ydoc::YdocSession>>,
+    workspace: Option<&WorkspaceHandle>,
+    binding: &LiveObjectBinding,
+    session_id: Option<&str>,
+) -> Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>> {
+    lock(sessions)
+        .get(session_id?)
+        .filter(|session| {
+            workspace == Some(&session.workspace)
+                && session.key.workspace_id == binding.workspace_id
+                && session.key.version_id == binding.main_version_id
+                && session.key.object_id == binding.object_id
+                && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
+                && session.restore_generation.unwrap_or(0) == binding.restore_fence_generation
+        })
+        .and_then(|session| session.conversion_consent.clone())
+        .filter(|consent| !consent.is_consumed())
+}
+
+#[cfg(test)]
+#[path = "markdown_owner_consent_tests.rs"]
+mod markdown_owner_consent_tests;
+
 /// Explicit host provisioning for the private admitted-update path.
 #[doc(hidden)]
 pub struct LiveApplicationHostConfig {
@@ -489,6 +513,8 @@ impl EngineService {
             registration_id: u64,
             terminal_receipt:
                 Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+            #[serde(default)]
+            owner_session_id: Option<String>,
         }
         if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
             return Err(WireError::new(
@@ -541,6 +567,12 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
+        let conversion_consent = forwarded_owner_consent(
+            &self.sessions,
+            request.workspace.as_ref(),
+            &registration.binding,
+            params.owner_session_id.as_deref(),
+        );
         let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
@@ -551,11 +583,14 @@ impl EngineService {
             reservation: Mutex::new(Some(reconstruction.reservation.clone())),
         });
         let mut retirement = RetireOnCancellation(Some(host));
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let workspace = request.workspace.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            registration
+            let result = registration
                 .handle
-                .settle(
+                .settle_with_consent(
                     params.terminal_receipt,
                     max_applications,
                     registration.host.open.root.clone(),
@@ -563,8 +598,28 @@ impl EngineService {
                     Arc::new(NoFaults),
                     token,
                     reconstruction,
+                    conversion_consent,
                 )
-                .await
+                .await;
+            if result.is_ok() {
+                let binding = &registration.binding;
+                for (id, session) in lock(&sessions).iter() {
+                    if workspace.as_ref() == Some(&session.workspace)
+                        && session.key.workspace_id == binding.workspace_id
+                        && session.key.version_id == binding.main_version_id
+                        && session.key.object_id == binding.object_id
+                        && session.path == binding.current_path
+                        && session.lineage_claim_id.as_deref()
+                            == Some(binding.lineage_claim_id.as_str())
+                    {
+                        events.emit(
+                            "ydoc.remoteUpdate",
+                            json!({"sessionId":id,"resyncRequired":true}),
+                        );
+                    }
+                }
+            }
+            result
         });
         let outcome = operation.await;
         retirement.0 = None;
@@ -1279,6 +1334,7 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let claim_events = self.events.clone();
         let claim_workspace = host.open.workspace_id.clone();
+        let max_applications = self.configured_settlement_limit();
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
@@ -1294,6 +1350,7 @@ impl EngineService {
                         Arc::new(NoFaults),
                         Some(input.reservation),
                         input.working_reserve_bytes,
+                        max_applications,
                     )
                     .await
                     .map(|result| match result {

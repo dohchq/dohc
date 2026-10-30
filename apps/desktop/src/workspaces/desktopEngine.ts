@@ -720,6 +720,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // renames announces it at once; the capture health poll is a backstop.
       bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);
       bridgeWriteDeferred(rustEngineDaemon, dependencies.noteWriteDeferred);
+      rustEngineDaemon.onEvent(event => {
+        if (event.name === "sync.refusalsChanged") dependencies.onRefusalsChanged?.();
+      });
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim

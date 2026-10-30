@@ -639,7 +639,7 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         );
         let resume = NativeRestoreResume {
             application: input,
-            settlement_id: settled.settlement_id,
+            settlement_id: settled.settlement_id.unwrap(),
         };
         // A fresh resolver has no persisted verdict, including after settlement.
         let config =
@@ -702,7 +702,8 @@ fn reader_restore_application_settlement_and_resume_recheck_authority() {
                     )
                 })
                 .unwrap()
-                .settlement_id;
+                .settlement_id
+                .unwrap();
             }
             match case {
                 "binding" => damage(&f,"UPDATE live_device_application_bindings SET host_id='replacement'"),
@@ -1602,7 +1603,7 @@ pub(in crate::live_update_application) fn record_test_projection(
         if audit.accepted_prefix().is_some() {
             crate::author_coverage::advance_accepted_prefix_in(tx,&key,false)?;
         }
-        Ok(audit.result(id,moment.into(),written.snapshot.blob_sha256,false))
+        Ok(audit.result(Some(id),moment.into(),written.snapshot.blob_sha256,false))
     })?;
     let TxnOutcome::Committed(result) = result else {
         return Err(ApplicationError::Interrupted);
@@ -4028,7 +4029,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
             f.resolver.as_ref(),
             NativeRestoreResume {
                 application: input,
-                settlement_id: restored.settlement_id.clone(),
+                settlement_id: restored.settlement_id.clone().unwrap(),
             },
             f.host.clone(),
             2_000_000,
@@ -4108,7 +4109,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .unwrap();
     let resume = NativeRestoreResume {
         application: input.clone(),
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     assert!(f
         .owner
@@ -4280,7 +4281,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .unwrap();
     let second_resume = NativeRestoreResume {
         application: second,
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     let result = f
         .owner
@@ -4379,7 +4380,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
             .unwrap();
         let resume = NativeRestoreResume {
             application: input,
-            settlement_id: settlement.settlement_id,
+            settlement_id: settlement.settlement_id.unwrap(),
         };
         assert!(matches!(
             f.owner.resume_restore(

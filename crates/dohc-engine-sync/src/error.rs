@@ -23,6 +23,19 @@ impl std::fmt::Display for ObservedBytes {
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("markdown-write-held")]
+    MarkdownWriteHeld {
+        key: Box<dohc_engine_collab::DocKey>,
+        path: String,
+        head_sha256: Option<String>,
+        checkpoint_sha256: String,
+    },
+    #[error("dohc is checking this file. Try again.")]
+    MarkdownWitnessCheckPending {
+        key: dohc_engine_collab::DocKey,
+        path: String,
+        pending: std::sync::Arc<dohc_engine_collab::markdown_write_safety::PendingWitnessCheck>,
+    },
     #[error("dohc is checking this file. Try again.")]
     MarkdownReaderPending(std::sync::Arc<dohc_engine_collab::reader_resolver::PendingProof>),
     #[error("live document binding is still active")]
@@ -144,6 +157,7 @@ impl SyncError {
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
+            | SyncError::MarkdownWriteHeld { .. }
             | SyncError::LiveDocumentBindingActive
             | SyncError::InputTooLarge { .. }
             | SyncError::UnsupportedOperation
@@ -157,6 +171,7 @@ impl SyncError {
             // still coming.
             SyncError::Storage(_)
             | SyncError::MarkdownReaderPending(_)
+            | SyncError::MarkdownWitnessCheckPending { .. }
             | SyncError::SequenceGap
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
@@ -169,6 +184,8 @@ impl SyncError {
     pub const fn code(&self) -> &'static str {
         match self {
             SyncError::MarkdownReaderPending(_) => "retryable-state",
+            SyncError::MarkdownWriteHeld { .. } => "markdown-write-held",
+            SyncError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",

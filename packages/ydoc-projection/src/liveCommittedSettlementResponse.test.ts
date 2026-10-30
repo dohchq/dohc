@@ -77,6 +77,7 @@ const invalidRows: [string, Record<string, unknown>][] = [
   ["negative cursor", { previousCursor: -1 }], ["fractional cursor", { terminalCursor: 1.5 }],
   ["string count", { applicationCount: "1" }], ["unsafe sequence", { localYDocSequence: Number.MAX_SAFE_INTEGER + 1 }],
   ["nonfinite sequence", { localYDocSequence: Infinity }], ["empty settlement ID", { settlementId: "" }],
+  ["unrecorded settlement over an accepted edit", { settlementId: null }],
   ["invalid moment ID", { momentId: {} }], ["invalid digest", { markdownDigest: "not-a-digest" }],
 ];
 it.each(invalidRows)("refuses %s without advancing relay progress and releases document ownership", async (_name, patch) => {
