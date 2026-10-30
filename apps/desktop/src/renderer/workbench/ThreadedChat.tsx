@@ -1,5 +1,5 @@
 import { ArrowDown, MessageSquareText, MoreHorizontal, SquareTerminal } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { ChatMessageRecord, ChatRunRecord, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
@@ -73,6 +73,7 @@ export function ThreadedChat(props: {
   // Messages the reader had seen when last at the end.
   const seenCount = useRef(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const streamListRef = useRef<ChatMessageListHandle | null>(null);
   const threadListRef = useRef<ChatMessageListHandle | null>(null);
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
@@ -104,7 +105,7 @@ export function ThreadedChat(props: {
   // counted instead of pulling the view to the end.
   const hasList = !props.loading && stream.length > 0;
   useEffect(() => {
-    const node = hasList && streamShown ? listRef.current?.getScrollableNode() : null;
+    const node = hasList && streamShown ? streamListRef.current?.getScrollableNode() : null;
     if (!node) return;
     const onScroll = () => {
       setAtEnd(node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX);
@@ -112,14 +113,38 @@ export function ThreadedChat(props: {
     onScroll();
     node.addEventListener("scroll", onScroll, { passive: true });
     return () => node.removeEventListener("scroll", onScroll);
-  }, [hasList, listRef, streamShown]);
+  }, [hasList, streamShown]);
   useEffect(() => {
     if (atEnd) seenCount.current = stream.length;
   }, [atEnd, stream.length]);
   const newCount = atEnd ? 0 : Math.max(0, stream.length - seenCount.current);
 
+  // A jump to a reply opens its thread and scrolls there once the thread's list is up.
+  const rootOfReply = useMemo(() => new Map([...threads.replies].flatMap(([rootId, replies]) =>
+    replies.map((reply) => [reply.id, rootId] as const))), [threads]);
+  const pendingJump = useRef<string | null>(null);
+  useImperativeHandle(listRef, () => ({
+    scrollToEnd: () => streamListRef.current?.scrollToEnd(),
+    getScrollableNode: () => streamListRef.current?.getScrollableNode() ?? null,
+    scrollToMessage: (messageId) => {
+      const rootId = rootOfReply.get(messageId);
+      if (rootId === undefined) return streamListRef.current?.scrollToMessage(messageId) ?? false;
+      if (rootId === openRootId) return threadListRef.current?.scrollToMessage(messageId) ?? false;
+      pendingJump.current = messageId;
+      setOpenRootId(rootId);
+      return true;
+    },
+  }), [openRootId, rootOfReply]);
+  useEffect(() => {
+    const messageId = pendingJump.current;
+    if (messageId && threadListRef.current?.scrollToMessage(messageId)) pendingJump.current = null;
+  });
+
   const openThread = useCallback((messageId: string) => setOpenRootId(messageId), []);
-  const closeThread = useCallback(() => setOpenRootId(null), []);
+  const closeThread = useCallback(() => {
+    pendingJump.current = null;
+    setOpenRootId(null);
+  }, []);
   const replyDraft = openRootId ? replyDrafts.get(openRootId) ?? "" : "";
   const setReplyDraft = useCallback((value: string) => {
     if (!openRootId) return;
@@ -234,7 +259,7 @@ export function ThreadedChat(props: {
             messages={stream}
             loading={props.loading}
             emptyLabel={props.emptyLabel}
-            listRef={listRef}
+            listRef={streamListRef}
             mentionCandidates={mentionCandidates}
             onOpenPath={props.onOpenPath}
             flashMessageId={props.flashMessageId}
@@ -255,7 +280,7 @@ export function ThreadedChat(props: {
               <button
                 type="button"
                 data-testid={`${prefix}-new-messages`}
-                onClick={() => listRef.current?.scrollToEnd()}
+                onClick={() => streamListRef.current?.scrollToEnd()}
                 className="dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line"
               >
                 <ArrowDown size={11} aria-hidden />
@@ -284,6 +309,7 @@ export function ThreadedChat(props: {
           renderMessageFooter={renderThreadFooter}
           rowActions={threadActions}
           listRef={threadListRef}
+          flashMessageId={props.flashMessageId}
           working={working && workingRootId === openRootId ? working : null}
           composer={props.replyNotice ?? (
             <MentionComposer

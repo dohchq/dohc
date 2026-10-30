@@ -3464,10 +3464,13 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
         return null;
       } catch (error) {
-        return ipcErrorMessage(error, `dohc could not create ${input.name}.`);
+        // The dialog keeps the draft and says why; Notices keeps the failure after it closes.
+        const message = ipcErrorMessage(error, `dohc could not create ${input.name}.`);
+        if (token === liveToken.current) props.onError(message, error);
+        return message;
       }
     },
-    [resetGroupForm, openConversation, workspaceId],
+    [resetGroupForm, openConversation, props.onError, workspaceId],
   );
 
   const goBack = useCallback(() => {

@@ -218,6 +218,7 @@ export function ChatThreadPanel(props: {
   renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
   rowActions?: (message: ChatMessageRecord) => ReactNode;
   listRef?: RefObject<ChatMessageListHandle | null>;
+  flashMessageId?: string | null;
   working?: ChatWorking | null;
   composer: ReactNode;
 }) {
@@ -276,6 +277,7 @@ export function ChatThreadPanel(props: {
         emptyLabel="This message isn't here anymore."
         key={parentId ?? "none"}
         listRef={props.listRef}
+        flashMessageId={props.flashMessageId}
         mentionCandidates={props.mentionCandidates}
         onOpenPath={props.onOpenPath}
         reactionControls={props.reactionControls}

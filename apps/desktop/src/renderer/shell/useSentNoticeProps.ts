@@ -102,7 +102,7 @@ export function useSentNoticeProps(input: {
     onOpenShare, reportShellError, clearShellError,
   } = input;
 
-  // A run's thread is in an agent's chat, whichever agent ran it, or in a
+  // A run's thread is in an agent's DM, whichever agent ran it, or in a
   // group's posts where a message named the agent. A failed lookup throws.
   const openRunThread = useCallback(
     async (threadId: string, signal: AbortSignal): Promise<string | null> => {
@@ -112,7 +112,8 @@ export function useSentNoticeProps(input: {
         ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
       for (const { channel, threads } of places) {
         const thread = threads.find((candidate) => candidate.id === threadId);
-        if (thread) nav = { level: "thread", channel, thread };
+        // An agent DM is one conversation: its threads open inside it.
+        if (thread) nav = channel.kind === "agent" ? { level: "channel", channel } : { level: "thread", channel, thread };
       }
       if (signal.aborted) return null;
       if (!nav) return RUN_THREAD_NOT_HERE_NOTE;

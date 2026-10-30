@@ -374,7 +374,7 @@ describe("opening a sent notice", () => {
 });
 
 describe("a failed run's notice", () => {
-  it("opens a run's thread in the chat of whichever agent ran it", async () => {
+  it("opens a run in the DM of whichever agent ran it", async () => {
     const chat = (id: string, agentId: string) => ({
       id, name: agentId, slug: id, kind: "agent" as const, agentId, createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0,
     });
@@ -392,7 +392,8 @@ describe("a failed run's notice", () => {
     const { result, openChat, openFile, reportShellError } = setup([run], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.openable).toBe(true);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
-    expect(openChat).toHaveBeenCalledWith({ level: "thread", channel: chat("chat-scout", "scout"), thread: thread("thread-scout", "chat-scout") });
+    // An agent DM is one conversation, so the run opens the DM, not a thread view.
+    expect(openChat).toHaveBeenCalledWith({ level: "channel", channel: chat("chat-scout", "scout") });
     expect(openFile).not.toHaveBeenCalled();
 
     // A thread that is gone says so on the row. A read that fails goes to

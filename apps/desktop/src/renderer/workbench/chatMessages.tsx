@@ -481,6 +481,7 @@ export type ChatDensity = "stream" | "thread" | "narrow";
 
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
+// A narrow row has no room beside its name, so its hover bar rises above it.
 export const DENSITY = {
   stream: {
     row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-5", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-5",
@@ -489,7 +490,7 @@ export const DENSITY = {
     row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-4", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-4",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-3.5 right-3",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-3",
   },
 } as const;
 
@@ -834,7 +835,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     recycleItems={false}
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
-    style={{ paddingTop: 8, paddingBottom: props.bottomSpace ?? 4 }}
+    // A narrow row's hover bar rises above it, so the first row needs the room.
+    style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: props.bottomSpace ?? 4 }}
     role="list"
     data-chat-virtualized="true"
     onKeyDown={event => {

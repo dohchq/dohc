@@ -28,6 +28,8 @@ type PaintedLane = {
   revision: number;
   // An agent DM's earlier posts, by id, last change and size.
   postsKey: string;
+  // A run ends without a new message, so its details repaint when the run changes.
+  liveRunId: string | null;
   messageCount: number;
   readState: "retry" | "pending" | "done";
 };
@@ -165,8 +167,9 @@ export function ChatLane(props: {
       ]);
       if (!isCurrent()) return;
       setDispatch(nextDispatch);
+      const nextRunId = nextDispatch?.liveRunId ?? null;
       const painted = paintedRevision.current;
-      if (!force && painted?.threadId === laneId && painted.revision === revision && painted.postsKey === postsKey) {
+      if (!force && painted?.threadId === laneId && painted.revision === revision && painted.postsKey === postsKey && painted.liveRunId === nextRunId) {
         markRead(painted);
         return;
       }
@@ -194,7 +197,7 @@ export function ChatLane(props: {
         const firstUnread = lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
         setFirstUnreadMessageId(firstUnread?.id ?? null);
       }
-      const next: PaintedLane = { threadId: laneId, revision, postsKey, messageCount: laneMessages.length, readState: "retry" };
+      const next: PaintedLane = { threadId: laneId, revision, postsKey, liveRunId: nextRunId, messageCount: laneMessages.length, readState: "retry" };
       paintedRevision.current = next;
       setThreadId(laneId);
       setPostThreadIds(posts.map((post) => post.id));
@@ -345,11 +348,16 @@ export function ChatLane(props: {
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     if (!threadId || sending || loading || props.locked) return;
+    // The answer goes where the poll is: its thread, or its earlier post.
+    const asked = messages.find((message) => message.id === decision.messageId);
+    const post = asked && asked.threadId !== threadId ? asked.threadId : undefined;
+    const parentMessageId = post ? undefined : asked?.parentMessageId;
     const current = token.current;
     setSending(true);
     try {
       const result = await bridge().sendChatMessage({
-        workspaceId, threadId, body: option,
+        workspaceId, threadId: post ?? threadId, body: option,
+        ...(parentMessageId ? { parentMessageId } : {}),
         resolves: { messageId: decision.messageId, chosenOption: option },
       });
       if (current !== token.current) return;
@@ -369,7 +377,7 @@ export function ChatLane(props: {
         void load(true);
       }
     }
-  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load]);
+  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages]);
 
   const liveRunId = dispatch?.liveRunId ?? null;
   const stopRun = useCallback(async () => {

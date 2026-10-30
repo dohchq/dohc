@@ -95,6 +95,22 @@ describe("ChatsView channels", () => {
     );
   });
 
+  it("keeps a failed create in the dialog and in Notices", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const cause = new Error("The workspace engine is not running.");
+    bridgeMock.createChatChannel.mockRejectedValue(cause);
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+
+    await screen.findByTestId("chats-new-channel-error");
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("The workspace engine is not running."), cause);
+    expect((screen.getByTestId("chats-new-channel-name") as HTMLInputElement).value).toBe("launch");
+  });
+
   it("creates a group with the type and purpose the form holds", async () => {
     const user = userEvent.setup();
     bridgeMock.createChatChannel.mockResolvedValue({

@@ -786,7 +786,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   // Tells this computer's person how a run ended. A finished run's notice
-  // names the agent's last reply, so a chat showing it can skip the notice.
+  // names one of the agent's replies, so a chat showing it can skip the notice.
   async function noticeRun(
     workspace: ChatDispatchWorkspace,
     run: AgentRunRecord,

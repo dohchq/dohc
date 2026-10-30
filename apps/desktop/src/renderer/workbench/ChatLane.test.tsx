@@ -605,6 +605,42 @@ describe("ChatLane", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it("shows a run's exit code once it ends, with no new message", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Plan the trip" }),
+      message({ id: "reply", body: "Here is a plan", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    const run = { runId: "run-1", threadId: "thread-1", triggerMessageId: "ask", command: "nova reply", startedAtMs: 1_000 };
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: { reply: run } });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Here is a plan");
+    fireEvent.click(screen.getByTestId("chats-lane-more"));
+    fireEvent.click(await screen.findByTestId("chats-lane-more-run-details"));
+    expect((await screen.findByTestId("chats-run-exit-code")).textContent).toBe("—");
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: { reply: { ...run, exitCode: 0 } } });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await waitFor(() => expect(screen.getByTestId("chats-run-exit-code").textContent).toBe("0"));
+  });
+
+  it("answers a poll in a thread inside that thread", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "When do we leave?" }),
+      message({ id: "poll", body: "Which day?", parentMessageId: "ask", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    const decision = { threadId: "thread-1", messageId: "poll", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", body: "Monday", parentMessageId: "ask" }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Monday", parentMessageId: "ask",
+      resolves: { messageId: "poll", chosenOption: "Monday" },
+    }));
+  });
+
   it("drops the poll with the draft when the group changes", async () => {
     const view = render(lane());
     await screen.findByText("Old message");
