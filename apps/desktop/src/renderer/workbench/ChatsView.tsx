@@ -662,7 +662,11 @@ export function ChatsView(props: {
   const [startingThread, setStartingThread] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   // A failed create the dialog showed and no retry fixed.
-  const unreportedCreateFailure = useRef<{ message: string; error: unknown } | null>(null);
+  const unreportedCreateFailure = useRef<{
+    message: string;
+    error: unknown;
+    input: { name: string; type: GroupType; purpose: string };
+  } | null>(null);
   const resetGroupForm = useCallback(() => {
     unreportedCreateFailure.current = null;
     setCreatingGroup(false);
@@ -3472,7 +3476,7 @@ export function ChatsView(props: {
         // The open dialog says why and keeps the draft. Notices hears of it
         // only if the person closes the dialog without a retry that worked.
         const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
-        if (token === liveToken.current) unreportedCreateFailure.current = { message, error };
+        if (token === liveToken.current) unreportedCreateFailure.current = { message, error, input };
         return message;
       }
     },
@@ -3481,8 +3485,15 @@ export function ChatsView(props: {
   const closeGroupDialog = useCallback(() => {
     const failure = unreportedCreateFailure.current;
     resetGroupForm();
-    if (failure) props.onError(failure.message, failure.error);
-  }, [props.onError, resetGroupForm]);
+    if (!failure) return;
+    // Try again creates the same group; a failure there reports again.
+    const again = () => void createChannel(failure.input).then(() => {
+      const next = unreportedCreateFailure.current;
+      unreportedCreateFailure.current = null;
+      if (next) props.onError(next.message, next.error, again);
+    });
+    props.onError(failure.message, failure.error, again);
+  }, [createChannel, props.onError, resetGroupForm]);
 
   const goBack = useCallback(() => {
     // Back is an explicit command like any conversation click: report it
