@@ -8,7 +8,7 @@ const TOOK_LONG = "The workspace took more than 4 minutes to open.";
 const COME_BACK = "Your saved tabs come back the next time it opens. Until then, tab changes aren't saved.";
 export const SAVED_TABS_RESTORE = "Restore tabs brings them back. Until you pick it, tab changes aren't saved.";
 export const SAVED_TABS_WAITED = `${TOOK_LONG} ${COME_BACK}`;
-export const SAVED_TABS_RESTORE_AFTER_WAIT = `${TOOK_LONG} ${SAVED_TABS_RESTORE}`;
+export const SAVED_TABS_RESTORE_AFTER_WAIT = `${SAVED_TABS_RESTORE} ${TOOK_LONG}`;
 
 // Main's layout read waits this long for the engine's open of the workspace,
 // twice the open's deadline in desktopEngine.ts, then fails.

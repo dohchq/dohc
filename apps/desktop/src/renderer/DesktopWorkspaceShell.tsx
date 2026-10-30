@@ -1538,16 +1538,24 @@ export function DesktopWorkspaceShell(props: {
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
   // The saved layout replaces the defaults, and tabs opened since stay open
-  // beside the saved ones, the one in view still in view. Saving starts.
+  // beside the saved ones, the one in view still in view. A file open in both
+  // keeps its saved place. Saving starts, with what's shown when nothing was
+  // saved.
   const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
+    const shown = wbRef.current;
     if (stored) {
       const saved = parseUiState(stored);
-      const shown = wbRef.current;
+      const holder = (state: WorkbenchState, path: string) =>
+        state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
       let next = saved;
-      for (const tab of allTabs(shown)) next = openTab(next, tab.path);
+      for (const { path } of allTabs(shown)) {
+        if (!holder(next, path)) next = openTab(next, path);
+      }
       const active = activeTabPath(shown);
-      writeWb(active === null ? next : openTab(next, active));
+      writeWb(active === null ? next : openTab(next, active, holder(next, active)));
       setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
+    } else {
+      writeWb({ ...shown });
     }
     uiStateLoaded.current = true;
   }, [writeWb]);

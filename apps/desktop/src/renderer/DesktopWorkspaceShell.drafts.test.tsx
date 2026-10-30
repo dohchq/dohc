@@ -281,6 +281,9 @@ describe("workspace switch admission", () => {
         expect(screen.queryByTestId("tab-b.md")).toBeNull();
         window.dispatchEvent(new Event("beforeunload"));
         expect(bridge.setWorkspaceUiState, "saving waits for Restore tabs").not.toHaveBeenCalled();
+        await user.click(within(row).getByRole("button", { name: "Copy notice details" }));
+        expect((await navigator.clipboard.readText()).split("\n")[0], "the action first, so the toast's limit cuts only the reason")
+          .toBe("Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. The workspace took more than 4 minutes to open.");
 
         await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
 
@@ -288,6 +291,60 @@ describe("workspace switch admission", () => {
         expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
         expect(screen.queryByText(SAVED_TABS_TITLE)).toBeNull();
         await waitFor(() => expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["b.md", "a.md"]));
+      } finally {
+        vi.mocked(Date.now).mockRestore();
+      }
+    });
+
+    it("shows a file open in both as one tab, where the saved layout has it", async () => {
+      const bridge = makeBridge(Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+          { id: "right", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+        ],
+        activeEditorGroup: "primary",
+      }));
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+      const user = userEvent.setup();
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+      await openFile(user, "a.md");
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
+
+      await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
+
+      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+      expect(screen.getAllByTestId("tab-a.md")).toHaveLength(1);
+      await waitFor(() => expect(bridge.setWorkspaceUiState.mock.lastCall?.[0].state).toMatchObject({
+        editorGroups: [{ id: "primary", tabs: ["b.md"] }, { id: "right", tabs: ["a.md"], activeTab: "a.md" }],
+        activeEditorGroup: "right",
+      }));
+    });
+
+    it.each([
+      ["nothing was saved", null],
+      ["the saved layout has no tabs", storedStateWithTabs([])],
+    ])("takes back the toast and the row, and saves the tabs open, when %s", async (_, stored) => {
+      const second = deferred<WorkspaceUiState | null>();
+      const bridge = makeBridge(second.promise);
+      waitOutTheOpen(bridge);
+      const user = userEvent.setup();
+      try {
+        renderShell(bridge);
+        await screen.findByTestId("workspace-shell-notice");
+        await openFile(user, "a.md");
+
+        await act(async () => {
+          second.resolve(stored);
+          await second.promise;
+        });
+
+        await waitFor(() => expect(screen.queryByTestId("workspace-shell-notice")).toBeNull());
+        expect(notices()).toBe("Notices");
+        await waitFor(() => expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["a.md"]));
       } finally {
         vi.mocked(Date.now).mockRestore();
       }
