@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { app, BrowserWindow, session, type Input, type IpcMainInvokeEvent, type WebContents, type WebPreferences } from "electron";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
@@ -77,7 +77,6 @@ interface Entry {
   viewId: string;
   publicationId: string;
   partition: string;
-  token: string;
   colorScheme: ColorScheme;
   launch?: LocalAppLaunchSession;
   guest?: WebContents;
@@ -89,15 +88,15 @@ interface Entry {
   removeLifetime(): void;
 }
 const issuedByOwner = new Map<number, Map<string, Entry>>();
-const attaching = new Map<string, Entry>();
+// The entry will-attach-webview admitted. Electron creates its guest in the same tick, before anything else runs.
+let admitted: Entry | undefined;
 const installedOwners = new WeakSet<WebContents>();
-const GUEST_TOKEN = "--dohc-app-view=";
 
-export function appViewGuestPreferences(partition: string, token: string, packaged: boolean): WebPreferences & { transparent: true; disablePopups: false } {
+export function appViewGuestPreferences(partition: string, packaged: boolean): WebPreferences & { transparent: true; disablePopups: false } {
   return {
     partition, sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
     webviewTag: false, devTools: !packaged, spellcheck: false, webSecurity: true, allowRunningInsecureContent: false,
-    navigateOnDragDrop: false, transparent: true, disablePopups: false, additionalArguments: [GUEST_TOKEN + token],
+    navigateOnDragDrop: false, transparent: true, disablePopups: false,
   };
 }
 
@@ -106,16 +105,17 @@ export function installAppViewEmbedder(owner: WebContents): void {
   if (installedOwners.has(owner)) return;
   installedOwners.add(owner);
   owner.on("will-attach-webview", (event, preferences, params) => {
+    admitted = undefined;
     const entry = [...(issuedByOwner.get(owner.id)?.values() ?? [])].find(candidate =>
       !candidate.closed && !candidate.attached && candidate.launch?.url === params.src && candidate.launch.isAlive());
     if (!entry) { event.preventDefault(); return; }
     // Replace the entire renderer-supplied preference set, including preload and preloadURL.
     for (const key of Object.keys(preferences)) Reflect.deleteProperty(preferences, key);
-    Object.assign(preferences, appViewGuestPreferences(entry.partition, entry.token, app.isPackaged));
+    Object.assign(preferences, appViewGuestPreferences(entry.partition, app.isPackaged));
     for (const key of ["preload", "preloadURL", "webpreferences", "httpreferrer", "useragent"]) Reflect.deleteProperty(params, key);
     params.partition = entry.partition;
     entry.attached = true;
-    attaching.set(entry.token, entry);
+    admitted = entry;
   });
 }
 
@@ -142,7 +142,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     if (entry.closing) return entry.closing;
     entry.closed = true;
     if (issuedByOwner.get(entry.owner.id)?.get(entry.viewId) === entry) issuedByOwner.get(entry.owner.id)?.delete(entry.viewId);
-    attaching.delete(entry.token);
+    if (admitted === entry) admitted = undefined;
     if (entry.guest) partitions.get(entry.partition)?.delete(entry.guest.id);
     entry.removeLifetime();
     entry.closing = Promise.resolve().then(async () => {
@@ -218,16 +218,16 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     entry.themeUpdate = (entry.themeUpdate ?? Promise.resolve()).catch(() => {}).then(update);
     return entry.themeUpdate;
   };
-  // Electron creates the guest before loading src, but emits did-attach-webview after loadURL.
+  // Electron creates the guest before loading src, but emits did-attach-webview after loadURL. createGuest emits
+  // will-attach-webview and then creates the guest, which emits this, with nothing in between.
   app.on("web-contents-created", (_event, guest) => {
     if (guest.getType() !== "webview") return;
-    const preferences = (guest as WebContents & { getLastWebPreferences(): WebPreferences | null }).getLastWebPreferences();
-    const token = preferences?.additionalArguments?.find(value => value.startsWith(GUEST_TOKEN))?.slice(GUEST_TOKEN.length);
-    const entry = token ? attaching.get(token) : undefined;
+    const entry = admitted;
+    admitted = undefined;
     if (!entry || entry.closed || guest.hostWebContents !== entry.owner || guest.session !== session.fromPartition(entry.partition)) {
       guest.close({ waitForBeforeUnload: false }); return;
     }
-    attaching.delete(entry.token); entry.guest = guest;
+    entry.guest = guest;
     partitionEntries(entry.partition).set(guest.id, entry);
     const navigate = (details: { url: string; isMainFrame: boolean; preventDefault(): void }) => {
       if (entry.launch?.isAlive() && appViewNavigationAllowed(details.url, details.isMainFrame, new URL(entry.launch.url).origin)) return;
@@ -244,7 +244,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.on("before-input-event", (event, input) => {
       const shortcut = appViewShortcut(input);
       if (shortcut) { event.preventDefault(); emit(entry, { kind: "shortcut", viewId: entry.viewId, ...shortcut }); }
-      // Like Chromium, dohc's shortcuts, a modifier key alone and Escape aren't a press in the app.
+      // dohc's shortcuts, a modifier key alone and Escape aren't a press in the app.
       else if (!NOT_A_PRESS.has(input.key)) press(input);
     });
     // A press doesn't carry over into a page dohc reloads. A navigation the page starts has an initiator.
@@ -279,7 +279,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         if (entries.size >= 8) throw Error("Close another app before opening this one.");
         const entry: Entry = { owner: event.sender, workspaceId: input.workspaceId, appRoot: input.appRoot,
           viewId: input.viewId, publicationId: "", partition: appViewPartition(input.workspaceId, input.appRoot),
-          token: randomUUID(), colorScheme: input.colorScheme, attached: false, closed: false, removeLifetime() {} };
+          colorScheme: input.colorScheme, attached: false, closed: false, removeLifetime() {} };
         entries.set(input.viewId, entry);
         const retire = () => { void close(entry); };
         operation.signal.addEventListener("abort", retire, { once: true });

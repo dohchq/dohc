@@ -187,7 +187,9 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
       await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Review and open app", exact: true })).toBeVisible();
-      await page.getByTestId("app-view-review").click();
+      // The moved app's old tab stays open, mounted and hidden, so only the visible tab's button counts.
+      const review = page.getByTestId("app-view-review").filter({ visible: true });
+      await review.click();
       const publication = page.getByTestId("app-publication-dialog");
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
@@ -196,7 +198,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await share.getByRole("button", { name: "Create link", exact: true }).click();
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
       await share.getByRole("button", { name: "Close", exact: true }).click();
-      await page.getByTestId("app-view-review").click();
+      await review.click();
       await publication.getByRole("combobox", { name: "Publication share link" }).selectOption({ index: 1 });
       await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
       await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();

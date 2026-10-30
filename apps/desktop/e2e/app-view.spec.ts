@@ -1,6 +1,7 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { activityPin, editorTabTestId } from "../src/testPins";
 import { siteTabPath } from "../src/renderer/workbench/workbenchState";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -10,7 +11,8 @@ import type { AppViewEvent } from "../src/ipc/bridgeContract";
 type MainProbe = typeof globalThis & { __appViewProbe?: {
   urls: string[];
   openExternal: typeof import("electron").shell.openExternal;
-  downloads: string;
+  attaches: Array<{ src: string; refused: boolean }>;
+  guestsCreated: number;
 } };
 type RendererProbe = Window & { __appViewEvents?: AppViewEvent[]; __stopAppViewEvents?: () => void };
 const appRoot = "registrations-form";
@@ -54,6 +56,17 @@ async function pressApp(page: Page, app: ElectronApplication, id: number, select
   const [x, y] = await inFrame(app, id, `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`) as [number, number];
   await page.mouse.click(view.x + frameX + x, view.y + frameY + y);
 }
+// A <webview> that dohc didn't issue, added by the window's own page with its own preload and partition.
+async function injectGuest(page: Page, src: string, preload: string) {
+  await page.evaluate(({ src, preload }) => {
+    const view = document.createElement("webview");
+    view.setAttribute("partition", "persist:injected");
+    view.setAttribute("preload", preload);
+    view.setAttribute("src", src);
+    view.dataset.injected = "true";
+    document.body.append(view);
+  }, { src, preload });
+}
 async function shown(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(true); }
 async function hidden(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(false); }
 
@@ -86,12 +99,21 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     }, workspaceId);
     const downloads = join(workspace.baseDir, "blocked-downloads");
     await mkdir(downloads);
-    await electronApp.evaluate(({ app, shell }, downloads) => {
+    await electronApp.evaluate(({ app, shell, BrowserWindow }, downloads) => {
       const probe = globalThis as MainProbe;
-      probe.__appViewProbe = { urls: [], openExternal: shell.openExternal, downloads: app.getPath("downloads") };
+      probe.__appViewProbe = { urls: [], openExternal: shell.openExternal, attaches: [], guestsCreated: 0 };
       shell.openExternal = async url => { probe.__appViewProbe!.urls.push(url); };
       app.setPath("downloads", downloads);
+      // Added after dohc's own handlers, so these record what dohc decided.
+      BrowserWindow.getAllWindows()[0]!.webContents.on("will-attach-webview", (event, _preferences, params) => {
+        probe.__appViewProbe!.attaches.push({ src: params.src, refused: event.defaultPrevented });
+      });
+      app.on("web-contents-created", (_event, contents) => { if (contents.getType() === "webview") probe.__appViewProbe!.guestsCreated++; });
     }, downloads);
+    const attaches = () => electronApp.evaluate(() => (globalThis as MainProbe).__appViewProbe!.attaches);
+    const guestsCreated = () => electronApp.evaluate(() => (globalThis as MainProbe).__appViewProbe!.guestsCreated);
+    const preload = pathToFileURL(join(workspace.baseDir, "injected-preload.js")).href;
+    const removeInjected = () => page.evaluate(() => document.querySelectorAll("[data-injected]").forEach(view => view.remove()));
 
     await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
     const collectionDialog = page.getByTestId("new-collection-dialog");
@@ -119,6 +141,12 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     expect(await guestIds(electronApp)).toEqual([]);
     expect(await electronApp.evaluate(({ webContents }) => webContents.getAllWebContents().filter(contents =>
       /^http:\/\/127\.0\.0\.1:\d+\/bootstrap/.test(contents.getURL())).length)).toBe(0);
+    // An unapproved app has no address dohc issued, so a guest the page adds itself is refused before Electron creates it.
+    const unissued = `http://127.0.0.1:1/bootstrap#${"a".repeat(43)}`;
+    await injectGuest(page, unissued, preload);
+    await expect.poll(attaches).toContainEqual({ src: unissued, refused: true });
+    await removeInjected();
+    expect(await guestsCreated()).toBe(0);
 
     await page.getByTestId("app-view-review").click();
     const review = page.getByTestId("app-publication-dialog");
@@ -136,6 +164,14 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
     const guestId = (await guestIds(electronApp))[0]!;
     await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
+    // The approved app's address admits one guest. A second guest at the same address is refused.
+    const issued = (await page.getByTestId("app-view-webview").getAttribute("src"))!;
+    expect(await attaches()).toContainEqual({ src: issued, refused: false });
+    await injectGuest(page, issued, preload);
+    await expect.poll(attaches).toContainEqual({ src: issued, refused: true });
+    await removeInjected();
+    expect(await guestsCreated()).toBe(1);
+    expect(await guestIds(electronApp)).toEqual([guestId]);
     const isolation = await electronApp.evaluate(({ webContents, BrowserWindow }, id) => {
       const guest = webContents.fromId(id)!;
       const owner = BrowserWindow.getAllWindows().find(window => window.webContents === guest.hostWebContents)!.webContents;
@@ -225,9 +261,9 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
   } finally {
     if (desktop) {
       await desktop.page.evaluate(() => (window as RendererProbe).__stopAppViewEvents?.()).catch(() => {});
-      await desktop.app.evaluate(({ app, shell }) => {
+      await desktop.app.evaluate(({ shell }) => {
         const probe = (globalThis as MainProbe).__appViewProbe;
-        if (probe) { shell.openExternal = probe.openExternal; app.setPath("downloads", probe.downloads); }
+        if (probe) shell.openExternal = probe.openExternal;
         delete (globalThis as MainProbe).__appViewProbe;
       }).catch(() => {});
     }

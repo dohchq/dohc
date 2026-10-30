@@ -47,14 +47,14 @@ describe("app view boundaries", () => {
     expect(partition).not.toContain("persist:");
   });
   it("provides only main-owned guest preferences, without a preload", () => {
-    const prefs = appViewGuestPreferences("dohc-app:test", "token", true);
+    const prefs = appViewGuestPreferences("dohc-app:test", true);
     expect(prefs).toMatchObject({ partition: "dohc-app:test", sandbox: true, contextIsolation: true,
       nodeIntegration: false, nodeIntegrationInSubFrames: false, webviewTag: false, devTools: false,
       spellcheck: false, webSecurity: true, allowRunningInsecureContent: false });
     expect(prefs).not.toHaveProperty("preload");
     expect(prefs).not.toHaveProperty("preloadURL");
     expect(prefs).toMatchObject({ transparent: true, disablePopups: false });
-    expect(appViewGuestPreferences("p", "t", false).devTools).toBe(true);
+    expect(appViewGuestPreferences("p", false).devTools).toBe(true);
   });
   it("forwards only workbench shortcuts and browser navigation keys", () => {
     const input = { type: "keyDown", key: "p", code: "KeyP", control: true, shift: false, alt: false, meta: false, isComposing: false };

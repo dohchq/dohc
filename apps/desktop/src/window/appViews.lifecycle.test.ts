@@ -101,7 +101,7 @@ it("denies permission checks and display capture, and guards main-frame requests
   const prefs: Record<string, unknown> = {};
   f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, prefs, { src: opened.url });
   const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
-    getType: () => "webview", getLastWebPreferences: () => prefs, isDestroyed: () => false,
+    getType: () => "webview", isDestroyed: () => false,
     close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: { isAttached: () => true, sendCommand: vi.fn(async () => {}) } });
   app.emit("web-contents-created", {}, guest);
   const permission = vi.fn();
@@ -169,7 +169,7 @@ it("keeps a page whose session ended until its tab reloads, and removes one whos
     const prefs: Record<string, unknown> = {};
     f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, prefs, { src: opened.url });
     const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
-      getType: () => "webview", getLastWebPreferences: () => prefs, isDestroyed: () => false,
+      getType: () => "webview", isDestroyed: () => false,
       close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: { isAttached: () => true, sendCommand: vi.fn(async () => {}) } });
     app.emit("web-contents-created", {}, guest);
     return guest;
