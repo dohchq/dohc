@@ -558,9 +558,9 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       taken.fill(0, 0, cols * rows);
       dots.fill(0, 0, cols * rows);
     }
-    // The grid cells a node's dot covers.
-    const dotCol = (i: number, side: number) => Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * screenR(i)) / CELL)));
-    const dotRow = (i: number, side: number) => Math.max(0, Math.min(rows - 1, Math.floor((sy(i) + side * screenR(i)) / CELL)));
+    // The grid cells a node's dot covers, out to a diamond's tips, the widest shape.
+    const dotCol = (i: number, side: number) => Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * 1.25 * screenR(i)) / CELL)));
+    const dotRow = (i: number, side: number) => Math.max(0, Math.min(rows - 1, Math.floor((sy(i) + side * 1.25 * screenR(i)) / CELL)));
     for (let i = 0; i < count; i++) {
       if (!visibleNode(i)) continue;
       for (let r = dotRow(i, -1); r <= dotRow(i, 1); r++) {
