@@ -2798,6 +2798,18 @@ export function DesktopWorkspaceShell(props: {
     openChatsNavigator();
   }, [openChatsNavigator]);
   const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
+  // The reveal waits for Chats to list the invitation only until the person
+  // clicks or presses a key, so focus never jumps to Join after they moved on.
+  useEffect(() => {
+    if (revealedInvitation === null) return;
+    const end = () => setRevealedInvitation(null);
+    window.addEventListener("pointerdown", end, true);
+    window.addEventListener("keydown", end, true);
+    return () => {
+      window.removeEventListener("pointerdown", end, true);
+      window.removeEventListener("keydown", end, true);
+    };
+  }, [revealedInvitation]);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);

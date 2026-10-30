@@ -1918,9 +1918,47 @@ describe("notices sent to you", () => {
     await screen.findByTestId("tab-b.md");
   });
 
-  it("opens Chats, where a Group invitation waits, once the workspace it switched to is ready", async () => {
-    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { chatsInvitation: "share-1" } });
+  // Chats' answer for a Group invitation, share-1, that waits with Join.
+  const INVITATION_LISTING = {
+    joined: [],
+    sessionKey: null,
+    relay: {
+      state: "answered" as const,
+      granted: [],
+      received: [{ shareId: "share-1", channelWireId: "wire-share-1", access: "read-write" as const, granterEmail: "owner@example.com" }],
+      removed: [],
+    },
+  };
+
+  it("opens Chats at a Group invitation, with its Join focused, once the workspace it switched to is ready", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
+    renderWithNotices(bridge, { openOnReady: { chatsInvitation: "share-1" } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+    const join = await screen.findByTestId("chats-join-shared");
+    await waitFor(() => expect(document.activeElement).toBe(join));
+  });
+
+  it.each([
+    ["leaves Chats", async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByTestId("activity-explorer"));
+      await user.click(screen.getByTestId("activity-chats"));
+    }],
+    ["types", async (user: ReturnType<typeof userEvent.setup>) => user.keyboard("a")],
+  ])("drops the invitation's reveal when the person %s before Chats lists it", async (_, moveOn) => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const first = deferred<typeof INVITATION_LISTING>();
+    const listChatChannelShares = vi.fn(() => Promise.resolve(INVITATION_LISTING));
+    listChatChannelShares.mockReturnValueOnce(first.promise);
+    Object.assign(bridge, { listChatChannelShares });
+    renderWithNotices(bridge, { openOnReady: { chatsInvitation: "share-1" } });
+    await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+    await moveOn(user);
+    first.resolve(INVITATION_LISTING);
+    const join = await screen.findByTestId("chats-join-shared");
+    expect(join.getAttribute("data-invitation")).toBe("share-1");
+    expect(document.activeElement).not.toBe(join);
   });
 
   it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
 import { isAutomationControlsTarget, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import type { ChatDispatchStoppedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
@@ -236,13 +236,17 @@ export function useSentNoticeProps(input: {
   // person's own, where it waits with Join or Accept. A failed lookup goes to
   // the shell's errors, whose Try again goes where Open goes again; any
   // other outcome takes that error back. A lookup that answers once the
-  // person has left this workspace opens nothing, as a cancelled Open does.
+  // person has left this workspace, or after a later Open of the same notice
+  // started, opens nothing, as a cancelled Open does.
   const workspace = useRequestSequence([workspaceId]);
+  const latestOpens = useRef(new Map<string, number>());
   const go = useCallback(
     async function go(notice: NoticeRow, signal: AbortSignal, controls: boolean): Promise<string | null> {
       const identity = openErrorIdentity(notice);
       const epoch = workspace.current();
-      const stale = () => signal.aborted || !workspace.isCurrent(epoch);
+      const attempt = (latestOpens.current.get(identity) ?? 0) + 1;
+      latestOpens.current.set(identity, attempt);
+      const stale = () => signal.aborted || !workspace.isCurrent(epoch) || latestOpens.current.get(identity) !== attempt;
       let lookupFailed = false;
       const failed = (note: string, error: unknown): null => {
         lookupFailed = true;

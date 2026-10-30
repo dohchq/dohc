@@ -224,6 +224,24 @@ describe("opening a sent notice", () => {
     expect(clearShellError).toHaveBeenCalledWith(OPEN_ERROR);
   });
 
+  it("lets only the notice's latest Open act, so an older Try again can't take back a newer error", async () => {
+    getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
+    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
+    await result.current.onOpenSentNotice(notice(), live());
+    // Try again waits on a slow lookup while Open on the row fails again.
+    const slow = deferred<typeof RECEIVED>();
+    getRelayReceivedShare.mockReturnValueOnce(slow.promise);
+    vi.mocked(reportShellError).mock.calls[0]?.[2]?.();
+    getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
+    await result.current.onOpenSentNotice(notice(), live());
+    expect(reportShellError).toHaveBeenCalledTimes(2);
+    slow.resolve(RECEIVED);
+    // A macrotask runs after every queued continuation of the lookup.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onOpenShare).not.toHaveBeenCalled();
+    expect(clearShellError).not.toHaveBeenCalled();
+  });
+
   it("reports nothing when the share lookup fails after Open was cancelled", async () => {
     const lookup = deferred<typeof RECEIVED>();
     getRelayReceivedShare.mockReturnValueOnce(lookup.promise);
