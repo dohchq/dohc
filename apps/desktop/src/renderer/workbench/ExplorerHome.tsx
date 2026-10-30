@@ -111,7 +111,7 @@ function SectionActions(props: { label: string; testId: string; items: readonly 
       items={props.items}
       open={open}
       onOpenChange={setOpen}
-      width={208}
+      width={248}
       trigger={(trigger) => (
         <button {...trigger} type="button" data-testid={props.testId} aria-label={props.label} title={props.label} className={HEADER_BUTTON}>
           <MoreHorizontal size={13} aria-hidden />
