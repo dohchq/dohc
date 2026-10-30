@@ -668,7 +668,7 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <KindGlyph kind={fileKindForPath(link.source)} size={14} />
       </span>
-      <span className="col-end-4 min-w-0 truncate text-ink">{link.title}</span>
+      <span className="col-start-2 col-end-4 min-w-0 truncate text-ink">{link.title}</span>
       <LinkSnippet link={link} />
     </button>
   );

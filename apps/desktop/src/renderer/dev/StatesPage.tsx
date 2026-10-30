@@ -2202,7 +2202,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AboutHeader subject={{ path: "4.md" }} />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
               onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
-            <AboutSection id="chats" label="Comments" count="0" expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
               {null}
             </AboutSection>
             <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS.slice(-1), more: false }} expanded
@@ -2217,7 +2217,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AboutHeader subject={{ path: "Untitled.md" }} />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
               onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
-            <AboutSection id="chats" label="Comments" count="0" expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
               {null}
             </AboutSection>
             <AboutHistoryView view={{ status: "ready", moments: ABOUT_SITTING, more: true }} expanded
