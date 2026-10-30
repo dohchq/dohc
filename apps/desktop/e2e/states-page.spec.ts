@@ -62,7 +62,7 @@ const PARTS = [
   "sharing",
   "usage-record",
   "word-diff",
-  "apps-shelf",
+  "explorer-home",
   "chat-rows",
   "settings-frame",
   "theme-picker",
