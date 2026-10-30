@@ -138,12 +138,15 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let radius = new Float64Array(0);
   // Measured label widths, 0 until a label is first drawn.
   let labelWidth = new Float32Array(0);
+  // Each label's opacity; it eases to 1 when the label is shown and to 0 when hidden.
+  let labelAlpha = new Float32Array(0);
+  let lastDraw = 0;
   let taken = new Uint8Array(0);
   let placed = new Uint8Array(0);
   // Neighbours as compressed rows: node i's are adjacency[offsets[i]..offsets[i+1]].
   let offsets = new Uint32Array(1);
   let adjacency = new Uint32Array(0);
-  const remembered = new Map<string, { x: number; y: number }>();
+  const remembered = new Map<string, { x: number; y: number; label: number }>();
 
   let width = 0, height = 0, dpr = 1;
   let k = 1, tx = 0, ty = 0;
@@ -199,7 +202,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   const py = (i: number) => positions[i * 2 + 1]!;
 
   function remember(): void {
-    for (let i = 0; i < model.nodes.length; i++) remembered.set(model.nodes[i]!.path, { x: px(i), y: py(i) });
+    for (let i = 0; i < model.nodes.length; i++) remembered.set(model.nodes[i]!.path, { x: px(i), y: py(i), label: labelAlpha[i]! });
   }
 
   function setModel(next: Model): void {
@@ -208,6 +211,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const count = next.nodes.length;
     radius = new Float64Array(count);
     labelWidth = new Float32Array(count);
+    labelAlpha = Float32Array.from(next.nodes, (node) => remembered.get(node.path)?.label ?? 0);
     for (let i = 0; i < count; i++) radius[i] = nodeRadius(next.nodes[i]!.degree, options.display);
     const degree = new Uint32Array(count);
     source = new Uint32Array(next.links.length);
@@ -270,10 +274,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (focus >= count) focus = -1;
     lit = -1;
     relight();
-    if (seeded.size === 0) cameraMoved = false;
+    // A layout that starts from scratch opens framed, without zooming in from
+    // the last view. An empty graph keeps the camera, so clearing a search
+    // with no matches returns to the person's view.
+    const fresh = count > 0 && seeded.size === 0;
+    if (fresh) cameraMoved = false;
     followLayout = !cameraMoved || options.local;
-    // A layout that starts from scratch opens framed, without zooming in from the last view.
-    if (seeded.size === 0) snapCamera = true;
+    if (fresh) snapCamera = true;
     canvas.dataset.nodeCount = String(count);
     canvas.dataset.linkCount = String(next.links.length);
     canvas.dataset.settled = "false";
@@ -385,8 +392,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       fading = t < 1;
       if (!fading && mixTo === 0) lit = -1;
     }
-    if (!awaitingLayout) draw();
-    if (fading || easing) {
+    const labelsFading = !awaitingLayout && draw(now);
+    if (fading || easing || labelsFading) {
       frame = requestAnimationFrame(step);
     } else if (layoutSettled && canvas.dataset.settled !== "true") {
       canvas.dataset.settled = "true";
@@ -394,13 +401,16 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     }
   }
 
-  function draw(): void {
-    if (!ctx) return;
+  // Draws a frame and reports whether a label is still fading.
+  function draw(now: number): boolean {
+    const fadeStep = reduced ? 1 : Math.min(34, now - lastDraw) / FADE_MS;
+    lastDraw = now;
+    if (!ctx) return false;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = palette.bg;
     ctx.fillRect(0, 0, width, height);
     const count = model.nodes.length;
-    if (count === 0) return;
+    if (count === 0) return false;
     const { display } = options;
     const highlight = lit >= 0 && mix > 0;
     const rest = highlight ? 1 - (1 - DIM) * mix : 1;
@@ -524,39 +534,60 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.fill();
     }
 
-    // Labels fade in with zoom over a short range, so a label is readable or
-    // gone. The lit node, the open page and the lit neighbours claim space
-    // first, then bigger nodes; a label that would overlap a placed one or run
-    // off the canvas is left out.
+    // A label shows once its node is big enough on screen, bigger nodes first,
+    // and fades in or out over FADE_MS, so a still graph has no half-faded
+    // labels. The lit node, the open page and the lit neighbours claim space
+    // first; a label that would overlap a placed one or run off the canvas is
+    // left out. A halo in the background colour keeps text clear of links.
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = palette.bg;
     const cols = Math.ceil(width / CELL), rows = Math.ceil(height / CELL);
     if (taken.length < cols * rows) taken = new Uint8Array(cols * rows);
     else taken.fill(0, 0, cols * rows);
     placed = placed.length < count ? new Uint8Array(count) : placed.fill(0, 0, count);
     let drawn = 0;
+    let labelsFading = false;
     const label = (i: number) => {
-      if (placed[i] || drawn >= LABEL_LIMIT) return;
+      if (placed[i]) return;
       placed[i] = 1;
       const own = highlight && litSet[i] === 1;
-      const scale = k * Math.sqrt(radius[i]! / 4);
-      let alpha = Math.max(0, Math.min(1, (scale - fadeAt) / (fadeAt * 0.15)));
-      if (i === active && options.local) alpha = 1;
-      if (own) alpha = Math.max(alpha * rest, mix);
-      else alpha *= rest;
-      if (alpha < 0.03 || !visibleNode(i)) return;
-      const title = shortTitle(model.nodes[i]!.title);
-      const w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
-      const left = sx(i) - w / 2, top = sy(i) + screenR(i) + 3;
-      if (left < 2 || top < 0 || left + w > width - 2 || top + LABEL_HEIGHT > height) return;
-      const c0 = Math.floor(left / CELL), c1 = Math.floor((left + w) / CELL);
-      const r0 = Math.floor(top / CELL), r1 = Math.floor((top + LABEL_HEIGHT) / CELL);
-      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (taken[r * cols + c]) return;
+      const shown = (i === active && options.local) || k * Math.sqrt(radius[i]! / 4) >= fadeAt;
+      let fits = (shown || own || labelAlpha[i]! > 0) && drawn < LABEL_LIMIT && visibleNode(i);
+      let title = "", left = 0, top = 0, w = 0, c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+      if (fits) {
+        title = shortTitle(model.nodes[i]!.title);
+        w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
+        left = sx(i) - w / 2;
+        top = sy(i) + screenR(i) + 3;
+        fits = left >= 2 && top >= 0 && left + w <= width - 2 && top + LABEL_HEIGHT <= height;
+        c0 = Math.floor(left / CELL);
+        c1 = Math.floor((left + w) / CELL);
+        r0 = Math.floor(top / CELL);
+        r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
+        for (let r = r0; fits && r <= r1; r++) for (let c = c0; c <= c1; c++) if (taken[r * cols + c]) fits = false;
+      }
+      if (!fits) {
+        labelAlpha[i] = 0;
+        return;
+      }
+      const goal = shown ? 1 : 0;
+      let fade = labelAlpha[i]!;
+      if (fade !== goal) {
+        fade = goal > fade ? Math.min(goal, fade + fadeStep) : Math.max(goal, fade - fadeStep);
+        labelAlpha[i] = fade;
+        if (fade !== goal) labelsFading = true;
+      }
+      const alpha = own ? Math.max(fade * rest, mix) : fade * rest;
+      if (alpha < 0.03) return;
       for (let r = r0; r <= r1; r++) taken.fill(1, r * cols + c0, r * cols + c1 + 1);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = own || i === active ? palette.ink : palette.label;
+      ctx.strokeText(title, sx(i), top + 1);
       ctx.fillText(title, sx(i), top + 1);
       drawn++;
     };
@@ -565,6 +596,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (highlight) for (let a = offsets[lit]!; a < offsets[lit + 1]!; a++) label(adjacency[a]!);
     for (let i = 0; i < count; i++) label(i);
     ctx.globalAlpha = 1;
+    return labelsFading;
   }
 
   function hitTest(x: number, y: number): number {

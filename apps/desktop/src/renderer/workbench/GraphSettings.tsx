@@ -139,7 +139,10 @@ export function GraphSettings(props: {
       data-testid="graph-settings"
       role="group"
       aria-label="Graph settings"
-      className="dohc-popover dohc-pop-in absolute right-3 top-3 z-10 flex max-h-[calc(100%-24px)] w-72 max-w-[calc(100%-24px)] flex-col overflow-y-auto rounded-xl border border-line bg-panel py-1"
+      className={`dohc-popover dohc-pop-in absolute right-3 z-10 flex w-72 max-w-[calc(100%-24px)] flex-col overflow-y-auto rounded-xl border border-line bg-panel py-1 ${
+        // In the side panel, open below the local graph so a change shows as it is made.
+        props.local ? "top-[calc(18rem+8px)] max-h-[calc(100%-18rem-20px)]" : "top-3 max-h-[calc(100%-24px)]"
+      }`}
     >
       <div className="flex h-7 items-center justify-end px-2">
         <IconButton aria-label="Close graph settings" title="Close graph settings" onClick={props.onClose}>
