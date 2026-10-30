@@ -160,15 +160,15 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       await expect.poll(recorded).toEqual(expected);
       await expect.poll(() => electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/bootstrap$/);
     }
+    // Without a press, the app can't send anyone out of dohc. #mailto used up the last one.
+    await clickApp(electronApp, guestId, "#plain");
+    await inFrame(electronApp, guestId, "window.open('https://example.com/unprompted'); true");
+    expect(await recorded()).toEqual(expected);
     for (const selector of ["#javascript", "#file"]) {
       await pressApp(page, electronApp, guestId, selector);
       // A main-process round trip follows the click before checking that nothing opened.
       expect(await recorded()).toEqual(expected);
     }
-    // Without a press, the app can't send anyone out of dohc.
-    await clickApp(electronApp, guestId, "#plain");
-    await inFrame(electronApp, guestId, "window.open('https://example.com/unprompted'); true");
-    expect(await recorded()).toEqual(expected);
     expect(await page.evaluate(() => (window as RendererProbe).__appViewEvents!.filter(event => event.kind === "external-link")
       .map(event => event.url))).toEqual(expected);
     await clickApp(electronApp, guestId, "#permission");

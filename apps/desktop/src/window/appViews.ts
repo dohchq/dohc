@@ -241,10 +241,13 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.on("before-mouse-event", (_event, mouse) => press(mouse));
     guest.on("input-event", (_event, input) => press(input));
     guest.on("before-input-event", (event, input) => {
-      press(input);
       const shortcut = appViewShortcut(input);
       if (shortcut) { event.preventDefault(); emit(entry, { kind: "shortcut", viewId: entry.viewId, ...shortcut }); }
+      // Like Chromium, dohc's shortcuts and Escape aren't a press in the app.
+      else if (input.key !== "Escape") press(input);
     });
+    // A press doesn't carry over into a reloaded page.
+    guest.on("did-start-navigation", event => { if (event.isMainFrame && !event.isSameDocument) entry.lastPress = undefined; });
     guest.once("destroyed", () => { void close(entry); });
     void theme(entry).catch(() => {
       emit(entry, { kind: "session-ended", viewId: entry.viewId }); void close(entry);
