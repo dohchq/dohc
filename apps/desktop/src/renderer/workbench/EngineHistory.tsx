@@ -785,19 +785,21 @@ function GroupRow(props: {
   );
 }
 
-// A version starting, as a marker between changes. It opens nothing, so it
-// is one line, lighter than the changes around it.
+// A version starting, as a marker between changes. It reads as a change
+// does, its time first, but it opens nothing.
 function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   const createdAt = formatChatTime(props.version.createdAtMs);
   return (
-    <div className="flex h-7 min-w-0 items-center gap-2 px-2 text-[12px] text-muted">
+    <div className={TWO_LINES}>
+      <time dateTime={createdAt.iso} title={createdAt.label} className={WHEN}>
+        {formatClock(props.version.createdAtMs)}
+      </time>
       <span className={`${MARK_BOX} text-subtle`}>
         <Layers size={14} aria-hidden />
       </span>
-      <span className="min-w-0 flex-1 truncate">{versionMarkerTitle(props.version)}</span>
-      <time dateTime={createdAt.iso} title={createdAt.label} className="shrink-0 tabular-nums text-subtle">
-        {formatClock(props.version.createdAtMs)}
-      </time>
+      <span className={LINE_TWO}>
+        <span className="min-w-0 truncate">{versionMarkerTitle(props.version)}</span>
+      </span>
     </div>
   );
 }

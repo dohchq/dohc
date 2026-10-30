@@ -566,7 +566,9 @@ export function EngineMomentDiffPage({
             </SecondaryButton>
           ) : (
             // Restore records a new change and offers Undo, so it asks
-            // nothing first. Its title says what it does to the file.
+            // nothing first. It returns the file to before this change, and
+            // its name says so, as its status line does; its title says what
+            // that does to the file.
             <PrimaryButton
               ref={actionRef}
               size="compact"
@@ -575,7 +577,7 @@ export function EngineMomentDiffPage({
               disabled={!canRestore || restoreBusy}
               title={canRestore ? restoreDetail : "This change can't be restored directly"}
             >
-              {restoreState.status === "restoring" ? "Restoring…" : "Restore"}
+              {restoreState.status === "restoring" ? "Restoring…" : "Restore earlier state"}
             </PrimaryButton>
           )}
           {moreItems.length > 0 ? (
