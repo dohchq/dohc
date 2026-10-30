@@ -74,11 +74,13 @@ async function overlayAboveApp(page: Page, overlay: Locator) {
   await expect.poll(() => overlay.evaluate(element => {
     const app = document.querySelector('[data-testid="app-view-webview"]');
     if (!app) return false;
+    // The overlay must cover part of the app, and be on top at the middle of that part.
     const a = app.getBoundingClientRect(), b = element.getBoundingClientRect();
-    const x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
-    if (x <= a.left || x >= a.right || y <= a.top || y >= a.bottom) return false;
-    const top = document.elementFromPoint(x, y);
-    return top === element || !!top && element.contains(top);
+    const left = Math.max(a.left, b.left), right = Math.min(a.right, b.right);
+    const top = Math.max(a.top, b.top), bottom = Math.min(a.bottom, b.bottom);
+    if (left >= right || top >= bottom) return false;
+    const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+    return hit === element || !!hit && element.contains(hit);
   })).toBe(true);
 }
 
