@@ -15,8 +15,10 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { AgentName, ChatAvatar, LinkHolderMark, useAgentInk } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
+import { ThreadedChat } from "./ThreadedChat";
+import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -29,6 +31,7 @@ import {
   joinedChannelLabel,
   ComposerModeBar,
   ComposerNotice,
+  AgentProblemLine,
   DispatchAnnouncement,
   dispatchAnnouncement,
   type ShareReadFailure,
@@ -65,6 +68,7 @@ import {
   MessageSquare,
   MessagesSquare,
   Plus,
+  Settings,
   Square,
   Users,
   X,
@@ -100,7 +104,6 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
-  ChatMessageList,
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
@@ -108,7 +111,7 @@ import {
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
-import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
+import { AGENT_OFFER_SPACE, NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
@@ -395,11 +398,10 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
 }
 
 // An agent chat's mark beside its name, in its agent's hue.
-function AgentMark(props: { presentation: ActorPresentation }) {
-  const ink = useAgentInk(props.presentation);
+function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   return (
-    <span aria-hidden data-testid="chats-channel-agent-mark" className={`shrink-0 font-mono text-[12px] ${ink}`}>
-      ◈
+    <span data-testid="chats-channel-agent-mark" className="inline-flex shrink-0">
+      <ChatAvatar presentation={props.presentation} name={props.name} kind="agent" size="strip" />
     </span>
   );
 }
@@ -658,14 +660,8 @@ export function ChatsView(props: {
     if (nav.level === "channel" && newThreadPoll && newThreadPoll.channelId !== nav.channel.id) setNewThreadPoll(null);
   }, [nav, poll, newThreadPoll]);
   const [startingThread, setStartingThread] = useState(false);
-  const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
-  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
-  const [newGroupPurpose, setNewGroupPurpose] = useState("");
-  const resetGroupForm = useCallback(() => {
-    setCreatingChannel(null);
-    setNewGroupType("posts");
-    setNewGroupPurpose("");
-  }, []);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const resetGroupForm = useCallback(() => setCreatingGroup(false), []);
   const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
   // is on (signed in + relay) or a DM already exists locally — a solo user
@@ -2685,6 +2681,32 @@ export function ChatsView(props: {
     }
   }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
 
+  // A reply in one of the DM's threads.
+  const sendDmReply = useCallback(async (rootId: string, body: string) => {
+    if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return false;
+    const context = sendContextKey;
+    try {
+      const references = extractChatFileReferences(body);
+      const result = await bridge().sendChatMessage({
+        workspaceId,
+        threadId: nav.dm.threadId,
+        body,
+        parentMessageId: rootId,
+        ...(references.length > 0 ? { fileReferences: references } : {}),
+      });
+      if (activeSendContext.current !== context) return false;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+      dmRefreshSeq.current += 1;
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id) ? current : [...current, result.message],
+      );
+      return true;
+    } catch (error) {
+      if (activeSendContext.current === context) props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
+      return false;
+    }
+  }, [nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, workspaceId]);
+
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
   const startDm = useCallback(async () => {
@@ -3410,23 +3432,20 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
-  // Which lane a "both" group shows. An agent DM opens on its conversation.
+  // Which lane a "both" group shows.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
-  const [agentLane, setAgentLane] = useState<"posts" | "chat">("chat");
+  // The new group dialog's create. A failure stays in the dialog.
   const createChannel = useCallback(
-    async (name: string) => {
-      const trimmed = name.trim();
-      if (trimmed.length === 0) return;
+    async (input: { name: string; type: GroupType; purpose: string }): Promise<string | null> => {
       const token = liveToken.current;
       try {
-        const purpose = newGroupPurpose.trim();
         const result = await bridge().createChatChannel({
           workspaceId,
-          name: trimmed,
-          type: newGroupType,
-          ...(purpose ? { purpose } : {}),
+          name: input.name,
+          type: input.type,
+          ...(input.purpose ? { purpose: input.purpose } : {}),
         });
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current) return null;
         resetGroupForm();
         setOverview((current) =>
           current.status === "ready"
@@ -3443,12 +3462,12 @@ export function ChatsView(props: {
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
         // The new group opens where any click on it would.
         openConversation({ level: "channel", channel: result.channel });
+        return null;
       } catch (error) {
-        if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not create that group."), error);
+        return ipcErrorMessage(error, "Could not create that group.");
       }
     },
-    [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
+    [resetGroupForm, openConversation, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -4125,6 +4144,35 @@ export function ChatsView(props: {
 
   if (nav.level === "dm") {
     const dm = nav.dm;
+    const dmHeader = (
+      <ChatHeader
+        label={dm.peerLabel}
+        testId="chats-dm"
+        large={variant === "page"}
+        onBack={variant === "panel" ? goBack : undefined}
+        icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
+        // A connected participant (shareId set, not already ended) has a
+        // live placement to reverse; the owner side (shareId null)
+        // never accepted a grant here, and an already-ended row (owner
+        // revoked, or already left) has nothing live to end — confirming
+        // would re-end a tombstone and promise a request that, for an
+        // owner-revoked grant, can never appear (its grant is gone from
+        // the relay's received listing).
+        action={
+          dm.shareId && dm.connected ? (
+            <button
+              type="button"
+              data-testid="chats-dm-leave"
+              onClick={() => setLeavingDm(dm)}
+              className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+            >
+              Leave
+            </button>
+          ) : undefined
+        }
+        trailing={<PresenceFaces others={presence.others} />}
+      />
+    );
     return (
       <div
         data-testid="chats-dm-view"
@@ -4132,89 +4180,74 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <ChatHeader
-          label={dm.peerLabel}
-          testId="chats-dm"
-          onBack={variant === "panel" ? goBack : undefined}
-          icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
-          // A connected participant (shareId set, not already ended) has a
-          // live placement to reverse; the owner side (shareId null)
-          // never accepted a grant here, and an already-ended row (owner
-          // revoked, or already left) has nothing live to end — confirming
-          // would re-end a tombstone and promise a request that, for an
-          // owner-revoked grant, can never appear (its grant is gone from
-          // the relay's received listing).
-          action={
-            dm.shareId && dm.connected ? (
-              <button
-                type="button"
-                data-testid="chats-dm-leave"
-                onClick={() => setLeavingDm(dm)}
-                className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
-              >
-                Leave
-              </button>
-            ) : undefined
-          }
-          trailing={<PresenceFaces others={presence.others} />}
-        />
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
             its channelWireId and fanned out through the same shareForRecipient
             grant gate. Dormant (calm header, no fake liveness) when solo. */}
-        <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
-          {dm.threadId ? (
-            <ChatMessageList
-              testIdPrefix="chats-dm"
-              messages={messages}
-              loading={messagesLoading}
-              emptyLabel="No messages yet."
-              key={`${workspaceId}:${dm.threadId}`}
-              listRef={flatChatListRef}
-              mentionCandidates={mentionCandidates}
-              onOpenPath={props.onOpenPath}
-              flashMessageId={flashMessageId}
-              reactionControls={reactionControls}
-              bottomSpace={AGENT_OFFER_SPACE}
-            />
-          ) : (
+        {dm.threadId ? (
+          <ThreadedChat
+            key={`${workspaceId}:${dm.threadId}`}
+            testIdPrefix="chats-dm"
+            messages={messages}
+            loading={messagesLoading}
+            emptyLabel="No messages yet."
+            place={dm.peerLabel}
+            header={dmHeader}
+            belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
+            composer={(inset) => dm.connected ? (
+              <MentionComposer
+                testIdPrefix="chats-dm"
+                composerId="chats-dm-composer"
+                value={composer}
+                sending={sending}
+                placeholder={`Message ${dm.peerLabel}`}
+                sendLabel="Send message"
+                candidates={mentionCandidates}
+                fileCandidates={fileMentionCandidates}
+                loadFileHeadings={loadFileHeadings}
+                onChange={(value) => {
+                  setComposer(value);
+                  presence.setTyping(value.trim().length > 0);
+                }}
+                onSend={() => {
+                  presence.setTyping(false);
+                  void sendDmMessage();
+                }}
+                onRosterPick={agentOffer.onRosterPick}
+                rosterScope={agentOffer.scope}
+                agentOffer={agentOffer.offer}
+                inset={inset}
+              />
+            ) : (
+              <ComposerNotice testId="chats-dm-ended">
+                This conversation has ended. You can still read it.
+              </ComposerNotice>
+            )}
+            replyNotice={dm.connected ? undefined : (
+              <ComposerNotice testId="chats-dm-thread-ended">
+                This conversation has ended. You can still read it.
+              </ComposerNotice>
+            )}
+            onSendReply={sendDmReply}
+            mentionCandidates={mentionCandidates}
+            fileCandidates={fileMentionCandidates}
+            loadFileHeadings={loadFileHeadings}
+            onOpenPath={props.onOpenPath}
+            reactionControls={reactionControls}
+            listRef={flatChatListRef}
+            flashMessageId={flashMessageId}
+            bottomSpace={AGENT_OFFER_SPACE}
+          />
+        ) : (
+          <>
+            {dmHeader}
             <div
               data-testid="chats-dm-waiting"
               className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
             >
               Waiting for this conversation to sync…
             </div>
-          )}
-          <TypingIndicator names={presence.typingNames} className="px-2" />
-          {dm.connected ? (
-            <MentionComposer
-              testIdPrefix="chats-dm"
-              composerId="chats-dm-composer"
-              value={composer}
-              sending={sending}
-              disabled={!dm.threadId}
-              placeholder={`Message ${dm.peerLabel}…`}
-              sendLabel="Send message"
-              candidates={mentionCandidates}
-              fileCandidates={fileMentionCandidates}
-              loadFileHeadings={loadFileHeadings}
-              onChange={(value) => {
-                setComposer(value);
-                presence.setTyping(value.trim().length > 0);
-              }}
-              onSend={() => {
-                presence.setTyping(false);
-                void sendDmMessage();
-              }}
-              onRosterPick={agentOffer.onRosterPick}
-              rosterScope={agentOffer.scope}
-              agentOffer={agentOffer.offer}
-            />
-          ) : (
-            <ComposerNotice testId="chats-dm-ended">
-              This conversation has ended. You can still read it.
-            </ComposerNotice>
-          )}
-        </div>
+          </>
+        )}
         {leavingDm ? (
           <LeaveDmDialog
             key={leavingDm.channelId}
@@ -4495,16 +4528,18 @@ export function ChatsView(props: {
     const channelLocked = channelIsLocked(nav.channel);
     const channelAgent = nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents) : null;
     const channelSettingsAgent = channelAgent ? settingsAgents.find((agent) => agent.id === nav.channel.agentId) : undefined;
-    // The strip under an agent's chat describes that agent's own runner.
-    const channelLaunch = channelSettingsAgent?.enabled ? channelSettingsAgent.launch : undefined;
-    const channelCommand = channelLaunch ? launchCommand(channelLaunch) : "";
-    // An agent DM is one conversation. Its older posts stay under Posts, which
-    // takes no new ones.
+    // An agent DM is one conversation, with threads. A group keeps its kind.
     const agentDm = nav.channel.kind === "agent";
-    const groupType = agentDm ? "both" : nav.channel.type ?? "posts";
-    const lane = agentDm ? agentLane : groupLane;
-    const setLane = agentDm ? setAgentLane : setGroupLane;
+    const groupType = agentDm ? "chat" : nav.channel.type ?? "posts";
+    const lane = groupLane;
+    const setLane = setGroupLane;
     const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
+    // Only when the agent can't answer: what's wrong, and the fix.
+    const agentProblem = !agentDm || !props.agentSetup ? null
+      : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+      : !channelSettingsAgent.launch ? { words: `${channelSettingsAgent.name} isn't set up.`, action: "Set up" }
+      : !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on" }
+      : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -4537,11 +4572,7 @@ export function ChatsView(props: {
               : "flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
           }
         >
-          {(
-            agentDm
-              ? ([["chat", "Chat"], ["posts", "Posts"]] as const)
-              : ([["posts", "Posts"], ["chat", "Chat"]] as const)
-          ).map(([value, label]) => (
+          {([["posts", "Posts"], ["chat", "Chat"]] as const).map(([value, label]) => (
             <button
               key={value}
               type="button"
@@ -4560,23 +4591,18 @@ export function ChatsView(props: {
           ))}
         </div>
       ) : null;
-    return (
-      <div
-        data-testid="chats-channel-view"
-        data-variant={variant}
-        data-group-type={groupType}
-        className="flex min-h-0 flex-1 flex-col"
-        onKeyDownCapture={onKeyDownCapture}
-      >
+    const top = (
+      <>
         <ChatHeader
           label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
+          large={variant === "page"}
           onBack={variant === "panel" ? goBack : undefined}
           icon={
             channelAgent ? (
-              <AgentMark presentation={channelAgent.presentation} />
+              <AgentMark presentation={channelAgent.presentation} name={channelAgent.label} />
             ) : (
-              <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
+              <Hash size={variant === "page" ? 16 : 12} aria-hidden className="shrink-0 text-subtle" />
             )
           }
           description={
@@ -4598,6 +4624,18 @@ export function ChatsView(props: {
               <PresenceFaces
                 others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
               />
+              {agentDm && props.onSetupAgent ? (
+                <button
+                  type="button"
+                  data-testid="chats-agent-settings"
+                  aria-label={`${channelAgent?.label ?? "Agent"} settings`}
+                  title={`${channelAgent?.label ?? "Agent"} settings`}
+                  onClick={props.onSetupAgent}
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                >
+                  <Settings size={16} strokeWidth={1.9} aria-hidden />
+                </button>
+              ) : null}
               {canShare ? (
                 <button
                   type="button"
@@ -4629,49 +4667,6 @@ export function ChatsView(props: {
           }
         />
         {variant === "panel" ? laneTabs : null}
-        {nav.channel.kind === "agent" && props.agentSetup ? (
-          <div
-            data-testid="chats-agent-screen"
-            data-state={channelLaunch ? "ready" : "needs-setup"}
-            className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
-          >
-            <Bot size={12} aria-hidden className="shrink-0 text-agent" />
-            <span
-              data-testid="chats-agent-screen-runner"
-              className="min-w-0 flex-1 truncate"
-              title={channelCommand || undefined}
-            >
-              {channelLaunch
-                ? channelCommand
-                  ? `Runs ${runnerProgram(channelCommand)}`
-                  : "Runner on"
-                : channelSettingsAgent?.launch
-                  ? "Chat runner is off in Settings"
-                  : props.agentSetup.agentRunActive
-                    ? "Agent run active · connect an agent to reply here"
-                    : "No runner yet · add an agent under Agents"}
-            </span>
-            {props.workspacePath ? (
-              <span
-                data-testid="chats-agent-screen-reach"
-                title={props.workspacePath}
-                className="hidden shrink-0 truncate text-[10px] tabular-nums text-subtle sm:inline"
-              >
-                reaches {reachName(props.workspacePath)}
-              </span>
-            ) : null}
-            {props.onSetupAgent ? (
-              <button
-                type="button"
-                data-testid="chats-agent-screen-manage"
-                onClick={props.onSetupAgent}
-                className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
-              >
-                Manage
-              </button>
-            ) : null}
-          </div>
-        ) : null}
         {channelJoined !== null ? (
           <div
             data-testid="chats-joined-banner"
@@ -4783,6 +4778,17 @@ export function ChatsView(props: {
             </form>
           </div>
         ) : null}
+      </>
+    );
+    return (
+      <div
+        data-testid="chats-channel-view"
+        data-variant={variant}
+        data-group-type={groupType}
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={onKeyDownCapture}
+      >
+        {showLane ? null : top}
         {showLane ? (
           <ChatLane
             workspaceId={workspaceId}
@@ -4798,8 +4804,13 @@ export function ChatsView(props: {
             agentSetup={props.agentSetup}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            header={top}
+            notice={agentProblem ? (
+              <AgentProblemLine words={agentProblem.words} action={agentProblem.action} onAction={props.onSetupAgent} />
+            ) : null}
             {...(agentDm ? {
-              ...(channelSettingsAgent ? { agentName: channelSettingsAgent.name } : {}),
+              agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
+              ...(channelAgent ? { agentPresentation: channelAgent.presentation } : {}),
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,
@@ -4973,8 +4984,7 @@ export function ChatsView(props: {
             <SectionActionButton
               testId="chats-new-channel"
               label="New group"
-              disabled={creatingChannel !== null}
-              onClick={() => setCreatingChannel("")}
+              onClick={() => setCreatingGroup(true)}
             >
               <Plus size={12} aria-hidden />
             </SectionActionButton>
@@ -5278,90 +5288,8 @@ export function ChatsView(props: {
           ) : null}
         </nav>
       </div>
-      {creatingChannel !== null ? (
-        <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createChannel(creatingChannel);
-            }}
-          >
-            <label className="sr-only" htmlFor="chats-new-channel-name">
-              Group name
-            </label>
-            <input
-              id="chats-new-channel-name"
-              data-testid="chats-new-channel-name"
-              autoFocus
-              value={creatingChannel}
-              maxLength={80}
-              placeholder="Group name"
-              onChange={(event) => setCreatingChannel(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  resetGroupForm();
-                }
-              }}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-            />
-            <label className="sr-only" htmlFor="chats-new-channel-purpose">
-              Purpose
-            </label>
-            <input
-              id="chats-new-channel-purpose"
-              data-testid="chats-new-channel-purpose"
-              value={newGroupPurpose}
-              maxLength={200}
-              placeholder="What it's for"
-              onChange={(event) => setNewGroupPurpose(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  resetGroupForm();
-                }
-              }}
-              className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-            />
-            <div
-              role="radiogroup"
-              aria-label="Group type"
-              className="mt-1.5 flex gap-1"
-            >
-              {(
-                [
-                  ["posts", "Posts"],
-                  ["chat", "Chat"],
-                  ["both", "Both"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={newGroupType === value}
-                  data-testid={`chats-new-channel-type-${value}`}
-                  onClick={() => setNewGroupType(value)}
-                  className={`h-7 flex-1 rounded-md border text-[12px] transition-colors dohc-focus-visible ${
-                    newGroupType === value
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line text-muted hover:bg-hover hover:text-ink"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <button
-              type="submit"
-              data-testid="chats-new-channel-submit"
-              disabled={creatingChannel.trim().length === 0}
-              className="mt-1.5 h-7 w-full rounded-md bg-ink text-[12px] font-medium text-bg hover:opacity-90 disabled:opacity-40 dohc-focus-visible"
-            >
-              Create group
-            </button>
-          </form>
-        </div>
+      {creatingGroup ? (
+        <NewGroupDialog onCreate={createChannel} onClose={resetGroupForm} />
       ) : null}
       {acceptingDmRequest ? (
         <AcceptDmDialog

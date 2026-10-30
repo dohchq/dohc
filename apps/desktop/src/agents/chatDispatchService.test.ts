@@ -1588,7 +1588,7 @@ describe("chatDispatchService", () => {
       ),
     ).toEqual(["running", "done", "done"]);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toEqual({
-      liveRunId: expect.any(String),
+      liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String),
       pendingCount: 0,
       paused: false,
     });
@@ -1606,7 +1606,7 @@ describe("chatDispatchService", () => {
     // which a new message prompts, shows it.
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
-      liveRunId: expect.any(String),
+      liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String),
       pendingCount: 1,
     });
 
@@ -1979,7 +1979,7 @@ describe("chatDispatchService", () => {
     );
     expect(pauseRow?.reason).toBe("re-dispatch budget exceeded");
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toEqual({
-      liveRunId: null,
+      liveRunId: null, liveTriggerMessageId: null,
       pendingCount: 1,
       paused: true,
     });
@@ -2002,7 +2002,7 @@ describe("chatDispatchService", () => {
     expect(fixture.resumed).toEqual([pending.threadId]);
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toMatchObject({
-      liveRunId: expect.any(String),
+      liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String),
       pendingCount: 0,
       paused: false,
     });
@@ -2359,7 +2359,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       noticeId: `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
       kind: "agent-run",
-      title: "Nova finished in \"Plan day 2\"",
+      title: "Nova replied in \"Plan day 2\"",
       body: "",
       target: { thread: trigger.threadId, run: claim.run.runId },
     }]);
@@ -2697,7 +2697,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
 
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova finished in \"Plan day 2\"",
+      "Nova replied in \"Plan day 2\"",
     ]);
     expect(await owedRuns(fixture)).toEqual([]);
   });
@@ -2756,7 +2756,7 @@ describe("chatDispatchService", () => {
     await vi.waitFor(async () => {
       expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({ exitCode: 0 });
       expect(fixture.notices.map((notice) => notice.title)).toEqual([
-        "Nova finished in \"Plan day 2\"",
+        "Nova replied in \"Plan day 2\"",
       ]);
       expect(await owedRuns(fixture)).toEqual([]);
     }, { interval: 0 });
@@ -2788,7 +2788,7 @@ describe("chatDispatchService", () => {
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
     await vi.waitFor(async () => {
       expect(fixture.notices.map((notice) => notice.title)).toEqual([
-        "Nova finished in \"Plan day 2\"",
+        "Nova replied in \"Plan day 2\"",
       ]);
       expect(await owedRuns(fixture)).toEqual([]);
     }, { interval: 0 });
@@ -3569,7 +3569,7 @@ describe("chatDispatchService", () => {
       "Stopped Nova's run in \"Stop this run.\"",
     ]);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
-      liveRunId: null,
+      liveRunId: null, liveTriggerMessageId: null,
     });
 
     const followUp = await createAgentThread(fixture, {
@@ -3623,7 +3623,7 @@ describe("chatDispatchService", () => {
         WORKSPACE_ID,
         successor.threadId,
       ),
-    ).toMatchObject({ liveRunId: expect.any(String) });
+    ).toMatchObject({ liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String) });
   });
 
   it("deadlines and transport-retries the stopped-run notice fallback", async () => {

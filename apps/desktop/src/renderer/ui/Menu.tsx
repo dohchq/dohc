@@ -242,6 +242,8 @@ export function Menu(props: {
   disabled?: boolean;
   menuTestId?: string;
   width?: number;
+  /** The list lines up with the trigger's right edge, or with its left at "start". */
+  align?: "start" | "end";
   closeOnPick?: boolean;
   /** Rendered under the rows, inside the list. */
   children?: ReactNode;
@@ -274,7 +276,9 @@ export function Menu(props: {
     const box = trigger.current?.getBoundingClientRect();
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const left = props.align === "start"
+        ? Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - width))
+        : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
       const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
       const above = box.top - GAP_PX - EDGE_PX;
       setPlace(
@@ -289,7 +293,7 @@ export function Menu(props: {
       setPlace(null);
       setPointerMoved(false);
     };
-  }, [open, width]);
+  }, [open, width, props.align]);
 
   // Placed, a list shorter than its rows shows its top, so it scrolls to the
   // row focus opened on.

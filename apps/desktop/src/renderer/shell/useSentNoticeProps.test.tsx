@@ -61,7 +61,7 @@ const retryAutomationNotice = vi.fn();
 const listChatChannels = vi.fn();
 const listChannelThreads = vi.fn();
 const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
-const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
+const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
 const chatDispatchStateForThread = vi.fn(async (_payload: ChatDispatchStateForThreadPayload) => IDLE);
 const retryStoppedRun = vi.fn(async (): Promise<RetryStoppedRunResult> => ({ queued: true }));
 beforeEach(() => vi.stubGlobal("dohcDesktop", {

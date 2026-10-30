@@ -69,7 +69,7 @@ function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string |
   const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
   const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
   const sentence = {
-    finished: `${agent ?? "Your agent"} finished`,
+    finished: `${agent ?? "Your agent"} replied`,
     stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
     "no-reply": `${whose(true)} produced no reply`,
     "timed-out": `${whose(true)} timed out`,
@@ -217,6 +217,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
 
 interface ChatDispatchThreadState {
   liveRunId: string | null;
+  liveTriggerMessageId: string | null;
   pendingCount: number;
   paused: boolean;
   stoppedRun?: ChatDispatchStoppedRun;
@@ -1579,11 +1580,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       stoppedRunForThread(workspace, threadId),
     ]);
     const live = liveRuns.get(workspaceId);
+    const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
     return {
-      liveRunId:
-        live?.claim.run.threadId === threadId && live.finalized === false
-          ? live.claim.run.runId
-          : null,
+      liveRunId: running?.runId ?? null,
+      liveTriggerMessageId: running?.triggerMessageId ?? null,
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,

@@ -1,4 +1,4 @@
-import { AtSign, FileText, Hash, ListChecks, type LucideIcon } from "lucide-react";
+import { AtSign, FileText, Hash, ListChecks, Plus, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   activeMentionQuery,
@@ -16,6 +16,7 @@ import { ComposerSendButton } from "./ComposerSendButton";
 import { ComposerPoll } from "./ComposerPoll";
 import { activeCatalogQuery, NEW_POLL, openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { Menu, type MenuItem } from "../ui/Menu";
 import {
   MENU_ACTIVE_OPTION,
   MENU_DETAIL,
@@ -116,6 +117,10 @@ function menuQueryAt(value: string, caret: number): boolean {
 //
 // A / at the start of a word opens the catalog in the same list: a poll, and
 // the @ menu's people and files.
+const BAR_BUTTON =
+  "grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink disabled:opacity-40";
+const COMPOSER_INSET = { stream: "mx-5 mb-4 mt-1", thread: "mx-4 mb-4 mt-1", narrow: "mx-3 mb-3 mt-1" } as const;
+
 export function MentionComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -139,6 +144,9 @@ export function MentionComposer(props: {
   // Bars on a stream composer's top edge, such as Replying to. The agent
   // offer floats above them.
   above?: ReactNode;
+  // Where a chat's box sits: under a stream, in a thread's panel, or in a
+  // narrow pane. Each keeps its own margins.
+  inset?: "stream" | "thread" | "narrow";
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -184,6 +192,7 @@ export function MentionComposer(props: {
   }, [props.composerId, props.rosterScope]);
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const [fileStage, setFileStage] = useState<{
     path: string;
@@ -547,7 +556,31 @@ export function MentionComposer(props: {
       onFocusQuestion={() => textareaRef.current?.focus()}
     />
   ) : null;
-  const pollButton = (shape: "post" | "icon") => offersPoll ? (
+  // A chat's "+": attach a page, or start or remove a poll.
+  const addItems: MenuItem[] = [
+    ...(hasFiles ? [{
+      id: "file",
+      label: "Attach a page",
+      icon: <FileText size={14} aria-hidden />,
+      testId: `${props.testIdPrefix}-attach-page`,
+      onSelect: () => {
+        textareaRef.current?.focus();
+        highlightFileOnOpen.current = true;
+        insertAtCaret("@");
+      },
+    }] : []),
+    ...(offersPoll ? [{
+      id: "poll",
+      label: poll ? "Remove poll" : "Start a poll",
+      icon: <ListChecks size={14} aria-hidden />,
+      testId: `${props.testIdPrefix}-poll-toggle`,
+      onSelect: () => {
+        textareaRef.current?.focus();
+        togglePoll(props.value);
+      },
+    }] : []),
+  ];
+  const pollButton = offersPoll ? (
     <button
       type="button"
       data-testid={`${props.testIdPrefix}-poll-toggle`}
@@ -560,12 +593,10 @@ export function MentionComposer(props: {
         event.preventDefault();
         togglePoll(props.value);
       }}
-      className={shape === "post"
-        ? "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
-        : "grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"}
+      className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
     >
       <ListChecks size={14} strokeWidth={1.9} aria-hidden />
-      {shape === "post" ? <span className="@max-[29rem]/composer:hidden">Poll</span> : null}
+      <span className="@max-[29rem]/composer:hidden">Poll</span>
     </button>
   ) : null;
   const form = (
@@ -576,7 +607,7 @@ export function MentionComposer(props: {
           ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
               expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
             }`
-          : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+          : `relative flex shrink-0 flex-col rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
       onSubmit={(event) => {
         event.preventDefault();
@@ -760,7 +791,7 @@ export function MentionComposer(props: {
         data-testid={`${props.testIdPrefix}-composer`}
         value={props.value}
         disabled={locked}
-        rows={isPost && poll ? 1 : 2}
+        rows={isPost ? (poll ? 1 : 2) : 1}
         // While a poll is open the message is its question.
         placeholder={poll ? "Ask a question" : props.placeholder}
         role="combobox"
@@ -821,7 +852,7 @@ export function MentionComposer(props: {
                     ? "field-sizing-content px-0 py-0"
                     : "min-h-16 px-0 py-0"
               }`
-            : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
+            : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none! disabled:opacity-60"
         }
       />
       {isPost && expanded ? pollBlock : null}
@@ -862,7 +893,7 @@ export function MentionComposer(props: {
                 <span className="@max-[29rem]/composer:hidden">File</span>
               </button>
             ) : null}
-            {pollButton("post")}
+            {pollButton}
             {props.agentOffer ? (
               <AgentOffer offer={props.agentOffer} surface="post" />
             ) : (
@@ -890,7 +921,30 @@ export function MentionComposer(props: {
           </button>
         )
       ) : (
-        <>
+        <div className="flex items-center gap-0.5 px-1.5 pb-1.5 pt-1">
+          {addItems.length ? (
+            <Menu
+              label="Add"
+              open={addOpen}
+              onOpenChange={setAddOpen}
+              width={176}
+              align="start"
+              items={addItems}
+              trigger={(trigger) => (
+                <button
+                  {...trigger}
+                  type="button"
+                  data-testid={`${props.testIdPrefix}-add`}
+                  aria-label="Add"
+                  title="Add"
+                  disabled={locked}
+                  className={`${BAR_BUTTON} dohc-focus-visible`}
+                >
+                  <Plus size={16} strokeWidth={1.9} aria-hidden />
+                </button>
+              )}
+            />
+          ) : null}
           <button
             type="button"
             aria-label="Mention"
@@ -902,38 +956,19 @@ export function MentionComposer(props: {
               event.preventDefault();
               insertAtCaret("@");
             }}
-            className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
+            className={BAR_BUTTON}
           >
-            <span aria-hidden className="text-[13px] font-semibold">
-              @
-            </span>
+            <AtSign size={16} strokeWidth={1.9} aria-hidden />
           </button>
-          {props.fileCandidates?.length ? (
-            <button
-              type="button"
-              aria-label="Attach a file"
-              title="Attach a file"
-              tabIndex={-1}
-              disabled={locked}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                highlightFileOnOpen.current = true;
-                insertAtCaret("@");
-              }}
-              className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
-            >
-              <FileText size={14} strokeWidth={1.9} aria-hidden />
-            </button>
-          ) : null}
-          {pollButton("icon")}
+          <span className="flex-1" />
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}
             label={props.sendLabel}
             sending={props.sending}
             disabled={sendDisabled}
-            shape="icon"
+            shape="box"
           />
-        </>
+        </div>
       )}
     </form>
   );

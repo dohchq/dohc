@@ -86,7 +86,7 @@ describe("ChatsView channels", () => {
       expect(bridgeMock.createChatChannel).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         name: "launch",
-        type: "posts",
+        type: "chat",
       }),
     );
     // Straight into the new channel — no extra click.
