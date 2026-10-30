@@ -233,13 +233,13 @@ it("reports the saved recovery file through the shell notice callback", async ()
 });
 
 it("keeps archived offline Collections read-only until refresh reaches the host", async () => {
-  backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true } })
+  backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true, host: "sync.example.test" } })
     .mockResolvedValue({ kind: "description", dataset: { ...dataset, archived: true } });
   render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   const restore = await screen.findByRole("button", { name: "Restore Collection" });
   expect(restore.hasAttribute("disabled")).toBe(true);
   fireEvent.click(restore); expect(backend.dataset.mock.calls.some(([input]) => input.action === "restore")).toBe(false);
-  expect(screen.getByRole("status").textContent).toContain("Offline copy");
+  expect(screen.getByRole("status").textContent).toBe("Offline copy · Restoring needs sync.example.test");
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Restore Collection" }).hasAttribute("disabled")).toBe(false));
 });

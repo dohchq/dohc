@@ -33,7 +33,7 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
   return { kind: "cancelled" };
 }
 const api = {
-  dataset: vi.fn(async () => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json" as string | null, datasetAddressStatus: "available" as "available" | "missing" | "ambiguous" }], nextCursor: null })),
+  dataset: vi.fn(async (_input?: unknown): Promise<unknown> => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null })),
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
   publishOwnerApp: vi.fn(answer),
   openExternalUrl: vi.fn(async () => undefined),
@@ -286,6 +286,20 @@ describe("owner app publication", () => {
     expect(screen.getByTestId("app-publication-capability").textContent).toContain("responses appear in the same Collection");
     expect(screen.getByText("Approving this app grants these actions. It does not change the Collection's rules.")).toBeTruthy();
     expect(screen.getByTestId("app-publication-capability").textContent).not.toContain("private store");
+    expect(screen.queryByTestId("collection-move-note")).toBeNull();
+    expect(api.dataset.mock.calls.every(([input]) => (input as { action: string }).action === "list")).toBe(true);
+  });
+
+  it("says publishing on a link moves a Collection on this computer to the server before Publish", async () => {
+    api.dataset.mockImplementation(async (input: unknown) => (input as { action: string }).action === "permissions"
+      ? { kind: "permissions", permissions: [], nextCursor: null, place: { kind: "here", server: { host: "sync.example.test", runs: "no-schedules", automations: 1, scheduledAutomations: 1 } } }
+      : { kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, capabilities: [datasetCapability] } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    expect((await screen.findByTestId("collection-move-note")).textContent).toBe("Publishing moves this Collection to sync.example.test. Even on this computer, it then works only while "
+      + "sync.example.test is reachable. dohc can't move it back. Its schedules and Group messages stop until you choose sync.example.test under Schedules run on in Settings.");
+    expect(api.dataset).toHaveBeenCalledWith({ action: "permissions", workspaceId: "ws-trip", datasetPath: "data/dataset.json", expectedDatasetId: datasetCapability.datasetId, limit: 1 });
   });
 
   it("reviews exact source and network consequences before approval", async () => {

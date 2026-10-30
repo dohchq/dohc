@@ -5,6 +5,7 @@ import type { AppCollectionCapability } from "@dohc/security-contract/app-public
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
+import { CollectionMoveNote, type CollectionServer } from "./collections/CollectionMoveNote";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
@@ -23,13 +24,14 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
   return <>{operations.map((operation, index) => <span key={operation.name}>{index ? ", " : ""}<span className="font-mono">{operation.name}</span> ({operation.readOnly ? "reads only" : "changes data"})</span>)}</>;
 }
 
-function DatasetApproval({ capability, workspaceId, reportError }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError }) {
-  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "failed" | "available" } | null>(null);
+/** `moves`: publishing moves a Collection on this computer to the workspace's server, which this says first. */
+function DatasetApproval({ capability, workspaceId, reportError, moves = false }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError; moves?: boolean }) {
+  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "failed" | "available"; server: CollectionServer | null } | null>(null);
   const [reload, setReload] = useState(0);
   const report = useRef(reportError);
   report.current = reportError;
   useEffect(() => {
-    let current = true;
+    let current = true, failure = "dohc could not find this Collection.";
     setAddress(null);
     void (async () => {
       let after: string | undefined;
@@ -39,19 +41,28 @@ function DatasetApproval({ capability, workspaceId, reportError }: { capability:
         if (!current) return;
         if (page.kind !== "list") throw Error("dohc could not find this Collection.");
         const dataset = page.datasets.find(value => value.datasetId === capability.datasetId);
-        if (dataset) { setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath, status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing") }); return; }
+        if (dataset) {
+          failure = "dohc could not check where this Collection is.";
+          const access = moves && dataset.datasetPath
+            ? await bridge().dataset({ action: "permissions", workspaceId, datasetPath: dataset.datasetPath, expectedDatasetId: capability.datasetId, limit: 1 }) : null;
+          if (!current) return;
+          const place = access?.kind === "permissions" ? access.place : undefined;
+          setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath, status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
+            server: place?.kind === "here" ? place.server : null });
+          return;
+        }
         after = page.nextCursor ?? undefined;
         if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
         if (after) seen.add(after);
       } while (after);
-      if (current) setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
+      if (current) setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing", server: null });
     })().catch(error => {
       if (!current) return;
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
-      report.current("dohc could not find this Collection.", error, () => { if (current) setReload(value => value + 1); });
+      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed", server: null });
+      report.current(failure, error, () => { if (current) setReload(value => value + 1); });
     });
     return () => { current = false; };
-  }, [workspaceId, capability.datasetId, reload]);
+  }, [workspaceId, capability.datasetId, moves, reload]);
   const found = address?.workspaceId === workspaceId && address.datasetId === capability.datasetId ? address : null;
   return <div data-testid="app-publication-capability" className="space-y-2">
     <p className="m-0 font-medium">{capability.name}</p>
@@ -64,6 +75,7 @@ function DatasetApproval({ capability, workspaceId, reportError }: { capability:
     </dl>
     {capability.linkReads?.length ? <p className="m-0 text-[12px]">Approved link reads: {capability.operations.filter(operation => capability.linkReads!.some(read => read.operationId === operation.operationId)).map(operation => `${operation.name} (${operation.fields?.map(field => field.name).join(", ")})`).join("; ")}. Unpublish to withdraw access.</p> : null}
     <p className="m-0 text-[12px]">Approving this app grants these actions. It does not change the Collection's rules.</p>
+    {found?.server ? <CollectionMoveNote action="Publishing" server={found.server} /> : null}
     <details className="text-[12px]"><summary className="cursor-pointer">Collection revision</summary>
       <p className="break-all font-mono">Revision {capability.revision}</p>
       <p className="break-all font-mono">{capability.revisionSha256}</p>
@@ -499,7 +511,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} moves={!prepared.local} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
             <CollectionApproval key={capability.collectionPath} capability={capability} local={prepared.local === true} />)}
           {!prepared.local && !reactivating ? prepared.capabilities.filter(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.access === "helper" && operation.fields !== undefined)).map(capability => capability.kind === "dataset" ? <fieldset key={capability.datasetId} disabled={!!busy} className="space-y-2 border-0 p-0">
             <legend className="text-[13px] font-medium text-ink">Allow people with the link to read</legend>

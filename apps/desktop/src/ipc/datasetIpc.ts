@@ -2,7 +2,7 @@ import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
-import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere, type DatasetPlace } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -59,6 +59,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
+  /** Where a Collection is: only on this computer, or on the workspace's server. */
+  collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
+  /** Moves a Collection that is only on this computer to the workspace's server for good. */
+  moveToServer?(workspace: W, datasetId: string, signal: AbortSignal): Promise<void>;
 }) {
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
@@ -330,11 +334,20 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }) };
       }
       if (input.action === "permissions") {
-        if (!("permissions" in data) || !data.permissions) throw new Error("Publish this Collection before managing shared access.");
-        const result = await data.permissions(input); current(); return { kind: "permissions" as const, ...result };
+        if (!("permissions" in data) || !data.permissions) throw new Error("Collection access is unavailable on this computer.");
+        const result = await data.permissions(input); current();
+        const place = await dependencies.collectionPlace?.(operation.workspace, input.datasetId, operation.signal); current();
+        return { kind: "permissions" as const, ...result, ...(place ? { place } : {}) };
       }
       if (input.action === "setGrant" || input.action === "removeGrant") {
-        if (!("setGrant" in data) || !data.setGrant) throw new Error("Publish this Collection before managing shared access.");
+        // A person reaches a Collection through the workspace's server, so it moves there first, once its owner agrees.
+        const place = input.action === "setGrant" ? await dependencies.collectionPlace?.(operation.workspace, input.datasetId, operation.signal) : undefined; current();
+        if (input.action === "setGrant" && place?.kind === "here") {
+          if (!place.server || !dependencies.moveToServer) throw new Error("Sync this workspace with a server before giving a person access.");
+          if (!input.moveToServer) throw new Error(`Giving a person access moves this Collection to ${place.server.host}. It then works only while ${place.server.host} is reachable, and dohc can't move it back. Send moveToServer: true to agree.`);
+          await dependencies.moveToServer(operation.workspace, input.datasetId, operation.signal); current();
+        }
+        if (!("setGrant" in data) || !data.setGrant) throw new Error("Collection access is unavailable on this computer.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
       }
       if (input.action === "list") {

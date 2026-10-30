@@ -215,7 +215,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   if (dataset.archived) return <><div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
     <p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>
-    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}
+    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}</p>}
     {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
     <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
     {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}

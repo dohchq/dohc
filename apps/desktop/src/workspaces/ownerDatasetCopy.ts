@@ -19,6 +19,9 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
     void result.then(() => confirmations.delete(result), () => confirmations.delete(result));
     return result;
   };
+  // The server that holds this Collection, which it needs to change.
+  const host = new URL(options.origin).host;
+  const unreachable = () => Error(`This Collection needs ${host}, which dohc can't reach.`);
   const markerPath = join(options.directory, "archived.json");
   const binding = createHash("sha256").update(JSON.stringify([options.scope,options.ownerKey,new URL(options.origin).origin])).digest("hex");
   const markerSchema = z.object({ binding: z.literal(binding), dataset: z.unknown().transform(value => parseDatasetDescription(value)), savedAtMs: z.number().int().nonnegative() }).strict();
@@ -39,7 +42,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   };
   const clearArchive = async () => { await rm(markerPath,{force:true}); archived=null; };
   const revoke = async () => { denied=true; await metadataPending; await replica.revoke(); await clearArchive(); };
-  const archivedResult = () => archived && { dataset: { ...archived.dataset, archived:true }, copy:{offline:true,savedAtMs:archived.savedAtMs} };
+  const archivedResult = () => archived && { dataset: { ...archived.dataset, archived:true }, copy:{offline:true,savedAtMs:archived.savedAtMs,host} };
   return {
     // Called inside source requests. Revoke after catchUp settles, avoiding its serialized work queue.
     accessLost() { denied = true; },
@@ -87,8 +90,8 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         }
         if (offline && archived) return archivedResult()!;
         authorize(); const state = replica.state();
-        if (!state) throw Error("Download this Collection before opening it offline.");
-        return { dataset: describe(state.checkpoint.definitionJson), copy: { offline, savedAtMs: state.savedAtMs } };
+        if (!state) throw unreachable();
+        return { dataset: describe(state.checkpoint.definitionJson), copy: { offline, savedAtMs: state.savedAtMs, host } };
       };
       return {
         ...remote,
@@ -140,7 +143,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
               authorize();
               if (!(error instanceof TypeError) || !(captureError instanceof DatasetCopyOfflineError)) throw error;
               if (archived) return archivedResult()!.dataset;
-              const saved = replica.state(); if (!saved) throw captureError;
+              const saved = replica.state(); if (!saved) throw unreachable();
               return describe(saved.checkpoint.definitionJson);
             }
             throw error;
@@ -152,7 +155,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
           if ("archived" in state.dataset && state.dataset.archived === true) throw Error("This Collection is archived. Reconnect and restore it before using its records.");
           const operation = state.dataset.operations.find(operation => operation.operationId === input.operationId);
           if (!operation?.readOnly) {
-            if (state.copy.offline) throw Error("This Collection copy is read-only. Reconnect to make changes.");
+            if (state.copy.offline) throw Error(`dohc didn't save this change. This Collection is read-only until ${host} is reachable.`);
             const result = await remote.invoke(input); authorize(); return result;
           }
           const result = await replica.read(input); authorize();
