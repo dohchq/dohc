@@ -18,16 +18,19 @@ it("says where a Collection is, and asks what the server runs only for one with 
 });
 
 // A transfer record that reads `before` until the move ends, then `after`.
-function moving(before: DatasetTransferStatus | null, options: { after?: FinishedTransfer; inFlight?: Promise<DatasetTransferStatus>; relayUrl?: string } = {}) {
+function moving(before: DatasetTransferStatus | null, options: { after?: FinishedTransfer; inFlight?: Promise<DatasetTransferStatus>; relayUrl?: string; noSession?: Error } = {}) {
   let current = before;
   const local = {
     transferStatus: vi.fn(() => current),
     transferInFlight: vi.fn(() => options.inFlight?.then(value => { current = options.after ?? null; return value; }) ?? null),
     transferToShared: vi.fn(async (input: { targetOrigin: string }) => { current = options.after ?? null; return { ...options.after!, targetOrigin: input.targetOrigin }; }),
   };
-  const server = vi.fn(async () => ({ credentials: { serverUrl: "https://account.example.test", relayUrl: options.relayUrl ?? "https://sync.example.test", token: "t", userId: "u", email: "u@example.test" }, credentialGeneration: 1 }));
-  const finish = () => finishedTransfer({ local, workspaceId: "w", datasetId: "d", server, currentCredentialGeneration: () => 1,
-    relayStream: async () => { throw Error("Nothing streams in this test."); }, signal: new AbortController().signal });
+  const server = vi.fn(async () => {
+    if (options.noSession) throw options.noSession;
+    return { credentials: { serverUrl: "https://account.example.test", relayUrl: options.relayUrl ?? "https://sync.example.test", token: "t", userId: "u", email: "u@example.test" }, credentialGeneration: 1 };
+  });
+  const finish = (signal = new AbortController().signal) => finishedTransfer({ local, workspaceId: "w", datasetId: "d", server, currentCredentialGeneration: () => 1,
+    relayStream: async () => { throw Error("Nothing streams in this test."); }, signal });
   return { local, server, finish };
 }
 
@@ -56,6 +59,31 @@ it("waits for the move this app is running instead of refusing the read", async 
   expect(local.transferToShared).not.toHaveBeenCalled();
 });
 
+it("waits for the move this app is running while it prepares its archive, before its transfer record exists", async () => {
+  let end!: (value: DatasetTransferStatus) => void;
+  const { finish } = moving(null, { after: transfer("imported"), inFlight: new Promise(resolve => { end = resolve; }) });
+  const read = finish();
+  end(transfer("imported"));
+  await expect(read).resolves.toMatchObject({ state: "imported" });
+});
+
+it("reads the Collection on this computer when the move this app is running stops before its transfer record exists", async () => {
+  const { finish } = moving(null, { inFlight: Promise.reject(Error("The Collection changed while it was being exported. Retry this transfer.")) });
+  await expect(finish()).resolves.toBeNull();
+});
+
+it("stops waiting when the read is cancelled, and leaves the move running", async () => {
+  let end!: (value: DatasetTransferStatus) => void;
+  const move = new Promise<DatasetTransferStatus>(resolve => { end = resolve; });
+  const { finish } = moving(transfer("ready"), { after: transfer("imported"), inFlight: move });
+  const reader = new AbortController();
+  const read = finish(reader.signal);
+  reader.abort(Error("The read was cancelled."));
+  await expect(read).rejects.toThrow("The read was cancelled.");
+  end(transfer("imported"));
+  await expect(move).resolves.toMatchObject({ state: "imported" });
+});
+
 it("fails a read with the move's own error when the move this app is running fails", async () => {
   const { finish } = moving(transfer("ready"), { inFlight: Promise.reject(Error("The server stopped answering.")) });
   await expect(finish()).rejects.toThrow("The server stopped answering.");
@@ -69,6 +97,12 @@ it("resumes a move that stopped partway to the same server", async () => {
 
 it("keeps refusing a move to a server this workspace no longer uses, and names that server", async () => {
   const { local, finish } = moving(transfer("ready"), { after: transfer("imported"), relayUrl: "https://other.example.test" });
+  await expect(finish()).rejects.toThrow("This Collection is moving to sync.example.test. Sign in to sync.example.test to finish the move.");
+  expect(local.transferToShared).not.toHaveBeenCalled();
+});
+
+it("names the server a move is going to when this workspace has no session for it", async () => {
+  const { local, finish } = moving(transfer("ready"), { after: transfer("imported"), noSession: Error("Sync this workspace before sharing.") });
   await expect(finish()).rejects.toThrow("This Collection is moving to sync.example.test. Sign in to sync.example.test to finish the move.");
   expect(local.transferToShared).not.toHaveBeenCalled();
 });

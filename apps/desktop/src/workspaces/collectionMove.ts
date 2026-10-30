@@ -46,9 +46,9 @@ export async function moveCollectionToServer(input: {
 
 /**
  * A Collection's transfer record once its move has finished, or null for one
- * only on this computer. A read waits for the move this app is running. A move
- * that stopped partway resumes to the same server, because its owner agreed to
- * the move before it began.
+ * only on this computer. A read waits for the move this app is running, even
+ * one still preparing its archive. A move that stopped partway resumes to the
+ * same server, because its owner agreed to the move before it began.
  */
 export async function finishedTransfer(input: {
   local: Pick<LocalDatasetHost, "transferStatus" | "transferInFlight" | "transferToShared">;
@@ -59,19 +59,30 @@ export async function finishedTransfer(input: {
   relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
   signal: AbortSignal;
 }): Promise<FinishedTransfer | null> {
+  const moving = input.local.transferInFlight(input.datasetId);
+  const failure = moving ? await abortable(moving, input.signal).then(() => null, (error: unknown) => error) : null;
+  input.signal.throwIfAborted();
   const transfer = input.local.transferStatus(input.datasetId);
   if (!transfer || transfer.state === "imported") return transfer as FinishedTransfer | null;
-  const moving = input.local.transferInFlight(input.datasetId);
-  if (moving) await moving;
-  else {
-    const { credentials, credentialGeneration } = await input.server();
-    input.signal.throwIfAborted();
-    const host = new URL(transfer.targetOrigin).host;
-    if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`);
-    await moveCollectionToServer({ ...input, credentials, credentialGeneration });
-  }
+  if (moving) throw failure ?? new Error("This Collection's move didn't finish. Try again.");
+  const host = new URL(transfer.targetOrigin).host;
+  const needsHost = (cause?: unknown) => new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`, { cause });
+  const { credentials, credentialGeneration } = await input.server().catch((error: unknown) => { throw needsHost(error); });
+  input.signal.throwIfAborted();
+  if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw needsHost();
+  await moveCollectionToServer({ ...input, credentials, credentialGeneration });
   input.signal.throwIfAborted();
   const finished = input.local.transferStatus(input.datasetId);
   if (finished?.state !== "imported") throw new Error("This Collection's move didn't finish. Try again.");
   return finished as FinishedTransfer;
+}
+
+// Settles with the work, or rejects when the signal aborts. Aborting stops only the wait, not the work.
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
