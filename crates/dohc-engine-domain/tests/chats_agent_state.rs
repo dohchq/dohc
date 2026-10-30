@@ -690,7 +690,14 @@ fn recent_dispatch_count_skips_runs_a_person_started_in_their_agent_dm_conversat
             ..start_input("wake", "wake-1", ChatActorKind::Agent, 13)
         };
         chats.start_channel_thread(&wake, &NO_FAULTS).expect("wake");
-        send(&mut chats, "wake", "wake-reply", ChatActorKind::Human, None, 14);
+        send(
+            &mut chats,
+            "wake",
+            "wake-reply",
+            ChatActorKind::Human,
+            None,
+            14,
+        );
         conversation
     };
     for (index, (trigger, thread)) in [
@@ -1156,7 +1163,14 @@ fn claim_folds_pending_triggers_only_from_the_same_place() {
     base_chat(&mut store);
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "root-a", ChatActorKind::Human, 10);
-    send(&mut chats, "thread", "root-b", ChatActorKind::Human, None, 11);
+    send(
+        &mut chats,
+        "thread",
+        "root-b",
+        ChatActorKind::Human,
+        None,
+        11,
+    );
     for (message, parent, at) in [
         ("main-1", None, 12),
         ("main-2", None, 13),
@@ -1164,7 +1178,14 @@ fn claim_folds_pending_triggers_only_from_the_same_place() {
         ("a-2", Some("root-a"), 15),
         ("b-1", Some("root-b"), 16),
     ] {
-        send(&mut chats, "thread", message, ChatActorKind::Human, parent, at);
+        send(
+            &mut chats,
+            "thread",
+            message,
+            ChatActorKind::Human,
+            parent,
+            at,
+        );
         chats
             .enqueue_dispatch(WS, message, "default", "thread", at, &NO_FAULTS)
             .expect("enqueue");
