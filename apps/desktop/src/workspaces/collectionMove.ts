@@ -4,21 +4,21 @@ import type { LocalDatasetHost } from "./localDatasetHost";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
 import { createRemoteDatasetTransferTarget } from "./remoteDataset";
 
+/** The transfer record of a Collection whose move to a server finished. */
+export type FinishedTransfer = DatasetTransferStatus & { state: "imported" };
+
 /**
- * Where a Collection is, from its transfer record on this computer.
+ * Where a Collection is, from its finished transfer record on this computer.
  * `relayUrl` is the workspace's server, or null when it has none. dohc asks
  * what the server runs only for a Collection with automations.
  */
 export async function collectionPlace(input: {
-  transfer: DatasetTransferStatus | null;
+  transfer: FinishedTransfer | null;
   relayUrl: string | null;
   automations(): Promise<{ automations: number; scheduledAutomations: number }>;
   runs(): Promise<"all" | "no-schedules" | "off" | null>;
 }): Promise<DatasetPlace> {
-  if (input.transfer) {
-    if (input.transfer.state !== "imported") throw new Error("This Collection is transferring. Wait for the transfer to finish, then retry.");
-    return { kind: "server", host: new URL(input.transfer.targetOrigin).host };
-  }
+  if (input.transfer) return { kind: "server", host: new URL(input.transfer.targetOrigin).host };
   if (!input.relayUrl) return { kind: "here", server: null };
   const counts = await input.automations();
   return { kind: "here", server: { host: new URL(input.relayUrl).host, runs: counts.automations ? await input.runs() : null, ...counts } };
@@ -42,4 +42,36 @@ export async function moveCollectionToServer(input: {
     credentials: input.credentials, credentialGeneration: input.credentialGeneration, currentCredentialGeneration: input.currentCredentialGeneration,
     signal: input.signal, assertCurrent: () => input.signal.throwIfAborted(), relayStream: input.relayStream });
   await input.local.transferToShared({ datasetId: input.datasetId, targetOrigin, target, signal: input.signal });
+}
+
+/**
+ * A Collection's transfer record once its move has finished, or null for one
+ * only on this computer. A read waits for the move this app is running. A move
+ * that stopped partway resumes to the same server, because its owner agreed to
+ * the move before it began.
+ */
+export async function finishedTransfer(input: {
+  local: Pick<LocalDatasetHost, "transferStatus" | "transferInFlight" | "transferToShared">;
+  workspaceId: string; datasetId: string;
+  /** The workspace's server session, asked for only to resume a move. */
+  server(): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
+  currentCredentialGeneration(): number;
+  relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
+  signal: AbortSignal;
+}): Promise<FinishedTransfer | null> {
+  const transfer = input.local.transferStatus(input.datasetId);
+  if (!transfer || transfer.state === "imported") return transfer as FinishedTransfer | null;
+  const moving = input.local.transferInFlight(input.datasetId);
+  if (moving) await moving;
+  else {
+    const { credentials, credentialGeneration } = await input.server();
+    input.signal.throwIfAborted();
+    const host = new URL(transfer.targetOrigin).host;
+    if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`);
+    await moveCollectionToServer({ ...input, credentials, credentialGeneration });
+  }
+  input.signal.throwIfAborted();
+  const finished = input.local.transferStatus(input.datasetId);
+  if (finished?.state !== "imported") throw new Error("This Collection's move didn't finish. Try again.");
+  return finished as FinishedTransfer;
 }
