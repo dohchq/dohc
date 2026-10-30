@@ -3174,10 +3174,13 @@ export function ChatsView(props: {
     commitShareListing(ticket, session, shares);
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
   // A notice's Open can name an invitation that arrived after Chats last
-  // listed its shares, so each reveal reads the listing again.
+  // listed it. Each reveal reads the shares again and pulls message requests,
+  // whose poll stops while a conversation tab is open.
   useEffect(() => {
-    if (revealInvitation !== undefined) void refreshShares();
-  }, [refreshShares, revealInvitation]);
+    if (revealInvitation === undefined) return;
+    void refreshShares();
+    void refreshDms("open");
+  }, [refreshDms, refreshShares, revealInvitation]);
 
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic

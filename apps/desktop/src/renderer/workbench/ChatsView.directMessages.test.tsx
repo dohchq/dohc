@@ -47,6 +47,33 @@ describe("ChatsView direct messages", () => {
     expect(row.className).not.toContain("bg-selected");
   });
 
+  it("pulls message requests for a request a notice's Open names that arrived while a conversation tab held the polls", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [], pending: [], declined: [] });
+    const props = {
+      workspaceId: "workspace-a",
+      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+      variant: "panel" as const,
+      suspendPolling: true,
+    };
+    const { rerender } = render(<ChatsView {...props} />);
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
+    await act(async () => undefined);
+    bridgeMock.syncDms.mockClear();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
+      declined: [],
+    });
+    const onInvitationRevealed = vi.fn();
+    rerender(<ChatsView {...props} revealInvitation={{ shareId: "share-dm-request", inputs: inputCount() }} onInvitationRevealed={onInvitationRevealed} />);
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", poll: true });
+    expect(document.activeElement).toBe(screen.getByTestId("chats-dm-request-accept"));
+  });
+
   it("accepts a message request elsewhere without navigating this workspace", async () => {
     const user = userEvent.setup();
     const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
