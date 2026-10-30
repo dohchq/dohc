@@ -142,6 +142,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let labelAlpha = new Float32Array(0);
   let lastDraw = 0;
   let taken = new Uint8Array(0);
+  // How many nodes cover each label grid cell, so labels keep clear of dots.
+  let dots = new Uint8Array(0);
   let placed = new Uint8Array(0);
   // Neighbours as compressed rows: node i's are adjacency[offsets[i]..offsets[i+1]].
   let offsets = new Uint32Array(1);
@@ -538,7 +540,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // and fades in or out over FADE_MS, so a still graph has no half-faded
     // labels. The lit node, the open page and the lit neighbours claim space
     // first; a label that would overlap a placed one or run off the canvas is
-    // left out. A halo in the background colour keeps text clear of links.
+    // left out, and so is one that would cross another node's dot. A halo in
+    // the background colour keeps text clear of links.
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
     ctx.textAlign = "center";
@@ -547,8 +550,22 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ctx.lineWidth = 3;
     ctx.strokeStyle = palette.bg;
     const cols = Math.ceil(width / CELL), rows = Math.ceil(height / CELL);
-    if (taken.length < cols * rows) taken = new Uint8Array(cols * rows);
-    else taken.fill(0, 0, cols * rows);
+    if (taken.length < cols * rows) {
+      taken = new Uint8Array(cols * rows);
+      dots = new Uint8Array(cols * rows);
+    } else {
+      taken.fill(0, 0, cols * rows);
+      dots.fill(0, 0, cols * rows);
+    }
+    // The grid cells a node's dot covers.
+    const dotCol = (i: number, side: number) => Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * screenR(i)) / CELL)));
+    const dotRow = (i: number, side: number) => Math.max(0, Math.min(rows - 1, Math.floor((sy(i) + side * screenR(i)) / CELL)));
+    for (let i = 0; i < count; i++) {
+      if (!visibleNode(i)) continue;
+      for (let r = dotRow(i, -1); r <= dotRow(i, 1); r++) {
+        for (let c = dotCol(i, -1); c <= dotCol(i, 1); c++) if (dots[r * cols + c]! < 255) dots[r * cols + c]!++;
+      }
+    }
     placed = placed.length < count ? new Uint8Array(count) : placed.fill(0, 0, count);
     let drawn = 0;
     let labelsFading = false;
@@ -569,7 +586,14 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
         c1 = Math.floor((left + w) / CELL);
         r0 = Math.floor(top / CELL);
         r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
-        for (let r = r0; fits && r <= r1; r++) for (let c = c0; c <= c1; c++) if (taken[r * cols + c]) fits = false;
+        // The label may touch its own node's dot, not another's.
+        const a0 = dotCol(i, -1), a1 = dotCol(i, 1), b0 = dotRow(i, -1), b1 = dotRow(i, 1);
+        for (let r = r0; fits && r <= r1; r++) {
+          for (let c = c0; c <= c1; c++) {
+            const mine = r >= b0 && r <= b1 && c >= a0 && c <= a1 ? 1 : 0;
+            if (taken[r * cols + c] || dots[r * cols + c]! > mine) fits = false;
+          }
+        }
       }
       if (!fits) {
         labelAlpha[i] = 0;
