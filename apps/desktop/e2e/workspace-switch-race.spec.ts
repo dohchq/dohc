@@ -208,7 +208,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     await revealExplorerPath(page, "b-note.md");
     await explorerRow(page, "b-note.md").click();
     await openAboutPanel(page);
-    await expect(page.getByTestId("linked-chats-panel")).toBeVisible();
+    await expect(page.getByTestId("about-chats-count")).toHaveText("0");
     await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
     await expect(page.getByText("Doc zero deep dive")).toHaveCount(0);
 

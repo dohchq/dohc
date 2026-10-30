@@ -12,7 +12,7 @@ import { ipcWireError } from "../../ipc/errorWords";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
-import { formatShortTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
 import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
@@ -189,7 +189,7 @@ describe("About Access", () => {
     expect(screen.queryByTestId("about-access-empty")).toBeNull();
     expect(screen.queryByTestId("about-access-count")).toBeNull();
     await act(async () => pending.resolve(answer()));
-    expect(screen.getByTestId("about-access-answer")).toBeTruthy();
+    expect(screen.getByTestId("about-access-empty")).toBeTruthy();
   });
 
   it("lists each grant with its person or link and its level, and counts only active grants", async () => {
@@ -207,8 +207,9 @@ describe("About Access", () => {
     const result = await screen.findByTestId("about-access-answer");
     expect(result.dataset.freshness).toBe("fresh");
     expect(result.dataset.coverage).toBe("granted");
-    expect(screen.getByTestId("about-access-freshness").textContent).toBe("Checked");
-    expect(within(result).getByText(formatShortTime(CHECKED_AT))).toBeTruthy();
+    // A fresh answer keeps when it was checked in its head's tooltip.
+    expect(screen.queryByTestId("about-access-freshness")).toBeNull();
+    expect(screen.getByTitle(`Checked ${formatChatTime(CHECKED_AT).label}`)).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
     expect(rows.map((row) => row.textContent)).toEqual([
       "Anyone with the link", "Ssam@example.com", "Kkim@example.comended", "Llee@example.comended",
@@ -1168,14 +1169,14 @@ describe("About Links", () => {
     }
   });
 
-  it("draws only the head, with no count, when nothing links here", async () => {
+  it("draws only the head, with a 0 and no chevron, when nothing links here", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([]));
     bridgeMock.chatFileMentionsPage.mockResolvedValue(chatPage([]));
     render(<Links chats />);
     await waitFor(() => expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalled());
     await act(async () => {});
-    expect(sectionBody("links").textContent).toBe("");
-    expect(screen.queryByTestId("about-links-count")).toBeNull();
+    expect(screen.getByTestId("about-links-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
   it("reads nothing for a file under shared-with-me/, and says dohc does not list its links yet", async () => {
@@ -1248,11 +1249,11 @@ describe("About Links", () => {
     render(<Links chats />);
     const rows = await screen.findAllByTestId("chat-file-mention");
     expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
-    // Where it was said, who said what, then when.
+    // Where it was said and when, then who said what.
     const when = formatShortTime(CHECKED_AT);
     expect(rows.map((row) => row.textContent)).toEqual([
-      `generalSam See docs/plan.md general${when}`,
-      `Thread file-threadSam See docs/plan.md file-thread${when}`,
+      `general${when}Sam See docs/plan.md general`,
+      `Thread file-thread${when}Sam See docs/plan.md file-thread`,
     ]);
     expect(rows[0]!.querySelector("time")?.getAttribute("title")).toBeTruthy();
     expect(screen.getByTestId("about-links-count").textContent).toBe("3");
@@ -1436,8 +1437,8 @@ describe("About History", () => {
     expect(loadingLines("history")).toHaveLength(2);
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
-    expect(sectionBody("history").textContent).toBe("");
-    expect(screen.queryByTestId("about-history-count")).toBeNull();
+    expect(screen.getByTestId("about-history-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-history-toggle")).toBeNull();
   });
 
   it("reports a failed read to the shell and reads again on Try again", async () => {

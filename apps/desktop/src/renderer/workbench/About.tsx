@@ -1378,12 +1378,15 @@ export function AboutAccessView(props: {
   const { view } = props;
   const noun = props.noun ?? "file";
   const empty = view.status === "ready" ? emptyWithin(view.answer, noun) : null;
-  // A fresh answer says nothing about itself; its head's tooltip holds when
-  // main checked it. A file only you can open says so in its head.
-  const fresh = view.status === "ready" && empty !== null && view.answer.freshness === "fresh";
-  const checkedAtMs = view.status === "ready" ? view.answer.checkedAtMs : null;
-  const onlyYou = fresh && view.status === "ready" && empty?.only === true && view.answer.rows.length === 0 &&
-    view.answer.coverage.complete && view.answer.nextCursor === null;
+  // A fresh answer with something to show says nothing about itself; its
+  // head's tooltip holds when main checked it. A file only you can open says
+  // so in its head. A listing that did not finish still shows its check.
+  const answer = view.status === "ready" && empty !== null ? view.answer : null;
+  const fresh = answer?.freshness === "fresh";
+  const listedNone = answer !== null && answer.rows.length === 0 && empty?.only === true;
+  const listedAll = answer !== null && answer.coverage.complete && answer.nextCursor === null;
+  const quietCheck = fresh && !(listedNone && !listedAll);
+  const onlyYou = fresh && listedNone && listedAll;
   return (
     <AboutSection
       id="access"
@@ -1391,7 +1394,7 @@ export function AboutAccessView(props: {
       count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
       empty={onlyYou}
       summary={onlyYou ? <OnlyYou /> : undefined}
-      {...(fresh && checkedAtMs !== null ? { title: `Checked ${formatChatTime(checkedAtMs).label}` } : {})}
+      {...(quietCheck && answer !== null && answer.checkedAtMs !== null ? { title: `Checked ${formatChatTime(answer.checkedAtMs).label}` } : {})}
       expanded={props.expanded}
       onToggle={props.onToggle}
       actions={props.onShare ? (
@@ -1414,7 +1417,7 @@ export function AboutAccessView(props: {
               answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>
-              {fresh ? null : <AccessChecked testId="about-access-freshness" answer={view.answer} />}
+              {quietCheck ? null : <AccessChecked testId="about-access-freshness" answer={view.answer} />}
               {view.answer.rows.length > 0 ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
               ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (

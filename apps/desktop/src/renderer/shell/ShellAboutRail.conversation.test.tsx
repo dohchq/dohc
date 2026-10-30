@@ -71,8 +71,6 @@ function linksPage(entries: Mention[], overrides: Partial<Page> = {}): Page {
     indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null, ...overrides,
   };
 }
-const linksBody = () =>
-  document.getElementById(screen.getByTestId("about-links-toggle").getAttribute("aria-controls")!)!;
 // Each row: its file, then who mentioned it.
 const linkRows = () => screen.queryAllByTestId("about-conversation-link").map((row) =>
   [row.dataset.path, within(row).getByTestId("about-conversation-link-authors").textContent]);
@@ -326,7 +324,8 @@ describe("About for an open conversation", () => {
   });
 
   it("keeps Access open across conversations, though the next one loads first", async () => {
-    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    // A stale answer keeps its check line, so the head stays a disclosure.
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...answer(), freshness: "stale" });
     publish("workspace-a", GENERAL, conversation({}));
     const { rerender } = render(<Rail />);
     await userEvent.setup().click(await screen.findByTestId("about-access-toggle"));
@@ -435,8 +434,8 @@ describe("Links for an open conversation", () => {
     expect(count()).toBe("0+");
     await userEvent.setup().click(more);
     await waitFor(() => expect(screen.queryByTestId("about-conversation-links-more")).toBeNull());
-    expect(count()).toBeUndefined();
-    expect(linksBody().textContent).toBe("");
+    expect(count()).toBe("0");
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
   it("names an agent or an automation as one to a screen reader, as the avatar shows it", async () => {
@@ -460,8 +459,8 @@ describe("Links for an open conversation", () => {
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     await waitFor(() => expect(bridgeMock.chatLinks).toHaveBeenCalled());
-    await waitFor(() => expect(linksBody().textContent).toBe(""));
-    expect(count()).toBeUndefined();
+    await waitFor(() => expect(count()).toBe("0"));
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
     expect(screen.queryByText(/salaries/)).toBeNull();
   });
 
@@ -577,6 +576,7 @@ describe("Links for an open conversation", () => {
   );
 
   it("reads nothing before the page says what it shows, or while Links is closed, which it stays", async () => {
+    bridgeMock.chatLinks.mockResolvedValue(linksPage([mention("notes/plan.md", SAM, 1)]));
     const { rerender } = render(<Rail />);
     expect(screen.getByText("Loading About...")).toBeTruthy();
     expect(bridgeMock.chatLinks).not.toHaveBeenCalled();

@@ -210,8 +210,8 @@ describe("LinkedChatsPanel startup", () => {
       fileRead.resolve({ fileObjectId: "object-1", threads: [] });
       await fileRead.promise;
     });
-    expect(screen.getByTestId("linked-chats-panel").textContent).toBe("");
-    expect(screen.queryByTestId("about-chats-count")).toBeNull();
+    expect(screen.getByTestId("about-chats-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-chats-toggle")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("ready:object-1");
   });
 
@@ -245,7 +245,7 @@ describe("LinkedChatsPanel startup", () => {
     });
 
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
   });
 
   it("reports an ordinary load failure through the shell once, without retrying it", async () => {
@@ -333,7 +333,7 @@ describe("LinkedChatsPanel startup", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(302);
   });
 
@@ -362,7 +362,7 @@ describe("LinkedChatsPanel startup", () => {
       />,
     );
     await act(async () => undefined);
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
@@ -389,7 +389,7 @@ describe("LinkedChatsPanel startup", () => {
 
     const retry = await screen.findByText("Try again");
     await act(async () => retry.click());
-    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
+    expect(await screen.findByTestId("about-chats-count")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
   });
 
@@ -428,7 +428,7 @@ describe("LinkedChatsPanel startup", () => {
       path === "docs/old.md" ? forOld.promise : Promise.resolve({ fileObjectId: "object-2", threads: [] }));
     const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/old.md" onError={() => undefined} />);
     view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/new.md" onError={() => undefined} />);
-    await screen.findByTestId("linked-chats-panel");
+    await screen.findByTestId("about-chats-count");
     const clears = notices.clear.mock.calls.length;
     await act(async () => {
       forOld.reject(new Error("offline"));
@@ -495,7 +495,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
 
     // The remounted panel lands on the thread LIST — the stale search thread
     // must not re-open (no second listChatMessages call).
-    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("about-chats-count")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
   });

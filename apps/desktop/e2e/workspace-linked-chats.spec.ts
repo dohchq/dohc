@@ -39,7 +39,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await openAboutPanel(page);
 
     // Calm empty state, then create.
-    await expect(page.getByTestId("linked-chats-panel")).toBeVisible();
+    await expect(page.getByTestId("about-chats-count")).toHaveText("0");
     await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
     // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
