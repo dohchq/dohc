@@ -10,14 +10,14 @@ import { createHash } from "node:crypto";
  * Who made one contribution, as a moment names an author: the one author its
  * evidence credits, or the unattributed marker when it credits nobody.
  */
-export type RetainedAuthor =
+type RetainedAuthor =
   | { kind: "unattributed" }
   | { kind: "agent"; agentId: string; onBehalfOf?: string; depth?: number }
   | { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number }
   | { kind: "human"; humanId: string; onBehalfOf?: string };
 
 /** Where a piece of retained work is, without who made it. */
-export type ContributionLocator =
+type ContributionLocator =
   | { kind: "carried"; deliveryId: string; updateDigest: string; journalCursor: number }
   | { kind: "outbox"; outboxId: string; sequence: number; deliveryId: string; updateDigest: string };
 
@@ -29,7 +29,7 @@ export interface UnprovenCommitment {
   digest: string;
 }
 
-export interface ProtectedTail {
+interface ProtectedTail {
   namespace: string;
   activationId: string;
   /** What the tail's release bound; null when it does not read. */
@@ -176,9 +176,6 @@ function contribution(value: unknown): RetainedContribution {
   if (!Array.isArray(authors) || authors.length !== 1) throw invalid("authors");
   return {...locator(located), authors: [author(authors[0])]};
 }
-
-/** Where a finding's contribution is, with exactly the contract's fields. */
-export const decodeContributionLocator = (value: unknown): ContributionLocator => locator(value);
 
 /** A retained contribution, authors included, with exactly the contract's fields. */
 export const decodeRetainedContribution = (value: unknown): RetainedContribution => contribution(value);
