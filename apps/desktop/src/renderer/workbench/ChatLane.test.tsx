@@ -641,6 +641,22 @@ describe("ChatLane", () => {
     }));
   });
 
+  it("answers a poll in an earlier post when the DM has no chat yet", async () => {
+    bridgeMock.listChannelThreads.mockImplementation(async ({ lane }) => ({ threads: lane === "posts" ? [thread({ id: "post-1" })] : [] }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "poll", threadId: "post-1", body: "Which day?", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    const decision = { threadId: "post-1", messageId: "poll", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", threadId: "post-1", body: "Monday" }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "post-1", body: "Monday",
+      resolves: { messageId: "poll", chosenOption: "Monday" },
+    }));
+  });
+
   it("drops the poll with the draft when the group changes", async () => {
     const view = render(lane());
     await screen.findByText("Old message");

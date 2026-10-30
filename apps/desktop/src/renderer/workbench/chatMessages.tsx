@@ -712,7 +712,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           {/* A continued message's time sits in the face's column, ending at
               its edge, so "12:45" fits at every hour. The full time is its
               tooltip, and a screen reader reads it with AM or PM. */}
-          <span className="flex justify-end">
+          <span className="flex items-start justify-end">
             {continues ? (
               <>
                 <time
