@@ -5,7 +5,7 @@ import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createA
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously"; url?: string }) => {
-  window: Window & typeof globalThis & { value?: string; log?: string[] };
+  window: Window & typeof globalThis & { value?: string; log?: string[]; routedSaw?: boolean };
 } };
 
 const limits = { maxBundleBytes: 4096, maxDocumentBytes: 8192 };
@@ -55,15 +55,18 @@ describe("compiled app document", () => {
     const links = '<a id="out" href="https://example.org/page"><b>Out</b></a><a id="top" target="_top" href="https://example.org/top">Top</a>' +
       '<a id="own" href="/other">Own</a><a id="blank" target="_blank" href="https://example.org/blank">Blank</a>' +
       '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>' +
-      '<a id="handled" href="https://example.org/handled">Handled</a>';
+      '<a id="handled" href="https://example.org/handled">Handled</a><a id="routed" href="https://example.org/routed">Routed</a>';
     const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};` +
-      'document.getElementById("handled").addEventListener("click",e=>e.preventDefault());')], limits);
+      'document.getElementById("handled").addEventListener("click",e=>e.preventDefault());' +
+      'addEventListener("click",e=>{if(e.target.id==="routed"){window.routedSaw=e.defaultPrevented;e.preventDefault();}});')], limits);
     const dom = new JSDOM(output.html, { runScripts: "dangerously", url: "https://app.example.net/bootstrap" });
     const opened: unknown[][] = [];
     dom.window.open = (...args: unknown[]) => { opened.push(args); return null; };
-    // The test's own listener comes last: it reads what dohc's did, then keeps jsdom from navigating.
+    // The test's own listener moves to the end on each click, as dohc's does, so it reads what dohc's did, then keeps
+    // jsdom from navigating.
     let prevented = false;
-    dom.window.addEventListener("click", event => { prevented = event.defaultPrevented; event.preventDefault(); });
+    const last = (event: Event) => { prevented = event.defaultPrevented; event.preventDefault(); };
+    dom.window.addEventListener("click", () => { dom.window.removeEventListener("click", last); dom.window.addEventListener("click", last); }, true);
     const click = (selector: string, init: MouseEventInit = {}) => {
       dom.window.document.querySelector(selector)!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
       return prevented;
@@ -75,6 +78,9 @@ describe("compiled app document", () => {
     expect(click("#out", { ctrlKey: true })).toBe(false);
     expect(click("#out", { button: 1 })).toBe(false);
     expect(click("#handled")).toBe(true);
+    // A listener the app adds on window decides before dohc's.
+    expect(click("#routed")).toBe(true);
+    expect(dom.window.routedSaw).toBe(false);
     expect(opened).toHaveLength(2);
     dom.window.close();
   });
@@ -113,7 +119,7 @@ describe("compiled app document", () => {
 
     it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
-      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>\{const link=[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
       expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
       expect(dom.window.document.title).toBe("Trip");

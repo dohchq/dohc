@@ -66,13 +66,14 @@ const attributeValue = (value: string) => value.replaceAll("&", "&amp;").replace
 
 // A plain link to another site would take the app's own frame there, and the launch page's frame-src refuses that,
 // so the link opens in a new tab, as one with target="_blank" does. Links the app handles itself, links with a
-// modifier key or download, and links to the launch page's own origin keep the browser's behavior. This runs
-// before the app's code, so its listener on window comes after the app's listeners on elements and document.
-const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
+// modifier key or download, and links to the launch page's own origin keep the browser's behavior. Each click moves
+// its listener to the end of window's list, so it decides after every listener the app has.
+const LINK_SCRIPT = '{const link=e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
   'if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.defaultPrevented||e.button!==0||e.ctrlKey||e.metaKey||' +
   'e.shiftKey||e.altKey||a.hasAttribute("download")||!["","_self","_parent","_top"].includes(a.target.toLowerCase()))return;' +
   'const u=new URL(a.href);if(!/^https?:$/.test(u.protocol)||u.origin===new URL(document.baseURI).origin)return;' +
-  'e.preventDefault();open(u.href,"_blank","noopener");});';
+  'e.preventDefault();open(u.href,"_blank","noopener");};' +
+  'addEventListener("click",()=>{removeEventListener("click",link);addEventListener("click",link);},true);}';
 
 /**
  * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
