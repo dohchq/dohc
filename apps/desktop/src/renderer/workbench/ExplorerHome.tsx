@@ -551,7 +551,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
             aria-label={section.label}
             className="mt-4 first:mt-0"
           >
-            <header data-testid={`${testId}-header`} className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover">
+            <header data-testid={`${testId}-header`} className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover">
               <button
                 type="button"
                 ref={(element) => registerRef(sectionKey, element)}
@@ -564,7 +564,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                   setFocusedKey(sectionKey);
                   toggleSection(section.id);
                 }}
-                className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted focus-visible:-outline-offset-2"
+                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
                 <span className="min-w-0 truncate">{section.label}</span>
                 {section.count ? (
@@ -614,7 +614,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                           tabIndex={tabbableKey === section.more.key ? 0 : -1}
                           onFocus={() => setFocusedKey(section.more!.key)}
                           onClick={section.more.onActivate}
-                          className="flex h-7 w-full items-center rounded-md px-2 text-left text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink focus-visible:-outline-offset-2"
+                          className="dohc-focus-row flex h-7 w-full items-center rounded-md px-2 text-left text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                         >
                           {section.more.label}
                         </button>
@@ -713,7 +713,7 @@ const HomeRow = memo(function HomeRow(props: {
           onDragLeave={drag?.leave}
           onDragEnd={drag?.end}
           style={{ paddingLeft: 8 + (row.depth - 1) * 20, paddingRight: 8 + trailing * 24 }}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left text-[13px] focus-visible:-outline-offset-2"
+          className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left text-[13px] ${active ? "bg-transparent" : ""}`}
         >
           {props.chevronSlot ? (
             row.folder ? (

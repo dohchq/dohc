@@ -86,20 +86,26 @@ export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border
 /**
  * One row. The list-row ladder: hover 7%, and 11% for the current or checked
  * row whatever has focus. A disabled row dims its icon and label, not the
- * row, so the focus outline and any second line keep their strength.
+ * row, so its fill and any second line keep their strength.
  */
 export const MENU_ROW =
   "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
 export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
- * aria-activedescendant naming the option: the selected fill and the accent
- * outline inside the row, whether the keyboard or the pointer moved it, since
- * it is where Enter acts. The fill alone measures about 1.2:1. A rest row
- * also takes `data-active:text-ink`; a destructive row keeps its color.
+ * aria-activedescendant naming the option: the selected fill, whether the
+ * keyboard or the pointer moved it, since it is where Enter acts. Nothing
+ * else in the list is filled, so the fill alone marks it. A rest row also
+ * takes `data-active:text-ink`; a destructive row keeps its color.
  */
-export const MENU_ACTIVE_OPTION =
-  "data-active:bg-selected data-active:outline-2 data-active:outline-accent data-active:-outline-offset-2";
+export const MENU_ACTIVE_OPTION = "data-active:bg-selected";
+/**
+ * The active option of a list that also fills its current row, such as Turn
+ * into. While the keyboard moves, it adds the row's accent line, which tells
+ * the two apart.
+ */
+export const MENU_ACTIVE_OPTION_BESIDE_CURRENT =
+  `${MENU_ACTIVE_OPTION} keyboard:data-active:outline-1 keyboard:data-active:-outline-offset-1 keyboard:data-active:outline-accent`;
 /** The leading icon column; a destructive row keeps its own color here. */
 export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
@@ -189,12 +195,11 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus is the active row: the
-// fill and the accent outline, whether the keyboard or the pointer moved it,
-// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
-// row's. The list scrolls, so the outline sits inside the row, where the
-// scroller cannot clip it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row, drawn
+// as MENU_ACTIVE_OPTION draws it: the fill alone, or the fill and the row's
+// line in a menu that also fills a current or checked row.
+const ROW = `${MENU_ROW} focus:bg-selected`;
+const ROW_FOCUS = { besideCurrent: "dohc-focus-row", alone: "focus-visible:outline-none" };
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
@@ -266,6 +271,7 @@ export function Menu(props: {
   const descriptionId = useId();
   // One leading column for every row when any row needs it, so labels line up.
   const lead = rows.some((row) => !isField(row) && (row.icon !== undefined || row.checked !== undefined));
+  const rowFocus = rows.some((row) => !isField(row) && (row.current || row.checked)) ? ROW_FOCUS.besideCurrent : ROW_FOCUS.alone;
 
   // Measured before the first paint, at its full height, so the side with
   // room is known before anything shows.
@@ -474,7 +480,7 @@ export function Menu(props: {
                   }
                 }}
                 onClick={() => pick(entry)}
-                className={`${ROW} ${tone.base} ${hover} ${describedBy ? "py-1" : ""}`}
+                className={`${ROW} ${rowFocus} ${tone.base} ${hover} ${describedBy ? "py-1" : ""}`}
               >
                 {lead ? (
                   // Beside a description, the icon sits on the label's line.

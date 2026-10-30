@@ -113,8 +113,8 @@ describe("PostCard as a feed row", () => {
     }
     // Inside the row's own box: the list paints each row in its own box.
     expect(classes).toEqual(expect.arrayContaining(["top-1", "right-9"]));
-    // The row's focus ring is drawn inside it, for the same reason.
-    expect(screen.getByTestId("chats-post-card").className).toContain("focus-visible:-outline-offset-2");
+    // The row's keyboard focus is drawn inside it, for the same reason.
+    expect(screen.getByTestId("chats-post-card").className.split(" ")).toContain("dohc-focus-row");
     await user.tab();
     expect(document.activeElement).toBe(screen.getByTestId("chats-post-card"));
     for (const id of ["chats-post-like", "chats-post-comment", "chats-post-bookmark"]) {
