@@ -55,9 +55,9 @@ async function expectLastRevealed(page: Page, list: Locator): Promise<void> {
   expect(await inView(last, list)).toBe(false);
   await page.keyboard.press("ArrowUp");
   await expect(last).toHaveAttribute("aria-selected", "true");
-  expect(await inView(last, list)).toBe(true);
+  await expect.poll(() => inView(last, list)).toBe(true);
   await page.keyboard.press("ArrowDown");
-  expect(await inView(list.getByRole("option").first(), list)).toBe(true);
+  await expect.poll(() => inView(list.getByRole("option").first(), list)).toBe(true);
 }
 
 test("the editor's listboxes keep the option Enter acts on in view as the arrows move it", async () => {
