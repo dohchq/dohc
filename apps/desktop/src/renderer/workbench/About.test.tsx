@@ -1392,12 +1392,13 @@ describe("About History", () => {
     );
     const onOpenMoment = vi.fn();
     render(<HistorySection onOpenMoment={onOpenMoment} />);
-    const rows = await screen.findAllByTestId("about-history-open");
+    const rows = await screen.findAllByTestId("engine-moment-open");
     expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 20 });
+    // Who made the change and when, then what it changed.
+    expect(within(rows[0]!).getByTestId("engine-moment-source").textContent).toBe("Nova");
     expect(rows[0]!.textContent).toContain("Tightened the plan");
-    expect(rows[0]!.getAttribute("title")).toBe("Nova");
-    expect(rows[1]!.textContent).toContain("Edited plan.md");
-    expect(rows[1]!.getAttribute("title")).toBe("Live edit");
+    expect(within(rows[1]!).getByTestId("engine-moment-source").textContent).toBe("Live edit");
+    expect(rows[1]!.textContent).toContain("Edited");
     expect(screen.getByTestId("about-history-count").textContent).toBe("2+");
     await userEvent.setup().click(rows[0]!);
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
@@ -1452,7 +1453,7 @@ describe("About History", () => {
       retry: expect.any(Function),
     });
     await userEvent.setup().click(within(failed).getByText("Try again"));
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
     expect(notices.clear).toHaveBeenLastCalledWith("about-history:docs/plan.md");
   });
 
@@ -1472,7 +1473,7 @@ describe("About History", () => {
       next.resolve(page([moment()]));
       await next.promise;
     });
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
   });
 
   // A paused History may be missing changes: its line replaces taking in
@@ -1484,14 +1485,14 @@ describe("About History", () => {
     expect(line.textContent).toBe("History paused");
     expect(screen.queryByTestId("about-history-updating")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-    const [row] = await screen.findAllByTestId("about-history-open");
+    const [row] = await screen.findAllByTestId("engine-moment-open");
     const heading = screen.getByTestId("about-history-paused");
     expect(heading.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(notices.report).not.toHaveBeenCalled();
     // History recovers: the rows stay and the line goes.
     rerender(<HistorySection paused={false} />);
     expect(screen.queryByTestId("about-history-paused")).toBeNull();
-    expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
   });
 
   it("keeps a real failure's Try again while History is paused", async () => {
@@ -1500,7 +1501,7 @@ describe("About History", () => {
     const failed = await screen.findByTestId("about-history-failed");
     expect(screen.queryByTestId("about-history-paused")).toBeNull();
     await userEvent.setup().click(within(failed).getByText("Try again"));
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
     expect(screen.getByTestId("about-history-paused")).toBeTruthy();
   });
 
@@ -1531,7 +1532,7 @@ describe("About History", () => {
         grown.resolve(page([moment()]));
         await grown.promise;
       });
-      expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+      expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1569,9 +1570,9 @@ describe("About History", () => {
     const { rerender } = render(<HistorySection objectId="object-1" />);
     await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(1));
     rerender(<HistorySection objectId="object-2" />);
-    expect((await screen.findByTestId("about-history-open")).textContent).toContain("Second file");
+    expect((await screen.findByTestId("engine-moment-open")).textContent).toContain("Second file");
     await act(async () => forFirst.resolve(page([moment({ summary: "First file" })])));
-    expect(screen.getAllByTestId("about-history-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
   });
 
   it("folds an agent's run into one row and shows the three latest rows", async () => {
@@ -1581,11 +1582,15 @@ describe("About History", () => {
     const edits = ["edit-1", "edit-2", "edit-3"].map((id) => moment({ id }));
     bridgeMock.listEngineMoments.mockResolvedValue(page([...run, ...edits]));
     render(<HistorySection />);
-    const rows = await screen.findAllByTestId("about-history-open");
+    const rows = await screen.findAllByTestId("engine-moment-open");
     expect(rows.map((row) => row.dataset.momentId)).toEqual(["run-1", "edit-1", "edit-2"]);
-    expect(within(rows[0]!).getByTestId("about-history-folded").textContent).toBe("3 changes");
-    expect(within(rows[1]!).queryByTestId("about-history-folded")).toBeNull();
+    const fold = screen.getByTestId("engine-moment-run-toggle");
+    expect(fold.getAttribute("aria-label")).toBe("3 changes");
     expect(screen.getByTestId("about-history-count").textContent).toBe("3+");
+    // The run opens in place, its earlier edits under its newest.
+    await userEvent.setup().click(fold);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId))
+      .toEqual(["run-1", "run-2", "run-3", "edit-1", "edit-2"]);
   });
 
   it("opens the full History from its head", async () => {
@@ -1601,13 +1606,13 @@ describe("About History", () => {
   it("keeps its rows while it reads again after History grows", async () => {
     bridgeMock.listEngineMoments.mockResolvedValueOnce(page([moment({ summary: "Older" })]));
     const { rerender } = render(<HistorySection revision={1} />);
-    await screen.findByTestId("about-history-open");
+    await screen.findByTestId("engine-moment-open");
     const next = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValueOnce(next.promise);
     rerender(<HistorySection revision={2} />);
-    expect(screen.getByTestId("about-history-open").textContent).toContain("Older");
+    expect(screen.getByTestId("engine-moment-open").textContent).toContain("Older");
     await act(async () => next.resolve(page([moment({ id: "moment-new", summary: "Newer" }), moment({ summary: "Older" })])));
-    expect(screen.getAllByTestId("about-history-open")).toHaveLength(2);
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(2);
   });
 });
 
@@ -1616,7 +1621,7 @@ describe("About History authors", () => {
   function row(fields: Partial<EngineMomentRecord>) {
     render(<AboutHistoryView view={{ status: "ready", moments: [moment(fields)], more: false }}
       expanded onToggle={() => undefined} onOpenMoment={() => undefined} />);
-    return screen.getByTestId("about-history-open");
+    return screen.getByTestId("engine-moment-open");
   }
   afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS));
 

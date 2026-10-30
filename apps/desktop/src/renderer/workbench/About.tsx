@@ -7,7 +7,6 @@ import {
   CloudOff,
   Eye,
   EyeOff,
-  FileText,
   FileX,
   History,
   Link2Off,
@@ -36,7 +35,7 @@ import type { AboutConversation } from "./aboutConversation";
 import { accessReasonForLane, serverName, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { HistoryPaused, HistoryUpdating, MARK_BOX, MomentAuthor, engineMomentSourceLabel, engineMomentSummary, groupTimeline } from "./EngineHistory";
+import { HistoryPaused, HistoryRow, HistoryUpdating, MARK_BOX, groupTimeline } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -869,13 +868,6 @@ export type HistoryView =
 const HISTORY_READ = 20;
 const HISTORY_GROUPS = 3;
 
-// A change with no one author, or several, keeps the file mark here.
-const FILE_MARK = (
-  <span aria-hidden className={`${MARK_BOX} text-subtle`}>
-    <FileText size={14} />
-  </span>
-);
-
 export function AboutHistory(props: {
   workspaceId: string;
   path: string;
@@ -965,7 +957,15 @@ export function AboutHistoryView(props: {
     [view],
   );
   const shown = groups.slice(0, HISTORY_GROUPS);
-  const more = groups.length > HISTORY_GROUPS || (view.status === "ready" && view.more);
+  const readMore = view.status === "ready" && view.more;
+  const more = groups.length > HISTORY_GROUPS || readMore;
+  // The runs opened in place, by their key, which a newer edit on top keeps.
+  const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleRun = (key: string) => setOpenRuns((open) => {
+    const next = new Set(open);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
   // Its words start where a row's name does.
   const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
   return (
@@ -997,34 +997,23 @@ export function AboutHistoryView(props: {
       ) : (
         <ul className="m-0 list-none p-0">
           {paused ? <li>{paused}</li> : null}
-          {shown.map(({ key, moments }, index) => {
-            const moment = moments[0]!;
-            // The read's last group may go on past it.
-            const changes = `${moments.length}${index === groups.length - 1 && more ? " or more" : ""} changes`;
-            const when = formatChatTime(moment.recordedAtMs);
-            const source = engineMomentSourceLabel(moment);
+          {shown.map(({ key, run, moments }, index) => {
+            const [newest, ...earlier] = moments;
+            const expanded = openRuns.has(key);
             return (
               <li key={key}>
-                <button
-                  type="button"
-                  data-testid="about-history-open"
-                  data-moment-id={moment.id}
-                  title={source}
-                  onClick={() => props.onOpenMoment(moment.id, moment.path)}
-                  className={`${ABOUT_ROW_BUTTON} h-7`}
-                >
-                  <MomentAuthor moment={moment} fallback={FILE_MARK} />
-                  <span className="min-w-0 flex-1 truncate">{engineMomentSummary(moment)}</span>
-                  {moments.length > 1 ? (
-                    <span data-testid="about-history-folded" className="shrink-0 text-[11px] tabular-nums text-subtle">
-                      {changes}
-                    </span>
-                  ) : null}
-                  <span className="sr-only">{source}</span>
-                  <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
-                    {formatShortTime(moment.recordedAtMs)}
-                  </time>
-                </button>
+                <HistoryRow
+                  moment={newest!}
+                  context="file"
+                  onOpen={props.onOpenMoment}
+                  {...(earlier.length > 0 ? {
+                    // The read's last group may go on past it.
+                    fold: { count: moments.length, more: readMore && index === groups.length - 1, expanded, onToggle: () => toggleRun(key) },
+                  } : {})}
+                />
+                {expanded ? earlier.map((moment) => (
+                  <HistoryRow key={moment.id} moment={moment} context="file" nested={run ? "run" : "pass"} onOpen={props.onOpenMoment} />
+                )) : null}
               </li>
             );
           })}
