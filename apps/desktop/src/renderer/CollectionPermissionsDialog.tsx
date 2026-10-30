@@ -24,9 +24,9 @@ interface Props {
 type Target = { workspaceId: string; datasetPath: string; expectedDatasetId: string };
 type Change = { principalKey: string } | { principalKey?: undefined; grantId: string; person: string; operationIds: string[]; moveToServer: boolean };
 type Failure = { principalKey?: string; words: string };
-// One row in Notices for a person's failed change, which their next change that succeeds removes.
-const changeIdentity = (datasetId: string, change: Change) =>
-  `collection-access:${datasetId}:${change.principalKey !== undefined ? change.principalKey : change.grantId}`;
+// One row in Notices for this Collection's failed access change, which the next change that succeeds removes,
+// so an older Try again never undoes newer access. A save names a person by grant and a removal by key, so the row can't be per person.
+const changeIdentity = (datasetId: string) => `collection-access:${datasetId}`;
 async function changeAccess(target: Target, dataset: DatasetDescription, change: Change) {
   const result = await bridge().dataset(change.principalKey !== undefined ? { ...target, action: "removeGrant", principalKey: change.principalKey } : {
     ...target, action: "setGrant", grantId: change.grantId, grant: { revision: dataset.revision, revisionSha256: dataset.revisionSha256,
@@ -37,7 +37,7 @@ async function changeAccess(target: Target, dataset: DatasetDescription, change:
 // A change that answered after its dialog closed takes a toast and a row, whose Try again runs it again.
 function reportClosed(report: ReportShellFailure, run: () => Promise<void>, change: Change, dataset: DatasetDescription, cause: unknown) {
   report({ title: change.principalKey !== undefined ? "Access wasn't removed" : `Access wasn't saved for ${change.person}`,
-    message: readError(namingCollectionMove(cause, dataset.name)).words ?? UNKNOWN_ERROR_WORDS, cause, identity: changeIdentity(dataset.datasetId, change),
+    message: readError(namingCollectionMove(cause, dataset.name)).words ?? UNKNOWN_ERROR_WORDS, cause, identity: changeIdentity(dataset.datasetId),
     retry: () => { void run().catch((error: unknown) => reportClosed(report, run, change, dataset, error)); } });
 }
 export function CollectionPermissionsDialog(props: Props) {
@@ -89,7 +89,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError, onSe
     locked.current = true; const token = ++request.current; setBusy(true); onFailure(null);
     try {
       await run();
-      onSettled?.(changeIdentity(dataset.datasetId, asked));
+      onSettled?.(changeIdentity(dataset.datasetId));
       if (asked.principalKey === undefined && asked.moveToServer) onMoved?.();
       if (!alive.current || token !== request.current) return;
       setGrantId(""); setSelected([]); locked.current = false; await load();

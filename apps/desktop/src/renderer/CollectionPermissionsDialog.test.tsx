@@ -55,7 +55,7 @@ it("says what moving to the server means before saving access to a Collection on
 });
 const stopped = Error("CollectionMoveUnfinishedError: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
 const friend = { workspaceId: "w", grantId: "grant", recipientUserId: "person", recipientEmail: "friend@example.test", revokedAtMs: null };
-const friendRow = `collection-access:${id(1)}:grant`;
+const accessRow = `collection-access:${id(1)}`;
 const choose = async () => {
   await screen.findByRole("option", { name: /friend@example.test/ });
   fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
@@ -84,7 +84,7 @@ it("says in place that the access wasn't saved, keeps the choices and focus, fil
   expect(report).not.toHaveBeenCalled();
   fail = false;
   fireEvent.click(save);
-  await waitFor(() => expect(onSettled).toHaveBeenCalledWith(friendRow));
+  await waitFor(() => expect(onSettled).toHaveBeenCalledWith(accessRow));
   expect(screen.queryByText(/Access wasn't saved/)).toBeNull();
   await waitFor(() => expect((screen.getByLabelText("Collection access person") as HTMLSelectElement).value).toBe(""));
   expect(onError).not.toHaveBeenCalled();
@@ -136,34 +136,32 @@ it("reports a save that answers after the dialog closed with a toast naming the 
   unmount();
   await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
   await waitFor(() => expect(report).toHaveBeenCalledWith({ title: "Access wasn't saved for friend@example.test",
-    message: "\"Orders\" didn't finish moving to sync.example.test. Its records are kept on this computer.", cause: stopped, identity: friendRow, retry: expect.any(Function) }));
+    message: "\"Orders\" didn't finish moving to sync.example.test. Its records are kept on this computer.", cause: stopped, identity: accessRow, retry: expect.any(Function) }));
   fail = false;
   act(() => { (report.mock.calls[0]![0] as { retry: () => void }).retry(); });
   await waitFor(() => expect(api.dataset.mock.calls.filter(([input]) => input.action === "setGrant")).toHaveLength(2));
   await act(async () => { await Promise.resolve(); });
   expect(report).toHaveBeenCalledTimes(1);
 });
-it("takes back a closed dialog's row when the next save for that person succeeds", async () => {
+it("takes back a closed dialog's row when the next change succeeds, so its Try again can't undo newer access", async () => {
   const answer = deferred<never>();
-  let fail = true;
   api.dataset.mockImplementation(async input => {
-    if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null };
-    if (fail) return answer.promise;
+    if (input.action === "permissions") return { kind: "permissions", nextCursor: null,
+      permissions: [{ kind: "data", principal: "person-key", current: true, metadata: { revision: 2, revisionSha256: "a".repeat(64), operationIds: [id(2)], discover: true } }] };
+    if (input.action === "removeGrant") return answer.promise;
     return { kind: "grant-updated" };
   });
   api.listRelayShares.mockResolvedValue({ granted: [friend] });
   const report = vi.fn(), onSettled = vi.fn();
   const dialog = <ShellErrorReporter.Provider value={report}><CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} onSettled={onSettled} /></ShellErrorReporter.Provider>;
   const first = render(dialog);
-  await choose();
-  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "setGrant" })));
+  fireEvent.click(await screen.findByRole("button", { name: "Remove access" }));
+  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "removeGrant" })));
   first.unmount();
   await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
-  await waitFor(() => expect(report).toHaveBeenCalledWith(expect.objectContaining({ identity: friendRow })));
-  fail = false;
+  await waitFor(() => expect(report).toHaveBeenCalledWith(expect.objectContaining({ title: "Access wasn't removed", identity: accessRow })));
   render(dialog);
   await choose();
   fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(onSettled).toHaveBeenCalledWith(friendRow));
+  await waitFor(() => expect(onSettled).toHaveBeenCalledWith(accessRow));
 });
