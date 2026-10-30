@@ -4,6 +4,7 @@ import {
   createLayout,
   createLayoutEngine,
   DEFAULT_FORCES,
+  pathHash,
   placeNodes,
   reheat,
   settled,
@@ -15,12 +16,14 @@ function ring(count: number): [number, number][] {
   return Array.from({ length: count }, (_, i) => [i, (i + 1) % count] as [number, number]);
 }
 
+const byIndex = (i: number) => pathHash(`file-${i}.md`);
+
 function layoutOf(
   count: number,
   links: readonly (readonly [number, number])[],
   seed: (index: number) => { x: number; y: number } | undefined = () => undefined,
 ) {
-  const placed = placeNodes(count, seed);
+  const placed = placeNodes(count, seed, byIndex);
   return createLayout(
     placed.x,
     placed.y,
@@ -78,8 +81,17 @@ describe("graphLayout", () => {
     expect(layout.y[3]).toBe(-200);
   });
 
+  it("starts each file at the same scattered point every time", () => {
+    const first = placeNodes(50, () => undefined, byIndex);
+    const again = placeNodes(50, () => undefined, byIndex);
+    expect(Array.from(again.x)).toEqual(Array.from(first.x));
+    const radii = Array.from(first.x, (x, i) => Math.hypot(x, first.y[i]!));
+    expect(Math.max(...radii)).toBeLessThanOrEqual(10 * Math.sqrt(50.5));
+    expect(new Set(radii.map((r) => r.toFixed(3))).size).toBe(50);
+  });
+
   it("starts a mostly remembered layout cool", () => {
-    const placed = placeNodes(10, (i) => (i < 9 ? { x: i * 10, y: 0 } : undefined));
+    const placed = placeNodes(10, (i) => (i < 9 ? { x: i * 10, y: 0 } : undefined), byIndex);
     expect(placed.alpha).toBeLessThan(0.5);
     expect(placed.x[4]).toBe(40);
   });
@@ -111,7 +123,7 @@ describe("layout engine", () => {
       while (queue.length) queue.shift()!();
     };
     const model = (generation: number, count: number) => {
-      const placed = placeNodes(count, () => undefined);
+      const placed = placeNodes(count, () => undefined, byIndex);
       layout.receive({
         type: "model",
         generation,

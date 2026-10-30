@@ -34,11 +34,23 @@ export type GraphLayout = {
 // Starting places: a remembered place where the seed has one, else a spot on a
 // phyllotaxis disc, an even spread with no two nodes on one point. A layout that
 // kept most of its places only needs to settle the new ones, so it starts cooler.
+// A stable 32-bit hash of a file's path (FNV-1a).
+export function pathHash(path: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < path.length; i++) hash = Math.imul(hash ^ path.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+
 export function placeNodes(
   count: number,
   seed: (index: number) => { x: number; y: number } | undefined,
+  hash: (index: number) => number,
 ): { x: Float64Array; y: Float64Array; alpha: number } {
   const x = new Float64Array(count), y = new Float64Array(count);
+  // A new node starts at a point in a disc that grows with the graph. The
+  // point comes from its file's hash, so it is scattered, not lined up, and
+  // the same each time the Graph opens.
+  const disc = 10 * Math.sqrt(count + 0.5);
   let seeded = 0;
   for (let i = 0; i < count; i++) {
     const previous = seed(i);
@@ -48,8 +60,9 @@ export function placeNodes(
       seeded++;
       continue;
     }
-    const radius = 10 * Math.sqrt(0.5 + i);
-    const angle = i * Math.PI * (3 - Math.sqrt(5));
+    const h = hash(i);
+    const radius = disc * Math.sqrt((h & 0xffff) / 0x10000);
+    const angle = ((h >>> 16) / 0x10000) * Math.PI * 2;
     x[i] = radius * Math.cos(angle);
     y[i] = radius * Math.sin(angle);
   }
