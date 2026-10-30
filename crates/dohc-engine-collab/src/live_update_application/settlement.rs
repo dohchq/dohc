@@ -798,9 +798,11 @@ pub(super) fn private_tail(
         terminal_cursor
     ];
     let mut any: bool = conn
-        .query_row(&format!("SELECT EXISTS(SELECT 1 {tail})"), &bound[..9], |row| {
-            row.get(0)
-        })
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 {tail})"),
+            &bound[..9],
+            |row| row.get(0),
+        )
         .map_err(read_sql)?;
     let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),&bound[..9],|row|row.get(0)).map_err(read_sql)?;
     let mut sequences = BTreeSet::new();
@@ -869,7 +871,8 @@ pub(super) fn private_tail(
         let json: String = row.get(3).map_err(read_sql)?;
         let accepted: bool = row.get(8).map_err(read_sql)?;
         // A refused entry is terminal; a pending or carried one still waits.
-        let refused = !accepted && !row.get::<_, bool>(4).map_err(read_sql)?
+        let refused = !accepted
+            && !row.get::<_, bool>(4).map_err(read_sql)?
             && !row.get::<_, bool>(5).map_err(read_sql)?;
         let source: crate::owner_outbox::OwnerOutboxNativeSource =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;

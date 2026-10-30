@@ -3455,7 +3455,6 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
 ];
 
-
 /// A lineage keeps its one immutable adoption. Each activation that held the
 /// document since has a row: at most one unreleased per document lineage, at
 /// most one successor per activation, and both links stay on one lineage.
