@@ -594,7 +594,8 @@ export function GraphView(props: {
       className={variant === "page" ? "flex min-h-0 flex-1 flex-col bg-bg" : "flex min-h-0 flex-1 flex-col"}
     >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
-        <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
+        {/* The side panel's own title names the Graph, so its row keeps the room for the counts. */}
+        {variant === "page" ? <GitFork size={13} aria-hidden className="shrink-0 text-subtle" /> : null}
         <span title={counts} className="flex min-w-0 items-center gap-2 overflow-hidden text-[12px] tabular-nums text-muted">
           <output data-testid="graph-doc-count" className="shrink-0">{fileCount}</output>
           <span aria-hidden className="text-subtle">·</span>

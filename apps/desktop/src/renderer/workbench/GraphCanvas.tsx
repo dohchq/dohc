@@ -36,6 +36,9 @@ type Palette = {
 
 const DIM = 0.12;
 const LABEL_LIMIT = 600;
+const LABEL_HEIGHT = 15;
+// Labels claim space on a grid of cells this many pixels wide and high.
+const CELL = 6;
 const FADE_MS = 140;
 
 function readPalette(surface: "bg" | "panel"): Palette {
@@ -133,6 +136,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let source = new Uint32Array(0);
   let target = new Uint32Array(0);
   let radius = new Float64Array(0);
+  // Measured label widths, 0 until a label is first drawn.
+  let labelWidth = new Float32Array(0);
+  let taken = new Uint8Array(0);
+  let placed = new Uint8Array(0);
   // Neighbours as compressed rows: node i's are adjacency[offsets[i]..offsets[i+1]].
   let offsets = new Uint32Array(1);
   let adjacency = new Uint32Array(0);
@@ -141,6 +148,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let width = 0, height = 0, dpr = 1;
   let k = 1, tx = 0, ty = 0;
   let followLayout = true;
+  // Set once the person pans, zooms or drags; the camera then stays theirs.
+  let cameraMoved = false;
   let snapCamera = true;
   let visible = true;
   let frame: number | null = null;
@@ -198,6 +207,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     model = next;
     const count = next.nodes.length;
     radius = new Float64Array(count);
+    labelWidth = new Float32Array(count);
     for (let i = 0; i < count; i++) radius[i] = nodeRadius(next.nodes[i]!.degree, options.display);
     const degree = new Uint32Array(count);
     source = new Uint32Array(next.links.length);
@@ -260,7 +270,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (focus >= count) focus = -1;
     lit = -1;
     relight();
-    followLayout = followLayout || seeded.size === 0 || options.local;
+    if (seeded.size === 0) cameraMoved = false;
+    followLayout = !cameraMoved || options.local;
     // A layout that starts from scratch opens framed, without zooming in from the last view.
     if (seeded.size === 0) snapCamera = true;
     canvas.dataset.nodeCount = String(count);
@@ -513,25 +524,46 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.fill();
     }
 
-    // Labels fade in with zoom, bigger nodes first; the lit node's are full.
+    // Labels fade in with zoom over a short range, so a label is readable or
+    // gone. The lit node, the open page and the lit neighbours claim space
+    // first, then bigger nodes; a label that would overlap a placed one or run
+    // off the canvas is left out.
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
+    const cols = Math.ceil(width / CELL), rows = Math.ceil(height / CELL);
+    if (taken.length < cols * rows) taken = new Uint8Array(cols * rows);
+    else taken.fill(0, 0, cols * rows);
+    placed = placed.length < count ? new Uint8Array(count) : placed.fill(0, 0, count);
     let drawn = 0;
-    for (let i = 0; i < count && drawn < LABEL_LIMIT; i++) {
+    const label = (i: number) => {
+      if (placed[i] || drawn >= LABEL_LIMIT) return;
+      placed[i] = 1;
       const own = highlight && litSet[i] === 1;
       const scale = k * Math.sqrt(radius[i]! / 4);
-      let alpha = Math.max(0, Math.min(1, (scale - fadeAt) / (fadeAt * 0.4)));
-      if (i === active) alpha = Math.max(alpha, options.local ? 1 : alpha);
+      let alpha = Math.max(0, Math.min(1, (scale - fadeAt) / (fadeAt * 0.15)));
+      if (i === active && options.local) alpha = 1;
       if (own) alpha = Math.max(alpha * rest, mix);
       else alpha *= rest;
-      if (alpha < 0.03 || !visibleNode(i)) continue;
+      if (alpha < 0.03 || !visibleNode(i)) return;
+      const title = shortTitle(model.nodes[i]!.title);
+      const w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
+      const left = sx(i) - w / 2, top = sy(i) + screenR(i) + 3;
+      if (left < 2 || top < 0 || left + w > width - 2 || top + LABEL_HEIGHT > height) return;
+      const c0 = Math.floor(left / CELL), c1 = Math.floor((left + w) / CELL);
+      const r0 = Math.floor(top / CELL), r1 = Math.floor((top + LABEL_HEIGHT) / CELL);
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (taken[r * cols + c]) return;
+      for (let r = r0; r <= r1; r++) taken.fill(1, r * cols + c0, r * cols + c1 + 1);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = own || i === active ? palette.ink : palette.label;
-      ctx.fillText(shortTitle(model.nodes[i]!.title), sx(i), sy(i) + screenR(i) + 4);
+      ctx.fillText(title, sx(i), top + 1);
       drawn++;
-    }
+    };
+    if (highlight) label(lit);
+    if (active >= 0 && active < count) label(active);
+    if (highlight) for (let a = offsets[lit]!; a < offsets[lit + 1]!; a++) label(adjacency[a]!);
+    for (let i = 0; i < count; i++) label(i);
     ctx.globalAlpha = 1;
   }
 
@@ -583,6 +615,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (gesture.kind === "pan") {
       if (!moved && tx === gesture.tx && ty === gesture.ty) return;
       followLayout = false;
+      cameraMoved = true;
       tx = gesture.tx + point.x - gesture.startX;
       ty = gesture.ty + point.y - gesture.startY;
       canvas.style.cursor = "grabbing";
@@ -593,6 +626,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     gesture.moved = true;
     // The camera holds still under a dragged node.
     followLayout = false;
+    cameraMoved = true;
     const i = gesture.index;
     canvas.style.cursor = "grabbing";
     held = { index: i, x: (point.x - tx) / k, y: (point.y - ty) / k };
@@ -626,6 +660,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ty = y - ((y - ty) * next) / k;
     k = next;
     followLayout = false;
+    cameraMoved = true;
     wake();
   }
 
@@ -712,10 +747,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     },
     fit() {
       followLayout = true;
+      cameraMoved = false;
       wake();
     },
     retheme() {
       palette = readPalette(surface);
+      labelWidth.fill(0);
       const nextReduced = prefersReducedMotion();
       if (nextReduced !== reduced) send({ type: "reduced", reduced: nextReduced });
       reduced = nextReduced;

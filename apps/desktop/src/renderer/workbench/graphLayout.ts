@@ -11,6 +11,7 @@ export const ALPHA_MIN = 0.002;
 const ALPHA_DECAY = 1 - Math.pow(ALPHA_MIN, 1 / 280);
 const VELOCITY_KEEP = 0.6;
 const THETA2 = 0.81;
+const LONELY_PULL = 4;
 
 export type GraphLayout = {
   count: number;
@@ -23,6 +24,9 @@ export type GraphLayout = {
   target: Uint32Array;
   linkBias: Float64Array;
   linkStrength: Float64Array;
+  // 1 for a node with no links: it is pulled toward the middle harder, so
+  // unlinked files ring the graph closely instead of far out.
+  lonely: Uint8Array;
   alpha: number;
   alphaTarget: number;
 };
@@ -76,6 +80,7 @@ export function createLayout(x: Float64Array, y: Float64Array, source: Uint32Arr
     target,
     linkBias,
     linkStrength,
+    lonely: Uint8Array.from(degree, (d) => (d === 0 ? 1 : 0)),
     alpha,
     alphaTarget: 0,
   };
@@ -309,8 +314,9 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
       vy[i] = 0;
       continue;
     }
-    vx[i] = (vx[i]! - x[i]! * center) * VELOCITY_KEEP;
-    vy[i] = (vy[i]! - y[i]! * center) * VELOCITY_KEEP;
+    const pull = layout.lonely[i] ? center * LONELY_PULL : center;
+    vx[i] = (vx[i]! - x[i]! * pull) * VELOCITY_KEEP;
+    vy[i] = (vy[i]! - y[i]! * pull) * VELOCITY_KEEP;
     x[i] = x[i]! + vx[i]!;
     y[i] = y[i]! + vy[i]!;
   }
