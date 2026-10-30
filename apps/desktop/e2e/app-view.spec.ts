@@ -14,6 +14,7 @@ type MainProbe = typeof globalThis & { __appViewProbe?: {
   attaches: Array<{ src: string; refused: boolean; partition: string }>;
   guestsCreated: number;
 } };
+type FrameProbe = typeof globalThis & { __appViewFrames?: Array<{ url: string; error: string | null }> };
 type RendererProbe = Window & { __appViewEvents?: AppViewEvent[]; __stopAppViewEvents?: () => void };
 const appRoot = "registrations-form";
 const frontend = `
@@ -210,14 +211,21 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await clickApp(electronApp, guestId, "#plain");
     await inFrame(electronApp, guestId, "window.open('https://example.com/unprompted'); true");
     expect(await recorded()).toEqual(expected);
-    // An iframe the app adds at an outside address loads nothing and opens nothing.
+    // An iframe the app adds at an outside address loads nothing and opens nothing. Main records each child frame
+    // that commits: an outside page that loaded would show up without an error.
+    await electronApp.evaluate(({ webContents }, id) => {
+      const guest = webContents.fromId(id)!;
+      const frames: Array<{ url: string; error: string | null }> = [];
+      guest.on("did-frame-navigate", (_event, url, _code, _status, isMainFrame) => { if (!isMainFrame) frames.push({ url, error: null }); });
+      guest.on("did-fail-load", (_event, _code, error, url, isMainFrame) => { if (!isMainFrame) frames.push({ url, error }); });
+      (globalThis as FrameProbe).__appViewFrames = frames;
+    }, guestId);
     expect(String(await inFrame(electronApp, guestId, `new Promise(resolve => {
       addEventListener('securitypolicyviolation', event => resolve(event.effectiveDirective + ' ' + event.blockedURI), { once: true });
       const frame = document.createElement('iframe'); frame.src = 'https://example.com/framed'; document.body.append(frame);
     })`))).toMatch(/^frame-src https:\/\/example\.com/);
-    // Chromium commits the blocked frame as an error page at that address, with an opaque origin, so check origins.
-    expect(await electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.mainFrame.framesInSubtree
-      .filter(frame => frame.origin === "https://example.com").length, guestId)).toBe(0);
+    await expect.poll(() => electronApp.evaluate(() => (globalThis as FrameProbe).__appViewFrames!
+      .filter(frame => frame.url.startsWith("https://example.com")))).toEqual([{ url: "https://example.com/framed", error: "ERR_BLOCKED_BY_CSP" }]);
     expect(await recorded()).toEqual(expected);
     for (const selector of ["#javascript", "#file"]) {
       await pressApp(page, electronApp, guestId, selector);
