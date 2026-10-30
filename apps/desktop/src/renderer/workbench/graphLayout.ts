@@ -1,0 +1,310 @@
+// A force layout for the Graph: many-body repulsion through a Barnes-Hut
+// quadtree, springs along links, and a pull toward the origin. Positions live
+// in typed arrays so a tick over 5,000 nodes stays a few milliseconds.
+
+export type GraphForces = { center: number; repel: number; link: number; distance: number };
+
+// Each force is a 0 to 1 setting; 0.5 is the default and the middle of its slider.
+export const DEFAULT_FORCES: GraphForces = { center: 0.5, repel: 0.5, link: 0.5, distance: 0.5 };
+
+export const ALPHA_MIN = 0.002;
+const ALPHA_DECAY = 1 - Math.pow(ALPHA_MIN, 1 / 280);
+const VELOCITY_KEEP = 0.6;
+const THETA2 = 0.81;
+
+export type GraphLayout = {
+  count: number;
+  x: Float64Array;
+  y: Float64Array;
+  vx: Float64Array;
+  vy: Float64Array;
+  pinned: Uint8Array;
+  source: Uint32Array;
+  target: Uint32Array;
+  linkBias: Float64Array;
+  linkStrength: Float64Array;
+  alpha: number;
+  alphaTarget: number;
+};
+
+export function createLayout(
+  count: number,
+  links: readonly (readonly [number, number])[],
+  degree: ArrayLike<number>,
+  seed: (index: number) => { x: number; y: number } | undefined,
+): GraphLayout {
+  const layout: GraphLayout = {
+    count,
+    x: new Float64Array(count),
+    y: new Float64Array(count),
+    vx: new Float64Array(count),
+    vy: new Float64Array(count),
+    pinned: new Uint8Array(count),
+    source: new Uint32Array(links.length),
+    target: new Uint32Array(links.length),
+    linkBias: new Float64Array(links.length),
+    linkStrength: new Float64Array(links.length),
+    alpha: 1,
+    alphaTarget: 0,
+  };
+  let seeded = 0;
+  for (let i = 0; i < count; i++) {
+    const previous = seed(i);
+    if (previous) {
+      layout.x[i] = previous.x;
+      layout.y[i] = previous.y;
+      seeded++;
+      continue;
+    }
+    // Phyllotaxis: an even disc with no two nodes on one point.
+    const radius = 10 * Math.sqrt(0.5 + i);
+    const angle = i * Math.PI * (3 - Math.sqrt(5));
+    layout.x[i] = radius * Math.cos(angle);
+    layout.y[i] = radius * Math.sin(angle);
+  }
+  links.forEach(([s, t], index) => {
+    layout.source[index] = s;
+    layout.target[index] = t;
+    const ds = Math.max(1, degree[s] ?? 1), dt = Math.max(1, degree[t] ?? 1);
+    layout.linkBias[index] = ds / (ds + dt);
+    layout.linkStrength[index] = 1 / Math.min(ds, dt);
+  });
+  // A layout that kept most of its places only needs to settle the new ones.
+  if (count > 0 && seeded / count > 0.8) layout.alpha = 0.3;
+  return layout;
+}
+
+export function reheat(layout: GraphLayout, alpha: number): void {
+  layout.alpha = Math.max(layout.alpha, alpha);
+}
+
+export function settled(layout: GraphLayout): boolean {
+  return layout.alpha < ALPHA_MIN && layout.alphaTarget === 0;
+}
+
+// Reused between ticks so a settling graph allocates nothing per frame.
+type Tree = {
+  child: Int32Array;
+  point: Int32Array;
+  next: Int32Array;
+  mass: Float64Array;
+  mx: Float64Array;
+  my: Float64Array;
+  size: Float64Array;
+  used: number;
+};
+let tree: Tree | null = null;
+
+function ensureTree(points: number): Tree {
+  const capacity = Math.max(64, points * 3);
+  if (tree && tree.mass.length >= capacity && tree.next.length >= points) return tree;
+  tree = {
+    child: new Int32Array(capacity * 4),
+    point: new Int32Array(capacity),
+    next: new Int32Array(points),
+    mass: new Float64Array(capacity),
+    mx: new Float64Array(capacity),
+    my: new Float64Array(capacity),
+    size: new Float64Array(capacity),
+    used: 0,
+  };
+  return tree;
+}
+
+function newQuad(t: Tree, size: number): number {
+  const q = t.used++;
+  t.child.fill(-1, q * 4, q * 4 + 4);
+  t.point[q] = -1;
+  t.mass[q] = 0;
+  t.size[q] = size;
+  return q;
+}
+
+// Builds the quadtree. Internal quads have point -2; a leaf chains points that
+// share one spot through `next`.
+function buildTree(layout: GraphLayout): Tree {
+  const { count, x, y } = layout;
+  let t = ensureTree(count);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < count; i++) {
+    if (x[i]! < x0) x0 = x[i]!;
+    if (x[i]! > x1) x1 = x[i]!;
+    if (y[i]! < y0) y0 = y[i]!;
+    if (y[i]! > y1) y1 = y[i]!;
+  }
+  const size = Math.max(x1 - x0, y1 - y0, 1) * 1.0001;
+  for (;;) {
+    t.used = 0;
+    newQuad(t, size);
+    let overflow = false;
+    for (let i = 0; i < count && !overflow; i++) {
+      t.next[i] = -1;
+      let q = 0, qx = x0, qy = y0, qs = size;
+      let pending = i;
+      while (pending >= 0) {
+        const p = t.point[q]!;
+        if (p === -1) {
+          // Only the empty root has no point and no children.
+          t.point[q] = pending;
+          pending = -1;
+        } else if (p >= 0) {
+          if (Math.abs(x[p]! - x[pending]!) < 1e-9 && Math.abs(y[p]! - y[pending]!) < 1e-9) {
+            t.next[pending] = t.next[p]!;
+            t.next[p] = pending;
+            pending = -1;
+            continue;
+          }
+          // Split the leaf: push its chain one level down, then keep inserting.
+          t.point[q] = -2;
+          const half = qs / 2;
+          const quadrant = (x[p]! >= qx + half ? 1 : 0) | (y[p]! >= qy + half ? 2 : 0);
+          if (t.used >= t.mass.length) { overflow = true; break; }
+          const c = newQuad(t, half);
+          t.child[q * 4 + quadrant] = c;
+          t.point[c] = p;
+        } else {
+          const half = qs / 2;
+          const right = x[pending]! >= qx + half, below = y[pending]! >= qy + half;
+          const quadrant = (right ? 1 : 0) | (below ? 2 : 0);
+          if (right) qx += half;
+          if (below) qy += half;
+          qs = half;
+          const existing = t.child[q * 4 + quadrant]!;
+          if (existing === -1) {
+            if (t.used >= t.mass.length) { overflow = true; break; }
+            const c = newQuad(t, half);
+            t.child[q * 4 + quadrant] = c;
+            t.point[c] = pending;
+            pending = -1;
+          } else {
+            q = existing;
+          }
+        }
+      }
+    }
+    if (!overflow) break;
+    // Deeply nested near-duplicates: grow the arrays and build again.
+    tree = null;
+    t = ensureTree(count * 4);
+  }
+  // Children always come after their parent, so one reverse pass sums mass.
+  for (let q = t.used - 1; q >= 0; q--) {
+    const p = t.point[q]!;
+    if (p >= 0) {
+      let mass = 0;
+      for (let i = p; i >= 0; i = t.next[i]!) mass++;
+      t.mass[q] = mass;
+      t.mx[q] = x[p]!;
+      t.my[q] = y[p]!;
+      continue;
+    }
+    let mass = 0, mx = 0, my = 0;
+    for (let k = 0; k < 4; k++) {
+      const c = t.child[q * 4 + k]!;
+      if (c < 0) continue;
+      mass += t.mass[c]!;
+      mx += t.mx[c]! * t.mass[c]!;
+      my += t.my[c]! * t.mass[c]!;
+    }
+    t.mass[q] = mass;
+    t.mx[q] = mass ? mx / mass : 0;
+    t.my[q] = mass ? my / mass : 0;
+  }
+  return t;
+}
+
+const stack = { items: new Int32Array(256) };
+
+export function tick(layout: GraphLayout, forces: GraphForces): void {
+  const { count, x, y, vx, vy, pinned } = layout;
+  if (count === 0) {
+    layout.alpha = 0;
+    return;
+  }
+  layout.alpha += (layout.alphaTarget - layout.alpha) * ALPHA_DECAY;
+  const alpha = layout.alpha;
+
+  // Links pull toward a rest length; the bias moves the less-linked end more.
+  const distance = 20 + forces.distance * 120;
+  const linkScale = forces.link * 2;
+  for (let l = 0; l < layout.source.length; l++) {
+    const s = layout.source[l]!, t = layout.target[l]!;
+    let dx = x[t]! + vx[t]! - x[s]! - vx[s]!;
+    let dy = y[t]! + vy[t]! - y[s]! - vy[s]!;
+    let length = Math.hypot(dx, dy) || 1e-6;
+    length = ((length - distance) / length) * alpha * layout.linkStrength[l]! * linkScale;
+    dx *= length;
+    dy *= length;
+    const bias = layout.linkBias[l]!;
+    vx[t] = vx[t]! - dx * bias;
+    vy[t] = vy[t]! - dy * bias;
+    vx[s] = vx[s]! + dx * (1 - bias);
+    vy[s] = vy[s]! + dy * (1 - bias);
+  }
+
+  // Many-body repulsion: far quads act as one mass.
+  const t = buildTree(layout);
+  const strength = -(10 + forces.repel * 140) * alpha;
+  let items = stack.items;
+  if (items.length < t.used) items = stack.items = new Int32Array(t.used * 2);
+  for (let i = 0; i < count; i++) {
+    const xi = x[i]!, yi = y[i]!;
+    let fx = 0, fy = 0, top = 0;
+    items[top++] = 0;
+    while (top > 0) {
+      const q = items[--top]!;
+      const dx = t.mx[q]! - xi, dy = t.my[q]! - yi;
+      let d2 = dx * dx + dy * dy;
+      const p = t.point[q]!;
+      if (p >= 0) {
+        for (let j = p; j >= 0; j = t.next[j]!) {
+          if (j === i) continue;
+          let jx = x[j]! - xi, jy = y[j]! - yi, jd2 = jx * jx + jy * jy;
+          if (jd2 < 1e-6) {
+            // Nudge coincident points apart along a direction from their indexes.
+            jx = ((i * 7 + j * 13) % 11) / 11 - 0.5;
+            jy = ((i * 11 + j * 7) % 13) / 13 - 0.5;
+            jd2 = jx * jx + jy * jy;
+          }
+          if (jd2 < 1) jd2 = Math.sqrt(jd2);
+          fx += (jx * strength) / jd2;
+          fy += (jy * strength) / jd2;
+        }
+        continue;
+      }
+      const size = t.size[q]!;
+      if ((size * size) / THETA2 < d2) {
+        if (d2 < 1) d2 = Math.sqrt(d2);
+        fx += (dx * strength * t.mass[q]!) / d2;
+        fy += (dy * strength * t.mass[q]!) / d2;
+        continue;
+      }
+      for (let k = 0; k < 4; k++) {
+        const c = t.child[q * 4 + k]!;
+        if (c >= 0) {
+          if (top >= items.length) {
+            const grown = new Int32Array(items.length * 2);
+            grown.set(items);
+            items = stack.items = grown;
+          }
+          items[top++] = c;
+        }
+      }
+    }
+    vx[i] = vx[i]! + fx;
+    vy[i] = vy[i]! + fy;
+  }
+
+  const center = forces.center * 0.08 * alpha;
+  for (let i = 0; i < count; i++) {
+    if (pinned[i]) {
+      vx[i] = 0;
+      vy[i] = 0;
+      continue;
+    }
+    vx[i] = (vx[i]! - x[i]! * center) * VELOCITY_KEEP;
+    vy[i] = (vy[i]! - y[i]! * center) * VELOCITY_KEEP;
+    x[i] = x[i]! + vx[i]!;
+    y[i] = y[i]! + vy[i]!;
+  }
+}

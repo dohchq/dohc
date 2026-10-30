@@ -1,737 +1,360 @@
-import { FileText, GitFork, ListFilter, MessageSquare, RefreshCw } from "lucide-react";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
+import { FileText, GitFork, ListFilter, MessageSquare, RefreshCw, Search, SlidersHorizontal } from "lucide-react";
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type RefObject,
 } from "react";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
-import { graphWalk, degrees, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
+import { graphWalk, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
 import { bridge } from "../bridge";
 import { isChatMentionPageChanged } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
-import { IconButton } from "../ui/controls";
-
-type WorkspaceGraphNode = GraphNode;
+import { EmptyState, IconButton, RetryRow } from "../ui/controls";
+import { GraphCanvas, type CanvasNode } from "./GraphCanvas";
+import {
+  DEFAULT_SETTINGS,
+  GRAPH_KINDS,
+  GraphSettings,
+  ShapeMark,
+  type GraphKind,
+  type GraphSettingsValue,
+} from "./GraphSettings";
 
 type GraphState =
-  | {
-      workspaceId: string;
-      chatMentionsEnabled: boolean;
-      status: "loading";
-      graph: GraphData | null;
-      error: null;
-    }
-  | {
-      workspaceId: string;
-      chatMentionsEnabled: boolean;
-      status: "ready";
-      graph: GraphData;
-      error: null;
-    }
-  | {
-      workspaceId: string;
-      chatMentionsEnabled: boolean;
-      status: "error";
-      graph: GraphData | null;
-      error: string;
-    };
-
-type GraphPoint = WorkspaceGraphNode & {
-  x: number;
-  y: number;
-  radius: number;
-};
-
-type ForceNode = GraphPoint & {
-  index: number;
-  vx: number;
-  vy: number;
-  dragging: boolean;
-};
-
-type VisibleGraphEdge = GraphData["edges"][number];
-
-type GraphPositionSink = (
-  nodes: readonly ForceNode[],
-  edges: readonly VisibleGraphEdge[],
-  byPath: ReadonlyMap<string, ForceNode>,
-) => void;
-
-type GraphDrag = {
-  path: string;
-  pointerId: number;
-  startClientX: number;
-  startClientY: number;
-  moved: boolean;
-};
-
-const EMPTY_GRAPH = emptyGraph();
+  | { workspaceId: string; chatMentionsEnabled: boolean; status: "loading"; graph: GraphData | null; error: null }
+  | { workspaceId: string; chatMentionsEnabled: boolean; status: "ready"; graph: GraphData; error: null }
+  | { workspaceId: string; chatMentionsEnabled: boolean; status: "error"; graph: GraphData | null; error: string };
 
 type GraphVariant = "panel" | "page";
 
-const GRAPH_LAYOUT: Record<
-  GraphVariant,
-  {
-    width: number;
-    height: number;
-    nodeLimit: number;
-    edgeLimit: number;
-    pairwiseLimit: number;
-    labelLimit: number;
-    alphaDecay: number;
-    settleFrameLimit: number;
-  }
-> = {
-  // Nodes after the pairwise limit keep center and edge forces, but skip
-  // repulsion: panel layouts degrade after 160 ranked nodes, page layouts after 280.
-  // Mounting every loaded node as
-  // interactive SVG plus a second panel list creates a multi-hundred-ms main
-  // thread stall and an unreadable cloud. Keep the highest-connected slice
-  // (with the active document promoted to the front) and say how many are
-  // shown. Quick Open and Explorer remain the exhaustive file navigators.
-  panel: {
-    width: 260,
-    height: 420,
-    nodeLimit: 240,
-    edgeLimit: 2000,
-    pairwiseLimit: 160,
-    labelLimit: 80,
-    alphaDecay: 0.96,
-    settleFrameLimit: 120,
-  },
-  page: {
-    width: 1200,
-    height: 760,
-    nodeLimit: 500,
-    edgeLimit: 5000,
-    pairwiseLimit: 280,
-    labelLimit: 180,
-    alphaDecay: 0.96,
-    settleFrameLimit: 120,
-  },
+const EMPTY_GRAPH = emptyGraph();
+const ROW_HEIGHT = 28;
+const SEARCH_RESULTS = 8;
+
+// Settings last for the session, one set per workspace and surface.
+const sessionSettings = new Map<string, GraphSettingsValue>();
+
+export function graphKind(node: GraphNode): GraphKind {
+  if (node.kind === "chat-thread") return "chat";
+  if (node.kind === "heading") return "heading";
+  const display = fileKindForPath(node.path).displayKind;
+  return display === "markdown" ? "page" : display === "drawing" ? "drawing" : "file";
+}
+
+const SHAPES = Object.fromEntries(GRAPH_KINDS.map(({ kind, shape }) => [kind, shape])) as Record<
+  GraphKind,
+  CanvasNode["shape"]
+>;
+
+type GraphViewModel = {
+  nodes: CanvasNode[];
+  sources: GraphNode[];
+  links: [number, number][];
+  index: Map<string, number>;
+  // Before the local graph narrows them, for the header's counts.
+  filteredNodeCount: number;
+  filteredLinkCount: number;
+  kindCounts: Record<GraphKind, number>;
+  local: boolean;
 };
 
-function graphEdgeKey(edge: VisibleGraphEdge): string {
-  return JSON.stringify([edge.source, edge.target, edge.kind]);
-}
-
-function degree(node: Pick<WorkspaceGraphNode, "incoming" | "outgoing">): number {
-  return node.incoming + node.outgoing;
-}
-
-function compareGraphNodes(activePath: string | null) {
-  return (a: WorkspaceGraphNode, b: WorkspaceGraphNode) => {
-    if (a.path === activePath) return -1;
-    if (b.path === activePath) return 1;
-    return degree(b) - degree(a) || a.path.localeCompare(b.path);
-  };
-}
-
-function visibleGraphNodes(
+function buildModel(
   graph: GraphData,
-  activePath: string | null,
-  variant: GraphVariant,
-): WorkspaceGraphNode[] {
-  const selected = [...graph.nodes].sort(compareGraphNodes(activePath)).slice(0, GRAPH_LAYOUT[variant].nodeLimit);
-  return degrees(selected, visibleEdges(graph, selected, variant));
-}
-
-function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
-  return variant === "page"
-    ? Math.min(24, 9 + degree(node) * 0.9)
-    : Math.min(24, 12 + degree(node) * 1.15);
-}
-
-function initialGraphNode(
-  node: WorkspaceGraphNode,
-  index: number,
-  count: number,
-  activePath: string | null,
-  variant: GraphVariant,
-  previous: ForceNode | undefined,
-  dragging: boolean,
-): ForceNode {
-  const layout = GRAPH_LAYOUT[variant];
-  const radius = graphRadius(node, variant);
-  if (previous) {
-    return {
-      ...node,
-      index,
-      radius,
-      x: Math.min(layout.width - radius - 16, Math.max(radius + 16, previous.x)),
-      y: Math.min(layout.height - radius - 16, Math.max(radius + 16, previous.y)),
-      vx: dragging ? 0 : previous.vx,
-      vy: dragging ? 0 : previous.vy,
-      dragging,
-    };
+  settings: Pick<GraphSettingsValue, "hidden" | "orphans" | "depth">,
+  search: string,
+  localPath: string | null,
+): GraphViewModel {
+  const kindCounts: Record<GraphKind, number> = { page: 0, drawing: 0, file: 0, chat: 0, heading: 0 };
+  const query = search.trim().toLocaleLowerCase();
+  const kept = new Map<string, GraphNode>();
+  for (const node of graph.nodes) {
+    const kind = graphKind(node);
+    kindCounts[kind]++;
+    if (settings.hidden.includes(kind)) continue;
+    if (query && !node.title.toLocaleLowerCase().includes(query) && !node.path.toLocaleLowerCase().includes(query)) continue;
+    kept.set(node.path, node);
   }
+  const degree = new Map<string, number>();
+  let edges = graph.edges.filter((edge) => {
+    if (edge.source === edge.target || !kept.has(edge.source) || !kept.has(edge.target)) return false;
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+    return true;
+  });
+  let paths = [...kept.keys()];
+  if (!settings.orphans) paths = paths.filter((path) => degree.has(path) || path === localPath);
+  const filteredNodeCount = paths.length;
+  const filteredLinkCount = edges.length;
 
-  const centerX = layout.width / 2;
-  const centerY = layout.height / 2;
-  if (count === 1 || node.path === activePath) {
-    return {
-      ...node,
-      index,
-      radius,
-      x: centerX,
-      y: centerY,
-      vx: 0,
-      vy: 0,
-      dragging,
-    };
-  }
-  const ringCount = activePath ? Math.max(1, count - 1) : count;
-  const ringIndex = activePath ? Math.max(0, index - 1) : index;
-  const angle =
-    ringCount === 2
-      ? ringIndex * Math.PI
-      : -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
-  const spreadX = variant === "page" ? 350 : 88;
-  const spreadY = variant === "page" ? 235 : 158;
-  return {
-    ...node,
-    index,
-    radius,
-    x: centerX + Math.cos(angle) * spreadX,
-    y: centerY + Math.sin(angle) * spreadY,
-    vx: 0,
-    vy: 0,
-    dragging,
-  };
-}
-
-function snapshotNodes(nodes: ForceNode[]): GraphPoint[] {
-  return nodes.map(
-    ({ index: _index, vx: _vx, vy: _vy, dragging: _dragging, ...node }) =>
-      node,
-  );
-}
-
-function stopGraphMotion(
-  nodes: readonly { vx: number; vy: number }[],
-): void {
-  for (const node of nodes) {
-    node.vx = 0;
-    node.vy = 0;
-  }
-}
-
-function visibleEdges(
-  graph: GraphData,
-  nodes: readonly Pick<WorkspaceGraphNode, "path">[],
-  variant: GraphVariant,
-): VisibleGraphEdge[] {
-  const paths = new Set(nodes.map((node) => node.path));
-  return graph.edges
-    .filter((edge) => paths.has(edge.source) && paths.has(edge.target))
-    .slice(0, GRAPH_LAYOUT[variant].edgeLimit);
-}
-
-function useForceGraph(
-  graph: GraphData,
-  activePath: string | null,
-  variant: GraphVariant,
-  renderPositions: GraphPositionSink,
-  dragRef: RefObject<GraphDrag | null>,
-) {
-  const layout = GRAPH_LAYOUT[variant];
-  const ordered = useMemo(
-    () => visibleGraphNodes(graph, activePath, variant),
-    [graph, activePath, variant],
-  );
-  const [points, setPoints] = useState<GraphPoint[]>([]);
-  const nodesRef = useRef<ForceNode[]>([]);
-  const nodesByPathRef = useRef(new Map<string, ForceNode>());
-  const edgesRef = useRef<VisibleGraphEdge[]>([]);
-  const frameRef = useRef<number | null>(null);
-  const alphaRef = useRef(0);
-  const settleFramesRef = useRef(0);
-  const activePathRef = useRef(activePath);
-  const variantRef = useRef(variant);
-  const renderPositionsRef = useRef(renderPositions);
-  renderPositionsRef.current = renderPositions;
-
-  const step = useCallback(() => {
-    const nodes = nodesRef.current;
-    const edges = edgesRef.current;
-    const currentLayout = GRAPH_LAYOUT[variantRef.current];
-    const currentActivePath = activePathRef.current;
-    const byPath = nodesByPathRef.current;
-    const dragging = nodes.some((node) => node.dragging);
-    const alpha = dragging ? Math.max(alphaRef.current, 0.22) : alphaRef.current;
-    const centerX = currentLayout.width / 2;
-    const centerY = currentLayout.height / 2;
-    const hasActive =
-      currentActivePath !== null && nodes.some((node) => node.path === currentActivePath);
-
-    for (const node of nodes) {
-      if (node.dragging) continue;
-      const active = node.path === currentActivePath;
-      const centerStrength = active ? 0.09 : hasActive ? 0.006 : 0.014;
-      node.vx += (centerX - node.x) * centerStrength * alpha;
-      node.vy += (centerY - node.y) * centerStrength * alpha;
-
-      if (hasActive && !active) {
-        const ringIndex = Math.max(0, node.index - 1);
-        const ringCount = Math.max(1, nodes.length - 1);
-        const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
-        const ringX =
-          centerX + Math.cos(angle) * (variantRef.current === "page" ? 360 : 88);
-        const ringY =
-          centerY + Math.sin(angle) * (variantRef.current === "page" ? 240 : 158);
-        node.vx += (ringX - node.x) * 0.004 * alpha;
-        node.vy += (ringY - node.y) * 0.004 * alpha;
-      }
-    }
-
+  const local = localPath !== null && kept.has(localPath);
+  if (local) {
+    const neighbours = new Map<string, string[]>();
     for (const edge of edges) {
-      const source = byPath.get(edge.source);
-      const target = byPath.get(edge.target);
-      if (!source || !target) continue;
-      const dx = target.x - source.x;
-      const dy = target.y - source.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const desired =
-        variantRef.current === "page"
-          ? edge.kind === "wikilink"
-            ? 150
-            : 116
-          : edge.kind === "wikilink"
-            ? 94
-            : 74;
-      const force = (distance - desired) * 0.018 * alpha;
-      const fx = (dx / distance) * force;
-      const fy = (dy / distance) * force;
-      if (!source.dragging) {
-        source.vx += fx;
-        source.vy += fy;
-      }
-      if (!target.dragging) {
-        target.vx -= fx;
-        target.vy -= fy;
-      }
+      (neighbours.get(edge.source) ?? neighbours.set(edge.source, []).get(edge.source)!).push(edge.target);
+      (neighbours.get(edge.target) ?? neighbours.set(edge.target, []).get(edge.target)!).push(edge.source);
     }
-
-    const pairwiseLimit = Math.min(
-      nodes.length,
-      GRAPH_LAYOUT[variantRef.current].pairwiseLimit,
-    );
-    for (let i = 0; i < pairwiseLimit; i += 1) {
-      const a = nodes[i]!;
-      for (let j = i + 1; j < pairwiseLimit; j += 1) {
-        const b = nodes[j]!;
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
-        let distance = Math.hypot(dx, dy);
-        if (distance < 0.1) {
-          dx = (j % 3) + 0.25;
-          dy = (i % 5) + 0.5;
-          distance = Math.hypot(dx, dy);
-        }
-        const nx = dx / distance;
-        const ny = dy / distance;
-        const charge =
-          ((variantRef.current === "page" ? 2800 : 1400) * alpha) /
-          Math.max(80, distance * distance);
-        if (!a.dragging) {
-          a.vx -= nx * charge;
-          a.vy -= ny * charge;
-        }
-        if (!b.dragging) {
-          b.vx += nx * charge;
-          b.vy += ny * charge;
-        }
-        const minDistance =
-          a.radius + b.radius + (variantRef.current === "page" ? 34 : 28);
-        if (distance < minDistance) {
-          const push = ((minDistance - distance) / distance) * 0.38 * alpha;
-          if (!a.dragging) {
-            a.vx -= dx * push;
-            a.vy -= dy * push;
-          }
-          if (!b.dragging) {
-            b.vx += dx * push;
-            b.vy += dy * push;
+    const reached = new Set([localPath]);
+    let ring = [localPath];
+    for (let step = 0; step < settings.depth && ring.length; step++) {
+      const next: string[] = [];
+      for (const path of ring) {
+        for (const neighbour of neighbours.get(path) ?? []) {
+          if (!reached.has(neighbour)) {
+            reached.add(neighbour);
+            next.push(neighbour);
           }
         }
       }
+      ring = next;
     }
+    paths = paths.filter((path) => reached.has(path));
+    edges = edges.filter((edge) => reached.has(edge.source) && reached.has(edge.target));
+  }
 
-    let maxVelocity = 0;
-    for (const node of nodes) {
-      if (node.dragging) {
-        node.vx = 0;
-        node.vy = 0;
-        continue;
-      }
-      node.vx *= 0.84;
-      node.vy *= 0.84;
-      node.x = Math.min(
-        currentLayout.width - node.radius - 18,
-        Math.max(node.radius + 18, node.x + node.vx),
-      );
-      node.y = Math.min(
-        currentLayout.height - node.radius - 28,
-        Math.max(node.radius + 18, node.y + node.vy),
-      );
-      maxVelocity = Math.max(maxVelocity, Math.abs(node.vx), Math.abs(node.vy));
-    }
-
-    renderPositionsRef.current(nodes, edges, byPath);
-    alphaRef.current = dragging
-      ? 0.28
-      : alphaRef.current * currentLayout.alphaDecay;
-    if (!dragging) settleFramesRef.current += 1;
-    const hasEnergy = alphaRef.current > 0.008 || maxVelocity > 0.018;
-    if (
-      dragging ||
-      (hasEnergy && settleFramesRef.current < currentLayout.settleFrameLimit)
-    ) {
-      frameRef.current = requestAnimationFrame(step);
-      return;
-    }
-    stopGraphMotion(nodes);
-    alphaRef.current = 0;
-    setPoints(snapshotNodes(nodes));
-    frameRef.current = null;
-  }, []);
-
-  const restart = useCallback(
-    (boost = 0.7) => {
-      alphaRef.current = Math.max(alphaRef.current, boost);
-      settleFramesRef.current = 0;
-      if (frameRef.current === null) frameRef.current = requestAnimationFrame(step);
-    },
-    [step],
-  );
-
-  useEffect(() => {
-    activePathRef.current = activePath;
-    variantRef.current = variant;
-  }, [activePath, variant]);
-
-  useEffect(() => {
-    const previous = new Map(nodesRef.current.map((node) => [node.path, node]));
-    const heldPath = dragRef.current?.path;
-    const nodes = ordered.map((node, index) =>
-      initialGraphNode(
-        node,
-        index,
-        ordered.length,
-        activePath,
-        variant,
-        previous.get(node.path),
-        heldPath === node.path,
-      ),
-    );
-    nodesRef.current = nodes;
-    nodesByPathRef.current = new Map(nodes.map((node) => [node.path, node]));
-    edgesRef.current = visibleEdges(graph, nodes, variant);
-    setPoints(snapshotNodes(nodes));
-    restart(0.86);
-  }, [activePath, dragRef, graph, ordered, restart, variant]);
-
-  useEffect(() => {
-    return () => {
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-      frameRef.current = null;
-    };
-  }, []);
-
-  const setNodePosition = useCallback(
-    (path: string, x: number, y: number, dragging: boolean) => {
-      const node = nodesByPathRef.current.get(path);
-      if (!node) return;
-      node.dragging = dragging;
-      node.x = Math.min(layout.width - node.radius - 18, Math.max(node.radius + 18, x));
-      node.y = Math.min(layout.height - node.radius - 28, Math.max(node.radius + 18, y));
-      node.vx = 0;
-      node.vy = 0;
-      renderPositionsRef.current(
-        nodesRef.current,
-        edgesRef.current,
-        nodesByPathRef.current,
-      );
-      restart(dragging ? 0.55 : 0.32);
-    },
-    [layout.height, layout.width, restart],
-  );
-
-  const releaseNode = useCallback(
-    (path: string) => {
-      const node = nodesByPathRef.current.get(path);
-      if (!node) return;
-      node.dragging = false;
-      setPoints(snapshotNodes(nodesRef.current));
-      restart(0.34);
-    },
-    [restart],
-  );
-
-  return {
-    points,
-    edges: edgesRef.current,
-    setNodePosition,
-    releaseNode,
-  };
+  // Most-linked first: the layout seeds hubs at the centre, and labels show
+  // for them first.
+  paths.sort((a, b) => (degree.get(b) ?? 0) - (degree.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
+  const index = new Map(paths.map((path, i) => [path, i]));
+  const sources = paths.map((path) => kept.get(path)!);
+  const linkDegree = new Uint32Array(paths.length);
+  const links: [number, number][] = [];
+  for (const edge of edges) {
+    const s = index.get(edge.source), t = index.get(edge.target);
+    if (s === undefined || t === undefined) continue;
+    links.push([s, t]);
+    linkDegree[s]!++;
+    linkDegree[t]!++;
+  }
+  const nodes = sources.map((node, i) => ({
+    path: node.path,
+    title: node.title,
+    shape: SHAPES[graphKind(node)],
+    degree: linkDegree[i]!,
+  }));
+  return { nodes, sources, links, index, filteredNodeCount, filteredLinkCount, kindCounts, local };
 }
 
-function graphStatus(
-  graph: GraphData,
-  shownNodeCount: number,
-  shownEdgeCount: number,
-): string | null {
+function groupsFor(model: GraphViewModel, groups: GraphSettingsValue["groups"]): Int16Array {
+  const result = new Int16Array(model.nodes.length).fill(-1);
+  const queries = groups
+    .map((group) => ({ query: group.query.trim().toLocaleLowerCase(), hue: group.hue }))
+    .filter((group) => group.query);
+  if (!queries.length) return result;
+  model.sources.forEach((node, i) => {
+    const title = node.title.toLocaleLowerCase(), path = node.path.toLocaleLowerCase();
+    const match = queries.find((group) => title.includes(group.query) || path.includes(group.query));
+    if (match) result[i] = match.hue;
+  });
+  return result;
+}
+
+function plural(count: number, word: string): string {
+  return `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function coverageNotice(graph: GraphData): string | null {
   const notices: string[] = [];
-  if (shownNodeCount < graph.nodes.length) {
-    notices.push(`${shownNodeCount} of ${graph.nodes.length} docs shown`);
-  }
-  if (shownEdgeCount < graph.edges.length) {
-    notices.push(
-      `${shownEdgeCount} of ${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"} shown`,
-    );
-  }
   if (!graph.mountsCovered) notices.push("Shared folders excluded");
-  if (graph.unchecked.length) notices.push(`${graph.unchecked.length} unchecked`);
+  if (graph.unchecked.length) notices.push(`${graph.unchecked.length.toLocaleString()} unchecked`);
   return notices.length > 0 ? notices.join(" · ") : null;
 }
 
-function GraphMap(props: {
-  graph: GraphData;
-  activePath: string | null;
-  variant: GraphVariant;
-  onOpenPath: (path: string, headingAnchor?: string) => void;
-  onOpenChatThread?: (node: WorkspaceGraphNode) => void;
-}) {
-  const layout = GRAPH_LAYOUT[props.variant];
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const nodeElementsRef = useRef(new Map<string, SVGGElement>());
-  const edgeElementsRef = useRef(new Map<string, SVGLineElement>());
-  const dragRef = useRef<GraphDrag | null>(null);
-  const renderPositions = useCallback<GraphPositionSink>((nodes, edges, byPath) => {
-    for (const node of nodes) {
-      nodeElementsRef.current
-        .get(node.path)
-        ?.setAttribute("transform", `translate(${node.x} ${node.y})`);
-    }
-    for (const edge of edges) {
-      const element = edgeElementsRef.current.get(graphEdgeKey(edge));
-      const source = byPath.get(edge.source);
-      const target = byPath.get(edge.target);
-      if (!element || !source || !target) continue;
-      element.setAttribute("x1", String(source.x));
-      element.setAttribute("y1", String(source.y));
-      element.setAttribute("x2", String(target.x));
-      element.setAttribute("y2", String(target.y));
-    }
-  }, []);
-  const { points, edges, setNodePosition, releaseNode } = useForceGraph(
-    props.graph,
-    props.activePath,
-    props.variant,
-    renderPositions,
-    dragRef,
-  );
-  const byPath = useMemo(
-    () => new Map(points.map((point) => [point.path, point])),
-    [points],
-  );
+function nodeSubtitle(node: GraphNode): string {
+  return node.kind === "heading" ? node.filePath : node.kind === "chat-thread" ? "Chat thread" : node.path;
+}
 
-  function openNode(path: string) {
-    const node = byPath.get(path);
-    if (!node) return;
-    if (node.kind === "chat-thread") {
-      props.onOpenChatThread?.(node);
+// Shows its children only after 150 ms, so a fast answer never flashes.
+function useDelayed(active: boolean): boolean {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setShown(false);
       return;
     }
-    const targetPath = node.filePath ?? node.path;
-    if (node.headingAnchor) props.onOpenPath(targetPath, node.headingAnchor);
-    else props.onOpenPath(targetPath);
-  }
+    const timer = setTimeout(() => setShown(true), 150);
+    return () => clearTimeout(timer);
+  }, [active]);
+  return active && shown;
+}
 
-  function pointFromPointer(event: React.PointerEvent<SVGElement>) {
-    const rect = svgRef.current?.getBoundingClientRect();
-    const width = rect?.width && rect.width > 0 ? rect.width : layout.width;
-    const height = rect?.height && rect.height > 0 ? rect.height : layout.height;
-    const left = rect?.left ?? 0;
-    const top = rect?.top ?? 0;
-    return {
-      x: ((event.clientX - left) / width) * layout.width,
-      y: ((event.clientY - top) / height) * layout.height,
-    };
-  }
+function GraphRows(props: {
+  model: GraphViewModel;
+  activePath: string | null;
+  onOpen: (node: GraphNode) => void;
+  onFocusNode: (index: number) => void;
+}) {
+  // Rows keep their places: sorted by title, never by which page is open.
+  const order = useMemo(
+    () =>
+      props.model.sources
+        .map((node, index) => ({ node, index }))
+        .sort((a, b) => a.node.title.localeCompare(b.node.title) || a.node.path.localeCompare(b.node.path)),
+    [props.model],
+  );
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState({ top: 0, height: 480 });
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () => setViewport({ top: element.scrollTop, height: element.clientHeight || 480 });
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const first = Math.max(0, Math.floor(viewport.top / ROW_HEIGHT) - 8);
+  const last = Math.min(order.length, Math.ceil((viewport.top + viewport.height) / ROW_HEIGHT) + 8);
 
-  function moveDrag(event: React.PointerEvent<SVGSVGElement>) {
-    const drag = dragRef.current;
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const point = pointFromPointer(event);
-    const moved =
-      Math.abs(event.clientX - drag.startClientX) > 3 ||
-      Math.abs(event.clientY - drag.startClientY) > 3;
-    drag.moved ||= moved;
-    setNodePosition(drag.path, point.x, point.y, true);
-  }
-
-  function endDrag(event: React.PointerEvent<SVGSVGElement>, cancelled = false) {
-    const drag = dragRef.current;
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const shouldOpen = !cancelled && !drag.moved;
-    releaseNode(drag.path);
-    dragRef.current = null;
-    const svg = svgRef.current;
-    if (
-      typeof svg?.hasPointerCapture === "function" &&
-      typeof svg.releasePointerCapture === "function" &&
-      svg.hasPointerCapture(drag.pointerId)
-    ) {
-      svg.releasePointerCapture(drag.pointerId);
-    }
-    if (shouldOpen) openNode(drag.path);
+  function moveFocus(from: number, delta: number) {
+    const target = Math.max(0, Math.min(order.length - 1, from + delta));
+    const element = scrollRef.current;
+    if (!element) return;
+    const top = target * ROW_HEIGHT;
+    if (top < element.scrollTop) element.scrollTop = top;
+    else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight) element.scrollTop = top + ROW_HEIGHT - element.clientHeight;
+    setViewport({ top: element.scrollTop, height: element.clientHeight || viewport.height });
+    requestAnimationFrame(() => element.querySelector<HTMLElement>(`[data-row="${target}"]`)?.focus());
   }
 
   return (
-    <svg
-      ref={svgRef}
-      data-testid="graph-map"
-      viewBox={`0 0 ${layout.width} ${layout.height}`}
-      role="img"
-      aria-label="Workspace graph"
-      onPointerMove={moveDrag}
-      onPointerUp={endDrag}
-      onPointerCancel={(event) => endDrag(event, true)}
-      className={
-        props.variant === "page"
-          ? "min-h-0 w-full flex-1 touch-none bg-panel"
-          : "h-96 w-full shrink-0 touch-none border-y border-line bg-panel"
-      }
+    <div
+      ref={scrollRef}
+      data-testid="graph-rows"
+      onScroll={(event) => setViewport({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight || viewport.height })}
+      className="min-h-0 flex-1 overflow-y-auto px-1 py-2"
     >
-      <rect width={layout.width} height={layout.height} className="fill-panel" />
-      {edges.map((edge) => {
-        const source = byPath.get(edge.source)!;
-        const target = byPath.get(edge.target)!;
-        return (
-          <line
-            key={graphEdgeKey(edge)}
-            ref={(element) => {
-              const key = graphEdgeKey(edge);
-              if (element) edgeElementsRef.current.set(key, element);
-              else edgeElementsRef.current.delete(key);
-            }}
-            data-testid="graph-edge"
-            x1={source.x}
-            y1={source.y}
-            x2={target.x}
-            y2={target.y}
-            pathLength={1}
-            className={
-              edge.kind === "wikilink"
-                ? "dohc-graph-edge stroke-line"
-                : "dohc-graph-edge stroke-match/70"
-            }
-            strokeWidth={
-              props.variant === "page"
-                ? edge.kind === "wikilink"
-                  ? 1.4
-                  : 2
-                : edge.kind === "wikilink"
-                  ? 1
-                  : 1.4
-            }
-          />
-        );
-      })}
-      {points.map((node, index) => {
-        const active = node.path === props.activePath;
-        const showLabel = active || index < layout.labelLimit;
-        return (
-          <g
-            key={node.path}
-            ref={(element) => {
-              if (element) nodeElementsRef.current.set(node.path, element);
-              else nodeElementsRef.current.delete(node.path);
-            }}
-            transform={`translate(${node.x} ${node.y})`}
-          >
-            <g
-              data-testid="graph-node"
+      <div style={{ height: order.length * ROW_HEIGHT, position: "relative" }}>
+        {order.slice(first, last).map(({ node, index }, offset) => {
+          const row = first + offset;
+          const active = node.path === props.activePath;
+          return (
+            <button
+              key={node.path}
+              type="button"
+              data-testid="graph-file-row"
               data-path={node.path}
-              data-kind={node.kind ?? "file"}
-              role="button"
-              tabIndex={0}
-              aria-label={`Open or focus ${node.path}`}
               data-active={active ? "true" : "false"}
-              className="dohc-graph-node outline-none"
-              style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
-              onPointerDown={(event) => {
-                if (event.button !== 0 || dragRef.current !== null) return;
-                const point = pointFromPointer(event);
-                dragRef.current = {
-                  path: node.path,
-                  pointerId: event.pointerId,
-                  startClientX: event.clientX,
-                  startClientY: event.clientY,
-                  moved: false,
-                };
-                setNodePosition(node.path, point.x, point.y, true);
-                const svg = svgRef.current;
-                if (typeof svg?.setPointerCapture === "function") {
-                  svg?.setPointerCapture(event.pointerId);
-                }
-              }}
+              data-row={row}
+              title={nodeSubtitle(node)}
+              style={{ position: "absolute", top: row * ROW_HEIGHT, left: 0, right: 0 }}
+              onClick={() => props.onOpen(node)}
+              onFocus={() => props.onFocusNode(index)}
+              onBlur={() => props.onFocusNode(-1)}
+              onMouseEnter={() => props.onFocusNode(index)}
+              onMouseLeave={() => props.onFocusNode(-1)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                   event.preventDefault();
-                  openNode(node.path);
+                  moveFocus(row, event.key === "ArrowDown" ? 1 : -1);
                 }
               }}
+              className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+                active ? "bg-selected font-medium text-ink" : "text-muted hover:bg-hover hover:text-ink"
+              }`}
             >
-              <title>{`Open or focus ${node.path}`}</title>
-              <circle
-                cx={0}
-                cy={0}
-                r={node.radius + (props.variant === "page" ? 8 : 9)}
-                className="dohc-graph-node-halo"
-              />
-              <circle
-                cx={0}
-                cy={0}
-                r={node.radius}
-                className="dohc-graph-node-dot"
-                data-active={active ? "true" : "false"}
-                strokeWidth={active ? 2 : 1.25}
-              />
-              {showLabel ? (
-                <text
-                  x={0}
-                  y={node.radius + (props.variant === "page" ? 18 : 17)}
-                  textAnchor="middle"
-                  stroke="var(--dohc-panel)"
-                  strokeWidth={props.variant === "page" ? 4 : 3}
-                  paintOrder="stroke"
-                  data-active={active ? "true" : "false"}
-                  className={
-                    active
-                      ? props.variant === "page"
-                        ? "fill-ink text-[13px]"
-                        : "fill-ink text-[11px]"
-                      : props.variant === "page"
-                        ? "fill-muted text-[12px]"
-                        : "fill-muted text-[11px]"
-                  }
-                >
-                  {node.title.length > (props.variant === "page" ? 28 : 22)
-                    ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
-                    : node.title}
-                </text>
-              ) : null}
-            </g>
-          </g>
-        );
-      })}
-    </svg>
+              <ShapeMark shape={SHAPES[graphKind(node)]} className={active ? "text-ink" : "text-subtle"} />
+              <span className="min-w-0 flex-1 truncate">{node.title}</span>
+              <span className="text-[12px] tabular-nums text-subtle">{props.model.nodes[index]!.degree.toLocaleString()}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function GraphSearch(props: {
+  value: string;
+  model: GraphViewModel;
+  onChange: (value: string) => void;
+  onOpen: (node: GraphNode) => void;
+  onFocusNode: (index: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const matches = useMemo(
+    () => (props.value.trim() ? props.model.nodes.slice(0, SEARCH_RESULTS).map((node, index) => ({ node, index })) : []),
+    [props.model, props.value],
+  );
+  const shown = open && matches.length > 0;
+  const activeMatch = shown ? matches[Math.min(active, matches.length - 1)] : undefined;
+  const { onFocusNode } = props;
+  useEffect(() => {
+    onFocusNode(activeMatch ? activeMatch.index : -1);
+  }, [activeMatch, onFocusNode]);
+
+  return (
+    <div className="relative w-56 min-w-0 shrink">
+      <Search size={13} aria-hidden className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-subtle" />
+      <input
+        data-testid="graph-search"
+        role="combobox"
+        aria-label="Search graph"
+        aria-expanded={shown}
+        aria-controls="graph-search-results"
+        aria-activedescendant={activeMatch ? `graph-search-option-${activeMatch.index}` : undefined}
+        placeholder="Search files"
+        value={props.value}
+        onChange={(event) => {
+          props.onChange(event.target.value);
+          setActive(0);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+            setActive((current) => Math.max(0, Math.min(matches.length - 1, current + (event.key === "ArrowDown" ? 1 : -1))));
+          } else if (event.key === "Enter" && activeMatch) {
+            event.preventDefault();
+            props.onOpen(props.model.sources[activeMatch.index]!);
+          } else if (event.key === "Escape") {
+            if (props.value) {
+              event.preventDefault();
+              props.onChange("");
+            }
+          }
+        }}
+        className="h-7 w-full rounded-md border border-line bg-bg pl-7 pr-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+      />
+      {shown ? (
+        <ul
+          id="graph-search-results"
+          role="listbox"
+          aria-label="Matching files"
+          className="dohc-popover dohc-pop-in absolute right-0 top-8 z-20 w-72 rounded-lg border border-line bg-panel p-1"
+        >
+          {matches.map(({ node, index }, position) => (
+            <li
+              key={node.path}
+              id={`graph-search-option-${index}`}
+              role="option"
+              aria-selected={activeMatch?.index === index}
+              data-testid="graph-search-option"
+              data-path={node.path}
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActive(position)}
+              onClick={() => props.onOpen(props.model.sources[index]!)}
+              className={`flex h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] ${
+                activeMatch?.index === index ? "bg-selected text-ink" : "text-muted"
+              }`}
+            >
+              <ShapeMark shape={node.shape} className="text-subtle" />
+              <span className="min-w-0 flex-1 truncate">{node.title}</span>
+              <span className="text-[12px] tabular-nums text-subtle">{node.degree.toLocaleString()}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -740,7 +363,7 @@ export function GraphView(props: {
   activePath: string | null;
   refreshKey: string;
   onOpenPath: (path: string, headingAnchor?: string) => void;
-  onOpenChatThread?: (node: WorkspaceGraphNode) => void;
+  onOpenChatThread?: (node: GraphNode) => void;
   chatMentionsAvailable?: boolean;
   variant?: GraphVariant;
   onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
@@ -748,15 +371,9 @@ export function GraphView(props: {
   const variant = props.variant ?? "panel";
   const [reloadNonce, setReloadNonce] = useState(0);
   const [includeChatMentions, setIncludeChatMentions] = useState(false);
-  const chatMentionsEnabled =
-    props.chatMentionsAvailable === true && includeChatMentions;
+  const chatMentionsEnabled = props.chatMentionsAvailable === true && includeChatMentions;
   const requestIdentity = useMemo(
-    () => ({
-      workspaceId: props.workspaceId,
-      chatMentionsEnabled,
-      refreshKey: props.refreshKey,
-      reloadNonce,
-    }),
+    () => ({ workspaceId: props.workspaceId, chatMentionsEnabled, refreshKey: props.refreshKey, reloadNonce }),
     [chatMentionsEnabled, props.refreshKey, props.workspaceId, reloadNonce],
   );
   const requestIdentityRef = useRef(requestIdentity);
@@ -895,81 +512,113 @@ export function GraphView(props: {
   }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, requestIdentity, load]);
 
   const scopedState: GraphState =
-    state.workspaceId === props.workspaceId &&
-    state.chatMentionsEnabled === chatMentionsEnabled
+    state.workspaceId === props.workspaceId && state.chatMentionsEnabled === chatMentionsEnabled
       ? state
-      : {
-          workspaceId: props.workspaceId,
-          chatMentionsEnabled,
-          status: "loading",
-          graph: null,
-          error: null,
-        };
+      : { workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading", graph: null, error: null };
   const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
   const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
     ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
       mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
-  const rows = useMemo(
-    () => visibleGraphNodes(graph, props.activePath, variant),
-    [graph, props.activePath, variant],
+
+  const settingsKey = `${props.workspaceId} ${variant}`;
+  const [savedSettings, setSettingsState] = useState({ key: settingsKey, value: sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS });
+  const settings = savedSettings.key === settingsKey ? savedSettings.value : sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS;
+  const setSettings = useCallback((next: GraphSettingsValue) => {
+    sessionSettings.set(settingsKey, next);
+    setSettingsState({ key: settingsKey, value: next });
+  }, [settingsKey]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  // The side panel is the open page's local graph; with no page open in the
+  // graph, it shows the whole workspace.
+  const localPath = variant === "panel" ? props.activePath : null;
+  const model = useMemo(
+    () => buildModel(graph, { hidden: settings.hidden, orphans: settings.orphans, depth: settings.depth }, variant === "page" ? deferredSearch : "", localPath),
+    [graph, settings.hidden, settings.orphans, settings.depth, deferredSearch, localPath, variant],
   );
-  const shownEdgeCount = useMemo(
-    () => visibleEdges(graph, rows, variant).length,
-    [graph, rows, variant],
+  const groups = useMemo(() => groupsFor(model, settings.groups), [model, settings.groups]);
+  const activeIndex = props.activePath === null ? -1 : model.index.get(props.activePath) ?? -1;
+  const [focusIndex, setFocusIndex] = useState(-1);
+  useEffect(() => setFocusIndex(-1), [model]);
+
+  const openNode = useCallback((node: GraphNode) => {
+    if (node.kind === "chat-thread") props.onOpenChatThread?.(node);
+    else if (node.kind === "heading") props.onOpenPath(node.filePath, node.headingAnchor);
+    else props.onOpenPath(node.filePath ?? node.path);
+  }, [props]);
+  const openIndex = useCallback((index: number) => {
+    const node = model.sources[index];
+    if (node) openNode(node);
+  }, [model, openNode]);
+
+  const loadingBlank = scopedState.status === "loading" && !scopedState.graph;
+  const showLoading = useDelayed(loadingBlank);
+  const gathering = (walking || chatWalking) && scopedState.graph !== null;
+  const filtered = model.filteredNodeCount < graph.nodes.length || model.filteredLinkCount < graph.edges.length;
+  const more = walking && scopedState.graph !== null ? "+" : "";
+  const fileCount = filtered
+    ? `${model.filteredNodeCount.toLocaleString()} of ${plural(graph.nodes.length, "file")}`
+    : `${graph.nodes.length.toLocaleString()}${more} file${graph.nodes.length === 1 && !more ? "" : "s"}`;
+  const linkCount = filtered
+    ? `${model.filteredLinkCount.toLocaleString()} of ${plural(graph.edges.length, "link")}`
+    : `${graph.edges.length.toLocaleString()}${more} link${graph.edges.length === 1 && !more ? "" : "s"}`;
+  const counts = `${fileCount} · ${linkCount}`;
+  const notice = coverageNotice(graph);
+  const empty = !loadingBlank && graph.nodes.length === 0 && scopedState.status !== "error";
+
+  const canvas = (
+    <GraphCanvas
+      nodes={model.nodes}
+      links={model.links}
+      groups={groups}
+      activeIndex={activeIndex}
+      activePath={props.activePath}
+      focusIndex={focusIndex}
+      display={settings.display}
+      forces={settings.forces}
+      surface={variant === "page" ? "bg" : "panel"}
+      local={model.local}
+      label={model.local ? "Links to and from the open page" : "Workspace graph"}
+      className={variant === "page" ? "h-full w-full" : "h-72 w-full shrink-0"}
+      onOpen={openIndex}
+      onFocusChange={setFocusIndex}
+    />
   );
-  const notice = graphStatus(graph, rows.length, shownEdgeCount);
-  const docCount = `${graph.nodes.length} doc${graph.nodes.length === 1 ? "" : "s"}`;
-  const linkCount = `${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"}`;
-  const counts = `${docCount} · ${linkCount}`;
 
   return (
     <div
       data-testid="graph-view"
-      data-state={
-        scopedState.status === "loading" && !scopedState.graph
-          ? "loading"
-          : scopedState.status
-      }
+      data-state={loadingBlank ? "loading" : scopedState.status}
       data-variant={variant}
-      className={
-        variant === "page"
-          ? "flex min-h-0 flex-1 flex-col bg-bg"
-          : "flex min-h-0 flex-1 flex-col"
-      }
+      className={variant === "page" ? "flex min-h-0 flex-1 flex-col bg-bg" : "flex min-h-0 flex-1 flex-col"}
     >
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
         <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
-        <span title={counts} className="flex min-w-0 items-center gap-2 overflow-hidden text-[11px] text-muted">
-          <output data-testid="graph-doc-count" className="shrink-0">
-            {docCount}
-          </output>
-          <span aria-hidden className="text-[13px] text-subtle">
-            ·
-          </span>
-          <output data-testid="graph-link-count" className="min-w-0 truncate">
-            {linkCount}
-          </output>
+        <span title={counts} className="flex min-w-0 items-center gap-2 overflow-hidden text-[12px] tabular-nums text-muted">
+          <output data-testid="graph-doc-count" className="shrink-0">{fileCount}</output>
+          <span aria-hidden className="text-subtle">·</span>
+          <output data-testid="graph-link-count" className="min-w-0 truncate">{linkCount}</output>
         </span>
         {notice && variant === "page" ? (
-          <span
-            data-testid="graph-unresolved-count"
-            title={notice}
-            className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
-          >
+          <span data-testid="graph-unresolved-count" title={notice} className="inline-flex min-w-0 items-center gap-1 text-[12px] text-subtle">
             <ListFilter size={12} aria-hidden className="shrink-0" />
             <span className="truncate">{notice}</span>
           </span>
         ) : notice ? (
           // The side panel has room for the counts only, so the notice is its icon.
-          <span
-            data-testid="graph-unresolved-count"
-            role="img"
-            aria-label={notice}
-            title={notice}
-            className="inline-flex shrink-0 text-subtle"
-          >
+          <span data-testid="graph-unresolved-count" role="img" aria-label={notice} title={notice} className="inline-flex shrink-0 text-subtle">
             <ListFilter size={12} aria-hidden />
           </span>
+        ) : null}
+        {gathering ? (
+          <p role="status" title="Gathering linked mentions" className="min-w-0 truncate text-[12px] text-subtle">
+            Gathering linked mentions
+          </p>
+        ) : null}
+        <span className="ml-auto" />
+        {variant === "page" ? (
+          <GraphSearch value={search} model={model} onChange={setSearch} onOpen={openNode} onFocusNode={setFocusIndex} />
         ) : null}
         {props.chatMentionsAvailable ? (
           <IconButton
@@ -978,101 +627,59 @@ export function GraphView(props: {
             aria-pressed={includeChatMentions}
             title="Show chat and heading mentions"
             onClick={() => setIncludeChatMentions((value) => !value)}
-            className="ml-auto shrink-0 aria-pressed:bg-selected aria-pressed:text-ink"
+            className="shrink-0 aria-pressed:bg-selected aria-pressed:text-ink"
           >
             <MessageSquare size={13} aria-hidden />
           </IconButton>
-        ) : (
-          <span className="ml-auto" />
-        )}
-        <button
-          type="button"
-          aria-label="Refresh graph"
-          title="Refresh graph"
-          onClick={load}
-          className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-        >
+        ) : null}
+        <IconButton aria-label="Refresh graph" title="Refresh graph" onClick={load} className="shrink-0">
           <RefreshCw size={13} aria-hidden />
-        </button>
+        </IconButton>
+        <IconButton
+          data-testid="graph-settings-toggle"
+          aria-label="Graph settings"
+          aria-pressed={settingsOpen}
+          title="Graph settings"
+          onClick={() => setSettingsOpen((open) => !open)}
+          className="shrink-0 aria-pressed:bg-selected aria-pressed:text-ink"
+        >
+          <SlidersHorizontal size={13} aria-hidden />
+        </IconButton>
       </div>
 
-      {(walking || chatWalking) && scopedState.graph ? <p role="status" className="px-3 py-1 text-xs text-muted">Gathering linked mentions</p> : null}
-
-      {scopedState.status === "loading" && !scopedState.graph ? (
-        <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted">
-          Gathering linked mentions
-        </div>
-      ) : graph.nodes.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-          <FileText size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs text-muted">
-            {scopedState.status === "error" ? "Refresh graph to try again." : "Add a Markdown file to start building your graph."}
-          </span>
-        </div>
+      {empty ? (
+        <EmptyState icon={FileText} title="Add a Markdown file to start building your graph." />
       ) : (
-        <div
-          className={
-            variant === "page"
-              ? "flex min-h-0 flex-1"
-              : "flex min-h-0 flex-1 flex-col"
-          }
-        >
-          <GraphMap
-            graph={graph}
-            activePath={props.activePath}
-            variant={variant}
-            onOpenPath={props.onOpenPath}
-            onOpenChatThread={props.onOpenChatThread}
-          />
-          {variant === "page" ? null : (
-            <div className="flex min-h-0 flex-1 flex-col">
-              <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
-                {rows.map((node) => {
-                  const active = node.path === props.activePath;
-                  return (
-                    <button
-                      key={node.path}
-                      type="button"
-                      data-testid="graph-file-row"
-                      data-path={node.path}
-                      data-active={active ? "true" : "false"}
-                      onClick={() =>
-                        node.kind === "chat-thread"
-                          ? props.onOpenChatThread?.(node)
-                          : node.kind === "heading"
-                            ? props.onOpenPath(node.filePath, node.headingAnchor)
-                            : props.onOpenPath(node.filePath ?? node.path)
-                      }
-                      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
-                        active
-                          ? "bg-selected text-ink"
-                          : "text-muted hover:bg-hover hover:text-ink"
-                      }`}
-                    >
-                      <span className="grid size-6 shrink-0 place-items-center rounded-full border border-line bg-panel-2 text-[10px] font-semibold tabular-nums text-subtle">
-                        {degree(node)}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] text-ink">
-                          {node.title}
-                        </span>
-                        <span className="block truncate text-[10px] text-subtle">
-                          {node.kind === "heading"
-                            ? node.filePath
-                            : node.kind === "chat-thread"
-                              ? "Chat thread"
-                              : node.path}
-                        </span>
-                      </span>
-                      <span className="text-[10px] tabular-nums text-subtle">
-                        {node.incoming}/{node.outgoing}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+        <div className={variant === "page" ? "relative flex min-h-0 flex-1" : "relative flex min-h-0 flex-1 flex-col"}>
+          {loadingBlank ? (
+            <div className={variant === "page" ? "flex flex-1 items-center justify-center" : "flex h-72 shrink-0 items-center justify-center"}>
+              {showLoading ? <p role="status" className="text-[12px] text-subtle">Gathering linked mentions</p> : null}
             </div>
+          ) : (
+            canvas
           )}
+          {scopedState.status === "error" ? (
+            <div className="absolute left-2 top-2">
+              <RetryRow testId="graph-retry" onRetry={load} />
+            </div>
+          ) : null}
+          {!loadingBlank && model.nodes.length === 0 && deferredSearch.trim() && variant === "page" ? (
+            <p className="absolute inset-x-0 top-1/2 text-center text-sm text-muted">
+              {`No files match "${deferredSearch.trim()}". Try a shorter search.`}
+            </p>
+          ) : null}
+          {settingsOpen ? (
+            <GraphSettings
+              value={settings}
+              counts={model.kindCounts}
+              local={variant === "panel"}
+              onChange={setSettings}
+              onClose={() => setSettingsOpen(false)}
+            />
+          ) : null}
+          {variant === "panel" && !loadingBlank ? (
+            <GraphRows model={model} activePath={props.activePath} onOpen={openNode} onFocusNode={setFocusIndex} />
+          ) : null}
         </div>
       )}
     </div>
