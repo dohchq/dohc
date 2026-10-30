@@ -568,6 +568,39 @@ describe("ChatLane", () => {
     render(lane());
     await screen.findByText("Old message");
     expect(bridgeMock.chatDispatchStateForThread).not.toHaveBeenCalled();
+    expect(bridgeMock.chatRunRecordsForThread).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chats-lane-more")).toBeNull();
+  });
+
+  it("shows an agent reply's run details from its More menu", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Plan the trip" }),
+      message({ id: "reply", body: "Here is a plan", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {
+      reply: { runId: "run-1", threadId: "thread-1", triggerMessageId: "ask", command: "nova reply", startedAtMs: 1_000, exitCode: 0 },
+    } });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Here is a plan");
+    expect(bridgeMock.chatRunRecordsForThread).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" });
+    // Only the reply that has a run gets More.
+    expect(screen.getAllByTestId("chats-lane-more")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("chats-lane-more"));
+    fireEvent.click(await screen.findByTestId("chats-lane-more-run-details"));
+    const details = await screen.findByTestId("chats-lane-run-details");
+    expect(details.textContent).toContain("nova reply");
+    fireEvent.click(screen.getByTestId("chats-lane-more"));
+    expect((await screen.findByTestId("chats-lane-more-run-details")).textContent).toBe("Hide run details");
+    fireEvent.click(screen.getByTestId("chats-lane-more-run-details"));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-run-details")).toBeNull());
+  });
+
+  it("shows an agent DM without run details when its runs can't be read", async () => {
+    bridgeMock.chatRunRecordsForThread.mockRejectedValue(new Error("engine busy"));
+    render(lane("agent-dm", "workspace-a", "agent"));
+    await screen.findByText("Old message");
+    expect(screen.queryByTestId("chats-lane-more")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("drops the poll with the draft when the group changes", async () => {

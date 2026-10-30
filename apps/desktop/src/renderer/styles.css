@@ -2999,3 +2999,38 @@ input.dohc-math__source {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-2px); }
 }
+
+/* A thread's latest reply under its parent: two lines of running text. Lists
+ * keep their markers inline. The end of the second line fades out. */
+.dohc-chat-peek {
+  max-height: 40px;
+  overflow: hidden;
+  line-height: 20px;
+  mask-image: linear-gradient(black, black), linear-gradient(to right, black calc(100% - 64px), transparent);
+  mask-size: 100% 20px, 100% 20px;
+  mask-position: top, bottom;
+  mask-repeat: no-repeat;
+}
+.dohc-chat-peek :is(div, p, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+.dohc-chat-peek :is(p, li, blockquote, pre, h1, h2, h3, h4, h5, h6)::after {
+  content: " ";
+}
+.dohc-chat-peek ul > li::before {
+  content: "• ";
+}
+.dohc-chat-peek ol {
+  counter-reset: dohc-peek;
+}
+.dohc-chat-peek ol > li {
+  counter-increment: dohc-peek;
+}
+.dohc-chat-peek ol > li::before {
+  content: counter(dohc-peek) ". ";
+}

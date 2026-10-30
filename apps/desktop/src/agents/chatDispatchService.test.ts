@@ -2339,7 +2339,7 @@ describe("chatDispatchService", () => {
     expect(fixture.errors).toEqual([]);
   });
 
-  it("tells the person once when a run finishes, naming its thread", async () => {
+  it("tells the person once when a run finishes, naming its thread and reply", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       title: "Plan day 2",
@@ -2349,7 +2349,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
     if (!claim) throw new Error("Expected a live run.");
-    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    const reply = await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
 
     fixture.spawnCalls[0]!.process.emitExit(0);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -2361,7 +2361,7 @@ describe("chatDispatchService", () => {
       kind: "agent-run",
       title: "Nova replied in \"Plan day 2\"",
       body: "",
-      target: { thread: trigger.threadId, run: claim.run.runId },
+      target: { thread: trigger.threadId, run: claim.run.runId, message: reply },
     }]);
   });
 

@@ -264,7 +264,7 @@ export function AgentProblemLine(props: { words: string; action: string; onActio
           type="button"
           data-testid="chats-agent-problem-action"
           onClick={props.onAction}
-          className="inline-flex h-6 shrink-0 items-center rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-ink hover:bg-hover dohc-focus-visible"
+          className="inline-flex h-6 shrink-0 items-center rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-ink hover:bg-hover"
         >
           {props.action}
         </button>

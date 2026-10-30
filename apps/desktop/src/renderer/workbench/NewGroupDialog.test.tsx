@@ -54,8 +54,8 @@ describe("NewGroupDialog", () => {
     fireEvent.keyDown(nameField(), { key: "Enter" });
     expect(onCreate).toHaveBeenCalledOnce();
     expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(true);
-    pending.resolve("Could not create that group.");
-    expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe("Could not create that group.");
+    pending.resolve("dohc could not create launch.");
+    expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe("dohc could not create launch.");
     expect(nameField().value).toBe("launch");
     expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(false);
   });

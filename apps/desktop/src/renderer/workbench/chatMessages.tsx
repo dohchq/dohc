@@ -130,7 +130,7 @@ const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 export const TOOLBAR_BUTTON =
-  "grid size-7 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+  "grid size-7 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default";
 
 // A row's actions, floating over its top-right corner while the row is
 // hovered or holds focus. Only opacity changes, so the row never moves, and
@@ -726,11 +726,18 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
               </>
             ) : (
               <AgentColorAvatar>
-                <ChatAvatar presentation={message.presentation}
-                  name={message.authorDisplayName}
-                  kind={message.authorKind}
-                  size={sizes.avatar}
-                />
+                {isAgent ? (
+                  // The face marks an agent; hovering it says whose agent.
+                  <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation}>
+                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} size={sizes.avatar} />
+                  </AgentBadge>
+                ) : (
+                  <ChatAvatar presentation={message.presentation}
+                    name={message.authorDisplayName}
+                    kind={message.authorKind}
+                    size={sizes.avatar}
+                  />
+                )}
               </AgentColorAvatar>
             )}
           </span>
@@ -746,7 +753,6 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation} /> : null}
                 {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
@@ -795,7 +801,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       {props.loading ? (
         <SkeletonRows label="Loading..." className="pt-1" />
       ) : (
-        <p className="m-0 pt-4 text-center text-[11px] text-subtle">{props.emptyLabel}</p>
+        <p className="m-0 pt-4 text-center text-[13px] text-subtle">{props.emptyLabel}</p>
       )}
     </div>;
   }

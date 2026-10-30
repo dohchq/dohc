@@ -1,11 +1,14 @@
-import { ArrowDown, MessageSquareText } from "lucide-react";
+import { ArrowDown, MessageSquareText, MoreHorizontal, SquareTerminal } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import type { ChatMessageRecord, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import type { ChatMessageRecord, ChatRunRecord, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
+import { Menu } from "../ui/Menu";
 import { ChatMessageList, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
+import { RunDetails } from "./ChatPosts";
+import { showChat } from "./chatsOnScreen";
 
 // Within this distance of the end the reader is following the conversation.
 // Matches the list's own maintain-at-end threshold.
@@ -21,6 +24,9 @@ const SIDE_BY_SIDE_PX = 720;
 // a thread from one never opens in another.
 export function ThreadedChat(props: {
   testIdPrefix: string;
+  // The conversation's thread, once it has one, so an agent's notice about
+  // a reply shown here is skipped.
+  chatId?: string | null;
   messages: readonly ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
@@ -46,6 +52,8 @@ export function ThreadedChat(props: {
   reactionControls?: ChatReactionControls;
   // More under a message, such as its poll.
   renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
+  // The run behind each agent reply, by message, for its Run details.
+  runs?: Readonly<Record<string, ChatRunRecord>>;
   // An agent at work, and the message it answers.
   working?: ChatWorking | null;
   workingMessageId?: string | null;
@@ -58,6 +66,8 @@ export function ThreadedChat(props: {
   const [openRootId, setOpenRootId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<string, string>>(new Map());
   const [replying, setReplying] = useState(false);
+  // The message whose run details show under it.
+  const [detailsId, setDetailsId] = useState<string | null>(null);
   const [narrow, setNarrow] = useState(false);
   const [atEnd, setAtEnd] = useState(true);
   // Messages the reader had seen when last at the end.
@@ -78,6 +88,13 @@ export function ThreadedChat(props: {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+
+  const { chatId } = props;
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!node || !chatId) return;
+    return showChat(chatId, node);
+  }, [chatId]);
 
   const threads = useMemo(() => splitThreads(props.messages), [props.messages]);
   const stream = threads.top;
@@ -138,18 +155,45 @@ export function ThreadedChat(props: {
   }, [props.workingMessageId, threads.replies]);
   const working = props.working ?? null;
 
-  const { renderMessageFooter, mentionCandidates } = props;
+  const { renderMessageFooter, mentionCandidates, runs } = props;
+  const runDetails = useCallback((message: ChatMessageRecord) => {
+    const run = detailsId === message.id ? runs?.[message.id] : undefined;
+    return run ? (
+      <div
+        role="group"
+        aria-label="Run details"
+        data-testid={`${prefix}-run-details`}
+        className="mt-1.5 grid max-w-sm gap-2 rounded-lg border border-line bg-panel p-3"
+      >
+        <RunDetails run={run} />
+      </div>
+    ) : null;
+  }, [detailsId, prefix, runs]);
+  const moreAction = useCallback((message: ChatMessageRecord, testId: string) => runs?.[message.id] ? (
+    <MessageMore
+      testId={testId}
+      detailsShown={detailsId === message.id}
+      onToggleDetails={() => setDetailsId((shown) => (shown === message.id ? null : message.id))}
+    />
+  ) : null, [detailsId, runs]);
+  const renderThreadFooter = useCallback((message: ChatMessageRecord) => (
+    <>
+      {renderMessageFooter?.(message)}
+      {runDetails(message)}
+    </>
+  ), [renderMessageFooter, runDetails]);
   // Under a stream message: its poll, its thread, and the agent answering in it.
   const renderStreamFooter = useCallback((message: ChatMessageRecord) => {
     const replies = threads.replies.get(message.id);
     return (
       <>
         {renderMessageFooter?.(message)}
+        {runDetails(message)}
         {replies ? <ThreadSummary testIdPrefix={prefix} replies={replies} mentionCandidates={mentionCandidates} onOpen={() => openThread(message.id)} /> : null}
         {working && workingRootId === message.id && openRootId !== message.id ? <WorkingLine testIdPrefix={prefix} working={working} /> : null}
       </>
     );
-  }, [mentionCandidates, openRootId, openThread, prefix, renderMessageFooter, threads.replies, working, workingRootId]);
+  }, [mentionCandidates, openRootId, openThread, prefix, renderMessageFooter, runDetails, threads.replies, working, workingRootId]);
   const streamActions = useCallback((message: ChatMessageRecord) => (
     <>
       <button
@@ -163,11 +207,15 @@ export function ThreadedChat(props: {
         <MessageSquareText size={15} strokeWidth={1.9} aria-hidden />
       </button>
       <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-copy-text`} />
+      {moreAction(message, `${prefix}-more`)}
     </>
-  ), [openThread, prefix]);
+  ), [moreAction, openThread, prefix]);
   const threadActions = useCallback((message: ChatMessageRecord) => (
-    <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-thread-copy-text`} />
-  ), [prefix]);
+    <>
+      <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-thread-copy-text`} />
+      {moreAction(message, `${prefix}-thread-more`)}
+    </>
+  ), [moreAction, prefix]);
 
   const openRoot = openRootId ? stream.find((message) => message.id === openRootId) ?? null : null;
   const openReplies = openRootId ? threads.replies.get(openRootId) ?? [] : [];
@@ -208,7 +256,7 @@ export function ThreadedChat(props: {
                 type="button"
                 data-testid={`${prefix}-new-messages`}
                 onClick={() => listRef.current?.scrollToEnd()}
-                className="dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line dohc-focus-visible"
+                className="dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line"
               >
                 <ArrowDown size={11} aria-hidden />
                 <span className="tabular-nums">{newCount}</span>
@@ -233,7 +281,7 @@ export function ThreadedChat(props: {
           mentionCandidates={mentionCandidates}
           onOpenPath={props.onOpenPath}
           reactionControls={props.reactionControls}
-          renderMessageFooter={renderMessageFooter}
+          renderMessageFooter={renderThreadFooter}
           rowActions={threadActions}
           listRef={threadListRef}
           working={working && workingRootId === openRootId ? working : null}
@@ -257,5 +305,31 @@ export function ThreadedChat(props: {
         />
       ) : null}
     </div>
+  );
+}
+
+// A message's other actions, after its reactions, reply, and copy.
+function MessageMore(props: { testId: string; detailsShown: boolean; onToggleDetails: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label="More"
+      open={open}
+      onOpenChange={setOpen}
+      width={176}
+      menuTestId={`${props.testId}-menu`}
+      items={[{
+        id: "run-details",
+        label: props.detailsShown ? "Hide run details" : "Run details",
+        icon: <SquareTerminal size={14} aria-hidden />,
+        onSelect: props.onToggleDetails,
+        testId: `${props.testId}-run-details`,
+      }]}
+      trigger={(trigger) => (
+        <button {...trigger} type="button" data-testid={props.testId} aria-label="More" title="More" className={TOOLBAR_BUTTON}>
+          <MoreHorizontal size={15} strokeWidth={1.9} aria-hidden />
+        </button>
+      )}
+    />
   );
 }

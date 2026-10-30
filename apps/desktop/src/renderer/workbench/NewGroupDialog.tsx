@@ -10,7 +10,7 @@ export type GroupType = "chat" | "posts" | "both";
 const TYPES: ReadonlyArray<{ value: GroupType; label: string; line: string; icon: LucideIcon }> = [
   { value: "chat", label: "Chat", line: "One conversation, with threads.", icon: MessagesSquare },
   { value: "posts", label: "Posts", line: "Topics, each with its replies.", icon: Newspaper },
-  { value: "both", label: "Both", line: "Posts and a chat, side by side.", icon: Layers },
+  { value: "both", label: "Both", line: "Posts and a chat in one group.", icon: Layers },
 ];
 
 const FIELD =
@@ -88,7 +88,6 @@ export function NewGroupDialog(props: {
               autoFocus
               value={name}
               maxLength={80}
-              placeholder="lisbon-trip"
               disabled={busy}
               aria-invalid={nameMissing && !named}
               aria-describedby={nameMissing && !named ? `${id}-name-error` : undefined}

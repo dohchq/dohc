@@ -3,6 +3,7 @@ import type {
   ActorPresentation,
   ChatChannelRecord,
   ChatDecisionRecord,
+  ChatRunRecord,
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
@@ -84,6 +85,7 @@ export function ChatLane(props: {
   const [postThreadIds, setPostThreadIds] = useState<readonly string[]>([]);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
+  const [runs, setRuns] = useState<Readonly<Record<string, ChatRunRecord>>>({});
   const reactions = useReactions();
   const [loading, setLoading] = useState(true);
   const [ownComposer, setOwnComposer] = useState("");
@@ -147,6 +149,7 @@ export function ChatLane(props: {
         setThreadId(null);
         setMessages([]);
         setDecisions([]);
+        setRuns({});
         setDispatch(null);
         setLoading(false);
         return;
@@ -169,12 +172,14 @@ export function ChatLane(props: {
       }
       const ticket = reactions.ticket();
       const readThread = async (id: string) => {
-        const [page, reacted, polled] = await Promise.all([
+        const [page, reacted, polled, ran] = await Promise.all([
           bridge().listChatMessages({ workspaceId, threadId: id }),
           bridge().listChatReactions({ workspaceId, threadId: id }),
           bridge().listChatThreadDecisions({ workspaceId, threadId: id }),
+          // Only an agent's replies have runs. Without them the chat still shows.
+          agentDm ? bridge().chatRunRecordsForThread({ workspaceId, threadId: id }).catch(() => null) : null,
         ]);
-        return { id, messages: page.messages, reacted, decisions: polled.decisions };
+        return { id, messages: page.messages, reacted, decisions: polled.decisions, runs: ran?.runs ?? {} };
       };
       const [laneRead, ...postReads] = await Promise.all([
         laneId ? readThread(laneId) : null,
@@ -196,6 +201,7 @@ export function ChatLane(props: {
       setMessages([...postReads.flatMap((read) => postAsThread(read.messages)), ...laneMessages]
         .sort((left, right) => left.createdAtMs - right.createdAtMs));
       setDecisions(reads.flatMap((read) => read.decisions));
+      setRuns(Object.assign({}, ...reads.map((read) => read.runs)));
       setLoading(false);
       markRead(next);
       // A post shown here is read: there's nowhere else to open it.
@@ -217,6 +223,7 @@ export function ChatLane(props: {
     setPostThreadIds([]);
     setMessages([]);
     setDecisions([]);
+    setRuns({});
     setOwnComposer("");
     setOwnPoll(null);
     setSending(false);
@@ -431,7 +438,9 @@ export function ChatLane(props: {
     <ThreadedChat
       key={`${workspaceId}:${channelId}`}
       testIdPrefix="chats-lane"
+      chatId={threadId}
       messages={messages}
+      runs={runs}
       loading={loading}
       emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
       place={place}

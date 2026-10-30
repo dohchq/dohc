@@ -3464,7 +3464,7 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
         return null;
       } catch (error) {
-        return ipcErrorMessage(error, "Could not create that group.");
+        return ipcErrorMessage(error, `dohc could not create ${input.name}.`);
       }
     },
     [resetGroupForm, openConversation, workspaceId],
@@ -4563,32 +4563,24 @@ export function ChatsView(props: {
     // switch keeps its own row there.
     const laneTabs =
       groupType === "both" ? (
-        <div
-          role="tablist"
-          aria-label="Group lanes"
-          className={
-            variant === "page"
-              ? "flex shrink-0 gap-1"
-              : "flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
-          }
-        >
-          {([["posts", "Posts"], ["chat", "Chat"]] as const).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={lane === value}
-              data-testid={`chats-group-lane-${value}`}
-              onClick={() => setLane(value)}
-              className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                lane === value
-                  ? "bg-selected text-ink"
-                  : "text-muted hover:bg-hover hover:text-ink"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className={variant === "page" ? "shrink-0" : "flex shrink-0 border-b border-line px-3 py-1.5"}>
+          <div role="tablist" aria-label="Group lanes" className="flex rounded-lg border border-line bg-panel-2 p-0.5">
+            {([["posts", "Posts"], ["chat", "Chat"]] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={lane === value}
+                data-testid={`chats-group-lane-${value}`}
+                onClick={() => setLane(value)}
+                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+                  lane === value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null;
     const top = (
@@ -4631,7 +4623,7 @@ export function ChatsView(props: {
                   aria-label={`${channelAgent?.label ?? "Agent"} settings`}
                   title={`${channelAgent?.label ?? "Agent"} settings`}
                   onClick={props.onSetupAgent}
-                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
                 >
                   <Settings size={16} strokeWidth={1.9} aria-hidden />
                 </button>

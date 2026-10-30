@@ -2,7 +2,7 @@ import { ChevronLeft, Square, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { ActorPresentation, ChatMessageRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { formatChatDay, formatClock, sameChatDay } from "../time";
+import { formatClock, formatShortTime, sameChatDay } from "../time";
 import { ChatAvatar, useAgentInk } from "./ChatAvatar";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatMessageList, DENSITY, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
@@ -82,7 +82,7 @@ function AgentReplyPeek(props: {
         <span className="truncate text-[13px] font-semibold">{reply.authorDisplayName}</span>
         <span className="shrink-0 text-[12px] tabular-nums text-subtle">{formatClock(reply.createdAtMs)}</span>
       </span>
-      <div inert className="max-h-11 overflow-hidden text-ink [mask-image:linear-gradient(to_bottom,black_24px,transparent_44px)]">
+      <div inert className="dohc-chat-peek text-[14px] text-ink">
         <ChatMarkdown body={reply.body} candidates={props.mentionCandidates} attachments={reply.attachments} />
       </div>
     </div>
@@ -101,15 +101,16 @@ function RepliesLine(props: {
     const key = `${reply.authorKind}:${reply.presentation.group}:${reply.authorDisplayName}`;
     if (!faces.has(key) && faces.size < 3) faces.set(key, reply);
   }
-  const when = sameChatDay(last.createdAtMs, Date.now())
-    ? formatClock(last.createdAtMs)
-    : `${formatChatDay(last.createdAtMs)} ${formatClock(last.createdAtMs)}`;
+  // Today's time, "Yesterday", or a short date.
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const when = sameChatDay(last.createdAtMs, yesterday.getTime()) ? "Yesterday" : formatShortTime(last.createdAtMs);
   return (
     <button
       type="button"
       data-testid={`${props.testIdPrefix}-thread-summary`}
       onClick={props.onOpen}
-      className="-ml-1 mt-1 flex h-7 max-w-full items-center gap-2 rounded-md border border-transparent px-1 text-[13px] hover:border-line hover:bg-bg dohc-focus-visible"
+      className="-ml-1 mt-1 flex h-7 max-w-full items-center gap-2 rounded-md border border-transparent px-1 text-[13px] hover:border-line hover:bg-bg"
     >
       <span className="flex shrink-0 gap-[3px]">
         {[...faces.values()].map((reply) => (
@@ -147,7 +148,7 @@ function StopButton(props: { testIdPrefix: string; stopping: boolean; onStop: ()
       aria-label="Stop agent run"
       disabled={props.stopping}
       onClick={props.onStop}
-      className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+      className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
     >
       <Square size={9} strokeWidth={2} aria-hidden />
       Stop
@@ -249,7 +250,7 @@ export function ChatThreadPanel(props: {
             data-testid={`${props.testIdPrefix}-thread-back`}
             aria-label="Back to the conversation"
             onClick={props.onClose}
-            className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+            className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
           >
             <ChevronLeft size={16} aria-hidden />
           </button>
@@ -262,7 +263,7 @@ export function ChatThreadPanel(props: {
             data-testid={`${props.testIdPrefix}-thread-close`}
             aria-label="Close thread"
             onClick={props.onClose}
-            className="ml-auto grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+            className="ml-auto grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
           >
             <X size={16} aria-hidden />
           </button>

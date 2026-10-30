@@ -938,7 +938,7 @@ export function MentionComposer(props: {
                   aria-label="Add"
                   title="Add"
                   disabled={locked}
-                  className={`${BAR_BUTTON} dohc-focus-visible`}
+                  className={BAR_BUTTON}
                 >
                   <Plus size={16} strokeWidth={1.9} aria-hidden />
                 </button>
