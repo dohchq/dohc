@@ -129,7 +129,7 @@ it("denies permission checks and display capture, and guards main-frame requests
   guest.emit("input-event", {}, { type: "mouseMove" });
   guest.emit("will-frame-navigate", unprompted);
   expect(links()).toHaveLength(0);
-  guest.emit("input-event", {}, { type: "mouseDown" });
+  guest.emit("before-mouse-event", {}, { type: "mouseDown" });
   const navigation = { url: "https://example.com/out", isMainFrame: false, preventDefault: vi.fn() };
   guest.emit("will-frame-navigate", navigation);
   expect(navigation.preventDefault).toHaveBeenCalledOnce();

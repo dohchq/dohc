@@ -341,6 +341,17 @@ describe("an owner app in its tab", () => {
     expect(guest.focus.mock.contexts[0]).toBe(webview());
   });
 
+  it("leaves focus where it went if the tab lost focus before the app opened", async () => {
+    const slow = deferred<AppViewResult>();
+    appView.mockImplementationOnce(() => slow.promise);
+    const view = render(<Page focused />);
+    await waitFor(() => expect(opens()).toBe(1));
+    view.rerender(<Page focused={false} />);
+    await act(async () => slow.resolve(opened(appView.mock.calls[0]![0] as OpenRequest)));
+    await openedView();
+    expect(guest.focus).not.toHaveBeenCalled();
+  });
+
   it("passes dohc's theme to the app and follows it", async () => {
     document.documentElement.dataset.theme = "dark";
     render(<Page />);
@@ -361,6 +372,25 @@ describe("an owner app in its tab", () => {
     await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
     await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not open this app in your browser.", expect.any(Error), expect.any(Function)));
     expect(api.openExternalUrl).toHaveBeenCalledOnce();
+  });
+
+  it("drops a browser open that answers after its tab closed or moved to another workspace", async () => {
+    const reportError = vi.fn();
+    let launch = deferred<OwnerAppPublicationResult>();
+    publishOwnerApp.mockImplementation((request) => (request.action === "launchLocal" ? launch.promise : publication(request)));
+    const view = render(<Page workspaceId="ws-old" reportError={reportError} />);
+    await openedView();
+    await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
+    view.rerender(<Page workspaceId="ws-shop" reportError={reportError} />);
+    await waitFor(() => expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open", workspaceId: "ws-shop" })));
+    await act(async () => launch.reject(new Error("engine stopped")));
+    await openedView();
+    launch = deferred<OwnerAppPublicationResult>();
+    await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
+    view.unmount();
+    await act(async () => launch.resolve({ kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" }));
+    expect(reportError).not.toHaveBeenCalled();
+    expect(api.openExternalUrl).not.toHaveBeenCalled();
   });
 
   it("ends the view and its notices when the tab closes", async () => {

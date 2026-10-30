@@ -132,11 +132,10 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     if (!entry.closed && !entry.owner.isDestroyed()) entry.owner.send(CHANNELS.appViewEvent, event);
   };
   const external = (entry: Entry, raw: string) => {
-    const url = appViewExternalUrl(raw);
     const pressed = entry.lastPress !== undefined && Date.now() - entry.lastPress <= EXTERNAL_LINK_ACTIVATION_MS;
-    if (!url || !pressed) return;
     entry.lastPress = undefined;
-    emit(entry, { kind: "external-link", viewId: entry.viewId, url });
+    const url = appViewExternalUrl(raw);
+    if (url && pressed) emit(entry, { kind: "external-link", viewId: entry.viewId, url });
   };
   const close = (entry: Entry): Promise<void> => {
     if (entry.closing) return entry.closing;
@@ -237,8 +236,12 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.on("will-redirect", navigate);
     guest.on("will-frame-navigate", navigate);
     guest.setWindowOpenHandler(({ url }) => { external(entry, url); return { action: "deny" }; });
-    guest.on("input-event", (_event, input) => { if (ACTIVATING_INPUT.has(input.type)) entry.lastPress = Date.now(); });
+    // The before- events cover the app's child frames; input-event sees only the guest's main frame, but also sees taps.
+    const press = (input: { type: string }) => { if (ACTIVATING_INPUT.has(input.type)) entry.lastPress = Date.now(); };
+    guest.on("before-mouse-event", (_event, mouse) => press(mouse));
+    guest.on("input-event", (_event, input) => press(input));
     guest.on("before-input-event", (event, input) => {
+      press(input);
       const shortcut = appViewShortcut(input);
       if (shortcut) { event.preventDefault(); emit(entry, { kind: "shortcut", viewId: entry.viewId, ...shortcut }); }
     });

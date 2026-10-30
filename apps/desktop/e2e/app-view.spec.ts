@@ -41,7 +41,18 @@ async function clickApp(app: ElectronApplication, id: number, selector: string) 
   await inFrame(app, id, `document.querySelector(${JSON.stringify(selector)}).click(); true`);
 }
 async function ready(page: Page) {
-  await expect.poll(() => page.getByTestId("app-view").getAttribute("data-state")).toBe("ready");
+  const view = page.getByTestId("app-view-webview");
+  await shown(view);
+  await expect(view).not.toHaveClass(/opacity-0/);
+  await expect(page.getByTestId("app-view-loading")).toHaveCount(0);
+}
+// A real click, routed from dohc's window into the app. Only a press lets a link leave dohc.
+async function pressApp(page: Page, app: ElectronApplication, id: number, selector: string) {
+  const view = (await page.getByTestId("app-view-webview").boundingBox())!;
+  const [frameX, frameY] = await inFrame(app, id,
+    "(() => { const r = document.querySelector('iframe').getBoundingClientRect(); return [r.left, r.top]; })()", false) as [number, number];
+  const [x, y] = await inFrame(app, id, `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`) as [number, number];
+  await page.mouse.click(view.x + frameX + x, view.y + frameY + y);
 }
 async function shown(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(true); }
 async function hidden(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(false); }
@@ -99,11 +110,12 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await hidden(formDialog);
     await writeWorkspaceFiles(workspace, [{ path: `${appRoot}/frontend.js`, contents: frontend }]);
-    await page.getByTestId(activityPin("sites")).click();
+    const explorer = page.getByTestId(activityPin("explorer"));
+    if (await explorer.getAttribute("aria-pressed") === "false") await explorer.click();
     const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
     await shown(row);
     await row.click();
-    await expect.poll(() => page.getByTestId("app-view").getAttribute("data-state")).toBe("unapproved");
+    await shown(page.getByTestId("app-view-unapproved"));
     expect(await guestIds(electronApp)).toEqual([]);
     expect(await electronApp.evaluate(({ webContents }) => webContents.getAllWebContents().filter(contents =>
       /^http:\/\/127\.0\.0\.1:\d+\/bootstrap/.test(contents.getURL())).length)).toBe(0);
@@ -122,7 +134,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await row.click();
     await ready(page);
     await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
-    let guestId = (await guestIds(electronApp))[0]!;
+    const guestId = (await guestIds(electronApp))[0]!;
     await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
     const isolation = await electronApp.evaluate(({ webContents, BrowserWindow }, id) => {
       const guest = webContents.fromId(id)!;
@@ -143,16 +155,20 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     const expected: string[] = [];
     for (const [selector, url] of [["#blank", "https://example.com/blank"], ["#plain", "https://example.com/plain"],
       ["#popup", "https://example.com/popup"], ["#mailto", "mailto:app-view@example.com"]]) {
-      await clickApp(electronApp, guestId, selector!);
+      await pressApp(page, electronApp, guestId, selector!);
       expected.push(url!);
       await expect.poll(recorded).toEqual(expected);
       await expect.poll(() => electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/bootstrap$/);
     }
     for (const selector of ["#javascript", "#file"]) {
-      await clickApp(electronApp, guestId, selector);
+      await pressApp(page, electronApp, guestId, selector);
       // A main-process round trip follows the click before checking that nothing opened.
       expect(await recorded()).toEqual(expected);
     }
+    // Without a press, the app can't send anyone out of dohc.
+    await clickApp(electronApp, guestId, "#plain");
+    await inFrame(electronApp, guestId, "window.open('https://example.com/unprompted'); true");
+    expect(await recorded()).toEqual(expected);
     expect(await page.evaluate(() => (window as RendererProbe).__appViewEvents!.filter(event => event.kind === "external-link")
       .map(event => event.url))).toEqual(expected);
     await clickApp(electronApp, guestId, "#permission");
@@ -198,11 +214,11 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await shown(page.getByTestId("quick-open"));
     await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
+    // Reload reloads the same guest, so the app starts over.
     await page.getByTestId("app-view-reload").click();
+    await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count')?.textContent").catch(() => null)).toBe("0");
     await ready(page);
-    await expect.poll(async () => (await guestIds(electronApp)).some(id => id !== guestId)).toBe(true);
-    guestId = (await guestIds(electronApp))[0]!;
-    await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count')?.textContent")).toBe("0");
+    expect(await guestIds(electronApp)).toEqual([guestId]);
     await clickApp(electronApp, guestId, "#counter");
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("1");
     expect(await readdir(downloads)).toEqual([]);
