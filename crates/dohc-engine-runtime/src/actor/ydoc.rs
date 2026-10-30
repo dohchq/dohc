@@ -971,10 +971,13 @@ impl ActorHandle {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            let marker =
-                dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
-            if marker.path.as_deref() != Some(path.as_str())
-                || marker.lineage_claim_id != lineage_claim_id
+            let marker = dohc_engine_collab::read_marker(store, &key)?;
+            if marker
+                .as_ref()
+                .map_or(lineage_claim_id.is_some(), |marker| {
+                    marker.path.as_deref() != Some(path.as_str())
+                        || marker.lineage_claim_id != lineage_claim_id
+                })
             {
                 return Err(DomainError::ConflictStaleTarget.into());
             }
@@ -986,13 +989,6 @@ impl ActorHandle {
                     restore_generation,
                 )
             })?;
-            let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
-            let reference = doc.markdown_source_reference().filter(|reference| {
-                reference.source_sha256 == source_sha256 && doc.markdown_source(reference).is_some()
-            });
-            if reference.is_none() {
-                return Err(CollabError::MarkdownReaderUnavailable.into());
-            }
             let head = VersionedTextStore::new(store).read_text(
                 &key.workspace_id,
                 &key.version_id,
@@ -1003,6 +999,19 @@ impl ActorHandle {
                 .is_some_and(|head| head.object_id != key.object_id)
             {
                 return Err(DomainError::ConflictStaleTarget.into());
+            }
+            // A note with no Y.Doc state yet seeds from its file, and the seed
+            // records the file's bytes as its source.
+            let source = if marker.as_ref().is_some_and(ydoc_marker_has_durable_state) {
+                let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
+                doc.markdown_source_reference()
+                    .filter(|reference| doc.markdown_source(reference).is_some())
+                    .map(|reference| reference.source_sha256)
+            } else {
+                head.as_ref().map(|head| hex_sha256(head.text.as_bytes()))
+            };
+            if source.as_deref() != Some(source_sha256.as_str()) {
+                return Err(CollabError::MarkdownReaderUnavailable.into());
             }
             Ok(Arc::new(MarkdownConversionConsent::new(
                 key,

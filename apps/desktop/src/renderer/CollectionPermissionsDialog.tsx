@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetPermissionsPage } from "@dohc/cli/dataset";
+import type { DatasetPermissionsPage, DatasetPlace } from "@dohc/cli/dataset";
 import type { RelayShareGrantedRow } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
+import { CollectionMoveNote } from "./collections/CollectionMoveNote";
 import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -19,6 +20,7 @@ export function CollectionPermissionsDialog(props: Props) {
 }
 function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Props) {
   const [page, setPage] = useState<DatasetPermissionsPage | null>(null);
+  const [place, setPlace] = useState<DatasetPlace | null>(null);
   const [recipients, setRecipients] = useState<RelayShareGrantedRow[]>([]);
   const [grantId, setGrantId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -26,6 +28,8 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
   const alive = useRef(true), request = useRef(0), locked = useRef(false);
   const target = { workspaceId, datasetPath, expectedDatasetId: dataset.datasetId };
   const actions = dataset.operations.filter(operation => operation.access !== "owner");
+  // Saving moves a Collection on this computer to the server, which its owner agrees to by saving.
+  const moving = place?.kind === "here" ? place.server : null;
   async function load(after?: string) {
     if (!alive.current || locked.current) return;
     const token = ++request.current; setBusy(true);
@@ -36,7 +40,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
       ]);
       if (!alive.current || token !== request.current) return;
       if (permissions.kind !== "permissions") throw Error("dohc could not read Collection access. Try again.");
-      setPage({ permissions: permissions.permissions, nextCursor: permissions.nextCursor });
+      setPage({ permissions: permissions.permissions, nextCursor: permissions.nextCursor }); setPlace(permissions.place ?? null);
       setRecipients(shares.granted.filter(row => row.workspaceId === workspaceId && row.revokedAtMs === null && row.recipientUserId));
     } catch (cause) {
       if (alive.current && token === request.current) onError("Could not load Collection access.", cause, () => { void load(after); });
@@ -49,7 +53,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
     try {
       const result = await bridge().dataset(principalKey ? { ...target, action: "removeGrant", principalKey } : {
         ...target, action: "setGrant", grantId, grant: { revision: dataset.revision, revisionSha256: dataset.revisionSha256,
-          operationIds: selected, discover: true },
+          operationIds: selected, discover: true }, ...(moving ? { moveToServer: true as const } : {}),
       });
       if (!alive.current || token !== request.current) return;
       if (result.kind !== "grant-updated") throw Error("dohc could not confirm Collection access. Try again.");
@@ -62,6 +66,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
     className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-140 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5">
     <h2 id="collection-access-title" className="m-0 text-base font-semibold text-ink">Collection access</h2>
     <p className="m-0 text-[13px] text-muted">Choose who can use this Collection and which actions they can run.</p>
+    {place?.kind === "server" ? <p className="m-0 text-[12px] text-muted">This Collection is on {place.host}.</p> : null}
     <form className="flex flex-col gap-3" onSubmit={event => { event.preventDefault(); void change(); }}>
       <label className="text-[12px] text-muted">Person<select aria-label="Collection access person" value={grantId} disabled={busy}
         onChange={event => setGrantId(event.target.value)} className={`${inputClass} mt-1`}>
@@ -77,8 +82,9 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
         </label>)}
         {!actions.length ? <p className="m-0 text-[12px] text-muted">These rules contain no actions that can be shared. Review the Collection source to add one.</p> : null}
       </fieldset>
-      <p className="m-0 text-[12px] text-muted">Saving replaces this person's allowed actions for this Collection. Source permissions remain separate.</p>
-      <div><PrimaryButton type="submit" disabled={busy || !grantId || !selected.length}>Save access</PrimaryButton></div>
+      {moving ? <CollectionMoveNote action="Saving" server={moving} />
+        : <p className="m-0 text-[12px] text-muted">Saving replaces this person's allowed actions for this Collection. Source permissions remain separate.</p>}
+      <div><PrimaryButton type="submit" disabled={busy || !grantId || !selected.length}>{moving ? "Move and save access" : "Save access"}</PrimaryButton></div>
     </form>
     <div className="flex flex-col gap-2"><h3 className="m-0 text-sm font-semibold text-ink">People and apps with access</h3>
       {!page ? busy ? <SkeletonRows rows={2} label="Loading access…" /> : <p className="m-0 text-[12px] text-muted">Load access to review people and apps.</p> : !page.permissions.length ? <p className="m-0 text-[12px] text-muted">Only you have access.</p> : page.permissions.map(permission =>

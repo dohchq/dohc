@@ -13,6 +13,7 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/loc
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import type { DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
@@ -20,7 +21,8 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
   // Main's own host, which export opens first as main's does.
   localHost?: () => Promise<LocalDatasetHost>,
-  serverCollectionsFor?: () => Promise<ServerCollections | null>) {
+  serverCollectionsFor?: () => Promise<ServerCollections | null>,
+  moves?: { collectionPlace(): Promise<DatasetPlace>; moveToServer(): Promise<void> }) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -59,7 +61,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
     ...(serverCollectionsFor ? { serverCollectionsFor } : {}),
-    withAdapter, createSources, ...(automationName ? { automationName } : {}),
+    withAdapter, createSources, ...(automationName ? { automationName } : {}), ...moves,
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetPath: "data/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
@@ -449,6 +451,21 @@ it.each(["approve","approveMigration"])("refuses automation and received-share %
   await expect(f.handler("agent",input,{depth:1})).rejects.toThrow("Automations cannot approve");
   f.workspace.shareView={};
   await expect(f.handler("agent",input,{depth:0})).rejects.toThrow("original workspace");
+});
+
+it("moves a Collection on this computer to the server only when its owner agrees, never for an automation", async () => {
+  const setGrant = vi.fn(async () => undefined), moveToServer = vi.fn(async () => undefined);
+  let server: Extract<DatasetPlace, { kind: "here" }>["server"] = null;
+  const f = fixture({ setGrant } as unknown as OwnerDatasetData, undefined, undefined, undefined, undefined, { collectionPlace: async () => ({ kind: "here", server }), moveToServer });
+  const grant = { action: "setGrant", workspaceId: "workspace", datasetPath: "data/dataset.json", grantId: "grant",
+    grant: { revision: 1, revisionSha256: f.revision.revisionSha256, operationIds: ["00000000-0000-4000-8000-000000000005"], discover: true } };
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 0 })).rejects.toThrow("Sync this workspace with a server before giving a person access.");
+  server = { host: "sync.example.test", runs: null, automations: 0, scheduledAutomations: 0 };
+  await expect(f.handler("agent", grant, { depth: 0 })).rejects.toThrow("Giving a person access moves this Collection to sync.example.test.");
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 1 })).rejects.toThrow("Automations cannot move a Collection to the server.");
+  expect(moveToServer).not.toHaveBeenCalled(); expect(setGrant).not.toHaveBeenCalled();
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 0 })).resolves.toEqual({ kind: "grant-updated" });
+  expect(moveToServer).toHaveBeenCalledOnce(); expect(setGrant).toHaveBeenCalledOnce();
 });
 
 it.each([2, 3])("recovers revision %s to the base address", async number => {

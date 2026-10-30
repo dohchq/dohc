@@ -53,7 +53,8 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
-import { readServerDataset } from "./automations/serverDataset";
+import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
+import { collectionPlace, moveCollectionToServer } from "./workspaces/collectionMove";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -68,7 +69,7 @@ import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists
 import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
-import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, createServerCollectionsData, resolveRemoteDatasetRevision, type OwnerDatasetData, type RemoteDatasetData } from "./workspaces/remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createServerCollectionsData, resolveRemoteDatasetRevision, type OwnerDatasetData, type RemoteDatasetData } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
@@ -79,7 +80,7 @@ import { localStateOpened, LocalStateUnavailableError } from "./workspaces/works
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler, type ServerCollections } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
-import { type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { type DatasetPlace, type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
 import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
@@ -411,6 +412,7 @@ import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import {
   fetchShareViewInfo, fetchShareViewAccess, probeShareViewLog, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
@@ -4759,14 +4761,22 @@ async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: sy
   return {
     data: authority.kind === "server" ? authority.server.data(signal, remote.assertCurrent)
       : createRemoteDatasetData({ ...remote, relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, { ...init, redirect: "error" }) }),
-    automationHost: async () => {
-      const response = await relayShareResponseWithCredentials(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/automation-host`,
-        { method: "GET", signal: AbortSignal.any([signal, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS)]) });
-      signal.throwIfAborted();
-      if (credentialCacheGeneration !== credentialGeneration) throw new Error("Your server session changed. Try again.");
-      return { status: response.status, body: await response.json().catch(() => undefined) };
-    },
+    automationHost: () => readAutomationHost(workspace.workspaceId, credentials, credentialGeneration, signal),
   };
+}
+async function readAutomationHost(workspaceId: string, credentials: CloudSessionCredentials, credentialGeneration: number, signal: AbortSignal) {
+  const response = await relayShareResponseWithCredentials(credentials, `/sync/${encodeURIComponent(workspaceId)}/automation-host`,
+    { method: "GET", signal: AbortSignal.any([signal, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS)]) });
+  signal.throwIfAborted();
+  if (credentialCacheGeneration !== credentialGeneration) throw new Error("Your server session changed. Try again.");
+  return { status: response.status, body: await response.json().catch(() => undefined) };
+}
+/** A Collection's automations, and how many of them a schedule or Group message starts. */
+async function automationCounts(workspaceId: string, collectionPath: string) {
+  const file = await collectionAutomationsOf(workspaceId)?.automationsIn(collectionPath);
+  const automations = file?.status === "read" ? file.automations.flatMap(summary => summary.valid ? [summary.automation] : []) : [];
+  return { automations: automations.length,
+    scheduledAutomations: automations.filter(automation => automation.when.kind === "schedule" || automation.when.kind === "group-message").length };
 }
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
@@ -6655,8 +6665,24 @@ function registerIpcHandlers(): void {
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const datasetForWorkspace = localDatasetHostFor;
+  const moveToServer = async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string, signal: AbortSignal) => {
+    const remote = await remoteForWorkspace(workspace);
+    signal.throwIfAborted();
+    await moveCollectionToServer({ local: await datasetForWorkspace(workspace, signal), workspaceId: workspace.workspaceId, datasetId, ...remote,
+      currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal });
+  };
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    moveToServer,
+    collectionPlace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string, signal: AbortSignal): Promise<DatasetPlace> => {
+      const authority = await collectionsAuthorityFor(workspace, signal);
+      if (authority.kind === "server") return { kind: "server", host: new URL(authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl).host };
+      const { local } = authority, remote = workspace.remote ? await remoteForWorkspace(workspace) : null;
+      signal.throwIfAborted();
+      return collectionPlace({ transfer: local.transferStatus(datasetId), relayUrl: remote?.credentials.relayUrl ?? null,
+        automations: async () => automationCounts(workspace.workspaceId, datasetBaseFolder((await local.approvedArtifacts(datasetId)).revision.definition)),
+        runs: async () => remote && await readAutomationHost(workspace.workspaceId, remote.credentials, remote.credentialGeneration, signal).then(serverRunsOfAnswer, () => null) });
+    },
     serverCollectionsFor: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       const server = await serverCollectionsFor(workspace, signal);
       return server && { data: server.data(signal, () => signal.throwIfAborted()), elsewhere: server.elsewhere };
@@ -6923,18 +6949,7 @@ function registerIpcHandlers(): void {
     });
   const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
     const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
-    if (dataset) {
-      const remote = await remoteForWorkspace(workspace);
-      signal.throwIfAborted();
-      if (!remote.credentials.relayUrl) throw new Error("Reconnect your sharing server before publishing.");
-      const local = await datasetForWorkspace(workspace, signal);
-      const targetOrigin = new URL(remote.credentials.relayUrl).origin;
-      const target = createRemoteDatasetTransferTarget({ workspaceId: workspace.workspaceId, datasetId: dataset.datasetId, origin: targetOrigin,
-        ...remote, currentCredentialGeneration: () => credentialCacheGeneration, signal, assertCurrent: () => signal.throwIfAborted(),
-        relayStream: relayShareJsonWithCredentials });
-      await local.transferToShared({ datasetId: dataset.datasetId, targetOrigin, target, signal });
-      return;
-    }
+    if (dataset) await moveToServer(workspace, dataset.datasetId, signal);
   };
   const resolveDatasetRevision = async (workspace: DesktopRendererWorkspaceOperation["workspace"], binding: import("@dohc/security-contract/dataset").AppDatasetBinding, signal: AbortSignal) =>
     resolveRemoteDatasetRevision(await datasetDependencies.dataForWorkspace(workspace, signal), binding);
