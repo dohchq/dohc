@@ -11,6 +11,7 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./servic
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import {FirstOpenRetry} from "./firstOpenRetry";
 import {FirstOpenAnswers} from "./firstOpenAnswers";
 import {FIRST_OPEN_INTEGRITY_CODES, FIRST_OPEN_TOO_LARGE_CODES, FIRST_OPEN_UNSUPPORTED_CAUSES, firstOpenOutcome, firstOpenRefusal,
   type FirstOpenOutcome, type FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
@@ -38,18 +39,24 @@ async function fixture() {
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   // The documents the session host blocked until their owner tries again, and the relay's first-open answers it holds.
   const blocked = new Map<string, ServiceActivationBlock>(), answers = new FirstOpenAnswers();
+  let clock = 0;
+  const retry = new FirstOpenRetry({nowMs: () => clock, random: () => 0});
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {workspaceId: string; objectId: string}) => {
-      const retried = answers.retry(document);
-      return blocked.delete(document.objectId) || retried;
+      const retried = answers.retry(document), resumed = retry.retry(document);
+      return blocked.delete(document.objectId) || retried || resumed;
     }),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
     firstOpenRefusal: vi.fn((document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
       const current = answers.has(document) ? source() : undefined;
       return current && answers.refusal(current, FIRST_OPEN_CONTEXT);
     }),
+    firstOpenStatus: (document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
+      const current = source();
+      return current && (retry.state(current)?.stop ?? answers.refusal(current, FIRST_OPEN_CONTEXT));
+    },
     firstOpenAnswered: (outcome: FirstOpenOutcome) => answers.record(outcome, FIRST_OPEN_CONTEXT),
     keptEdits: {page: vi.fn(async (kept: ServiceKeptEdits, cursor: JsonValue | undefined) => keptPage(kept, cursor)),
       // The host grants in the document's turn after rechecking its caller and the refusal.
@@ -72,7 +79,7 @@ async function fixture() {
   };
   // What the service host does once it no longer holds the document.
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs: 20});
-  return {...f, history, host, resolveActor, handle, input, request, seed, release, setActor(value: typeof actor) {actor = value;}};
+  return {...f, retry, advance(ms: number) {clock += ms;}, history, host, resolveActor, handle, input, request, seed, release, setActor(value: typeof actor) {actor = value;}};
 }
 
 it("requires bearer owner authority, rejects ambient credentials and rejects unknown parameters", async () => {
@@ -888,4 +895,18 @@ it("rejects invalid generations and a stale repeat after the generation moves", 
   f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=8").run();
   expect((await retire(7)).status).toBe(409);
   expect((await retire(8)).status).toBe(200);
+});
+
+
+it("reports a temporary retry stop apart from content refusal, and owner Resume clears it", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const source = currentSource(f, enrolled.objectId);
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "unavailable", reason: "live-first-open-retry-stopped",
+    firstOpen: {reason: "retry-stopped", code: "build-deadline", source, deadlineAnswers: 3, recovery: "retry-later"}}]});
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.retry.state(source)?.stop).toBeUndefined();
 });

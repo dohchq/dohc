@@ -1848,3 +1848,65 @@ it("returns an edge page directly through CLI and MCP", async () => {
   const { linksEdges } = await import("@dohc/mcp/tools");
   expect(await linksEdges({ root: f.workspace.rootPath, home: "state", request: send }, {})).toEqual(page);
 });
+
+
+it("admits owner live status and retry through CLI and MCP, rejecting shared workspaces and received markers", async () => {
+  const root = await createTestScratch("first-open-cli-"), f = fixture(root);
+  const source = {workspaceId: "workspace", objectId: "o", path: "plan.md", sourceMomentId: "m", sourceDigest: "a".repeat(64)};
+  const documents = [{path: "plan.md", objectId: "o", status: "unavailable" as const, reason: "live-first-open-retry-stopped",
+    firstOpen: {source, reason: "retry-stopped" as const, code: "build-deadline" as const, deadlineAnswers: 3 as const, recovery: "retry-later" as const}}];
+  const retryIn: string[] = [];
+  const list = vi.fn<NonNullable<Dependencies["ownerLiveDocuments"]>["list"]>(async () => documents),
+    retry = vi.fn<NonNullable<Dependencies["ownerLiveDocuments"]>["retry"]>(async operation => {retryIn.push(operation.workspace.workspaceId);});
+  f.dependencies.ownerLiveDocuments = {list, retry};
+  await f.create().startDesktopCliServer();
+  const transport = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({...request, token: "a".repeat(64)}), "a".repeat(64), f.options())));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const listed = await executeCli({argv: ["document", "live-status", "--json"], cwd: root, env: {}, request: transport});
+  expect(listed.exitCode).toBe(0);
+  expect(JSON.parse(listed.stdout)).toMatchObject({documents});
+  const tools = await import("@dohc/mcp/tools");
+  const ctx = {root, home: root, request: transport};
+  expect(await tools.retryLiveDocument(ctx, {path: "plan.md"})).toEqual({ok: true, path: "plan.md"});
+  expect(retryIn).toEqual(["workspace"]);
+  expect(retry.mock.calls[0]?.[1]).toBe("plan.md");
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  expect(await tools.retryLiveDocument(ctx, {path: "plan.md"})).toMatchObject({ok: false});
+  expect(retry).toHaveBeenCalledTimes(1);
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue(null);
+  f.workspace.shareView = {} as RegistryEntry["shareView"];
+  expect(await tools.retryLiveDocument(ctx, {path: "plan.md"})).toMatchObject({ok: false});
+  expect(retry).toHaveBeenCalledTimes(1);
+});
+
+
+it.each(["liveDocuments", "retryLiveDocument"] as const)("refuses owner live %s in a read-only context", async verb => {
+  const root = await createTestScratch("first-open-readonly-"), f = fixture(root);
+  await f.create().startDesktopCliServer();
+  const list = vi.fn(async () => []), retry = vi.fn(async () => {});
+  const context = {...await f.options().openWorkspace(f.workspace), readOnly: true, ownerLiveDocuments: {list, retry}};
+  const options = {...f.options(), openWorkspace: async () => context};
+  const token = "a".repeat(64);
+  const response = JSON.parse(await handleCliRequestLine(JSON.stringify({token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: {cwd: root, actor: "agent", ...(verb === "retryLiveDocument" ? {path: "plan.md"} : {})}}), token, options));
+  expect(response).toMatchObject({ok: true, result: {ok: false, reason: "owner-workspace-required"}});
+  expect(list).not.toHaveBeenCalled();
+  expect(retry).not.toHaveBeenCalled();
+});
+
+it.each(["liveDocuments", "retryLiveDocument"] as const)("refuses owner live %s from a received-share folder", async verb => {
+  const root = await createTestScratch("first-open-received-"), f = fixture(root);
+  const cwd = join(root, "shared-with-me");
+  await mkdir(cwd);
+  await f.create().startDesktopCliServer();
+  const list = vi.fn(async () => []), retry = vi.fn(async () => {});
+  const context = {...await f.options().openWorkspace(f.workspace), ownerLiveDocuments: {list, retry}};
+  const options = {...f.options(), openWorkspace: async () => context};
+  const token = "a".repeat(64);
+  const response = JSON.parse(await handleCliRequestLine(JSON.stringify({token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: {cwd, actor: "agent", ...(verb === "retryLiveDocument" ? {path: "plan.md"} : {})}}), token, options));
+  expect(response).toMatchObject({ok: true, result: {ok: false, reason: "owner-workspace-required"}});
+  expect(list).not.toHaveBeenCalled();
+  expect(retry).not.toHaveBeenCalled();
+});

@@ -579,3 +579,25 @@ it("keeps an absent incoming subject as JSON null", async () => {
   expect(result.structuredContent).toBeUndefined();
   expect(result.isError).not.toBe(true);
 });
+
+
+it("advertises and dispatches owner live status and retry, withholding both from every shared profile", async () => {
+  const root = await workspaceRoot(), requests: unknown[] = [];
+  const source = {workspaceId: "w", objectId: "o", path: "plan.md", sourceMomentId: "m", sourceDigest: "a".repeat(64)};
+  const documents = [{path: "plan.md", objectId: "o", status: "unavailable", reason: "live-first-open-retry-stopped",
+    firstOpen: {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, source, recovery: "retry-later"}}];
+  const {names, client} = await connectedToolNames({root, home: root, request: async request => {
+    requests.push(request);
+    return request.verb === "liveDocuments" ? {ok: true, documents} : {ok: true, path: "plan.md"};
+  }});
+  expect(names).toEqual(expect.arrayContaining(["dohc_live_documents", "dohc_retry_live_document"]));
+  expect(JSON.stringify(await client.callTool({name: "dohc_live_documents", arguments: {}}))).toContain("retry-stopped");
+  expect((await client.callTool({name: "dohc_retry_live_document", arguments: {path: "plan.md"}})).isError).not.toBe(true);
+  expect(requests).toMatchObject([{verb: "liveDocuments"}, {verb: "retryLiveDocument", args: {path: "plan.md"}}]);
+  for (const shareAccess of ["view", "comment", "edit"] as const) {
+    const shared = await connectedToolNames({root, home: root, shareAccess});
+    expect(shared.names).not.toContain("dohc_live_documents");
+    expect(shared.names).not.toContain("dohc_retry_live_document");
+    expect((await shared.client.callTool({name: "dohc_retry_live_document", arguments: {path: "plan.md"}})).isError).toBe(true);
+  }
+});

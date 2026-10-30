@@ -67,7 +67,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
  * checks, so what it commits lands between those checks and the writer. `afterRead`
  * runs once a read has its snapshot, so what it commits moves the log past the cutoff.
  */
-async function fixture(options: {markdown?: string | Uint8Array; maxDeadlineWaits?: number} = {}) {
+async function fixture(options: {markdown?: string | Uint8Array; maxDeadlineWaits?: number; admissionIntervalMs?: number} = {}) {
   let reads = 0, onRead: ((read: number) => void) | undefined, afterRead: ((read: number) => void) | undefined, clock = 0;
   let reader: FirstOpenHistoryReader = async read => readFirstOpenHistoryFile(read);
   const storage = await testStorage({firstOpenHistory: async (read, signal) => {
@@ -122,7 +122,7 @@ async function fixture(options: {markdown?: string | Uint8Array; maxDeadlineWait
     return checks(input, signal);
   }};
   const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host, build: builds,
-    nowMs: () => clock, maxDeadlineWaits: options.maxDeadlineWaits});
+    nowMs: () => clock, maxDeadlineWaits: options.maxDeadlineWaits, admissionIntervalMs: options.admissionIntervalMs ?? 0});
   const writes = vi.spyOn(storage, "writeFirstOpen");
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
@@ -1093,4 +1093,53 @@ it("maps every answer to one recovery", () => {
   expect(firstOpenRecovery({kind: "published", receipt: {originId: "o", originSeq: 0, relaySeq: 1}})).toBe("pull");
   expect(firstOpenRecovery({kind: "refused", reason: "ordinary-activation-refused"})).toBe("report");
   expect(firstOpenRecovery({kind: "integrity", reason: "candidate"})).toBe("report");
+});
+
+
+it("admits once per object before reading blobs or building, despite edits, while another object stays eligible", async () => {
+  const f = await fixture({admissionIntervalMs: 60_000});
+  f.buildWith(async () => ({kind: "busy"}));
+  const blobs = vi.spyOn(f.storage, "getBlob");
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  const readCount = blobs.mock.calls.length;
+  f.source = f.writeText("Edited source.");
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(blobs).toHaveBeenCalledTimes(readCount);
+  expect(f.builds).toHaveBeenCalledTimes(1);
+  const sibling = f.writeText("Sibling", {objectId: "sibling", path: "docs/sibling.md"});
+  f.storage.enrollServiceHostDocument({workspaceId: WS, ownerUserId: OWNER, shareId: "share-1", path: "docs/sibling.md", nowMs: 10, guard() {}});
+  expect(await f.open({objectId: "sibling", path: "docs/sibling.md", ...sibling})).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(f.builds).toHaveBeenCalledTimes(2);
+  f.advance(59_999);
+  await f.open();
+  expect(f.builds).toHaveBeenCalledTimes(2);
+  f.advance(1);
+  await f.open();
+  expect(f.builds).toHaveBeenCalledTimes(3);
+  nothingAppended(f);
+});
+
+it("keeps admission through a long build and leaves a quiet interval afterwards, including across edits", async () => {
+  const f = await fixture({admissionIntervalMs: 60_000});
+  let entered!: () => void, release!: () => void, calls = 0;
+  const building = new Promise<void>(resolve => {entered = resolve;}), held = new Promise<void>(resolve => {release = resolve;});
+  f.buildWith(async () => {
+    if (++calls === 1) {entered(); await held;}
+    return {kind: "busy"};
+  });
+  const pending = f.open();
+  await building;
+  try {
+    f.advance(120_000);
+    f.source = f.writeText("An edit while the build was held.");
+    await f.open();
+    expect(f.builds).toHaveBeenCalledTimes(1);
+  } finally {release(); await pending;}
+  f.advance(59_999);
+  await f.open();
+  expect(f.builds).toHaveBeenCalledTimes(1);
+  f.advance(1);
+  await f.open();
+  expect(f.builds).toHaveBeenCalledTimes(2);
+  nothingAppended(f);
 });

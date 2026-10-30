@@ -374,6 +374,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
+  ownerLiveDocuments?: {
+    list(): Promise<Extract<CliResultByVerb["liveDocuments"], {ok: true}>["documents"]>;
+    retry(path: string): Promise<void>;
+  };
   keptEdits?: CliKeptEditsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
@@ -2366,7 +2370,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "liveDocuments", "retryLiveDocument", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2378,6 +2382,7 @@ async function dispatch(
     }
     throw error;
   }
+  if (paths.shared && (request.verb === "liveDocuments" || request.verb === "retryLiveDocument")) return {ok: false, reason: "owner-workspace-required"};
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
   if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
   let rebased: CliRequest;
@@ -2421,6 +2426,9 @@ async function dispatch(
         break;
       case "saveRecoveryCopy":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "retryLiveDocument":
+        rebased = {...request, args: {...request.args, path: paths.rebase(request.args.path, "write")}};
         break;
       case "retryKeptEdits":
       case "stopAgain":
@@ -3261,6 +3269,15 @@ async function dispatchWorkspace(
       }
     }
 
+    case "liveDocuments": {
+      if (!context.ownerLiveDocuments || context.readOnly) return {ok: false, reason: "owner-workspace-required"};
+      return {ok: true, documents: await context.ownerLiveDocuments.list()};
+    }
+    case "retryLiveDocument": {
+      if (!context.ownerLiveDocuments || context.readOnly) return {ok: false, reason: "owner-workspace-required"};
+      await context.ownerLiveDocuments.retry(request.args.path);
+      return {ok: true, path: request.args.path};
+    }
     case "liveKeptEdits": {
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();

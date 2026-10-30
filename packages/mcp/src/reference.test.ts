@@ -156,3 +156,15 @@ describe("CLI, MCP, and app channel reference", () => {
     }
   });
 });
+
+
+it.each([
+  ["dohc_live_documents", "Changes the workspace"],
+  ["dohc_live_documents", "retry-stopped"],
+  ["dohc_retry_live_document", "Clears a temporary first-open stop"],
+])("keeps %s free of the unshipped or incorrect claim %s", async (name, claim) => {
+  const page = await renderReference();
+  const section = page.split(`### \`${name}\``)[1]!.split(/\n#{2,3} /)[0]!;
+  expect(section).not.toContain(claim);
+  if (name === "dohc_live_documents") expect(section).toContain("Shared profiles do not offer this read.");
+});

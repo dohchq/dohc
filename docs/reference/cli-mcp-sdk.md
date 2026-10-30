@@ -268,6 +268,26 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
 
+### `dohc_live_documents`
+
+Read live document status from the owner's active list, including any first-open reason, code, source and recovery. Owner workspace only.
+
+Live document status requires the owning workspace. Shared profiles do not offer this read.
+
+No arguments.
+
+Returns `{ ok: true, documents: { path, objectId, status, reason?, firstOpen? }[] } | { ok: false, reason }`.
+
+### `dohc_retry_live_document`
+
+Resume live editing for a document, as the owner's Try again does. Read dohc_live_documents for the result; a successful request alone does not mean the document is ready. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, path } | { ok: false, reason }`.
+
 ### `dohc_save_recovery_copy`
 
 Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer, or on the server for a document it hosts (`storedOn`); dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. For edits the server keeps, dohc then tells the server the copy is saved, and the `recovery` becomes `copied`. `keptEdits` is `kept` when the edits stay where `storedOn` says, `copied` when the server may now release them, and `ended` for edits a Stop could not write: dohc no longer keeps those, and the copy holds them. Accepts every `recovery`. Pass the `incident` from `keptEdits` to save exactly those kept edits; without it, dohc saves edits a Stop could not write first. Owner workspace only.
@@ -921,6 +941,26 @@ Use - as the body to read it from stdin. The first message allows at most 64 KiB
 - `--run-id <id>`: Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
+
+#### `dohc document live-status`
+
+```sh
+dohc document live-status [options]
+```
+
+Read live document status in the owning workspace.
+
+With `--json`, prints `{ schemaVersion, ok: true, documents: { path, objectId, status, reason?, firstOpen? }[] }`.
+
+#### `dohc document retry-live`
+
+```sh
+dohc document retry-live <path> [options]
+```
+
+Resume live editing for a document in the owning workspace.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
 #### `dohc document kept-edits`
 

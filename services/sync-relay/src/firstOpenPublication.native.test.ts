@@ -105,7 +105,7 @@ async function fixture(options: {markdown?: string; service?: Record<string, unk
     await hold?.(answer);
     return answer;
   }};
-  const publisher = createFirstOpenPublisher({storage, namespace: history.namespace, activation: () => activation, host: () => host && checking,
+  const publisher = createFirstOpenPublisher({admissionIntervalMs: 0, storage, namespace: history.namespace, activation: () => activation, host: () => host && checking,
     build: async (policy, input) => { seen = input; return buildFirstOpenBase(policy, input); }});
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace: history.namespace, ...input})});

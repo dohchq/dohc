@@ -368,6 +368,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const commented = `Commented on ${lineSafe(comment.path)} in ${lineSafe(comment.threadId)}`;
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
+    case "liveDocuments":
+      return JSON.stringify(result, null, 2);
+    case "retryLiveDocument":
+      return JSON.stringify(result, null, 2);
     case "liveKeptEdits": {
       const { keptEdits } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
       if (keptEdits.length === 0) return "No document has kept edits.";

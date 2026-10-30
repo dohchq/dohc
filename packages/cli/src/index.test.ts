@@ -658,3 +658,20 @@ it.each([false, true])("requests Sharing refresh with JSON output %s", async jso
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual(json ? { schemaVersion: CLI_JSON_SCHEMA_VERSION, status: "paced" } : { status: "paced" });
 });
+
+
+it("lists structured first-open status and retries through owner document operations", async () => {
+  const source = {workspaceId: "w", objectId: "o", path: "plan.md", sourceMomentId: "m", sourceDigest: "a".repeat(64)};
+  const firstOpen = {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, source, recovery: "retry-later"};
+  const documents = [{path: "plan.md", objectId: "o", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen}];
+  const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({verb}) =>
+    verb === "liveDocuments" ? {ok: true, documents} : {ok: true, path: "plan.md"});
+  const listed = await executeCli({argv: ["document", "live-status", "--json"], cwd: "/workspace", env: {}, request});
+  expect(listed.exitCode).toBe(0);
+  expect(JSON.parse(listed.stdout)).toMatchObject({documents});
+  expect((await executeCli({argv: ["document", "retry-live", "plan.md", "--json"], cwd: "/workspace", env: {}, request})).exitCode).toBe(0);
+  expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
+    ["liveDocuments", {cwd: WORKSPACE, actor: "agent"}],
+    ["retryLiveDocument", {cwd: WORKSPACE, actor: "agent", path: "plan.md"}],
+  ]);
+});

@@ -79,7 +79,7 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_LOOP_MEASURE !== "1")("measures the first-
   const host: FirstOpenCheckHost = {checkFirstOpenCandidate: async (_workspaceId, input) => ({kind: "answered", current: () => true,
     check: {status: "checked", contractVersion: 1, binding: firstOpenCandidateBinding(input), settledSourceSha256: input.sourceSha256,
       settledSourceByteLength: input.source.byteLength, fullStateSha256: input.candidateSha256, fullStateByteLength: input.candidate.byteLength}})};
-  const publisher = createFirstOpenPublisher({storage, namespace, activation: () => activation, host: () => host,
+  const publisher = createFirstOpenPublisher({admissionIntervalMs: 0, storage, namespace, activation: () => activation, host: () => host,
     build: (policy, input, signal) => pool.buildFirstOpenBase(policy, input, signal)});
   const handle = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});

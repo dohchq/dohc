@@ -136,12 +136,35 @@ export function createFirstOpenPublisher(options: {
   nowMs?: () => number;
   /** How many sources' waits the relay keeps, unless a test keeps fewer. */
   maxDeadlineWaits?: number;
+  /** Quiet interval after work for one object, across every source. Zero only isolates other gates in tests. */
+  admissionIntervalMs?: number;
 }) {
   const {storage, namespace, nowMs = () => performance.now(), maxDeadlineWaits = FIRST_OPEN_DEADLINE_WAITS} = options;
   const build: FirstOpenBuild = options.build ?? ((policy, input, signal) => liveValidation.buildFirstOpenBase(policy, input, signal));
   // A build that passes its deadline would pass it again on the same bytes, holding the one first-open slot every time,
   // so the relay itself makes the same source wait, whatever its clients do. A restart forgets every wait.
   const deadlineWaits = new Map<string, {waitMs: number; untilMs: number}>();
+  const admissionIntervalMs = options.admissionIntervalMs ?? 60_000;
+  if (!Number.isSafeInteger(admissionIntervalMs) || admissionIntervalMs < 0) throw new Error("Invalid first-open admission interval.");
+  const admitted = new Map<string, number>();
+  const admit = (workspaceId: string, objectId: string) => {
+    if (admissionIntervalMs === 0) return () => {};
+    const key = JSON.stringify([workspaceId, objectId]), now = nowMs();
+    if ((admitted.get(key) ?? -Infinity) > now) return false;
+    if (admitted.size >= 4_096) {
+      let oldest: string | undefined, oldestUntil = Infinity;
+      for (const [other, until] of admitted) {
+        if (until <= now) admitted.delete(other);
+        else if (until < oldestUntil) {oldest = other; oldestUntil = until;}
+      }
+      if (admitted.size >= 4_096 && !admitted.has(key)) {
+        if (oldest === undefined) return false;
+        admitted.delete(oldest);
+      }
+    }
+    admitted.set(key, Infinity);
+    return () => {admitted.set(key, nowMs() + admissionIntervalMs);};
+  };
   // Every bound native capture and the relay's verifier apply to a base-only history.
   const bounds = (config: ServiceActivationConfig, source: FirstOpenSource, identity: {replicationEpoch: string; streamIdentity: string}, originId: string): FirstOpenBaseBounds => ({
     maxCaptureBytes: config.maxCaptureBytes, maxBytesPerDrain: config.maxBytesPerDrain,
@@ -232,96 +255,100 @@ export function createFirstOpenPublisher(options: {
       const retryAfterMs = Math.ceil(waitLeft());
       if (retryAfterMs > 0) return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs});
     }
-    const bytes = storage.getBlob(workspaceId, head.sourceDigest);
-    if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
-    let markdown: string;
-    try {markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);}
-    catch {return answer({kind: "refused", reason: "unsupported-source", cause: "not-utf8"});}
+    const releaseAdmission = admit(workspaceId, objectId);
+    if (!releaseAdmission) return answer({kind: "unavailable", reason: "busy"});
+    try {
+      const bytes = storage.getBlob(workspaceId, head.sourceDigest);
+      if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
+      let markdown: string;
+      try {markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);}
+      catch {return answer({kind: "refused", reason: "unsupported-source", cause: "not-utf8"});}
 
-    const preparation = prepared ?? await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
-    if (preparation.kind !== "prepared") return refusal(preparation);
-    let proof = preparation.proof;
-    const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
-      currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,
-      sourceByteLength: source.sourceByteLength, bounds: bounds(config, source, identity, originId)}, signal));
-    signal.throwIfAborted();
-    if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
-    if (built.kind === "deadline") {
-      const previous = deadlineWaits.get(waitKey);
-      const waitMs = previous ? Math.min(2 * previous.waitMs, FIRST_OPEN_DEADLINE_WAIT_CAP_MS) : FIRST_OPEN_DEADLINE_WAIT_MS;
+      const preparation = prepared ?? await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
+      if (preparation.kind !== "prepared") return refusal(preparation);
+      let proof = preparation.proof;
+      const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
+        currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,
+        sourceByteLength: source.sourceByteLength, bounds: bounds(config, source, identity, originId)}, signal));
+      signal.throwIfAborted();
+      if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
+      if (built.kind === "deadline") {
+        const previous = deadlineWaits.get(waitKey);
+        const waitMs = previous ? Math.min(2 * previous.waitMs, FIRST_OPEN_DEADLINE_WAIT_CAP_MS) : FIRST_OPEN_DEADLINE_WAIT_MS;
+        deadlineWaits.delete(waitKey);
+        deadlineWaits.set(waitKey, {waitMs, untilMs: Math.ceil(nowMs()) + waitMs});
+        if (deadlineWaits.size > maxDeadlineWaits) deadlineWaits.delete(deadlineWaits.keys().next().value!);
+        console.error("[sync-relay] first-open build passed its deadline", workspaceId, objectId, source.sourceDigest);
+        return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waitMs});
+      }
       deadlineWaits.delete(waitKey);
-      deadlineWaits.set(waitKey, {waitMs, untilMs: Math.ceil(nowMs()) + waitMs});
-      if (deadlineWaits.size > maxDeadlineWaits) deadlineWaits.delete(deadlineWaits.keys().next().value!);
-      console.error("[sync-relay] first-open build passed its deadline", workspaceId, objectId, source.sourceDigest);
-      return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waitMs});
-    }
-    deadlineWaits.delete(waitKey);
-    if (built.kind === "refused") {
-      switch (built.reason) {
-        case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});
-        // The file's own content or a fault in the relay's projection or seed can leave the shared schema or read back as other
-        // bytes, so both are logged. Any other fault is a malformed or mutated seed, the relay's fault.
-        case "invalid-base":
-          console.error("[sync-relay] first-open candidate invalid", built.fault, source.sourceDigest);
-          if (built.fault === "invalid-schema") return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
-          return answer({kind: "integrity", reason: "candidate"});
-        case "unsupported-source":
-          console.error("[sync-relay] first-open candidate invalid", built.reason, source.sourceDigest);
-          return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
-        default: return answer({kind: "refused", reason: "too-large", code: built.reason});
+      if (built.kind === "refused") {
+        switch (built.reason) {
+          case "source-mismatch": return answer({kind: "integrity", reason: "source-evidence"});
+          // The file's own content or a fault in the relay's projection or seed can leave the shared schema or read back as other
+          // bytes, so both are logged. Any other fault is a malformed or mutated seed, the relay's fault.
+          case "invalid-base":
+            console.error("[sync-relay] first-open candidate invalid", built.fault, source.sourceDigest);
+            if (built.fault === "invalid-schema") return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
+            return answer({kind: "integrity", reason: "candidate"});
+          case "unsupported-source":
+            console.error("[sync-relay] first-open candidate invalid", built.reason, source.sourceDigest);
+            return answer({kind: "refused", reason: "unsupported-source", cause: "relay-projection"});
+          default: return answer({kind: "refused", reason: "too-large", code: built.reason});
+        }
       }
-    }
 
-    // The engine checks this exact candidate outside the writer, encoding no more than every later bound leaves it.
-    const room = firstOpenEncodingCap(built.base.byteLength, bounds(config, source, identity, originId));
-    if ("exceeded" in room) return answer({kind: "refused", reason: "too-large", code: room.exceeded});
-    const host = options.host();
-    if (!host) return answer({kind: "unavailable", reason: "host-absent"});
-    const asked: FirstOpenCandidateInput = {objectId, path: source.path, sourceMomentId: source.sourceMomentId,
-      replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity, source: bytes, sourceSha256: source.sourceDigest,
-      candidate: built.base, candidateSha256: built.lineageClaimId, maxFullStateBytes: room.cap};
-    const native = await host.checkFirstOpenCandidate(workspaceId, asked, signal);
-    signal.throwIfAborted();
-    if (native.kind === "unavailable") return answer({kind: "unavailable", reason: native.reason});
-    if (native.kind === "host-capacity") return answer({kind: "refused", reason: "too-large", code: "host-capacity"});
-    if (native.kind === "integrity" || !isDeepStrictEqual(native.check.binding, firstOpenCandidateBinding(asked))) {
-      return answer({kind: "integrity", reason: "check-evidence"});
-    }
-    const {check} = native;
-    if (check.status === "refused") return answer({kind: "refused", reason: "unsupported-source", cause: check.cause});
-    if (check.status === "too-large") return answer({kind: "refused", reason: "too-large", code: room.bound});
-    const checked: FirstOpenChecked = Object.freeze({candidateSha256: built.lineageClaimId, current: native.current,
-      sizes: Object.freeze({baseBytes: built.base.byteLength, fullStateBytes: check.fullStateByteLength})});
-
-    // The writer commits only bytes with the checked digest, over the proof's source, which it rechecks.
-    const base = {namespace, bytes: built.base, sha256: checked.candidateSha256, recordedAtMs: head.recordedAtMs};
-    // The writer's own checks: authorization, standing, the checking host, the policy the base was built under and the bounds that apply now.
-    const writerGuard = (context: AppendLogBatchGuardContext) => {
-      if (standing(context.enforceWorkspaceIdentity) !== objectId) throw notFound();
-      const current = options.activation();
-      if (!current) throw notFound();
-      if (!checked.current()) throw new FirstOpenCheckLapsed("host-absent");
-      if (!isDeepStrictEqual(current.validation, config.validation)) throw new FirstOpenCheckLapsed("reconfigured");
-      const exceeded = firstOpenBaseExceeds(checked.sizes, bounds(current, source, identity, originId));
-      if (exceeded) throw new FirstOpenBoundExceeded(exceeded);
-    };
-    for (let attempt = 1; ; attempt++) {
-      let written;
-      try {written = storage.writeFirstOpen(proof, base, writerGuard);}
-      catch (error) {
-        if (error instanceof FirstOpenBoundExceeded) return answer({kind: "refused", reason: "too-large", code: error.bound});
-        if (error instanceof FirstOpenCheckLapsed) return answer({kind: "unavailable", reason: error.reason});
-        throw error;
+      // The engine checks this exact candidate outside the writer, encoding no more than every later bound leaves it.
+      const room = firstOpenEncodingCap(built.base.byteLength, bounds(config, source, identity, originId));
+      if ("exceeded" in room) return answer({kind: "refused", reason: "too-large", code: room.exceeded});
+      const host = options.host();
+      if (!host) return answer({kind: "unavailable", reason: "host-absent"});
+      const asked: FirstOpenCandidateInput = {objectId, path: source.path, sourceMomentId: source.sourceMomentId,
+        replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity, source: bytes, sourceSha256: source.sourceDigest,
+        candidate: built.base, candidateSha256: built.lineageClaimId, maxFullStateBytes: room.cap};
+      const native = await host.checkFirstOpenCandidate(workspaceId, asked, signal);
+      signal.throwIfAborted();
+      if (native.kind === "unavailable") return answer({kind: "unavailable", reason: native.reason});
+      if (native.kind === "host-capacity") return answer({kind: "refused", reason: "too-large", code: "host-capacity"});
+      if (native.kind === "integrity" || !isDeepStrictEqual(native.check.binding, firstOpenCandidateBinding(asked))) {
+        return answer({kind: "integrity", reason: "check-evidence"});
       }
-      if (written.kind === "published") return answer({kind: "published", receipt: written.receipt});
-      if (written.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
-      if (written.kind === "unchecked") return answer({kind: "integrity", reason: "check-evidence"});
-      if (written.kind === "refused") return refusal(written);
-      if (attempt === FIRST_OPEN_WRITER_ATTEMPTS) return replay() ?? answer({kind: "unavailable", reason: "contention"});
-      const caught = await step("history-unavailable", () => storage.catchUpFirstOpen(proof, signal));
-      if (caught.kind !== "prepared") return refusal(caught);
-      proof = caught.proof;
-    }
+      const {check} = native;
+      if (check.status === "refused") return answer({kind: "refused", reason: "unsupported-source", cause: check.cause});
+      if (check.status === "too-large") return answer({kind: "refused", reason: "too-large", code: room.bound});
+      const checked: FirstOpenChecked = Object.freeze({candidateSha256: built.lineageClaimId, current: native.current,
+        sizes: Object.freeze({baseBytes: built.base.byteLength, fullStateBytes: check.fullStateByteLength})});
+
+      // The writer commits only bytes with the checked digest, over the proof's source, which it rechecks.
+      const base = {namespace, bytes: built.base, sha256: checked.candidateSha256, recordedAtMs: head.recordedAtMs};
+      // The writer's own checks: authorization, standing, the checking host, the policy the base was built under and the bounds that apply now.
+      const writerGuard = (context: AppendLogBatchGuardContext) => {
+        if (standing(context.enforceWorkspaceIdentity) !== objectId) throw notFound();
+        const current = options.activation();
+        if (!current) throw notFound();
+        if (!checked.current()) throw new FirstOpenCheckLapsed("host-absent");
+        if (!isDeepStrictEqual(current.validation, config.validation)) throw new FirstOpenCheckLapsed("reconfigured");
+        const exceeded = firstOpenBaseExceeds(checked.sizes, bounds(current, source, identity, originId));
+        if (exceeded) throw new FirstOpenBoundExceeded(exceeded);
+      };
+      for (let attempt = 1; ; attempt++) {
+        let written;
+        try {written = storage.writeFirstOpen(proof, base, writerGuard);}
+        catch (error) {
+          if (error instanceof FirstOpenBoundExceeded) return answer({kind: "refused", reason: "too-large", code: error.bound});
+          if (error instanceof FirstOpenCheckLapsed) return answer({kind: "unavailable", reason: error.reason});
+          throw error;
+        }
+        if (written.kind === "published") return answer({kind: "published", receipt: written.receipt});
+        if (written.kind === "occupied") return answer({kind: "integrity", reason: "reserved-receipt"});
+        if (written.kind === "unchecked") return answer({kind: "integrity", reason: "check-evidence"});
+        if (written.kind === "refused") return refusal(written);
+        if (attempt === FIRST_OPEN_WRITER_ATTEMPTS) return replay() ?? answer({kind: "unavailable", reason: "contention"});
+        const caught = await step("history-unavailable", () => storage.catchUpFirstOpen(proof, signal));
+        if (caught.kind !== "prepared") return refusal(caught);
+        proof = caught.proof;
+      }
+    } finally {releaseAdmission();}
   }
   };
 }

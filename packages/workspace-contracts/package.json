@@ -33,6 +33,7 @@
     "./history-operation": "./src/historyOperation.ts",
     "./file-version": "./src/fileVersion.ts",
     "./first-open": "./src/firstOpen.ts",
+    "./first-open-wire": "./src/firstOpenWire.ts",
     "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./path-floor": "./src/pathFloor.ts",

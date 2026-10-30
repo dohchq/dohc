@@ -2531,6 +2531,18 @@
       }
     },
     {
+      "name": "dohc_live_documents",
+      "description": "Read live document status from the owner's active list, including any first-open reason, code, source and recovery. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_merge_version",
       "description": "Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
       "inputSchema": {
@@ -3576,6 +3588,27 @@
         "required": [
           "path",
           "incident"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_retry_live_document",
+      "description": "Resume live editing for a document, as the owner's Try again does. Read dohc_live_documents for the result; a successful request alone does not mean the document is ready. Owner workspace only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "path"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

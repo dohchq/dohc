@@ -139,6 +139,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", edit: "documentEdit", create: "documentCreate", chats: "fileChats", comment: "fileChatStart",
+  "live-status": "liveDocuments", "retry-live": "retryLiveDocument",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
 };
 
@@ -208,6 +209,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },
+  dohc_live_documents: {cli: "liveDocuments"},
+  dohc_retry_live_document: {cli: "retryLiveDocument"},
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
@@ -403,6 +406,7 @@ export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]>
 // Why a shared view does not offer a tool that reads. Every other tool it
 // does not offer changes the workspace.
 const NOT_SHARED_READS: Record<string, string> = {
+  dohc_live_documents: "Live document status requires the owning workspace. Shared profiles do not offer this read.",
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",

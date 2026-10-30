@@ -7,6 +7,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import {FirstOpenOwnerStatus} from "@dohc/workspace-contracts/first-open-wire";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
@@ -549,6 +550,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retryLiveDocument"), args: z.object({...argsBase, path: documentPathArg}).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
@@ -636,6 +639,8 @@ export const CLI_CAPABILITIES = {
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
+  liveDocuments: ["share.live.documents.list"],
+  retryLiveDocument: ["share.live.document.resume"],
   liveKeptEdits: ["workspace.status"],
   saveRecoveryCopy: ["share.live.document.recovery.save"],
   retryKeptEdits: ["share.live.document.retry"],
@@ -1429,6 +1434,16 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
 // `earlier` marks edits the server keeps in an earlier copy of the workspace,
 // copied or not, which only a recovery copy can reach.
 const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
+const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ok: z.literal(true), documents: z.array(z.object({
+    path: documentPathArg, objectId: z.string().min(1).max(512), status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+    reason: z.string().min(1).max(128).optional(), firstOpen: FirstOpenOwnerStatus.optional(),
+  }).strict())}).strict(),
+  rawFailureSchema,
+]);
+const retryLiveDocumentResultSchema = z.discriminatedUnion("ok", [
+  z.object({ok: z.literal(true), path: documentPathArg}).strict(), rawFailureSchema,
+]);
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
@@ -1777,6 +1792,8 @@ export const cliResultSchemas = {
   saveKeptCopy: saveKeptCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+  liveDocuments: liveDocumentsResultSchema,
+  retryLiveDocument: retryLiveDocumentResultSchema,
   liveKeptEdits: liveKeptEditsResultSchema,
   saveRecoveryCopy: saveRecoveryCopyResultSchema,
   retryKeptEdits: retryKeptEditsResultSchema,

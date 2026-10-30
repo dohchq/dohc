@@ -22,7 +22,7 @@ export interface FirstOpenSourceIdentity {
 export interface FirstOpenReceipt {readonly originId: string; readonly originSeq: 0; readonly relaySeq: number}
 
 /** A configured bound a base does not fit. `validation-budget`: the registration validator ran out of its configured policy. */
-export const FIRST_OPEN_BASE_BOUNDS = ["update-limit", "capture-budget", "read-budget", "validation-budget"] as const;
+const FIRST_OPEN_BASE_BOUNDS = ["update-limit", "capture-budget", "read-budget", "validation-budget"] as const;
 export type FirstOpenBaseBound = (typeof FIRST_OPEN_BASE_BOUNDS)[number];
 
 /**
@@ -33,7 +33,7 @@ export type FirstOpenBaseBound = (typeof FIRST_OPEN_BASE_BOUNDS)[number];
  * the relay's first-open worker out of memory, as it would on every try.
  */
 export const FIRST_OPEN_TOO_LARGE_CODES = [...FIRST_OPEN_BASE_BOUNDS, "source-limit", "host-capacity", "seed-worker-capacity"] as const;
-export type FirstOpenTooLargeCode = (typeof FIRST_OPEN_TOO_LARGE_CODES)[number];
+type FirstOpenTooLargeCode = (typeof FIRST_OPEN_TOO_LARGE_CODES)[number];
 
 /**
  * Why a current file cannot start live. The engine's own causes name how it
@@ -43,11 +43,11 @@ export type FirstOpenTooLargeCode = (typeof FIRST_OPEN_TOO_LARGE_CODES)[number];
  * around inline code or containers nested past the live document contract.
  */
 export const FIRST_OPEN_UNSUPPORTED_CAUSES = [...FIRST_OPEN_CANDIDATE_REFUSALS, "not-utf8", "relay-projection"] as const;
-export type FirstOpenUnsupportedCause = (typeof FIRST_OPEN_UNSUPPORTED_CAUSES)[number];
+type FirstOpenUnsupportedCause = (typeof FIRST_OPEN_UNSUPPORTED_CAUSES)[number];
 
 /** Which of the relay's own records, or what it told the engine, disagree. */
 export const FIRST_OPEN_INTEGRITY_CODES = ["reserved-receipt", "source-evidence", "candidate", "check-evidence"] as const;
-export type FirstOpenIntegrityCode = (typeof FIRST_OPEN_INTEGRITY_CODES)[number];
+type FirstOpenIntegrityCode = (typeof FIRST_OPEN_INTEGRITY_CODES)[number];
 
 /** The shape of the code a service host gives an `ordinary-activation-refused` answer, at most 128 characters. */
 export const FIRST_OPEN_ACTIVATION_CODE = /^[a-z0-9][a-z0-9-]{0,127}$/;
@@ -152,6 +152,15 @@ export const FIRST_OPEN_OWNER_NOTICE = {
 } as const satisfies Record<FirstOpenReason, "refusal" | "transient" | "none">;
 export type FirstOpenRefusalReason = {[R in FirstOpenReason]: (typeof FIRST_OPEN_OWNER_NOTICE)[R] extends "refusal" ? R : never}[FirstOpenReason];
 export const FIRST_OPEN_REFUSAL_REASONS = ["deletion", "unsupported-source", "too-large", "ordinary-activation-refused", "integrity"] as const satisfies readonly FirstOpenRefusalReason[];
+
+/** A source stopped after three deadlines. An edit or the owner's retry starts a new attempt sequence. */
+export interface FirstOpenTemporaryStop {
+  readonly source: FirstOpenSourceIdentity;
+  readonly reason: "retry-stopped";
+  readonly code: "build-deadline";
+  readonly deadlineAnswers: 3;
+  readonly recovery: "retry-later";
+}
 
 /** An answer that stops live editing for one file, as its owner and their agents read it. */
 export type FirstOpenRefusal = {readonly source: FirstOpenSourceIdentity; readonly recovery: FirstOpenRecovery} & (

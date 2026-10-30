@@ -1,6 +1,7 @@
 import {createHash} from "node:crypto";
 import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
+import type {FirstOpenRefusal, FirstOpenSourceIdentity, FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import type {SyncRelayStorage} from "./storage";
@@ -188,7 +189,10 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits" | "firstOpenRefusal">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits" | "firstOpenRefusal"> & {
+    firstOpenStatus?(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined):
+      FirstOpenRefusal | FirstOpenTemporaryStop | undefined;
+  };
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history), reads = readTurns(MAX_KEPT_EDITS_READS);
@@ -205,12 +209,13 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     // A refused first open names its reason, code and source for the owner and their agents, until the file or the host's checks change.
-    const firstOpen = host.firstOpenRefusal(row, () => {
+    const readSource = () => {
       const head = storage.readFirstOpenMoment(row.workspaceId, row.objectId);
       return head?.path && head.sourceDigest ? {workspaceId: row.workspaceId, objectId: row.objectId,
         path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest} : undefined;
-    });
-    if (firstOpen) return {...base, status: "unavailable", reason: "live-first-open-refused", firstOpen};
+    };
+    const firstOpen = host.firstOpenStatus?.(row, readSource) ?? host.firstOpenRefusal(row, readSource);
+    if (firstOpen) return {...base, status: "unavailable", reason: firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused", firstOpen};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first, and a Resume
     // cannot continue one whose host copy misses an edit made while live editing was off.

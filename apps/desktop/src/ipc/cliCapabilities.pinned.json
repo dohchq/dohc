@@ -241,6 +241,12 @@
     ],
     "versionResolve": [
       "version.conflict.resolve"
+    ],
+    "liveDocuments": [
+      "share.live.documents.list"
+    ],
+    "retryLiveDocument": [
+      "share.live.document.resume"
     ]
   },
   "public": {
@@ -339,6 +345,8 @@
     "links edges": "links.edges",
     "chat file-mentions": "chat.read",
     "file duplicate": "file.duplicate",
-    "chat links": "chat.read"
+    "chat links": "chat.read",
+    "document live-status": "share.live.documents.list",
+    "document retry-live": "share.live.document.resume"
   }
 }

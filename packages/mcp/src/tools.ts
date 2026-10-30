@@ -77,6 +77,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
+  dohc_live_documents: ["share.live.documents.list"],
+  dohc_retry_live_document: ["share.live.document.resume"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -2266,6 +2268,18 @@ export async function listKeptCopies(ctx: ToolContext) {
 
 export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
+export async function liveDocuments(ctx: ToolContext) {
+  if (ctx.shareAccess !== undefined) return {ok: false as const, reason: "owner-workspace-required"};
+  return requestCli(ctx, "liveDocuments", {});
+}
+
+export async function retryLiveDocument(ctx: ToolContext, args: {path: string}) {
+  if (ctx.shareAccess !== undefined) return {ok: false as const, reason: "owner-workspace-required"};
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return resolved;
+  return requestCli(ctx, "retryLiveDocument", {path: resolved.normalized});
 }
 
 // A live document's edits the server refused, which dohc keeps on this

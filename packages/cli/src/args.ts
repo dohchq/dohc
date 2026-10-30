@@ -35,7 +35,8 @@ type CliCommandBody =
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
-  | { verb: "liveKeptEdits" }
+  | { verb: "liveKeptEdits" | "liveDocuments" }
+  | { verb: "retryLiveDocument"; path: string }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
@@ -346,6 +347,23 @@ const DOCUMENT_VERBS = {
       return { verb: "fileChatStart", path, title, body: text ?? "", stdin: body === "-",
         ...(agent === undefined ? {} : { agent }), ...(requestId === undefined ? {} : { requestId }),
         ...(runId === undefined ? {} : { runId }) };
+    },
+  },
+  "live-status": {
+    capabilityId: "share.live.documents.list",
+    summary: "Read live document status in the owning workspace.",
+    operands: "",
+    parse: input => {noExtraArgs(input.operands, "document live-status"); return {verb: "liveDocuments"};},
+  },
+  "retry-live": {
+    capabilityId: "share.live.document.resume",
+    summary: "Resume live editing for a document in the owning workspace.",
+    operands: "<path>",
+    parse: input => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document retry-live requires a path");
+      noExtraArgs(extra, "document retry-live");
+      return {verb: "retryLiveDocument", path};
     },
   },
   "kept-edits": {
