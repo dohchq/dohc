@@ -61,7 +61,7 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
-import { AppRows } from "../workbench/AppsView";
+import { AppRows } from "../workbench/AppsSection";
 import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
@@ -2373,17 +2373,16 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Its empty and loading states are the shared ones above, in Empty
-          ("create") and Loading. */}
-      <Section part="apps-shelf" title="Apps shelf">
+      {/* The Explorer's Apps section rows. */}
+      <Section part="apps-shelf" title="Apps section">
         <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
-          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
+          <div className="w-60 rounded-lg border border-line bg-panel py-1" data-force-state="hover" data-force-target="li:nth-child(3)">
             <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
               onOpenPath={noop} onSetPinned={noop} />
           </div>
         </Specimen>
         <Specimen label="keyboard focus: a row, then a pin">
-          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
+          <div className="w-60 rounded-lg border border-line bg-panel py-1" data-force-state="focus focus-visible"
             data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
             <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
               <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />

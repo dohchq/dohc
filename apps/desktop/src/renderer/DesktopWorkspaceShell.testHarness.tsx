@@ -705,6 +705,8 @@ function makeBaseBridge(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
+    // The Explorer's Apps section: no apps unless a test says so.
+    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({ sites: [] })),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {

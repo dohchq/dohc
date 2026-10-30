@@ -52,6 +52,7 @@ import {
   clampOpenEditorsHeight,
 } from "./workbenchState";
 import { TabGlyph, tabMark } from "./tabGlyph";
+import { AppsSection, type ExplorerApps } from "./AppsSection";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
@@ -121,6 +122,9 @@ export interface ExplorerProps {
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
+  // The workspace's apps, in the section under Open editors. Without it the
+  // Explorer has no Apps section.
+  apps?: ExplorerApps;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
@@ -1363,6 +1367,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onTreeKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (editing) return;
+      // The tree's keys belong to the tree and the frame around it. A row in
+      // another section, such as Open editors or Apps, keeps its own Enter,
+      // Space and arrows.
+      if (
+        event.target !== event.currentTarget &&
+        !workspaceTreeRef.current?.contains(event.target as Node)
+      ) {
+        return;
+      }
       if (event.key === "F2") {
         event.preventDefault();
         const target = focusedPath ?? [...selection][0];
@@ -1649,24 +1662,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
-          <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
-          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
-            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
-          </button>)}
-          {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
-          {props.collectionsElsewhere && <CollectionsElsewhereRow elsewhere={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
-          {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
-          </>}
-        </section>}
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
-          className="relative mt-4 first:mt-0"
+          className="relative"
         >
           <header
             data-testid="open-editors-header"
@@ -1865,6 +1864,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             />
           ) : null}
         </section>
+
+        {props.apps ? (
+          <AppsSection {...props.apps} activePath={activeTab} onOpenPath={onOpenFile} />
+        ) : null}
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mt-4 px-1">
+          <SectionLabel as="div" className="flex h-6 items-center px-2">Collections</SectionLabel>
+          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
+          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
+            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
+            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
+          </button>)}
+          {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
+          {props.collectionsElsewhere && <CollectionsElsewhereRow elsewhere={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
+          {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
+          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          </>}
+        </section>}
 
         <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header

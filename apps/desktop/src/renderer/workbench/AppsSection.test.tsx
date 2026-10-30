@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
-import { AppsView } from "./AppsView";
+import { AppsSection, hasApps, useApps } from "./AppsSection";
 import { siteTabPath } from "./workbenchState";
 import { deferred } from "../../testing/deferred";
 
@@ -27,6 +26,7 @@ const app: SitePackageInfo = {
   diagnostics: [],
   authority: { kind: "workspace" },
 };
+const docs: SitePackageInfo = { ...app, root: "docs", title: "Docs" };
 
 const bridgeMock = {
   listSites: vi.fn(async (_input: { workspaceId: string }) => ({
@@ -36,38 +36,50 @@ const bridgeMock = {
 
 const notices = { report: vi.fn(), clear: vi.fn() };
 
-type Props = ComponentProps<typeof AppsView>;
+type HarnessProps = {
+  workspaceId?: string;
+  filesSettledRevision?: number;
+  enabled?: boolean;
+  activePath?: string | null;
+  pinnedApps?: readonly string[];
+  onSetPinned?: (appRoot: string, pinned: boolean) => void;
+  onOpenPath?: (path: string) => void;
+  reveal?: boolean;
+  onRevealed?: () => void;
+  onHasApps?: (has: boolean) => void;
+};
 
-// The side panel's header the count and create button portal into.
-let head: HTMLElement;
-
-function props(overrides: Partial<Props> = {}): Props {
-  return {
-    workspaceId: "ws-apps",
-    filesSettledRevision: 0,
-    head,
-    activePath: null,
-    pinnedApps: [],
-    onSetPinned: vi.fn(),
-    onOpenPath: vi.fn(),
-    onCreateFirstApp: vi.fn(async () => undefined),
+// The shell reads the apps; the Explorer draws the section from them.
+function Harness(props: HarnessProps) {
+  const apps = useApps(
+    props.workspaceId ?? "ws-apps",
+    props.filesSettledRevision ?? 0,
     notices,
-    ...overrides,
-  };
+    props.enabled ?? true,
+  );
+  props.onHasApps?.(hasApps(apps));
+  return (
+    <AppsSection
+      {...apps}
+      activePath={props.activePath ?? null}
+      pinnedApps={props.pinnedApps ?? []}
+      onSetPinned={props.onSetPinned ?? vi.fn()}
+      onOpenPath={props.onOpenPath ?? vi.fn()}
+      reveal={props.reveal ?? false}
+      onRevealed={props.onRevealed ?? vi.fn()}
+    />
+  );
 }
 
-describe("AppsView", () => {
+describe("AppsSection", () => {
   beforeEach(() => {
     bridgeMock.listSites.mockReset();
     bridgeMock.listSites.mockResolvedValue({ sites: [app] });
     vi.stubGlobal("dohcDesktop", bridgeMock);
-    head = document.createElement("span");
-    document.body.append(head);
   });
 
   afterEach(() => {
     cleanup();
-    head.remove();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -75,61 +87,76 @@ describe("AppsView", () => {
   it("lists detected apps and opens app preview tabs", async () => {
     const onOpenPath = vi.fn();
     const user = userEvent.setup();
-    render(<AppsView {...props({ onOpenPath })} />);
+    render(<Harness onOpenPath={onOpenPath} />);
 
     await screen.findByText("Client Portal");
-    await user.click(screen.getByTestId("sites-row"));
+    const row = screen.getByTestId("sites-row");
+    // One line: the folder is the row's tooltip, not a second line.
+    expect(row.textContent).toBe("Client Portal");
+    expect(row.getAttribute("title")).toBe("client-portal");
+    await user.click(row);
 
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
-  it("puts the count and the create button in the panel header", async () => {
-    render(<AppsView {...props()} />);
+  it("heads the section with its count and no actions", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
+    render(<Harness />);
 
-    await screen.findByText("Client Portal");
-    expect(head.contains(screen.getByTestId("sites-count"))).toBe(true);
-    expect(head.contains(screen.getByTestId("sites-create"))).toBe(true);
+    await screen.findByText("Docs");
+    const header = screen.getByTestId("explorer-apps-header");
+    const toggle = screen.getByTestId("explorer-apps-toggle");
+    expect(header.querySelectorAll("button")).toHaveLength(1);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const count = screen.getByTestId("sites-count");
+    expect(count.textContent).toBe("2");
+    expect(count.getAttribute("aria-label")).toBe("2 apps");
+    expect(screen.queryByRole("button", { name: /create app/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
   });
 
   it("selects the app whose preview is the focused tab", async () => {
-    bridgeMock.listSites.mockResolvedValueOnce({
-      sites: [app, { ...app, root: "docs", title: "Docs" }],
-    });
-    render(<AppsView {...props({ activePath: siteTabPath("docs") })} />);
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
+    render(<Harness activePath={siteTabPath("docs")} />);
 
     await screen.findByText("Docs");
-    const [portal, docs] = screen.getAllByTestId("sites-row");
+    const [portal, docsRow] = screen.getAllByTestId("sites-row");
     expect(portal?.getAttribute("aria-current")).toBeNull();
-    expect(docs?.getAttribute("aria-current")).toBe("page");
+    expect(docsRow?.getAttribute("aria-current")).toBe("page");
+    expect(docsRow?.parentElement?.className).toContain("bg-selected");
+    expect(docsRow?.parentElement?.className).toContain("font-medium");
+    expect(portal?.parentElement?.className).toContain("hover:bg-hover");
   });
 
   it("pins an app to the sidebar and unpins a pinned one, without opening it", async () => {
     const onOpenPath = vi.fn();
     const onSetPinned = vi.fn();
     const user = userEvent.setup();
-    const view = render(<AppsView {...props({ onOpenPath, onSetPinned })} />);
+    const view = render(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} />);
     await user.click(await screen.findByRole("button", { name: "Pin to sidebar" }));
     expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", true);
 
-    view.rerender(<AppsView {...props({ onOpenPath, onSetPinned, pinnedApps: ["client-portal"] })} />);
+    view.rerender(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} pinnedApps={["client-portal"]} />);
     await user.click(screen.getByRole("button", { name: "Unpin" }));
     expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", false);
     expect(onOpenPath).not.toHaveBeenCalled();
   });
 
-  it("reaches each row and its pin from the keyboard", async () => {
-    bridgeMock.listSites.mockResolvedValueOnce({
-      sites: [app, { ...app, root: "docs", title: "Docs" }],
-    });
+  it("reaches the header, each row and its pin from the keyboard", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
     const onOpenPath = vi.fn();
     const onSetPinned = vi.fn();
     const user = userEvent.setup();
-    render(<AppsView {...props({ onOpenPath, onSetPinned })} />);
+    render(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} />);
     await screen.findByText("Docs");
+    const toggle = screen.getByTestId("explorer-apps-toggle");
     const [portalRow, docsRow] = screen.getAllByTestId("sites-row");
     const [portalPin] = screen.getAllByTestId("sites-pin");
 
-    portalRow?.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(toggle);
+    await user.tab();
+    expect(document.activeElement).toBe(portalRow);
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenLastCalledWith(siteTabPath("client-portal"));
 
@@ -142,6 +169,24 @@ describe("AppsView", () => {
     expect(document.activeElement).toBe(docsRow);
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenLastCalledWith(siteTabPath("docs"));
+
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+  });
+
+  it("collapses to its header and keeps the count", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await screen.findByText("Client Portal");
+
+    await user.click(screen.getByTestId("explorer-apps-toggle"));
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+    expect(screen.getByTestId("sites-count").getAttribute("aria-label")).toBe("1 app");
+
+    await user.click(screen.getByTestId("explorer-apps-toggle"));
+    expect(screen.getByTestId("sites-row")).toBeTruthy();
   });
 
   it("reloads detected apps when the settled files revision bumps, including a content-only edit", async () => {
@@ -149,43 +194,52 @@ describe("AppsView", () => {
     // including a content-only edit to an existing file (e.g. dohc.json) —
     // not just an add/remove. A structural path/kind/icon hash would
     // produce the same value for that case and never rerun this effect.
-    const view = render(<AppsView {...props()} />);
+    const view = render(<Harness />);
     await screen.findByText("Client Portal");
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
 
-    view.rerender(<AppsView {...props({ filesSettledRevision: 1 })} />);
+    view.rerender(<Harness filesSettledRevision={1} />);
 
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
   });
 
   it("keeps the apps and their count on screen while a settled listing refetches", async () => {
-    const view = render(<AppsView {...props()} />);
+    const view = render(<Harness />);
     await screen.findByText("Client Portal");
     const refetch = deferred<{ sites: SitePackageInfo[] }>();
     bridgeMock.listSites.mockReturnValueOnce(refetch.promise);
 
-    view.rerender(<AppsView {...props({ filesSettledRevision: 1 })} />);
+    view.rerender(<Harness filesSettledRevision={1} />);
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
 
     expect(screen.getByText("Client Portal")).toBeTruthy();
-    expect(screen.getByTestId("sites-count").textContent).toBe("1 app");
-    expect(screen.queryByText("Loading apps…")).toBeNull();
+    expect(screen.getByTestId("sites-count").textContent).toBe("1");
 
     await act(async () => {
-      refetch.resolve({ sites: [app, { ...app, root: "docs", title: "Docs" }] });
+      refetch.resolve({ sites: [app, docs] });
       await refetch.promise;
     });
-    expect(screen.getByTestId("sites-count").textContent).toBe("2 apps");
+    expect(screen.getByTestId("sites-count").textContent).toBe("2");
   });
 
   it("does not reload detected apps for an unchanged settled files revision", async () => {
-    const view = render(<AppsView {...props()} />);
+    const view = render(<Harness />);
     await screen.findByText("Client Portal");
 
-    view.rerender(<AppsView {...props()} />);
+    view.rerender(<Harness />);
     await Promise.resolve();
 
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads nothing until the workspace is ready", async () => {
+    const view = render(<Harness enabled={false} />);
+    await Promise.resolve();
+    expect(bridgeMock.listSites).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+
+    view.rerender(<Harness enabled />);
+    expect(await screen.findByText("Client Portal")).toBeTruthy();
   });
 
   it("does not let a late workspace response replace the current apps or report a failure", async () => {
@@ -196,9 +250,9 @@ describe("AppsView", () => {
         ? workspaceA.promise
         : workspaceB.promise,
     );
-    const view = render(<AppsView {...props({ workspaceId: "workspace-a" })} />);
+    const view = render(<Harness workspaceId="workspace-a" />);
 
-    view.rerender(<AppsView {...props({ workspaceId: "workspace-b" })} />);
+    view.rerender(<Harness workspaceId="workspace-b" />);
     await act(async () => {
       workspaceB.resolve({ sites: [{ ...app, title: "Current App" }] });
       await workspaceB.promise;
@@ -215,28 +269,43 @@ describe("AppsView", () => {
     expect(notices.clear).toHaveBeenCalledWith("apps:workspace-a");
   });
 
-  it("does not fabricate apps from files while IPC is loading", () => {
+  it("draws no section while the first read is on its way", () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
-    render(<AppsView {...props()} />);
+    render(<Harness />);
 
-    expect(screen.queryByText("Report")).toBeNull();
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
     expect(screen.queryByTestId("sites-row")).toBeNull();
-    expect(screen.getByText("Loading apps…")).toBeTruthy();
-    // No count until one is known: "0 apps" would be a claim.
-    expect(screen.getByTestId("sites-count").textContent).toBe("");
+  });
+
+  it("draws no section for a workspace with no apps, then shows one once an app settles", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
+    const onHasApps = vi.fn();
+    const view = render(<Harness onHasApps={onHasApps} />);
+    await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+    expect(onHasApps).toHaveBeenLastCalledWith(false);
+
+    // An agent wrote an app folder; the listing settled.
+    view.rerender(<Harness filesSettledRevision={1} onHasApps={onHasApps} />);
+    expect(await screen.findByText("Client Portal")).toBeTruthy();
+    expect(screen.getByTestId("explorer-apps-section")).toBeTruthy();
+    expect(onHasApps).toHaveBeenLastCalledWith(true);
   });
 
   it("reports a failed read through the shell's error hook and reads again on Try again", async () => {
     const failure = new Error("App scan failed");
     bridgeMock.listSites.mockRejectedValueOnce(failure);
     const user = userEvent.setup();
-    render(<AppsView {...props()} />);
+    render(<Harness />);
 
-    const panel = await screen.findByTestId("sites-failed");
-    // The words are the Notices row's, not the panel's.
-    expect(panel.textContent).toBe("Try again");
+    const row = await screen.findByTestId("sites-failed");
+    // The section keeps its header; the words are the Notices row's.
+    expect(screen.getByTestId("explorer-apps-toggle")).toBeTruthy();
+    expect(row.textContent).toBe("Try again");
     expect(screen.queryByText("App scan failed")).toBeNull();
-    expect(screen.getByTestId("sites-count").textContent).toBe("");
+    expect(screen.queryByTestId("sites-count")).toBeNull();
     expect(notices.report).toHaveBeenCalledExactlyOnceWith({
       identity: "apps:ws-apps",
       message: "App scan failed",
@@ -252,7 +321,7 @@ describe("AppsView", () => {
 
   it("reads again from the Notices row's Try again", async () => {
     bridgeMock.listSites.mockRejectedValueOnce(new Error("App scan failed"));
-    render(<AppsView {...props()} />);
+    render(<Harness />);
     await screen.findByTestId("sites-failed");
 
     const [{ retry }] = notices.report.mock.calls[0] as [{ retry: () => void }];
@@ -261,9 +330,9 @@ describe("AppsView", () => {
     expect(await screen.findByText("Client Portal")).toBeTruthy();
   });
 
-  it("takes its Notices row away when the view closes", async () => {
+  it("takes its Notices row away when the workspace closes", async () => {
     bridgeMock.listSites.mockRejectedValueOnce(new Error("App scan failed"));
-    const view = render(<AppsView {...props()} />);
+    const view = render(<Harness />);
     await screen.findByTestId("sites-failed");
     notices.clear.mockClear();
 
@@ -272,53 +341,30 @@ describe("AppsView", () => {
     expect(notices.clear).toHaveBeenCalledExactlyOnceWith("apps:ws-apps");
   });
 
-  it("offers a keyboard-accessible first-app action when no apps are detected", async () => {
-    bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
-    const onCreateFirstApp = vi.fn(async () => undefined);
+  it("opens and focuses its first row for Add an app here…", async () => {
+    bridgeMock.listSites.mockResolvedValue({ sites: [app, docs] });
+    const onRevealed = vi.fn();
     const user = userEvent.setup();
-    render(<AppsView {...props({ onCreateFirstApp })} />);
+    const view = render(<Harness onRevealed={onRevealed} />);
+    await screen.findByText("Docs");
+    await user.click(screen.getByTestId("explorer-apps-toggle"));
+    expect(screen.queryByTestId("sites-row")).toBeNull();
 
-    expect(await screen.findByText("No apps in this workspace yet.")).toBeTruthy();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
-    // An empty shelf offers one create button, in its body.
-    expect(screen.queryByTestId("sites-create")).toBeNull();
-    const create = screen.getByRole("button", { name: "Create app" });
-    create.focus();
-    await user.keyboard("{Enter}");
-    expect(onCreateFirstApp).toHaveBeenCalledTimes(1);
+    view.rerender(<Harness reveal onRevealed={onRevealed} />);
+
+    const [first] = await screen.findAllByTestId("sites-row");
+    await vi.waitFor(() => expect(document.activeElement).toBe(first));
+    expect(screen.getByTestId("explorer-apps-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(onRevealed).toHaveBeenCalledOnce();
   });
 
-  it("creates another app from the header", async () => {
-    const onCreateFirstApp = vi.fn(async () => undefined);
-    const user = userEvent.setup();
-    render(<AppsView {...props({ onCreateFirstApp })} />);
-
-    await screen.findByText("Client Portal");
-    await user.click(screen.getByRole("button", { name: "Create app" }));
-    expect(onCreateFirstApp).toHaveBeenCalledOnce();
-  });
-
-  it("does not offer file creation in an empty received share workspace", async () => {
+  it("drops an Add an app here… request once the read finds no apps", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
-    const onCreateFirstApp = vi.fn(async () => undefined);
-    render(
-      <AppsView
-        {...props({
-          workspaceId: "ws-received-share",
-          onCreateFirstApp,
-          receivedShareWorkspace: true,
-        })}
-      />,
-    );
+    const onRevealed = vi.fn();
+    render(<Harness reveal onRevealed={onRevealed} />);
 
-    expect(
-      await screen.findByText(
-        "This shared view cannot create an app. Ask the workspace owner to add one.",
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
-    expect(screen.queryByTestId("sites-create-first")).toBeNull();
-    expect(onCreateFirstApp).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(onRevealed).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
   });
 
   it("marks apps opened from a mounted share", async () => {
@@ -331,7 +377,7 @@ describe("AppsView", () => {
         },
       ],
     });
-    render(<AppsView {...props()} />);
+    render(<Harness />);
 
     await screen.findByText("Client Portal");
     expect(screen.getByRole("img", { name: "Shared" }).getAttribute("data-testid")).toBe(
@@ -355,7 +401,7 @@ describe("AppsView", () => {
         },
       ],
     });
-    render(<AppsView {...props()} />);
+    render(<Harness />);
 
     const message = "Warning: dohc.json could not be parsed (client-portal/dohc.json)";
     const mark = await screen.findByRole("img", { name: message });
@@ -367,7 +413,7 @@ describe("AppsView", () => {
     bridgeMock.listSites.mockResolvedValueOnce({
       sites: [{ ...app, confidence: "low" }],
     });
-    render(<AppsView {...props()} />);
+    render(<Harness />);
 
     await screen.findByText("Client Portal");
     expect(screen.getByTestId("sites-low-confidence").getAttribute("aria-label")).toBe(
@@ -376,10 +422,8 @@ describe("AppsView", () => {
   });
 
   it("keeps a pinned app's pin in view and hides the others until hover or focus", async () => {
-    bridgeMock.listSites.mockResolvedValueOnce({
-      sites: [app, { ...app, root: "docs", title: "Docs" }],
-    });
-    render(<AppsView {...props({ pinnedApps: ["client-portal"] })} />);
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
+    render(<Harness pinnedApps={["client-portal"]} />);
 
     const pinned = await screen.findByRole("button", { name: "Unpin" });
     const unpinned = screen.getByRole("button", { name: "Pin to sidebar" });
