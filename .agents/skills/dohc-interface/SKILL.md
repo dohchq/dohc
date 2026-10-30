@@ -320,7 +320,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
-It draws the selected fill on the active option, where Enter acts, whether the keyboard or the pointer moved it. A list that also marks its current row with the fill, such as the tab overflow menu, Turn into and the callout type menu, adds the row's accent line while the keyboard moves. A picker you type into, such as Go to, the command palette, / and [[, shows the fill only.
+It draws the selected fill on the active option, where Enter acts, whether the keyboard or the pointer moved it. A list that also marks its current row with the fill, such as the tab overflow menu, Turn into and the callout type menu, adds the row's accent line while the keyboard moves. Compose `MENU_ACTIVE_OPTION_BESIDE_CURRENT` for it. A picker you type into, such as Go to, the command palette, / and [[, shows the fill only.
 
 Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-6` and `dohc-elevated`.
 

@@ -274,6 +274,11 @@ describe("Menu", () => {
     render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
     await user.click(screen.getByTestId("row-menu"));
     expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, checked: true }, { ...items[1]!, checked: false }]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitemradio", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
   });
 
   it("keeps the checked row's selected fill whatever has focus", async () => {
