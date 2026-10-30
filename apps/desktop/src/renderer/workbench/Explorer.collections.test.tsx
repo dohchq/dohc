@@ -76,6 +76,16 @@ describe("Explorer collection folders", () => {
     view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
   });
+  it("shows a Collection whose source is gone as unavailable, with how to recover it", () => {
+    const onOpenDataCollection = vi.fn();
+    render(<Explorer {...explorerProps({ mode: "home", onOpenDataCollection,
+      dataCollections: [{ datasetId: "d1", datasetPath: null, tableId: "00000000-0000-4000-8000-000000000002", name: "Guests" }] })} />);
+    const row = screen.getByTitle("Collection source unavailable. Restore dataset.json from History or remove duplicate copies.");
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+    expect(row.textContent).toContain("Source unavailable");
+    fireEvent.click(row);
+    expect(onOpenDataCollection).not.toHaveBeenCalled();
+  });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);

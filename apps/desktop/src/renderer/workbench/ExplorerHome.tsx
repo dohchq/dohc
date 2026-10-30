@@ -697,7 +697,8 @@ const HomeRow = memo(function HomeRow(props: {
           data-section={row.section}
           aria-current={active ? "page" : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
-          title={app ? app.root : path}
+          title={row.unavailable ?? (app ? app.root : path)}
+          aria-disabled={row.unavailable ? true : undefined}
           tabIndex={props.tabbable ? 0 : -1}
           draggable={dragPath !== null ? true : undefined}
           onFocus={() => {
@@ -726,7 +727,9 @@ const HomeRow = memo(function HomeRow(props: {
           <HomeGlyph row={row} active={active} />
           {/* The folder hint gives way before the name; the title holds the whole path. */}
           <span className="min-w-0 flex-auto truncate">{row.label}</span>
-          {row.detail ? <span className="min-w-0 shrink-[999] truncate text-[12px] text-subtle">{row.detail}</span> : null}
+          {row.detail ? (
+            <span className={`min-w-0 truncate text-[12px] ${row.unavailable ? "shrink-0 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
+          ) : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
         {trailing > 0 && (reached || pinned) ? (

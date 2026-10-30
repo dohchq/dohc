@@ -34,6 +34,8 @@ export type HomeRowModel = {
   expanded: boolean;
   // Muted text at the end of the row, such as an Other file's folder.
   detail?: string;
+  // Why the row cannot open, such as a Collection whose source is gone.
+  unavailable?: string;
 };
 
 export type DataCollection = {
@@ -258,7 +260,9 @@ export function collectionRows(data: readonly DataCollection[], collectionFolder
     glyph: { glyph: "collection", icon: undefined },
     open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
     menu: entry.datasetPath === null ? null : datasetMenu(entry.datasetPath),
-    ...(entry.datasetPath === null ? { detail: "Source unavailable" } : entry.archived ? { detail: "Archived" } : {}),
+    ...(entry.datasetPath === null
+      ? { detail: "Source unavailable", unavailable: "Collection source unavailable. Restore dataset.json from History or remove duplicate copies." }
+      : entry.archived ? { detail: "Archived" } : {}),
   }));
   const folders = [...collectionFolders].sort((a, b) => collator.compare(basenameOf(a), basenameOf(b)));
   for (const folder of folders) rows.push(collectionRow({ ...base, key: `collections:${folder}/` }, folder));
