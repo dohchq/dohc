@@ -254,7 +254,7 @@ function GraphRows(props: {
                   moveFocus(row, event.key === "ArrowDown" ? 1 : -1);
                 }
               }}
-              className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+              className={`dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
                 active ? "bg-selected font-medium text-ink" : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >

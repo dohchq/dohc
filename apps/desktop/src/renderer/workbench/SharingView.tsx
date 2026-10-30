@@ -238,7 +238,7 @@ function ShareRow(props: {
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
       <div role="group" aria-label={name} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
-        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover focus:bg-selected focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`}>
+        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover dohc-focus-row`}>
         {subject.glyph}
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate" title={subject.title}>{subject.name}</span>
@@ -530,7 +530,7 @@ function Section(props: {
   return (
     <section data-testid={`sharing-${lane}`} aria-label={words.label}>
       <h3 tabIndex={-1} data-sharing-lane-focus
-        className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">
+        className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5">
         {words.label}
         {known ? (
           <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">

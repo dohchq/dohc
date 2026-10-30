@@ -7,6 +7,8 @@
 @source "../../../../packages/collection-views/src";
 
 @custom-variant dark ([data-theme='dark'] &);
+/* While the person moves with the keyboard (keyboardNavigation.ts). */
+@custom-variant keyboard ([data-keyboard-nav] &);
 
 /* Warm paper + graphite palette (brand bible / packages/brand, supersedes the
  * zinc D-E5 draft). Every pair is contrast-solved — see tokens.test.ts.
@@ -41,6 +43,7 @@
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
   --dohc-accent: #2d342e;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 60%, transparent);
   --dohc-agent: #666d2e;
   --dohc-match: #326fce;
   --dohc-success: #38684e;
@@ -73,6 +76,7 @@
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
   --dohc-match: #377afa;
   --dohc-success: #82c29b;
@@ -101,6 +105,7 @@
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
   --color-accent: var(--dohc-accent);
+  --color-focus: var(--dohc-focus);
   --color-agent: var(--dohc-agent);
   --color-match: var(--dohc-match);
   --color-line: var(--dohc-line);
@@ -144,19 +149,36 @@ body {
   background: var(--dohc-selection);
 }
 
-/* a11y: keyboard focus is a 2px ink ring with offset, both modes. Layered so
- * Tailwind utilities (outline-none on inputs that carry their own focus
- * treatment) can override it — unlayered, this rule would beat every
- * utility and clip into stray bars inside overflow-hidden popovers. */
+/* Focus shows only while the person moves with the keyboard
+ * (keyboardNavigation.ts), never after a click, a shortcut, or focus dohc
+ * moves itself. A control wears a soft halo that follows its radius. It is an
+ * outline, not a shadow, so the control keeps its own shadow and forced
+ * colors still draw it. Layered so a utility can place it inset inside a
+ * scroller, or remove it where the part shows focus another way. */
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--dohc-accent);
-    outline-offset: 1px;
+    outline: none;
+  }
+
+  [data-keyboard-nav] :focus-visible {
+    outline: 2px solid var(--dohc-focus);
+    outline-offset: 0;
   }
 
   /* A checked checkbox or radio fills with the accent, not Chromium's blue. */
   input {
     accent-color: var(--dohc-accent);
+  }
+}
+
+/* A row in a list, tree or menu takes the hover fill and a 1px accent line
+ * inside its edge, where a scroller cannot clip it. A selected row keeps its
+ * fill, because utilities outrank this layer. */
+@layer components {
+  [data-keyboard-nav] .dohc-focus-row:focus-visible {
+    outline: 1px solid var(--dohc-accent);
+    outline-offset: -1px;
+    background-color: var(--dohc-hover);
   }
 }
 
@@ -1587,9 +1609,9 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1623,13 +1645,13 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible {
   pointer-events: auto;
   opacity: 1;
 }
 
 .dohc-table-grip:hover,
-.dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
 .dohc-table-grip.is-open {
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1815,7 +1837,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active,
-.dohc-table-row-resize:focus-visible,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible,
 .dohc-table-row-resize.is-resizing {
   opacity: 1;
   pointer-events: auto;
@@ -1826,7 +1848,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active:hover::after,
-.dohc-table-row-resize:focus-visible::after,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible::after,
 .dohc-table-row-resize.is-resizing::after {
   opacity: 1;
 }
@@ -1859,8 +1881,8 @@ body {
 /* The table menu (⋯) and the append strips reveal on table hover. */
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1884,7 +1906,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-.dohc-table-menu-btn:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1911,7 +1933,7 @@ body {
 }
 
 .dohc-table-append:hover,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   @apply bg-hover;
   color: var(--dohc-ink);
 }
@@ -2272,7 +2294,6 @@ body {
   padding: 4px 7px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
   color: var(--dohc-muted);
   text-align: left;
   text-overflow: ellipsis;
@@ -2593,11 +2614,6 @@ body {
 .dohc-callout-type-picker.is-open .dohc-callout-type-trigger {
   background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
 }
-.dohc-callout-type-trigger:focus-visible {
-  outline: 2px solid
-    color-mix(in srgb, var(--dohc-callout-accent) 55%, transparent);
-  outline-offset: 1px;
-}
 .dohc-callout-type-chevron {
   width: 12px;
   height: 12px;
@@ -2646,13 +2662,16 @@ body {
 }
 .dohc-callout-type-option:hover {
   @apply bg-hover;
-  outline: none;
 }
 
-.dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
   @apply bg-selected;
-  outline: none;
+}
+
+[data-keyboard-nav] .dohc-callout-type-option:focus-visible {
+  @apply bg-selected;
+  outline: 1px solid var(--dohc-accent);
+  outline-offset: -1px;
 }
 
 .dohc-callout-title-input {
@@ -2869,12 +2888,6 @@ input.dohc-math__source {
   min-width: 8ch;
 }
 
-@utility dohc-focus-visible {
-  &:focus-visible {
-    outline: 2px solid var(--dohc-accent);
-  }
-}
-
 @utility dohc-focus-input {
   &:focus {
     outline: none;
@@ -2885,4 +2898,76 @@ input.dohc-math__source {
 
 @utility dohc-section-label {
   @apply text-[12px] font-medium text-subtle;
+}
+
+/* An agent at work: three dots in its hue. Under reduced motion they hold still. */
+.dohc-working-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.dohc-working-dots > i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: dohc-working-dot 1.2s ease-in-out infinite;
+}
+.dohc-working-dots > i:nth-child(2) {
+  opacity: 0.65;
+  animation-delay: 0.2s;
+}
+.dohc-working-dots > i:nth-child(3) {
+  opacity: 1;
+  animation-delay: 0.4s;
+}
+@keyframes dohc-working-dot {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-2px); }
+}
+
+/* A thread's latest reply under its parent: two lines of running text. Lists
+ * keep their markers inline. The end of the second line fades out. */
+.dohc-chat-peek {
+  max-height: 40px;
+  overflow: hidden;
+  line-height: 20px;
+  mask-image: linear-gradient(black, black), linear-gradient(to right, black calc(100% - 64px), transparent);
+  mask-size: 100% 20px, 100% 20px;
+  mask-position: top, bottom;
+  mask-repeat: no-repeat;
+}
+.dohc-chat-peek :is(div, p, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+/* A chip or inline box keeps to the line, so two lines stay two lines. */
+.dohc-chat-peek * {
+  max-height: 20px;
+  vertical-align: top;
+}
+.dohc-chat-peek :is(p, li, blockquote, pre, h1, h2, h3, h4, h5, h6)::after {
+  content: " ";
+}
+.dohc-chat-peek ul > li::before {
+  content: "• ";
+}
+.dohc-chat-peek ol {
+  counter-reset: dohc-peek;
+}
+.dohc-chat-peek ol > li {
+  counter-increment: dohc-peek;
+}
+.dohc-chat-peek ol > li::before {
+  content: counter(dohc-peek) ". ";
+}
+
+/* The list contains each message's layout but not its paint, so a hover
+ * bar can rise over the message above. */
+[data-chat-virtualized] .legend-list-content-container > * > * {
+  contain: layout style !important;
 }

@@ -2220,14 +2220,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRunId: "run-1",
+        liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: -1,
         paused: true,
       }).success,

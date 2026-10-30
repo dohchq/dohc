@@ -134,7 +134,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
           <button
             key={option.value}
             {...group.radio(index)}
-            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors focus-visible:outline-offset-4 ${
+            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors ${
               checked ? "text-ink" : "text-muted hover:text-ink"
             }`}
           >
@@ -305,7 +305,7 @@ export function SwitchControl(props: {
       onClick={() => {
         if (!props.disabled) props.onChange(!props.checked);
       }}
-      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
+      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
         props.checked ? "border-accent bg-accent" : "border-line bg-line"
       }`}
     >

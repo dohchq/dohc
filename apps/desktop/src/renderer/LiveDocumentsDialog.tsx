@@ -632,7 +632,7 @@ export function LiveDocumentsDialog({
                 data-live-document-save-only={row.saveOnly ? "" : undefined}
                 aria-current={row.path === reveal ? "true" : undefined}
                 tabIndex={-1}
-                className={`flex flex-wrap items-center gap-3 rounded-md py-2 focus-visible:-outline-offset-2 ${
+                className={`dohc-focus-row flex flex-wrap items-center gap-3 rounded-md py-2 ${
                   row.path === reveal ? "-mx-2 border-transparent bg-selected px-2" : ""}`}
               >
                 <span

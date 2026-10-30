@@ -164,7 +164,7 @@ export function PollOptions(props: {
               disabled={!props.onChoose}
               aria-pressed={taken}
               onClick={() => props.onChoose?.(option)}
-              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
+              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
                   : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
@@ -222,7 +222,7 @@ export function DecisionStatus(props: {
             type="button"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
+            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink"
           >
             Answer
           </button>
@@ -313,7 +313,6 @@ function RunChip(props: { run: ChatRunRecord }) {
     };
   }, [open]);
 
-  const started = formatChatTime(props.run.startedAtMs);
   return (
     <span
       ref={containerRef}
@@ -327,7 +326,7 @@ function RunChip(props: { run: ChatRunRecord }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
@@ -338,50 +337,61 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Command</span>
-            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
-              {props.run.command}
-            </code>
-          </span>
-          <span className="grid grid-cols-2 gap-2">
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Started</span>
-              <time
-                data-testid="chats-run-started"
-                dateTime={started.iso}
-                className="text-[11px] tabular-nums text-ink"
-              >
-                {started.label}
-              </time>
-            </span>
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
-                {props.run.exitCode ?? "—"}
-              </span>
-            </span>
-          </span>
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Log</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
-                {props.run.logPath ?? "No log path"}
-              </code>
-              {props.run.logPath ? (
-                <CopyButton
-                  iconOnly
-                  testId="chats-run-copy-log"
-                  label="Copy log path"
-                  pinName
-                  getText={() => props.run.logPath ?? null}
-                />
-              ) : null}
-            </span>
-          </span>
+          <RunDetails run={props.run} />
         </span>
       ) : null}
     </span>
+  );
+}
+
+// What ran for an agent's reply: its command, when it started, how it
+// ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord }) {
+  const started = formatChatTime(props.run.startedAtMs);
+  return (
+    <>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Command</span>
+        <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
+          {props.run.command}
+        </code>
+      </span>
+      <span className="grid grid-cols-2 gap-2">
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Started</span>
+          <time
+            data-testid="chats-run-started"
+            dateTime={started.iso}
+            className="text-[11px] tabular-nums text-ink"
+          >
+            {started.label}
+          </time>
+        </span>
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Exit code</span>
+          <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
+            {props.run.exitCode ?? "—"}
+          </span>
+        </span>
+      </span>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Log</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.logPath ?? "No log path"}
+          </code>
+          {props.run.logPath ? (
+            <CopyButton
+              iconOnly
+              testId="chats-run-copy-log"
+              label="Copy log path"
+              pinName
+              getText={() => props.run.logPath ?? null}
+            />
+          ) : null}
+        </span>
+      </span>
+    </>
   );
 }
 
@@ -405,7 +415,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -427,7 +437,7 @@ export function BookmarkAction(props: {
               event.stopPropagation();
               props.onToggle?.("live");
             }}
-            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
+            className={`grid size-6 place-items-center rounded disabled:opacity-50 ${
               props.active
                 ? "text-accent hover:bg-hover"
                 : "text-subtle hover:bg-hover hover:text-ink"
@@ -607,7 +617,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
