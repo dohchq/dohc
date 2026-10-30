@@ -158,6 +158,9 @@ export function createRealShareMountHarness(input: {
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
     refresh: () => commands.refresh({ workspace, assertCurrent }),
     unmount: (shareId: string) => commands.unmount({ workspace, shareId, assertCurrent }),
+    linksEdges: (shareId: string, cursor?: string) => files.linksEdges(
+      { kind: "mount", workspaceId: workspace.workspaceId, shareId }, cursor === undefined ? {} : { cursor },
+    ),
     writeText: (relativePath: string) => mutations.writeText(undefined, {
       workspaceId: workspace.workspaceId, relativePath, text: "defaced",
       expectedContentHash: "0".repeat(64),

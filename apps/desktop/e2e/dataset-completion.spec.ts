@@ -9,7 +9,7 @@ import { orderFormDefinition } from "./helpers/datasetCompletion";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
-import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openExplorerHome, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
 
 async function dragBoardCard(page: Page, card: Locator, column: Locator): Promise<void> {
   const source = await card.boundingBox(), target = await column.boundingBox();
@@ -406,6 +406,7 @@ test("@dataset-completion generated form saves two files and an explicitly publi
     await desktop.close();
     desktop = await launchDesktopApp({ workspace }); page = desktop.page;
     await openWorkspaceFromFirstRun(page, workspace);
+    await openExplorerHome(page);
     await page.getByRole("region", { name: "Collections", exact: true }).getByRole("button", { name: "Orders", exact: true }).click();
     const collection = page.getByRole("region", { name: "Orders", exact: true });
     await collection.getByLabel("Manage Collection", { exact: true }).click();

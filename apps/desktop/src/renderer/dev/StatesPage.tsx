@@ -61,7 +61,7 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
-import { AppRows } from "../workbench/AppsView";
+import type { ExplorerApps } from "../workbench/AppsSection";
 import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
@@ -76,7 +76,7 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
@@ -469,6 +469,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   collection: "Registrations",
   group: "trip",
   chat: "Home",
+  agent: "Nova",
   compare: "Compare with Main",
   change: "Diff: plan.md",
   graph: "Graph",
@@ -2373,24 +2374,25 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Its empty and loading states are the shared ones above, in Empty
-          ("create") and Loading. */}
-      <Section part="apps-shelf" title="Apps shelf">
-        <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
-          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
-            <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
-              onOpenPath={noop} onSetPinned={noop} />
+      {/* The Explorer's Home, at the sidebar's narrowest. */}
+      <Section part="explorer-home" title="Explorer Home">
+        <Specimen label="pinned, recent, pages in folders, Collections, apps, other files; a page open; a row hovered">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
+            data-force-target='[data-section="pages"]:nth-of-type(1)'>
+            <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="keyboard focus: a row, then a pin">
-          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
-            data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
-            <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
-              <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />
-            </div>
+        <Specimen label="a new workspace: Pages and its +">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={undefined} dataCollections={[]} />
           </div>
         </Specimen>
-        <Specimen label="failed read: words in Notices">
+        <Specimen label="loading: blank for 150 ms, then skeleton rows">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} listed={false} />
+          </div>
+        </Specimen>
+        <Specimen label="failed apps read: words in Notices">
           <div className="w-60 rounded-lg border border-line bg-panel p-1">
             <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />
           </div>
@@ -3116,7 +3118,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The catalog is a listbox the textarea controls, not a menu, so it
           is drawn open here under its composer instead of being opened. */}
-      <Section part="composer-poll" title="Composer catalog and poll">
+      <Section part="composer-poll" title="Composer catalog and poll" menusAtRest>
         <Specimen label="/ in a new post: Poll active">
           <ComposerCatalogSpecimen theme={theme} surface="post" />
         </Specimen>
@@ -3493,6 +3495,67 @@ const SHELF_APPS: SitePackageInfo[] = [
   },
   { ...SHELF_APP, root: "notes/reading-list", title: "Reading list", confidence: "low" },
 ];
+
+const HOME_APPS: ExplorerApps = {
+  state: { status: "ready", workspaceId: "states", apps: SHELF_APPS },
+  retry: noop,
+  pinnedApps: ["trip-planner"],
+  onSetPinned: noop,
+  reveal: false,
+  onRevealed: noop,
+};
+
+const HOME_FILES = [
+  "Trip plan.md", "Packing list.md", "Budget.md",
+  "Days/Day 1 - Lisbon.md", "Days/Day 2 - Sintra.md", "Days/Day 3 - Porto.md",
+  "Research/Restaurants.md", "Research/Trains.md",
+  "trip-planner/index.html", "notes/reading-list/index.html",
+  "guests/dataset.json",
+  "receipts/hotel.pdf", "photos/tram.png", "itinerary.csv",
+].map((path) => ({ path, kind: "file" as const }));
+
+const HOME_SPECIMEN: ExplorerProps = {
+  workspaceId: "states",
+  mode: "home",
+  onModeChange: noop,
+  listed: true,
+  recentFiles: ["Days/Day 2 - Sintra.md", "itinerary.csv", "Budget.md"],
+  files: HOME_FILES,
+  folders: ["Days", "Research", "trip-planner", "notes", "notes/reading-list", "guests", "receipts", "photos"],
+  editorGroups: [{ id: "primary", tabs: [{ path: "Days/Day 2 - Sintra.md" }], activeTab: "Days/Day 2 - Sintra.md", size: 1 }],
+  activeEditorGroup: "primary",
+  dirtyPaths: new Set(),
+  recoveryPaths: new Set(),
+  expandedFolders: ["Days"],
+  pinned: ["Trip plan.md"],
+  openEditorsHeight: 180,
+  onOpenEditorsHeightChange: noop,
+  newFolderRequest: null,
+  onNewPage: noop,
+  onOpenFile: noop,
+  onActivateTab: noop,
+  onCloseTab: noop,
+  onCloseAllTabs: noop,
+  onNewUntitledTextFile: noop,
+  onCollapseFolders: noop,
+  onSetFolderExpanded: noop,
+  onToggleFolder: noop,
+  onTogglePin: noop,
+  collectionFolders: new Set(),
+  appFolders: new Set(["trip-planner", "notes/reading-list"]),
+  onOpenCollection: noop,
+  apps: HOME_APPS,
+  dataCollections: [{ datasetId: "guests", datasetPath: "guests/dataset.json", tableId: "guests", name: "Guests" }],
+  onPathsChanged: noop,
+  onImportFiles: noop,
+  shareView: null,
+  onRefreshShareMounts: noop,
+  onUnmountShare: noop,
+  onShare: noop,
+  onRefresh: noop,
+  onError: noop,
+  onNewCollection: noop,
+};
 
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",

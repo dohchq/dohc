@@ -205,6 +205,7 @@ import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
+import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
@@ -288,6 +289,7 @@ import {
   siteTabPath,
   setCollectionActiveView,
   setFolderExpanded,
+  setExplorerMode,
   setOpenEditorsHeight,
   setView,
   showView,
@@ -298,6 +300,7 @@ import {
   SHARING_VIEW_ID,
   type ActivityViewId,
   type EditorGroup,
+  type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
@@ -1699,15 +1702,6 @@ export function DesktopWorkspaceShell(props: {
       );
   }, [onManageWorkspaces, reportShellError]);
 
-  const refreshSites = useCallback(() => {
-    // refreshFiles's own settle bumps listingsSettled, which AppsView
-    // already keys its refetch off of (as filesSettledRevision) — nothing
-    // else needs to signal that refresh separately.
-    void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
-    );
-  }, [refreshFiles, reportShellError]);
-
   // A shared view has no recorder: the share's open installs no capture, so
   // it records nothing and restores nothing. Capability identity comes from
   // main's registry summary. This gates the versions surface and collections,
@@ -1768,7 +1762,14 @@ export function DesktopWorkspaceShell(props: {
       quiet,
     }),
   });
-  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
+  const workspaceApps = useApps(workspaceId, listingsSettled, aboutNotices, workspaceIsReady && !shareViewEnded);
+  // Every app folder: the listed apps, and any read before the list arrives.
+  const appFolders = useMemo(() => {
+    const folders = new Set(folderApps.keys());
+    const listed = workspaceApps.state;
+    if (listed.status === "ready" && listed.workspaceId === workspaceId) for (const app of listed.apps) folders.add(app.root);
+    return folders;
+  }, [folderApps, workspaceApps.state, workspaceId]);
   // The app folder of each entry file, so a file view shows Run.
   const appEntries = useMemo(() => {
     const entries = new Map<string, string>();
@@ -2683,7 +2684,7 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string) => {
+    (path: string, recent = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
@@ -2700,7 +2701,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       clearTabLimitError();
-      mutateWb(() => next);
+      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
     },
     [
       clearTabLimitError,
@@ -2720,7 +2721,7 @@ export function DesktopWorkspaceShell(props: {
   // other dohc surface — MAX_OPEN_TABS refusal included.
   const openCollectionTab = useCallback(
     (path: string) => {
-      openVirtualTab(collectionTabPath(path));
+      openVirtualTab(collectionTabPath(path), true);
     },
     [openVirtualTab],
   );
@@ -2857,7 +2858,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
     },
     [openVirtualTab],
   );
@@ -3725,11 +3726,11 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
   );
 
-  // Reveal-then-create: the inline editbox lives in the explorer view, so
-  // make that view visible first (never setView — re-selecting the active
+  // Reveal-then-create: the inline editbox lives in the explorer's Files
+  // tree, so make it visible first (never setView — re-selecting the active
   // view toggles the panel).
   const requestExplorerFolder = useCallback(() => {
-    mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+    mutateWb((state) => setExplorerMode({ ...state, activeView: "explorer", sidebarVisible: true }, "files"));
     setNewFolderRequest((current) => (current ?? 0) + 1);
   }, [mutateWb]);
 
@@ -3742,8 +3743,17 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
     [mutateWb],
   );
+  // An app folder's pin is its sidebar pin, kept in the settings file.
+  // Anything else is pinned in Home, in the workspace's ui-state.
   const toggleExplorerPin = useCallback(
-    (path: string) => mutateWb((state) => togglePinned(state, path)),
+    (path: string) => {
+      if (appFolders.has(path)) void setAppPinned(path, !pinnedRoots.includes(path));
+      else mutateWb((state) => togglePinned(state, path));
+    },
+    [appFolders, mutateWb, pinnedRoots, setAppPinned],
+  );
+  const setExplorerModeInWb = useCallback(
+    (mode: ExplorerMode) => mutateWb((state) => setExplorerMode(state, mode)),
     [mutateWb],
   );
   const collapseExplorerFolders = useCallback(() => {
@@ -3868,6 +3878,24 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     workspaceId,
   ]);
+  // Add an app here… opens the Explorer with its Apps section open and its
+  // first row focused. The request belongs to one workspace, like a reveal.
+  const [appsReveal, setAppsReveal] = useState<string | null>(null);
+  const clearAppsReveal = useCallback(() => setAppsReveal(null), []);
+  const showAppsInExplorer = useCallback(() => {
+    mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
+    setAppsReveal(workspaceId);
+  }, [mutateWb, workspaceId]);
+  const explorerApps = useMemo<ExplorerApps>(
+    () => ({
+      ...workspaceApps,
+      pinnedApps: pinnedRoots,
+      onSetPinned: setAppPinned,
+      reveal: appsReveal === workspaceId,
+      onRevealed: clearAppsReveal,
+    }),
+    [appsReveal, clearAppsReveal, pinnedRoots, setAppPinned, workspaceApps, workspaceId],
+  );
   // Stable identities for the memoized explorer and inspector (D2#2/#5).
   // Inline arrows here handed every shell render a fresh prop set, which
   // re-rendered every TreeRow and re-ran FileInspector for renders that
@@ -4418,7 +4446,6 @@ export function DesktopWorkspaceShell(props: {
       "show-chats": () => mutateWb((state) => showView(state, "chats")),
       "show-search": () => mutateWb((state) => showView(state, "search")),
       "show-graph": () => mutateWb((state) => showView(state, "graph")),
-      "show-sites": () => mutateWb((state) => showView(state, "sites")),
       "show-history": () => mutateWb((state) => showView(state, "history")),
       "connect-cloud": openCloud,
       "settings": () => openSettings(),
@@ -5098,6 +5125,10 @@ export function DesktopWorkspaceShell(props: {
     <>
       <Explorer
         workspaceId={workspaceId}
+        mode={wb.explorerMode}
+        onModeChange={setExplorerModeInWb}
+        listed={fileListingCommit !== null}
+        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}
@@ -5105,6 +5136,7 @@ export function DesktopWorkspaceShell(props: {
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         tabLabels={tabLabels}
+        tabGlyphs={chatEditors.glyphs}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -5125,6 +5157,7 @@ export function DesktopWorkspaceShell(props: {
         collectionFolders={collectionFolders}
         appFolders={appFolders}
         onOpenCollection={openCollectionTab}
+        apps={explorerApps}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
         onIncludeArchivedCollections={shareView || !collectionsListed ? undefined : setIncludeArchived}
@@ -5879,14 +5912,13 @@ export function DesktopWorkspaceShell(props: {
             openHistoryTab={openHistoryTab}
             openGraphTab={openGraphTab}
             openChatsTab={openChatsTab}
-            refreshSites={refreshSites}
+            showAppsInExplorer={hasApps(workspaceApps) ? showAppsInExplorer : null}
             explorerView={explorerView}
             search={search}
             openSearchResult={openSearchResult}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
             focusedTabPath={focusedTabPath}
-            appsNotices={aboutNotices}
             graphKey={graphKey}
             openPathWithHeading={openPathWithHeading}
             openGraphChatThread={openGraphChatThread}
@@ -5894,10 +5926,7 @@ export function DesktopWorkspaceShell(props: {
             captureDecided={captureDecided}
             syncStatus={syncStatus}
             chatsNavigatorProps={chatsNavigatorProps}
-            pinnedRoots={pinnedRoots}
             setAppPinned={setAppPinned}
-            listingsSettled={listingsSettled}
-            createFirstApp={createFirstApp}
             shareView={shareView}
             historyTimeline={historyTimeline}
             sharing={{
@@ -5958,6 +5987,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      tabGlyphs={chatEditors.glyphs}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}

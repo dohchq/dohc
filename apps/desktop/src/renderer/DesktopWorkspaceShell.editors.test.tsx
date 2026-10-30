@@ -1439,7 +1439,9 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    const row = await screen.findByText("a.md");
+    // Until its saved state loads, the Explorer shows Home, which titles
+    // a.md "a".
+    const row = await screen.findByText("a");
     await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
     await act(async () => {
@@ -3369,7 +3371,7 @@ describe("ui-state merge-on-load", () => {
       listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
       chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
       chatDispatchStateForThread: vi.fn(async () => ({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: 0,
         paused: false,
       })),
@@ -3873,8 +3875,8 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
 
-    // The listing lands first: a.md and b.md, no ghost.md.
-    await screen.findByText("a.md");
+    // The listing lands first: a.md and b.md, no ghost.md. Home titles a.md "a".
+    await screen.findByText("a");
 
     await act(async () => {
       stored.resolve(storedStateWithTabs(["b.md", "ghost.md"], "b.md"));
@@ -3925,7 +3927,8 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    await screen.findByText("a.md");
+    // Home, until the saved state loads, titles a.md "a".
+    await screen.findByText("a");
 
     await act(async () => {
       stored.resolve(STORED_STATE);
