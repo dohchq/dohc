@@ -2746,13 +2746,16 @@ body {
 }
 .dohc-callout-type-option:hover {
   @apply bg-hover;
-  outline: none;
 }
 
-[data-keyboard-nav] .dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
   @apply bg-selected;
-  outline: none;
+}
+
+[data-keyboard-nav] .dohc-callout-type-option:focus-visible {
+  @apply bg-selected;
+  outline: 1px solid var(--dohc-accent);
+  outline-offset: -1px;
 }
 
 .dohc-callout-title-input {
