@@ -134,7 +134,7 @@ function ProposalFileSection(props: {
         data-testid="proposal-review-file-toggle"
         aria-expanded={open}
         onClick={toggle}
-        className="flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
+        className="dohc-focus-row flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
           {file.path}

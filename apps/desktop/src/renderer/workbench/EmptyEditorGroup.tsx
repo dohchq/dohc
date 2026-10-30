@@ -109,7 +109,7 @@ export function EmptyEditorGroup(props: {
                 type="button"
                 aria-keyshortcuts={tile.shortcut ? ariaShortcut(tile.shortcut, props.platform) : undefined}
                 onClick={() => run(tile.create)}
-                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left focus-visible:outline-offset-4"
+                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left"
               >
                 <span aria-hidden className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2">
                   {START_TILE_ART[tile.kind]}
@@ -142,7 +142,7 @@ export function EmptyEditorGroup(props: {
                       type="button"
                       title={file.path.includes("/") ? file.path : undefined}
                       onClick={() => props.onOpen(file.path)}
-                      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                     >
                       <FileGlyph kind={kind} icon={file.icon} size={16} className={fileTone(kind)} />
                       <span className="min-w-0 truncate">{fileName(file.path)}</span>

@@ -48,7 +48,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // panel-2 (insets), not just bg — in both modes (see the contrast
     // test).
     subtle: "#7f7b6e",
-    // Green-graphite (the brand accent): focus rings, primary buttons.
+    // Green-graphite (the brand accent): keyboard focus, primary buttons.
     accent: "#2d342e",
     // Olive, the default agent color: AA as text on bg, panel and panel-2.
     agent: "#666d2e",

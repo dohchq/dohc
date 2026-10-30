@@ -339,7 +339,7 @@ describe("Menu", () => {
     const reason = screen.getByText("Only versions made from Main can merge into Main.");
     expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
     expect(merge.contains(reason)).toBe(true);
-    // The row, its focus outline and the reason keep their strength.
+    // The row, its focus fill and the reason keep their strength.
     expect(merge.className).not.toContain("opacity");
     expect(reason.className).not.toContain("opacity");
     expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");

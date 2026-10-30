@@ -7,6 +7,8 @@
 @source "../../../../packages/collection-views/src";
 
 @custom-variant dark ([data-theme='dark'] &);
+/* While the person moves with the keyboard (keyboardNavigation.ts). */
+@custom-variant keyboard (:root[data-keyboard-nav] &);
 
 /* Warm paper + graphite palette (brand bible / packages/brand, supersedes the
  * zinc D-E5 draft). Every pair is contrast-solved — see tokens.test.ts.
@@ -144,19 +146,36 @@ body {
   background: var(--dohc-selection);
 }
 
-/* a11y: keyboard focus is a 2px ink ring with offset, both modes. Layered so
- * Tailwind utilities (outline-none on inputs that carry their own focus
- * treatment) can override it — unlayered, this rule would beat every
- * utility and clip into stray bars inside overflow-hidden popovers. */
+/* Focus shows only while the person moves with the keyboard
+ * (keyboardNavigation.ts), never after a click, a shortcut, or focus dohc
+ * moves itself. A control wears a soft halo that follows its radius. It is an
+ * outline, not a shadow, so the control keeps its own shadow and forced
+ * colors still draw it. Layered so a utility can place it inset inside a
+ * scroller, or remove it where the part shows focus another way. */
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--dohc-accent);
-    outline-offset: 1px;
+    outline: none;
+  }
+
+  :root[data-keyboard-nav] :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--dohc-accent) 35%, transparent);
+    outline-offset: 0;
   }
 
   /* A checked checkbox or radio fills with the accent, not Chromium's blue. */
   input {
     accent-color: var(--dohc-accent);
+  }
+}
+
+/* A row in a list, tree or menu takes the hover fill and a 1px accent line
+ * inside its edge, where a scroller cannot clip it. A selected row keeps its
+ * fill, because utilities outrank this layer. */
+@layer components {
+  :root[data-keyboard-nav] .dohc-focus-row:focus-visible {
+    outline: 1px solid var(--dohc-accent);
+    outline-offset: -1px;
+    background-color: var(--dohc-hover);
   }
 }
 
@@ -1081,22 +1100,22 @@ body {
     font-weight 70ms linear;
 }
 
-.dohc-graph-node:is(:hover, :focus-visible) {
+:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) {
   transform: scale(1.16);
 }
 
-.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-halo {
+:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-halo {
   opacity: 0.34;
   stroke-width: 2.5;
 }
 
-.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-dot {
+:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-dot {
   fill: var(--dohc-match);
   stroke: var(--dohc-ink);
   stroke-width: 2.25;
 }
 
-.dohc-graph-node:is(:hover, :focus-visible) text {
+:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) text {
   fill: var(--dohc-match);
   font-weight: 650;
 }
@@ -1674,9 +1693,9 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+:root[data-keyboard-nav] .dohc-table-grip:focus-visible,
+:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+:root[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1710,13 +1729,13 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible {
+:root[data-keyboard-nav] .dohc-table-grip:focus-visible {
   pointer-events: auto;
   opacity: 1;
 }
 
 .dohc-table-grip:hover,
-.dohc-table-grip:focus-visible,
+:root[data-keyboard-nav] .dohc-table-grip:focus-visible,
 .dohc-table-grip.is-open {
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1902,7 +1921,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active,
-.dohc-table-row-resize:focus-visible,
+:root[data-keyboard-nav] .dohc-table-row-resize:focus-visible,
 .dohc-table-row-resize.is-resizing {
   opacity: 1;
   pointer-events: auto;
@@ -1913,7 +1932,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active:hover::after,
-.dohc-table-row-resize:focus-visible::after,
+:root[data-keyboard-nav] .dohc-table-row-resize:focus-visible::after,
 .dohc-table-row-resize.is-resizing::after {
   opacity: 1;
 }
@@ -1946,8 +1965,8 @@ body {
 /* The table menu (⋯) and the append strips reveal on table hover. */
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+:root[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1971,7 +1990,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-.dohc-table-menu-btn:focus-visible {
+:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1998,7 +2017,7 @@ body {
 }
 
 .dohc-table-append:hover,
-.dohc-table-append:focus-visible {
+:root[data-keyboard-nav] .dohc-table-append:focus-visible {
   @apply bg-hover;
   color: var(--dohc-ink);
 }
@@ -2359,7 +2378,6 @@ body {
   padding: 4px 7px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
   color: var(--dohc-muted);
   text-align: left;
   text-overflow: ellipsis;
@@ -2680,11 +2698,6 @@ body {
 .dohc-callout-type-picker.is-open .dohc-callout-type-trigger {
   background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
 }
-.dohc-callout-type-trigger:focus-visible {
-  outline: 2px solid
-    color-mix(in srgb, var(--dohc-callout-accent) 55%, transparent);
-  outline-offset: 1px;
-}
 .dohc-callout-type-chevron {
   width: 12px;
   height: 12px;
@@ -2736,7 +2749,7 @@ body {
   outline: none;
 }
 
-.dohc-callout-type-option:focus-visible,
+:root[data-keyboard-nav] .dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
   @apply bg-selected;
   outline: none;
@@ -2954,12 +2967,6 @@ textarea.dohc-math__source {
 }
 input.dohc-math__source {
   min-width: 8ch;
-}
-
-@utility dohc-focus-visible {
-  &:focus-visible {
-    outline: 2px solid var(--dohc-accent);
-  }
 }
 
 @utility dohc-focus-input {

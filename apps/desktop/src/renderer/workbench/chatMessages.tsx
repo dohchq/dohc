@@ -129,7 +129,7 @@ const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 export const TOOLBAR_BUTTON =
-  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default";
 
 // A row's actions, floating over its top-right corner while the row is
 // hovered or holds focus. Only opacity changes, so the row never moves, and
@@ -340,7 +340,7 @@ export function MessageReactions(props: {
       className={`${
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
-          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default"
       } aria-disabled:opacity-50 aria-disabled:cursor-default`}
     >
       <SmilePlus size={16} aria-hidden />

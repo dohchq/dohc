@@ -374,14 +374,12 @@ export const TreeRow = memo(function TreeRow(props: {
         // alone is medium weight so it still reads inside a multi-selection
         // once the tree loses focus. An attenuated fill for the
         // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the accent focus
-        // outline inset, inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. It holds 3:1 against
-        // every fill. The
-        // drag drop-target is a filled tint with a solid bar (list.drop-
+        // to either to read. The keyboard-focused row draws the row's 1px
+        // accent line inside its own rounded box, so the tree's scroller
+        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
         // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -1669,14 +1667,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         >
           <header
             data-testid="open-editors-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
               <span className="min-w-0 truncate">Open editors</span>
               {openEditorCount > 0 ? (
@@ -1763,9 +1761,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             data-group-id={group.id}
                             data-path={tab.path}
                             data-active={active}
-                            // The open button spans the row, so its inset
-                            // focus outline follows the row's rounded fill;
-                            // the close button sits on top at the right.
+                            // The open button spans the row, so its keyboard
+                            // focus follows the row's rounded fill; the close
+                            // button sits on top at the right.
                             className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
                                 ? "bg-selected text-ink"
@@ -1776,7 +1774,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
+                              className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
                               <TabGlyph
                                 {...tabMark(tab.path, fileByPath)}
@@ -1872,7 +1870,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           <SectionLabel as="div" className="flex h-6 items-center px-2">Collections</SectionLabel>
           {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+            className="dohc-focus-row flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
@@ -1886,14 +1884,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
               <span className="min-w-0 truncate">Files</span>
               <ChevronRight
@@ -1957,7 +1955,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               true,
                             );
                           }}
-                          className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                          className="dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
                           {props.appFolders?.has(path) ? (
                             <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphTone(false)} />

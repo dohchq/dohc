@@ -118,7 +118,7 @@ function AppRow(props: {
         aria-current={active ? "page" : undefined}
         title={app.root}
         onClick={() => props.onOpenPath(siteTabPath(app.root))}
-        className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-[13px] focus-visible:-outline-offset-2"
+        className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
       >
         <ObjectGlyph kind="app" size={14} />
         <span className="min-w-0 flex-1 truncate">{app.title}</span>
@@ -248,7 +248,7 @@ export function AppsSection(props: ExplorerApps & {
     <section ref={sectionRef} data-testid="explorer-apps-section" aria-label="Apps" className="mt-4">
       <header
         data-testid="explorer-apps-header"
-        className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+        className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
       >
         <button
           ref={toggleRef}
@@ -256,7 +256,7 @@ export function AppsSection(props: ExplorerApps & {
           data-testid="explorer-apps-toggle"
           aria-expanded={expanded}
           onClick={() => setExpanded((current) => !current)}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
+          className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
         >
           <span className="min-w-0 truncate">Apps</span>
           {apps.length > 0 ? (

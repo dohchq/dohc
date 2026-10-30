@@ -392,7 +392,7 @@ export function missingSourcesWords(
 // One timeline row: 28px, inset, with no rule between rows. Hover and the
 // open change take the list ladder's fills. A mark takes an avatar's 18px.
 export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
-const ROW = "h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
+const ROW = "h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
 const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
 
@@ -599,7 +599,7 @@ export function MomentRow(props: {
         aria-describedby={holdsOpen ? holdsOpenId : undefined}
         title={countWords}
         onClick={fold.onToggle}
-        className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:-outline-offset-2"
       >
         <span className={COUNT}>{fold.count}{fold.more ? "+" : null}</span>
       </button>
@@ -787,7 +787,7 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       aria-label={`Open Collection history for ${name}`}
       title={`Open Collection history for ${name}`}
       onClick={props.openHistory}
-      className="block w-full rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      className="block w-full rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-hover dohc-focus-row"
     >
       {body}
     </button>
@@ -1093,7 +1093,7 @@ export function EngineHistoryView(props: {
               data-testid="engine-history-load-more"
               disabled={props.loadingMore}
               onClick={props.onLoadMore}
-              className="block h-7 w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="dohc-focus-row block h-7 w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {props.loadingMore ? "Loading…" : "Show earlier changes"}
             </button>

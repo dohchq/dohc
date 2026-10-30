@@ -93,7 +93,7 @@ export function SidePanel(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
+        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 keyboard:focus-visible:bg-accent/35"
       />
     </aside>
   );

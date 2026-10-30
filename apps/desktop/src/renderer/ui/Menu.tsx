@@ -86,20 +86,21 @@ export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border
 /**
  * One row. The list-row ladder: hover 7%, and 11% for the current or checked
  * row whatever has focus. A disabled row dims its icon and label, not the
- * row, so the focus outline and any second line keep their strength.
+ * row, so its fill and any second line keep their strength.
  */
 export const MENU_ROW =
   "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
 export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
- * aria-activedescendant naming the option: the selected fill and the accent
- * outline inside the row, whether the keyboard or the pointer moved it, since
- * it is where Enter acts. The fill alone measures about 1.2:1. A rest row
- * also takes `data-active:text-ink`; a destructive row keeps its color.
+ * aria-activedescendant naming the option: the selected fill, whether the
+ * keyboard or the pointer moved it, since it is where Enter acts. While the
+ * keyboard moves, it adds the row's accent line, which tells it from a
+ * current row with the same fill. A rest row also takes
+ * `data-active:text-ink`; a destructive row keeps its color.
  */
 export const MENU_ACTIVE_OPTION =
-  "data-active:bg-selected data-active:outline-2 data-active:outline-accent data-active:-outline-offset-2";
+  "data-active:bg-selected keyboard:data-active:outline-1 keyboard:data-active:-outline-offset-1 keyboard:data-active:outline-accent";
 /** The leading icon column; a destructive row keeps its own color here. */
 export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
@@ -189,12 +190,9 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus is the active row: the
-// fill and the accent outline, whether the keyboard or the pointer moved it,
-// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
-// row's. The list scrolls, so the outline sits inside the row, where the
-// scroller cannot clip it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row, drawn
+// as MENU_ACTIVE_OPTION draws it.
+const ROW = `${MENU_ROW} focus:bg-selected dohc-focus-row`;
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
