@@ -1820,6 +1820,190 @@ fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() 
     assert_eq!(generations(&replica), generations(&f.store));
 }
 
+#[test]
+fn a_note_keeps_saving_after_a_cancelled_restore() {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationHostCoordinate, NativeRestoreFence, RestoreDeliveryOrigin,
+        RestoreFenceCancellation, RestoreFenceCancellationOutcome, cancel_restore_fence,
+    };
+    let (mut f, _source, baseline, root) = imported_owner(false, false);
+    let first: LiveUpdateReceipt = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE journal_cursor=1",
+                [],
+                |r| {
+                    Ok(LiveUpdateReceipt {
+                        delivery_id: r.get(0)?,
+                        update_digest: r.get(1)?,
+                        journal_cursor: r.get(2)?,
+                        accepting_host_epoch: r.get(3)?,
+                    })
+                },
+            )
+        })
+        .unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "service-host".into(),
+        host_epoch: 1,
+        instance_id: "self-host-service".into(),
+        connection_id: "connection".into(),
+    };
+    let pushed = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .last()
+        .unwrap()
+        .origin_seq;
+    crate::cursor::write_pushed_seq(
+        &mut f.store,
+        "ws",
+        "service-origin",
+        pushed,
+        &NoFaults,
+        &NoLiveLeases,
+        300,
+    )
+    .unwrap();
+    let applied_sequence: i64 = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT local_ydoc_sequence FROM live_device_update_applications WHERE journal_cursor=1",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let next = f.binding.restore_fence_generation + 1;
+    f._owner
+        .fence_restore(
+            &mut f.store,
+            None,
+            NativeRestoreFence {
+                point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                    journal_cursor: first.journal_cursor,
+                    receipt_digest: first.update_digest.clone(),
+                },
+                operation_id: "restore".into(),
+                relay_database_namespace: "relay".into(),
+                old_binding: f.binding.clone(),
+                host_id: coordinate.host_id.clone(),
+                new_fence: next,
+                origin: RestoreDeliveryOrigin::Owner {
+                    id: root.activation_id.clone(),
+                },
+                terminal: Some(first),
+                applied_sequence,
+            },
+            coordinate.clone(),
+            301,
+            &NoFaults,
+        )
+        .unwrap();
+    let cancelled = cancel_restore_fence(
+        &mut f.store,
+        "relay",
+        "ws",
+        &coordinate.host_id,
+        &RestoreFenceCancellation {
+            operation_id: "restore".into(),
+            object_id: "object".into(),
+            lineage_claim_id: f.binding.lineage_claim_id.clone(),
+            host_id: coordinate.host_id.clone(),
+            new_fence: next,
+        },
+        302,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(matches!(
+        cancelled,
+        RestoreFenceCancellationOutcome::FenceCancelled(_)
+    ));
+    f.binding.restore_fence_generation = next;
+    f.handle = f
+        ._owner
+        .register(&mut f.store, "relay".into(), coordinate, f.binding.clone())
+        .unwrap();
+    let after = dohc_engine_collab::Ydoc::wire();
+    after.apply(&f.bytes).unwrap();
+    after
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "After the cancel.")
+        .unwrap();
+    f.bytes = after.encode_full_state();
+    accept_named_event(&mut f, 2, "after-cancel".into());
+    let terminal = LiveUpdateReceipt {
+        delivery_id: "after-cancel".into(),
+        update_digest: hex_sha256(&f.bytes),
+        journal_cursor: 2,
+        accepting_host_epoch: 1,
+    };
+    let moment_id = "settle-after-cancel";
+    try_settle_through(&mut f, terminal.clone(), moment_id).unwrap();
+    let (id, previous, cursor, generation, restore): (String, i64, i64, i64, Option<String>) = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT settlement_id,previous_cursor,terminal_cursor,json_extract(binding_json,'$.restoreFenceGeneration'),restore_operation_id FROM live_device_settlements",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(count(&f.store, "live_device_settlements"), 1);
+    assert_eq!(previous, 0);
+    assert_eq!(cursor, terminal.journal_cursor);
+    assert_eq!(generation, next);
+    assert_eq!(restore, None);
+    let snapshot = VersionedTextStore::new(&mut f.store)
+        .read_text("ws", "main", "note.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.text, "After the cancel.");
+    assert_eq!(snapshot.blob_sha256, hex_sha256(b"After the cancel."));
+    let published = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap();
+    let pair = published
+        .iter()
+        .filter(|op| {
+            op.op_kind == settlement_record::SETTLEMENT_OP
+                || (op.op_kind == "moment.append" && op.payload["momentId"] == moment_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pair.len(), 2);
+    assert_eq!(pair[0].op_kind, settlement_record::SETTLEMENT_OP);
+    assert_eq!(pair[1].op_kind, "moment.append");
+    assert_eq!(pair[1].payload["payloadBeforeBlobSha256"], baseline);
+    assert_eq!(pair[1].payload["beforeLatestMomentId"], "bootstrap-moment");
+    assert_eq!(pair[0].payload["record"]["previousCursor"], 0);
+    assert_eq!(
+        pair[0].payload["record"]["terminalCursor"],
+        terminal.journal_cursor
+    );
+    assert_eq!(
+        pair[0].payload["record"]["binding"]["restoreFenceGeneration"],
+        next
+    );
+    assert_eq!(
+        pair[0].payload["record"]["markdownDigest"],
+        snapshot.blob_sha256
+    );
+    assert_eq!(
+        pair[1].payload["settlementReference"]["record"],
+        pair[0].payload["record"]
+    );
+    assert_eq!(count(&f.store, "live_audit_settlement_publications"), 1);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            journal_live_settlement_in_tx(tx, "ws", &id, 303)
+        })
+        .unwrap();
+    assert_eq!(
+        crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap(),
+        published
+    );
+}
+
 /// A bootstrap lineage accepts an update, fences and cancels two restores
 /// without settling, then accepts an update at the third generation. Its
 /// settlement covers both updates across the cancellations and keeps the

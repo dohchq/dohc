@@ -427,32 +427,47 @@ fn publication_source_before_in_tx(
         }
         // An empty handover writes the cut but leaves no settlement row.
         // The first unavailable interval from that exact cut kept its preimage.
-        let moment: String = tx
-            .query_row(
-                "SELECT s.moment_id FROM live_owner_activations a
+        let mut statement = tx
+            .prepare(
+                "SELECT s.moment_id,a.binding_json FROM live_owner_activations a
              JOIN live_device_settlements s ON s.relay_database_namespace=a.relay_database_namespace
                AND s.workspace_id=a.workspace_id AND s.main_version_id=a.main_version_id
                AND s.object_id=a.object_id AND s.lineage_claim_id=a.lineage_claim_id
-               AND s.binding_json=a.binding_json AND s.previous_cursor=a.terminal_cursor
+               AND s.binding_json=?7 AND s.previous_cursor=a.terminal_cursor
              JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id
                AND u.settlement_id=s.settlement_id AND u.moment_id=s.moment_id
              WHERE a.workspace_id=?1 AND a.relay_database_namespace=?2 AND a.main_version_id=?3
                AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.terminal_cursor=?6
-               AND a.evidence_digest IS NOT NULL AND a.binding_json=?7 AND s.terminal_cursor<?8
-             ORDER BY s.terminal_cursor LIMIT 1",
-                params![
-                    b.workspace_id,
-                    record.relay_database_namespace,
-                    b.main_version_id,
-                    b.object_id,
-                    b.lineage_claim_id,
-                    record.previous_cursor,
-                    serde_json::to_string(b).map_err(SyncError::corrupt)?,
-                    record.terminal_cursor
-                ],
-                |row| row.get(0),
+               AND a.evidence_digest IS NOT NULL AND s.terminal_cursor<?8
+             ORDER BY s.terminal_cursor",
             )
             .map_err(SyncError::corrupt)?;
+        let mut rows = statement
+            .query(params![
+                b.workspace_id,
+                record.relay_database_namespace,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                record.previous_cursor,
+                serde_json::to_string(b).map_err(SyncError::corrupt)?,
+                record.terminal_cursor
+            ])
+            .map_err(SyncError::corrupt)?;
+        let moment: String = loop {
+            let Some(row) = rows.next().map_err(SyncError::corrupt)? else {
+                return Err(SyncError::corrupt(rusqlite::Error::QueryReturnedNoRows));
+            };
+            let json: String = row.get(1).map_err(SyncError::corrupt)?;
+            let historical: LiveObjectBinding =
+                serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+            historical.validate_canonical().map_err(invalid)?;
+            if historical == *b
+                || dohc_engine_collab::owner_outbox::enrollment::restore_successor(&historical, b)
+            {
+                break row.get(0).map_err(SyncError::corrupt)?;
+            }
+        };
         let (payload, _) =
             crate::outbound::published_moment_append_payload_in_tx(tx, &b.workspace_id, &moment)?;
         return Ok(Some(crate::outbound::PortableBefore::bootstrap(&payload)));
@@ -521,7 +536,11 @@ fn imported_event_zero_before_in_tx(
     let base: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
     base.validate(&b.workspace_id)?;
     if base.relay_database_namespace != record.relay_database_namespace
-        || base.checkpoint.binding != *b
+        || !(base.checkpoint.binding == *b
+            || dohc_engine_collab::owner_outbox::enrollment::restore_successor(
+                &base.checkpoint.binding,
+                b,
+            ))
     {
         return Err(invalid("settlement event zero binding differs"));
     }
@@ -714,6 +733,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_note_keeps_saving_after_a_cancelled_restore_when_an_earlier_save_needs_review() {
+        let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let mut text = VersionedTextStore::new(&mut store);
+        text.ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        for (moment, body) in [
+            ("accepted", "Accepted note."),
+            ("saved-copy", "Unaccepted note."),
+        ] {
+            text.write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: moment.into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let mut binding = LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: hex_sha256(b"lineage"),
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        };
+        let adopted = serde_json::to_string(&binding).unwrap();
+        binding.restore_fence_generation = 1;
+        let current = serde_json::to_string(&binding).unwrap();
+        let accepted = hex_sha256(b"Accepted note.");
+        store.write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"lineage")?;
+            tx.execute(
+                "INSERT INTO live_owner_adoptions VALUES ('relay','first','ws','main','object',?1,?2,
+                 'accepted',?3,14,1,1,'evidence','coverage',0,1,3,'null','{}',1,1)",
+                params![binding.lineage_claim_id, adopted, accepted],
+            ).map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,
+                 main_version_id,object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,
+                 source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
+                 host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,
+                 local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+                 VALUES ('relay','first','ws','main','object',?1,'first',?2,'accepted',?3,14,1,1,
+                 '{}','evidence','coverage',0,1,3,'null',1,1)",
+                params![binding.lineage_claim_id, adopted, accepted],
+            ).map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_device_settlements (settlement_id,relay_database_namespace,workspace_id,
+                 main_version_id,object_id,lineage_claim_id,previous_cursor,terminal_cursor,
+                 previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,
+                 markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json,recorded_at_ms)
+                 VALUES ('unavailable','relay','ws','main','object',?1,3,4,1,2,1,?1,
+                 'saved-copy',?2,?1,?3,'{}',20)",
+                params![binding.lineage_claim_id, hex_sha256(b"Unaccepted note."), current],
+            ).map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_settlement_attribution_unavailable VALUES
+                 ('ws','saved-copy','unavailable','terminal-owner-source')", [],
+            ).map_err(SyncError::persist)?;
+            let record: SettlementRecord = serde_json::from_value(serde_json::json!({
+                "settlementId": "next", "relayDatabaseNamespace": "relay", "binding": binding,
+                "hostCoordinate": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+                "previousCursor":3,"terminalCursor":5,"previousYdocSequence":1,"localYdocSequence":3,
+                "applicationCount":2,"nativeIntervalDigest":"","acceptedEventCount":2,
+                "acceptedIntervalDigest":"","momentId":"next","markdownDigest":"",
+                "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
+                "restoreOperationId":null
+            })).unwrap();
+            let before = publication_source_before_in_tx(tx, &record)?.unwrap();
+            let mut payload = serde_json::json!({});
+            before.apply_to(&mut payload);
+            assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
+            assert_eq!(payload["beforeLatestMomentId"], "accepted");
+            Ok::<_, SyncError>(())
+        }).unwrap();
+    }
     /// The first settlement after an adoption starts at that activation's own
     /// source, released or current. A cut two sources adopted names neither.
     #[test]
