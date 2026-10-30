@@ -693,8 +693,15 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // The recipient's credit leaves the hosted agent's credit in place.
       expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       await openHistoryView(page);
-      await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-id="${credit!.id}"]`))
-        .toContainText(recipientAccount.name, { timeout: 60_000 });
+      // The recipient's edits to the note fold into a run whose newest edit
+      // names them. The credited edit may be an earlier one, so open the run.
+      await expect(page.locator('[data-testid="engine-moment-open"]', { hasText: recipientAccount.name }).first())
+        .toBeVisible({ timeout: 60_000 });
+      const runs = page.getByTestId("engine-moment-run").filter({ hasText: recipientAccount.name });
+      for (const toggle of await runs.getByTestId("engine-moment-run-toggle").all()) {
+        if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+      }
+      await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-id="${credit!.id}"]`)).toBeVisible();
       await attachScreen(testInfo, page, "owner History names the recipient");
     });
 

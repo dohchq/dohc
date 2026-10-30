@@ -15,7 +15,7 @@ import { neutralPresentation } from "./actorPresentation";
 // their summaries ("Saved latest edits", "Merged version X into Main",
 // "Changed while dohc was closed", ...) and a multi-file pass (reconcile, switch,
 // merge, restore) groups into one expandable item via its correlationId.
-// An agent's consecutive edits to one file fold into one row, a run.
+// One author's consecutive edits to one file fold into one row, a run.
 // Product vocabulary only, no git terms.
 
 interface EngineHistoryGroup {
@@ -196,29 +196,37 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// The one agent that made a moment, by its stable id. Two agents can share a
-// name, so a run never compares names.
-function soleAgentId(moment: EngineMomentRecord): string | undefined {
+// The one agent or person that made a moment, by their stable id. Two agents
+// can share a name, so a run never compares names.
+function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
-  return author?.kind === "agent" && others.length === 0 ? author.agentId : undefined;
+  if (author === undefined || others.length > 0) return undefined;
+  if (author.kind === "agent") return `agent:${author.agentId}`;
+  return author.kind === "human" ? `human:${author.humanId}` : undefined;
 }
 
-// Whether `older` continues the run `newer` is in: the same agent editing the
-// same file, on the same day.
+// An edit a run can hold. A restore and kept typing each keep a row of
+// their own, so they are never folded out of sight.
+function runEdit(moment: EngineMomentRecord): boolean {
+  return moment.operation === "write" && moment.origin !== "restore" && !isCaptureRecoveryOrigin(moment.origin);
+}
+
+// Whether `older` continues the run `newer` is in: the same agent or person
+// editing the same file, on the same day.
 function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
-  const agentId = soleAgentId(newer);
-  return agentId !== undefined && agentId === soleAgentId(older) &&
-    newer.path === older.path && newer.operation === "write" && older.operation === "write" &&
+  const author = soleAuthorKey(newer);
+  return author !== undefined && author === soleAuthorKey(older) &&
+    newer.path === older.path && runEdit(newer) && runEdit(older) &&
     dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs);
 }
 
 // Keeps the order main merged and groups consecutive file moments that share
 // a correlationId (one pass records its per-file moments contiguously on the
 // capture chain). A version or Collection row between them ends the group.
-// An agent's consecutive edits to one file fold into a run, keyed by its
-// oldest edit so a new edit on top keeps the row. Each edit may carry its own
-// one-moment operation; a moment of a multi-file pass never joins a run.
-// Other moments stay single.
+// One agent's or person's consecutive edits to one file fold into a run,
+// keyed by its oldest edit so a new edit on top keeps the row. Each edit may
+// carry its own one-moment operation; a moment of a multi-file pass never
+// joins a run. Other moments stay single.
 export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   for (const [index, entry] of entries.entries()) {
@@ -568,7 +576,7 @@ export function HistoryRow(props: {
   moment: EngineMomentRecord;
   // One file's History leaves the file's name out and dates each row.
   context: "workspace" | "file";
-  // A file in a multi-file pass, or an earlier edit in an agent's run.
+  // A file in a multi-file pass, or an earlier edit in a run.
   nested?: "pass" | "run";
   // The change open in the focused editor group.
   selected?: boolean;
@@ -668,7 +676,7 @@ export function HistoryRow(props: {
   );
 }
 
-// An agent's run of edits to one file: its newest edit, with the count that
+// One author's run of edits to one file: its newest edit, with the count that
 // lists the earlier ones under it.
 function RunRow(props: {
   group: EngineHistoryGroup;
