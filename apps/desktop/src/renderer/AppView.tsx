@@ -96,7 +96,8 @@ export function useAppView(options: {
   const wantsFocus = useRef(false);
 
   const tryFocus = useCallback(() => {
-    if (!wantsFocus.current || latest.current.holdFocus || !webview.current) return;
+    const { holdFocus, focused, visible } = latest.current;
+    if (!wantsFocus.current || holdFocus || !focused || !visible || !webview.current) return;
     wantsFocus.current = false;
     webview.current.focus();
   }, []);
@@ -166,13 +167,14 @@ export function useAppView(options: {
 
   // Today's path: launch the approved app for the browser and hand it its loopback address.
   const openInBrowser = useCallback(async () => {
-    if (!publicationId) return;
-    const { workspaceId, reportError } = latest.current;
+    if (!publicationId || !alive.current) return;
+    const { workspaceId, appRoot, reportError } = latest.current;
+    const current = () => alive.current && latest.current.workspaceId === workspaceId && latest.current.appRoot === appRoot;
     const again = () => void openInBrowserRef.current();
     try {
-      await openLocalApp(bridge(), workspaceId, publicationId, () => true);
+      await openLocalApp(bridge(), workspaceId, publicationId, current);
     } catch (cause) {
-      reportError?.(BROWSER_OPEN_FAILED, cause, again);
+      if (current()) reportError?.(BROWSER_OPEN_FAILED, cause, again);
     }
   }, [publicationId]);
   const openInBrowserRef = useRef(openInBrowser);
@@ -250,7 +252,9 @@ export function useAppView(options: {
   useEffect(() => {
     const before = wasFocused.current;
     wasFocused.current = options.focused;
-    if (!options.focused || before) return;
+    // Focus that moved elsewhere before the app finished opening stays there.
+    if (!options.focused) { wantsFocus.current = false; return; }
+    if (before) return;
     wantsFocus.current = true;
     tryFocus();
   }, [options.focused, tryFocus]);

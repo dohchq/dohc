@@ -9,19 +9,24 @@ import { palette } from "../renderer/tokens";
 import type { LocalAppLaunchSession } from "../workspaces/localAppLaunch";
 
 type ColorScheme = "light" | "dark";
+// One partition per app: every launch is on 127.0.0.1, so apps sharing one would share its cache and cookies.
 export function appViewPartition(workspaceId: string, appRoot: string): string {
-  const scope = workspaceId; // For one partition per app, use JSON.stringify([workspaceId, appRoot]).
-  void appRoot;
-  return `dohc-app:${createHash("sha256").update(scope).digest("hex").slice(0, 32)}`;
+  return `dohc-app:${createHash("sha256").update(JSON.stringify([workspaceId, appRoot])).digest("hex").slice(0, 32)}`;
 }
 
 export function appViewExternalUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
-    if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname.toLowerCase().replace(/\.$/, ""))) return null;
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (host === "localhost" || host.endsWith(".localhost") || host === "0.0.0.0" || /^127(\.\d+){3}$/.test(host) ||
+      host === "[::1]" || host === "[::]" || host.startsWith("[::ffff:7f")) return null;
     return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.toString() : null;
   } catch { return null; }
 }
+
+// Like Chromium's popup blocker: a link leaves dohc only within 5 s of a real press in the app, once per press.
+const EXTERNAL_LINK_ACTIVATION_MS = 5_000;
+const ACTIVATING_INPUT = new Set(["mouseDown", "rawKeyDown", "keyDown", "touchEnd", "gestureTap"]);
 
 export function appViewLaunchUrl(raw: string): string | null {
   try {
@@ -75,6 +80,7 @@ interface Entry {
   colorScheme: ColorScheme;
   launch?: LocalAppLaunchSession;
   guest?: WebContents;
+  lastPress?: number;
   attached: boolean;
   closed: boolean;
   closing?: Promise<void>;
@@ -127,7 +133,10 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
   };
   const external = (entry: Entry, raw: string) => {
     const url = appViewExternalUrl(raw);
-    if (url) emit(entry, { kind: "external-link", viewId: entry.viewId, url });
+    const pressed = entry.lastPress !== undefined && Date.now() - entry.lastPress <= EXTERNAL_LINK_ACTIVATION_MS;
+    if (!url || !pressed) return;
+    entry.lastPress = undefined;
+    emit(entry, { kind: "external-link", viewId: entry.viewId, url });
   };
   const close = (entry: Entry): Promise<void> => {
     if (entry.closing) return entry.closing;
@@ -228,6 +237,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.on("will-redirect", navigate);
     guest.on("will-frame-navigate", navigate);
     guest.setWindowOpenHandler(({ url }) => { external(entry, url); return { action: "deny" }; });
+    guest.on("input-event", (_event, input) => { if (ACTIVATING_INPUT.has(input.type)) entry.lastPress = Date.now(); });
     guest.on("before-input-event", (event, input) => {
       const shortcut = appViewShortcut(input);
       if (shortcut) { event.preventDefault(); emit(entry, { kind: "shortcut", viewId: entry.viewId, ...shortcut }); }
@@ -278,9 +288,11 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
           const url = appViewLaunchUrl(launch.url);
           if (!url) throw Error("The app address is not on this device. Open the app again.");
           entry.publicationId = publicationId;
+          // An ended approval removes the page. Any other ending keeps it on screen until the tab reloads or closes.
           const ended = () => {
-            emit(entry, { kind: launch.ended.reason === "needs-approval" ? "approval-ended" : "session-ended", viewId: entry.viewId });
-            void close(entry);
+            const approval = launch.ended.reason === "needs-approval";
+            emit(entry, { kind: approval ? "approval-ended" : "session-ended", viewId: entry.viewId });
+            if (approval) void close(entry);
           };
           launch.ended.addEventListener("abort", ended, { once: true });
           if (!launch.isAlive()) { ended(); throw Error("This app's approval changed. Review the app again."); }

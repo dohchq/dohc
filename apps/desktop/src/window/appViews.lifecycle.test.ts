@@ -25,7 +25,7 @@ function fixture() {
   vi.mocked(BrowserWindow.fromWebContents).mockReturnValue(window as unknown as Electron.BrowserWindow);
   const lifetime = new AbortController();
   const operation = { workspace: { workspaceId: "w" }, signal: lifetime.signal, assertCurrent: () => lifetime.signal.throwIfAborted() };
-  const launches: Array<{ url: string; ended: AbortSignal; stop: ReturnType<typeof vi.fn>; isAlive(): boolean }> = [];
+  const launches: Array<{ url: string; ended: AbortSignal; stop: ReturnType<typeof vi.fn>; isAlive(): boolean; end(reason: string): void }> = [];
   const activePublication = vi.fn(async () => "approved" as string | null);
   let handler!: (event: IpcMainInvokeEvent, payload: unknown) => unknown;
   const manager = registerAppViews({ registerHandler: (_channel, callback) => { handler = callback; },
@@ -37,7 +37,8 @@ function fixture() {
     launch: vi.fn(async () => {
       const ended = new AbortController();
       const launch = { url: `http://127.0.0.1:${43000 + launches.length}/bootstrap#${"a".repeat(43)}`, ended: ended.signal,
-        stop: vi.fn(async () => { ended.abort("ended"); }), isAlive: () => !ended.signal.aborted };
+        stop: vi.fn(async () => { ended.abort("ended"); }), isAlive: () => !ended.signal.aborted,
+        end: (reason: string) => ended.abort(reason) };
       launches.push(launch); return launch;
     }),
   });
@@ -120,10 +121,21 @@ it("denies permission checks and display capture, and guards main-frame requests
   f.isolated.emit("will-download", {}, download, guest);
   expect(download.cancel).toHaveBeenCalledOnce();
   expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, { kind: "download-blocked", viewId: "one", filename: "blocked.txt" });
+  const links = () => f.owner.send.mock.calls.filter(([, event]) => (event as { kind: string }).kind === "external-link");
+  const unprompted = { url: "https://example.com/unprompted", isMainFrame: false, preventDefault: vi.fn() };
+  guest.emit("will-frame-navigate", unprompted);
+  expect(unprompted.preventDefault).toHaveBeenCalledOnce();
+  expect(links()).toHaveLength(0);
+  guest.emit("input-event", {}, { type: "mouseMove" });
+  guest.emit("will-frame-navigate", unprompted);
+  expect(links()).toHaveLength(0);
+  guest.emit("input-event", {}, { type: "mouseDown" });
   const navigation = { url: "https://example.com/out", isMainFrame: false, preventDefault: vi.fn() };
   guest.emit("will-frame-navigate", navigation);
   expect(navigation.preventDefault).toHaveBeenCalledOnce();
   expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, { kind: "external-link", viewId: "one", url: navigation.url });
+  guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/again" });
+  expect(links()).toHaveLength(1);
   expect(guest.setWindowOpenHandler.mock.calls[0]![0]({ url: "file:///evil" })).toEqual({ action: "deny" });
   guest.emit("destroyed");
   await expect.poll(() => f.launches[0]!.stop.mock.calls.length).toBeGreaterThan(0);
@@ -133,4 +145,28 @@ it("retires a session when its owner reloads", async () => {
   f.owner.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
   await expect.poll(() => f.launches[0]!.stop.mock.calls.length).toBeGreaterThan(0);
   expect(AppViewRequest.safeParse({ action: "reload", workspaceId: "w", viewId: "one" }).success).toBe(false);
+});
+it("keeps a page whose session ended until its tab reloads, and removes one whose approval ended", async () => {
+  const f = fixture();
+  const attach = async (viewId: string) => {
+    const opened = await f.open(viewId) as { url: string };
+    const prefs: Record<string, unknown> = {};
+    f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, prefs, { src: opened.url });
+    const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
+      getType: () => "webview", getLastWebPreferences: () => prefs, isDestroyed: () => false,
+      close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: { isAttached: () => true, sendCommand: vi.fn(async () => {}) } });
+    app.emit("web-contents-created", {}, guest);
+    return guest;
+  };
+  const kept = await attach("one");
+  f.launches[0]!.end("ended");
+  expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, { kind: "session-ended", viewId: "one" });
+  await Promise.resolve();
+  expect(kept.close).not.toHaveBeenCalled();
+  await f.open("one");
+  expect(kept.close).toHaveBeenCalledOnce();
+  const removed = await attach("two");
+  f.launches.at(-1)!.end("needs-approval");
+  expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, { kind: "approval-ended", viewId: "two" });
+  await expect.poll(() => removed.close.mock.calls.length).toBe(1);
 });
