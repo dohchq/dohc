@@ -680,6 +680,7 @@ fn recent_dispatch_count_skips_runs_a_person_started_in_their_agent_dm_conversat
             &conversation,
             "agent-1",
             ChatActorKind::Agent,
+            None,
             11,
         );
         start(&mut chats, "post", "group-1", ChatActorKind::Human, 12);
