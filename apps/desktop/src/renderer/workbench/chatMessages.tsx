@@ -26,6 +26,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { useToastsAbove } from "./toastClearance";
 import type {
   ChatAttachmentRecord,
   ChatMessageRecord,
@@ -872,8 +873,11 @@ export function ChatComposer(props: {
   onSend: () => void;
   onEscape?: () => void;
 }) {
+  const formRef = useRef<HTMLFormElement | null>(null);
+  useToastsAbove(formRef);
   return (
     <form
+      ref={formRef}
       className="flex shrink-0 items-end gap-1.5 border-t border-line p-2"
       onSubmit={(event) => {
         event.preventDefault();

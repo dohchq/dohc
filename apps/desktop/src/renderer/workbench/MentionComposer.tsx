@@ -33,6 +33,7 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import { isComposingKey, isOptionReturn, isSendKey } from "../ui/keys";
+import { useToastsAbove } from "./toastClearance";
 
 export interface FileMentionCandidate {
   path: string;
@@ -536,6 +537,9 @@ export function MentionComposer(props: {
   };
 
   const isPost = props.surface === "post";
+  const formRef = useRef<HTMLFormElement | null>(null);
+  // A post composer sits at the top of its page; a chat's at the bottom.
+  useToastsAbove(formRef, !isPost);
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
   // A poll sends once it has a question and two choices the engine accepts.
@@ -601,6 +605,7 @@ export function MentionComposer(props: {
   ) : null;
   const form = (
     <form
+      ref={formRef}
       data-expanded={isPost ? expanded : undefined}
       className={
         isPost

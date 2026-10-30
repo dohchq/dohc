@@ -4848,7 +4848,9 @@ export function ChatsView(props: {
           topPadding={0}
           header={<>
             {!channelLocked && !agentDm ? (
-              <div className="mb-4 mt-4">
+              // Padding, not margin: a top margin would collapse through the
+              // list's full-height content and make an empty page scroll.
+              <div className="py-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
