@@ -353,7 +353,7 @@ fn resumed_at_one() -> (Fixture, LiveObjectBinding) {
         .resume_restore(
             &mut f.store,
             None,
-            NativeRestoreResume { application: input, settlement_id: settlement.settlement_id },
+            NativeRestoreResume { application: input, settlement_id: settlement.settlement_id.unwrap() },
             coordinate.clone(),
             2_000_000,
             100,
