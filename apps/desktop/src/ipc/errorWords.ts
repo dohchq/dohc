@@ -454,6 +454,17 @@ export type CollectionsRefusalRead =
   | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
   | { kind: "elsewhere"; words: string; computer: string | null };
 
+/** A moved Collection whose server dohc can't reach, with no saved copy on this computer. */
+export class CollectionServerUnreachableError extends Error {
+  override name = "CollectionServerUnreachableError";
+}
+
+/** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */
+export function readCollectionServerUnreachable(error: unknown): string | null {
+  const { name, message } = parse(error);
+  return name === "CollectionServerUnreachableError" && message ? message : null;
+}
+
 export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
   const { name, code, computer, message } = parse(error);
   if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;

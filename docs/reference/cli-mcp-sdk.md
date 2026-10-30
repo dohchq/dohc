@@ -1165,7 +1165,7 @@ Use describe to find approved operation IDs.
 - `expectedDatasetId`: `UUID`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }`.
+Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }`.
 
 #### `dohc dataset history`
 
@@ -1216,19 +1216,20 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor }`.
+Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here", server } | { kind: "server", host } }`.
 
 #### `dohc dataset setGrant`
 
 Add or change an explicit data grant.
 
-grant names revision, revisionSha256, operationIds, and discover.
+grant names revision, revisionSha256, operationIds, and discover. A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
+- `moveToServer`: `true`
 
 Returns `{ kind: "grant-updated" }`.
 
@@ -1581,7 +1582,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `input`: `any JSON`. Required.
 - `idempotencyKey`: `string`. Required.
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 

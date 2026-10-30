@@ -945,6 +945,11 @@
                       "discover"
                     ],
                     "additionalProperties": false
+                  },
+                  "moveToServer": {
+                    "type": "boolean",
+                    "const": true,
+                    "description": "Agree to move a Collection that is only on this computer to the workspace's server for good."
                   }
                 },
                 "required": [

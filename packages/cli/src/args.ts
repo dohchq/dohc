@@ -916,7 +916,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   permissions: { summary: "List app bindings and explicit data grants." },
   setGrant: {
     summary: "Add or change an explicit data grant.",
-    notes: ["grant names revision, revisionSha256, operationIds, and discover."],
+    notes: ["grant names revision, revisionSha256, operationIds, and discover.", "A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree."],
   },
   removeGrant: {
     summary: "Remove an explicit data grant.",
