@@ -89,7 +89,7 @@ export function useSentNoticeProps(input: {
   openAutomationControls: (automationId: string, options: { sharedFile?: string; signal: AbortSignal }) => Promise<string | null>;
   /** Opens a conversation in a chat tab. */
   openChat: (nav: ChatsNav) => void;
-  /** Shows the Chats panel at a Group invitation or message request, with its Join or Accept focused. */
+  /** Shows the Chats panel at a Group invitation or message request, with its Join or Accept focused unless the person did something since Open. */
   openChatsInvitation: (invitation: ChatsInvitation) => void;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: OpenOnSwitch) => void;
   onOpenShare: (share: NoticeShare) => void;

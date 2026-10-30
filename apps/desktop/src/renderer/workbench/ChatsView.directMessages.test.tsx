@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, DmRecord } from "../../ipc/bridgeContract";
 import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
+import { inputCount } from "../ui/inputCount";
 import {
   ChatsView,
   channel,
@@ -20,6 +21,32 @@ import {
 // zero-bloat rule — and the DM conversation is one running thread whose
 // composer sends on Enter (anti-forum).
 describe("ChatsView direct messages", () => {
+  it("marks the message request a notice's Open names and focuses its Accept, until the next click", async () => {
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
+      declined: [],
+    });
+    const onInvitationRevealed = vi.fn();
+    renderView(vi.fn(), vi.fn(), {
+      variant: "panel",
+      revealInvitation: { shareId: "share-dm-request", inputs: inputCount() },
+      onInvitationRevealed,
+    });
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const accept = screen.getByTestId("chats-dm-request-accept");
+    expect(document.activeElement).toBe(accept);
+    const row = screen.getByTestId("chats-dm-request-item");
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.className).toContain("bg-selected");
+    act(() => {
+      fireEvent.pointerDown(window);
+    });
+    expect(row.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("bg-selected");
+  });
+
   it("accepts a message request elsewhere without navigating this workspace", async () => {
     const user = userEvent.setup();
     const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };

@@ -203,6 +203,8 @@ export function LeaveDmDialog(props: {
 export function DmRequestListItem(props: {
   request: DmRequestRow;
   state: "pending" | "declined";
+  // The row a notice's Open revealed.
+  marked?: boolean;
   busy: boolean;
   onAccept?: () => void;
   onDecline?: () => void;
@@ -212,7 +214,8 @@ export function DmRequestListItem(props: {
   return (
     <li
       data-testid={pending ? "chats-dm-request-item" : "chats-dm-declined-item"}
-      className="border-b border-line"
+      aria-current={props.marked ? "true" : undefined}
+      className={`border-b border-line${props.marked ? " bg-selected" : ""}`}
     >
       <div className="flex items-center gap-1.5 px-3 py-2">
         <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />

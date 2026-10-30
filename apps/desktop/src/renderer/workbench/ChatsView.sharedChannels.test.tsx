@@ -23,19 +23,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
-  it("keeps the account email visible beside long invitation labels", async () => {
+  it("shows a long invitation's sender on one line that truncates, with the full label in its title", async () => {
     const subject = "Long group subject ".repeat(8), name = "Long sender name ".repeat(8), email = "account@example.test";
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({received: [{
       shareId: "share-invite", subjectName: subject, sharerName: name,
       channelWireId: "wire-invite", access: "read-write", granterEmail: email,
     }]}));
     renderView();
-    const address = await screen.findByText(`(${email})`);
-    expect(address.classList.contains("shrink-0")).toBe(true);
-    expect(address.classList.contains("break-all")).toBe(true);
-    expect(address.closest(".truncate")).toBeNull();
-    expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
-    expect(address.parentElement?.parentElement?.title).toBe(`${subject} · ${name.trim()} (${email})`);
+    const full = `${name.trim()} (${email})`;
+    const sender = await screen.findByTitle(full);
+    expect(sender.textContent).toBe(full);
+    expect(sender.children).toHaveLength(0);
+    expect(sender.classList.contains("truncate")).toBe(true);
+    expect(sender.parentElement?.title).toBe(`${subject} · ${full}`);
   });
 
   it("fails closed when sharing metadata is unavailable", async () => {
@@ -1004,7 +1004,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
   });
 
-  it("shows the invitation a notice's Open names, with its Join focused, once", async () => {
+  it("shows the invitation a notice's Open names, with its Join focused and its row marked until the next input", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
@@ -1022,6 +1022,15 @@ describe("ChatsView shared channels (MU-C4)", () => {
     const joins = screen.getAllByTestId("chats-join-shared");
     expect(document.activeElement).toBe(joins[1]);
     expect(joins[1]!.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    const row = joins[1]!.closest("li")!;
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.className).toContain("bg-selected");
+    expect(joins[0]!.closest("li")!.getAttribute("aria-current")).toBeNull();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    });
+    expect(row.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("bg-selected");
   });
 
   it("offers an explicit rejoin action for an ended leave tombstone", async () => {

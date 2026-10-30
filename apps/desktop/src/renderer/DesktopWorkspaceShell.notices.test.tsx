@@ -1949,6 +1949,9 @@ describe("notices sent to you", () => {
     ["leaves the window", async () => {
       fireEvent.blur(window);
     }],
+    ["picks a menu bar command", async (_user: ReturnType<typeof userEvent.setup>, bridge: ReturnType<typeof makeBridge>) => {
+      act(() => bridge.emitMenuCommand("command-palette"));
+    }],
   ])("drops the invitation's reveal when the person %s before Chats lists it", async (_, moveOn) => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -1958,7 +1961,7 @@ describe("notices sent to you", () => {
     Object.assign(bridge, { listChatChannelShares });
     renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
-    await moveOn(user);
+    await moveOn(user, bridge);
     first.resolve(INVITATION_LISTING);
     const join = await screen.findByTestId("chats-join-shared");
     expect(join.getAttribute("data-invitation")).toBe("share-1");

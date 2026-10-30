@@ -556,7 +556,10 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
-  it("says a Group invitation or message request opens in Chats, and opens nothing", async () => {
+  it.each([
+    [true, "Find it in Chats, in a workspace of your own."],
+    [false, "Find it in Chats, in a workspace of your own. Create one from Manage workspaces first."],
+  ])("says where a Group invitation or message request waits, with a workspace of their own: %s, and opens nothing", async (ownWorkspace, copy) => {
     bridgeMock.getRelayReceivedShare.mockResolvedValueOnce({ found: true, chats: true });
 
     render(
@@ -569,11 +572,11 @@ describe("ShareHandoffSurface", () => {
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
+        ownWorkspace={ownWorkspace}
       />,
     );
 
-    expect((await screen.findByTestId("handoff-opens-in-chats")).textContent)
-      .toBe("This opens in Chats, in a workspace of your own. Open or create one, then open Chats.");
+    expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toBe(copy);
     expect(screen.queryByTestId("open-shared-view")).toBeNull();
     expect(screen.queryByText(MISSING_COPY)).toBeNull();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
