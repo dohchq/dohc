@@ -331,7 +331,7 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             .markdown_settlement_fault_for_harness(
                 move |conn| {
                     assert_eq!(
-                        conn.query_row("SELECT count(*) FROM live_device_settlements", [], |row| {
+                        conn.query_row("SELECT count(*) FROM live_empty_settlements", [], |row| {
                             row.get::<_, i64>(0)
                         })
                         .unwrap(),
@@ -437,7 +437,7 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             let store = EngineStore::open_read_only(&db).unwrap();
             assert_eq!(store.table_row_count("moments").unwrap(), 2);
             assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 1);
-            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 1);
+            assert_eq!(store.table_row_count("live_empty_settlements").unwrap(), 1);
             let debt = store
                 .read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))
                 .unwrap();
@@ -956,4 +956,202 @@ async fn markdown_owner_consent_open_and_settle_validate_the_same_source() {
         source
     );
     service.workspace_close(Some(workspace)).await.unwrap();
+}
+
+/// Edit anyway on a note never opened for editing. It has no Y.Doc state, so
+/// the session seeds from the file and the open's consent covers its bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_opens_a_never_opened_note() {
+    edit_anyway_opens_a_note_with_no_ydoc_state(false).await;
+}
+
+/// Edit anyway on a note whose earlier local session closed, which prunes its
+/// Y.Doc state to a bare marker. The new session seeds from the file again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_opens_a_note_whose_session_closed() {
+    edit_anyway_opens_a_note_with_no_ydoc_state(true).await;
+}
+
+async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, hex_sha256};
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    let scratch = ScratchDir::new().unwrap();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+    let source = "- parent\n  - child\n";
+    {
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+        store.bind_root_token(token, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("w", "main", 1, &NoFaults)
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "w".into(),
+                    version_id: "main".into(),
+                    object_id: "note".into(),
+                    path: "note.md".into(),
+                    text: source.into(),
+                    moment_id: "source".into(),
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    std::fs::write(scratch.path().join("note.md"), source).unwrap();
+    let service = EngineService::new();
+    let ctx = RequestContext::unbounded();
+    let opened = service
+        .workspace_open(
+            &ctx,
+            json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
+        )
+        .await
+        .unwrap();
+    let workspace: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    service
+        .open(Some(&workspace))
+        .unwrap()
+        .actor
+        .configure_reader_resolver(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                dohc_engine_reader::Reader::new(Some(
+                    crate::rpc::markdown_recovery::tests::witness_reader(
+                        &scratch,
+                        "witness-unsafe",
+                    ),
+                )),
+            )),
+        ))
+        .await
+        .unwrap();
+    if edited_before {
+        let (earlier, egress) = service
+            .ydoc_open(
+                &ctx,
+                Some(workspace.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}),
+                1,
+            )
+            .await
+            .unwrap();
+        seed_session(&service, &workspace, &earlier, &egress.bytes, source).await;
+        drop(egress);
+        service
+            .ydoc_close(
+                &ctx,
+                Some(workspace.clone()),
+                json!({"sessionId":earlier["sessionId"],"settle":false}),
+            )
+            .await
+            .unwrap();
+        let reader = EngineStore::open_read_only(&engine_db_path(&scratch).unwrap()).unwrap();
+        let marker =
+            dohc_engine_collab::read_marker(&reader, &DocKey::new("w", "main", "note").unwrap())
+                .unwrap()
+                .expect("the closed session leaves its marker");
+        assert_eq!(
+            (marker.head_update_seq, marker.head_snapshot_seq),
+            (0, 0),
+            "the close pruned the note's Y.Doc state"
+        );
+    }
+    service
+        .ydoc_open(
+            &ctx,
+            Some(workspace.clone()),
+            json!({
+                "versionId":"main","path":"note.md","contentKind":"richdoc",
+                "allowLossySourceSha256":hex_sha256(b"another source"),
+            }),
+            2,
+        )
+        .await
+        .expect_err("consent to other bytes opens nothing");
+    assert!(lock(&service.sessions).is_empty());
+    let (opened, egress) = service
+        .ydoc_open(
+            &ctx,
+            Some(workspace.clone()),
+            json!({
+                "versionId":"main","path":"note.md","contentKind":"richdoc",
+                "allowLossySourceSha256":hex_sha256(source.as_bytes()),
+            }),
+            3,
+        )
+        .await
+        .expect("Edit anyway opens a note with no Y.Doc state");
+    assert_eq!(opened["seedContent"], source);
+    let session_id = opened["sessionId"].as_str().unwrap().to_owned();
+    let (doc, seeded) = seed_session(&service, &workspace, &opened, &egress.bytes, source).await;
+    drop(egress);
+    let edit = doc.richdoc_append_paragraph("Edited anyway");
+    service
+        .ydoc_record_update(
+            &ctx,
+            Some(workspace.clone()),
+            Some("edit".into()),
+            json!({
+                "sessionId":session_id,"updateBase64":STANDARD.encode(edit),
+                "expectedLineageClaimId":seeded["lineageClaimId"],
+            }),
+        )
+        .await
+        .unwrap();
+    let saved = service
+        .ydoc_settle(
+            &ctx,
+            Some(workspace.clone()),
+            json!({"sessionId":session_id}),
+        )
+        .await
+        .expect("the open's consent saves the edit");
+    assert!(saved["content"].as_str().unwrap().contains("Edited anyway"));
+    let grant = lock(&service.sessions)[&session_id]
+        .conversion_consent
+        .clone()
+        .unwrap();
+    assert!(grant.is_consumed(), "the save used the open's consent");
+    service.workspace_close(Some(workspace)).await.unwrap();
+}
+
+/// Seed a session from the file its open returned, as the desktop does.
+async fn seed_session(
+    service: &EngineService,
+    workspace: &WorkspaceHandle,
+    opened: &Value,
+    initial_update: &[u8],
+    source: &str,
+) -> (dohc_engine_collab::Ydoc, Value) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(initial_update).unwrap();
+    let seed = doc
+        .rewrite_content_to_markdown_preserving_source(
+            dohc_engine_collab::ContentKind::Richdoc,
+            source,
+        )
+        .unwrap();
+    let seeded = service
+        .ydoc_record_update(
+            &RequestContext::unbounded(),
+            Some(workspace.clone()),
+            Some(format!("seed-{}", opened["sessionId"].as_str().unwrap())),
+            json!({
+                "sessionId":opened["sessionId"],"updateBase64":STANDARD.encode(seed),"seed":true,
+                "expectedLineageClaimId":opened["lineageClaimId"],
+            }),
+        )
+        .await
+        .unwrap();
+    (doc, seeded)
 }

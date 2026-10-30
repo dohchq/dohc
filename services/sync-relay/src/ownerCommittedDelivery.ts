@@ -123,6 +123,33 @@ export class OwnerCommittedDelivery {
       // greatest sequence delivery has reached since.
       if (progress.adoptionId !== adopted.adoptionId) throw new Error("Owner adoption changed.");
       const recorded = {adoptionId: progress.adoptionId, sequence: progress.adoptionSequence};
+      // Materialize the handover cut before accepting or applying another edit.
+      // A resumed registration repeats this empty settle if its reply was lost.
+      if (!adopted.settled && progress.adoptionTerminal !== null &&
+        isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+        // One recovered ACK moves past the cut. Later applications replay in
+        // applyPending under its event budget, without repeating the cut settle.
+        const next = this.#store.nextOwnerApplication(latest);
+        if (next) {
+          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},next.metadata.accepted.receipt,signal);
+          check(); latest.assertCurrent();
+          if (ack) {
+            this.#store.acknowledgeOwnerDeliveryApplication(latest,ack);
+            progress = this.#store.ownerDeliveryProgress(latest);
+          }
+        }
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+          const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
+            registrationId,terminalReceipt: {...progress.adoptionTerminal},
+          }},signal),progress.adoptionTerminal);
+          check(); latest.assertCurrent();
+          if (settlementPending(settled) || !settled.materialized) {
+            if (settle) return settled;
+            return {kind: "pending",reason: settlementPending(settled) ? settled.reason : SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+          }
+          adopted.settled = settled;
+        }
+      }
       let appliedCount = 0;
       // Set inside applyPending, so declared wide for the reads after it.
       let pendingReason = null as string | null;

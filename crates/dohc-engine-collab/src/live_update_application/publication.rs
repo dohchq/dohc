@@ -85,6 +85,59 @@ fn native_accepted(
     Ok(Some((held, history.doc)))
 }
 
+/// Whether the predecessor renders this binding's accepted owner handover.
+pub(crate) fn adoption_contains_predecessor_in(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    digest: &str,
+    remaining: &mut usize,
+) -> Result<bool, ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = (|| {
+        let cursor: Option<i64> = conn.query_row(
+            "SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0",
+            params![namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id,
+                serde_json::to_string(binding).map_err(|_| ApplicationError::Corrupt)?],
+            |row| row.get(0),
+        ).optional().map_err(read_sql)?;
+        let Some(cursor) = cursor else {
+            return Ok(false);
+        };
+        let Some(held) = registration_in(conn, key, &mut budget)? else {
+            return Ok(false);
+        };
+        if held.namespace != namespace || held.binding != *binding {
+            return Ok(false);
+        }
+        current_in(conn, &held, &mut budget)?;
+        let history = accepted_history::read_inner(
+            conn,
+            &held,
+            cursor,
+            &mut budget,
+            accepted_history::CHECKPOINT_EVENTS as usize,
+            accepted_history::HistoryPurpose::Native,
+        )?;
+        let projection = history.doc.project(crate::ContentKind::Richdoc)?.content;
+        if let Some(source) = history.doc.preserved_markdown_source(&projection) {
+            return Ok(hex_sha256(source.as_bytes()) == digest);
+        }
+        // With a settled-only witness, the file's body chooses between the
+        // witness and the canonical projection. Both render this accepted cut.
+        Ok(hex_sha256(projection.as_bytes()) == digest
+            || history
+                .doc
+                .reprojected_markdown_source(&projection)
+                .is_some_and(|source| hex_sha256(source.as_bytes()) == digest))
+    })();
+    *remaining = budget.remaining;
+    result
+}
+
 /// The accepted head that the restore producing this exact binding replaced,
 /// from that restore's verified resume evidence. None when the current
 /// generation is not a resumed restore of this registration.
@@ -174,7 +227,9 @@ pub(crate) fn require_restore_registration_in(
 
 /// The text restore_fence::require_registration reads from the document's newest fence.
 fn fence_registration(document: &str) -> String {
-    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
+    format!(
+        "coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)"
+    )
 }
 
 fn charge_sql(
@@ -213,8 +268,12 @@ fn registration_in(
     key: &DocKey,
     budget: &mut Budget,
 ) -> Result<Option<Registration>, ApplicationError> {
-    charge_sql(conn, budget, "SELECT coalesce(sum(n),0) FROM (SELECT length(CAST(relay_database_namespace AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) AS n FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2)",
-        params![key.workspace_id, key.version_id, key.object_id])?;
+    charge_sql(
+        conn,
+        budget,
+        "SELECT coalesce(sum(n),0) FROM (SELECT length(CAST(relay_database_namespace AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) AS n FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2)",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )?;
     let mut query = conn.prepare("SELECT relay_database_namespace,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
     let records = query
         .query_map(

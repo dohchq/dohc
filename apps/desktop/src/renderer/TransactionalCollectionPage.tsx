@@ -459,7 +459,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         </div>
       </details> : null}
     </div>
-    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
+    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+      : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}

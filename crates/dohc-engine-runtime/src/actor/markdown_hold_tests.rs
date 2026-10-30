@@ -457,6 +457,41 @@ async fn markdown_hold_no_reader_audited_settlement_records_a_notice_across_rest
 }
 
 #[tokio::test]
+async fn markdown_hold_empty_audited_settlement_clears_its_notice_once_saved() {
+    let mut f = Fixture::with_reader_source(true).await;
+    f.adopt().await;
+    f.supervisor.close(&f.db).unwrap();
+    f.actor = f.supervisor.open(&f.db, 6).unwrap().actor;
+    let (_owner, host) = f.audited_host().await;
+    assert!(matches!(
+        f.audited_settle(&host, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.unchanged().await;
+    let grant = f.consent();
+    let saved = f.audited_settle(&host, Some(grant.clone())).await.unwrap();
+    assert!(saved.materialized);
+    assert_eq!(saved.terminal_cursor, 0);
+    assert!(grant.is_consumed());
+    f.supervisor.close(&f.db).unwrap();
+    let store = EngineStore::open(&f.db, 20).unwrap();
+    let owed = store
+        .read_with(|conn| write_obligations::pending_in(conn, "w"))
+        .unwrap();
+    assert!(
+        owed.iter()
+            .all(|row| row.kind == WriteObligationKind::WitnessRefresh)
+    );
+    assert!(
+        dohc_engine_sync::list_refusal_notices(&store, "w")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.table_row_count("live_empty_settlements").unwrap(), 1);
+    assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+}
+
+#[tokio::test]
 async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
     for queued in [false, true] {
         let f = Fixture::new().await;
@@ -698,7 +733,7 @@ async fn markdown_hold_audited_consent_rolls_back_pending_journal_then_commits_o
                         1
                     );
                     assert_eq!(
-                        conn.query_row("SELECT count(*) FROM live_device_settlements", [], |row| {
+                        conn.query_row("SELECT count(*) FROM live_empty_settlements", [], |row| {
                             row.get::<_, i64>(0)
                         })
                         .unwrap(),
@@ -738,7 +773,7 @@ async fn markdown_hold_audited_consent_rolls_back_pending_journal_then_commits_o
         .run(|store, _| {
             assert_eq!(store.table_row_count("moments")?, 2);
             assert_eq!(store.table_row_count("materialization_jobs")?, 1);
-            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+            assert_eq!(store.table_row_count("live_empty_settlements")?, 1);
             let debt = store.read_with(|conn| write_obligations::pending_in(conn, "w"))?;
             assert_eq!(debt.len(), 1);
             assert_eq!(debt[0].kind, WriteObligationKind::WitnessRefresh);
@@ -844,7 +879,7 @@ async fn markdown_hold_audited_noop_pending_never_uses_fresh_consent_or_adds_deb
         .run(|store, _| {
             assert_eq!(store.table_row_count("moments")?, 2);
             assert_eq!(store.table_row_count("materialization_jobs")?, 1);
-            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+            assert_eq!(store.table_row_count("live_empty_settlements")?, 1);
             assert_eq!(
                 store
                     .read_with(|conn| write_obligations::pending_in(conn, "w"))?
@@ -2688,7 +2723,7 @@ async fn markdown_hold_owner_only_debt_survives_restart_at_an_already_settled_te
     let covered = retry.clone();
     f.actor
         .run(move |store, _| {
-            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+            assert_eq!(store.table_row_count("live_empty_settlements")?, 1);
             assert!(!store.read_with(|conn| covered.covered_in(conn))?);
             assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
             Ok(())
@@ -2737,7 +2772,7 @@ async fn markdown_hold_owner_only_debt_survives_restart_at_an_already_settled_te
             );
             assert!(!store.read_with(|conn| current.covered_in(conn))?);
             assert!(!dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
-            assert_eq!(store.table_row_count("live_device_settlements")?, 1);
+            assert_eq!(store.table_row_count("live_empty_settlements")?, 1);
             assert_eq!(store.table_row_count("moments")?, 2);
             assert_eq!(store.table_row_count("materialization_jobs")?, 1);
             let doc = dohc_engine_collab::load_persisted(store, &key)?

@@ -1558,7 +1558,11 @@ fn settle_audited(
         conversion_consent,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
-    let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
+    let id = if audit.is_empty() {
+        None
+    } else {
+        Some(audit.stored_id(store, &settled.moment_id, &settled.sha256)?)
+    };
     match store.write_with(faults, |tx| {
         dohc_engine_collab::markdown_write_obligations::complete_covered_audited_in(
             tx, &key, now_ms,

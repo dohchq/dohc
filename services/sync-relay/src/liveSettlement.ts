@@ -6,7 +6,8 @@ import {
 import {EngineRequestError} from "@dohc/workspace-engine-client/daemon";
 
 export interface CommittedSettlement {
-  settlementId: string;
+  /** Null when nothing was accepted since the owner's handover or the first baseline, so nothing was recorded or published. */
+  settlementId: string | null;
   previousCursor: number;
   terminalCursor: number;
   applicationCount: number;
@@ -49,5 +50,6 @@ export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | n
     if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error("Invalid native settlement integer.");
   }
   if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean" || typeof row.collectionReconcileRequired !== "boolean") throw new Error("Native settlement coverage mismatch.");
-  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized, collectionReconcileRequired: row.collectionReconcileRequired };
+  if (row.settlementId === null && row.previousCursor !== row.terminalCursor) throw new Error("Native settlement coverage mismatch.");
+  return { settlementId: row.settlementId === null ? null : parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized, collectionReconcileRequired: row.collectionReconcileRequired };
 }

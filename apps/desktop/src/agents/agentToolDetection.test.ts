@@ -1,14 +1,18 @@
 // @vitest-environment node
 import { EventEmitter, getEventListeners } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runProbe } from "./agentToolDetection";
+import { detectAgentTools, runProbe } from "./agentToolDetection";
+import * as toolProbe from "./agentToolProbe";
 import type { ProbeOutput } from "./agentToolProbe";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), resolveSpawnCommand: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("node:fs", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs")>() }));
+vi.mock("./agentToolProbe", async (importOriginal) => ({ ...await importOriginal<typeof import("./agentToolProbe")>() }));
 // Detection has no tree-kill dependency: a Windows probe never kills by PID.
 vi.mock("../process/windowsSpawn", () => ({ resolveSpawnCommand: mocks.resolveSpawnCommand }));
 
@@ -122,10 +126,73 @@ afterEach(() => {
   setPlatform(realPlatform, realArch);
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const mock of Object.values(mocks)) mock.mockReset();
 });
 
 afterAll(() => { rmSync(resources, { recursive: true, force: true }); });
+
+describe("agent detection filesystem", () => {
+  it.each(["native", "fallback", "unavailable"])(
+    "resolves installed names using %s", async (resolution) => {
+      const lookup = "/usr/local/bin/claude", stored = "/opt/installed/claude";
+      const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => {
+        if (resolution !== "native") throw new Error("native resolution unavailable");
+        return stored;
+      });
+      const fallbackSpy = vi.spyOn(fs, "realpathSync").mockImplementation(() => {
+        if (resolution !== "fallback") throw new Error("resolution unavailable");
+        return stored;
+      });
+      Object.defineProperty(fallbackSpy, "native", { value: nativeSpy, configurable: true });
+      const probeSpy = vi.spyOn(toolProbe, "probeAgentTools").mockImplementation(async (deps) => {
+        expect(deps.realPath(lookup)).toBe(resolution === "unavailable" ? null : stored);
+        return [];
+      });
+      await detectAgentTools("workspace", new AbortController().signal, resources);
+      expect(probeSpy).toHaveBeenCalledOnce();
+      expect(nativeSpy).toHaveBeenCalledWith(lookup);
+      expect(fallbackSpy).toHaveBeenCalledTimes(resolution === "native" ? 0 : 1);
+    },
+  );
+
+  it("continues detection after unavailable install entries", async () => {
+    const actualProbe = await vi.importActual<typeof import("./agentToolProbe")>("./agentToolProbe");
+    vi.spyOn(toolProbe, "probeAgentTools").mockImplementation(actualProbe.probeAgentTools);
+    const home = "C:\\Users\\me", windowsApps = `${home}\\AppData\\Local\\Microsoft\\WindowsApps`;
+    const missing = `${home}\\missing`, unresolved = `${home}\\unresolved`, installed = `${home}\\AppData\\Roaming\\npm`;
+    const candidate = `${installed}\\codex.cmd`, unresolvedCandidate = `${unresolved}\\codex.cmd`;
+    vi.stubEnv("Path", [missing, windowsApps, unresolved, installed].join(";"));
+    vi.stubEnv("PATHEXT", ".exe;.cmd");
+    vi.stubEnv("APPDATA", `${home}\\AppData\\Roaming`);
+    const identity = fs.statSync(NODE);
+    vi.spyOn(fs, "accessSync").mockImplementation(() => {});
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((path) => {
+      const value = String(path);
+      if (value.startsWith(windowsApps)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+      if (value === candidate || value === unresolvedCandidate || [NODE, OWNER, RELAY].includes(value)) return identity;
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+    const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => { throw new Error("native resolution unavailable"); });
+    const fallbackSpy = vi.spyOn(fs, "realpathSync").mockImplementation((path) => {
+      if (String(path) === unresolvedCandidate) throw new Error("resolution unavailable");
+      return String(path);
+    });
+    Object.defineProperty(fallbackSpy, "native", { value: nativeSpy, configurable: true });
+    mocks.spawn.mockImplementation(() => {
+      const probeChild = new FakeChild(4321);
+      queueMicrotask(() => { probeChild.stdout!.emit("data", "1.2.3"); probeChild.drain(0); });
+      return probeChild;
+    });
+    const tools = await detectAgentTools("C:\\Projects\\Work", new AbortController().signal, resources);
+    expect(tools.find((tool) => tool.tool === "codex")).toMatchObject({ executable: candidate, probe: "detected" });
+    expect(statSpy).toHaveBeenCalledWith(`${windowsApps}\\codex.exe`);
+    expect(statSpy).toHaveBeenCalledWith(`${missing}\\codex.exe`);
+    expect(fallbackSpy).toHaveBeenCalledWith(unresolvedCandidate);
+    expect(mocks.resolveSpawnCommand).toHaveBeenCalledTimes(2);
+    expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(candidate, ["--version"], { cwd: homedir() });
+  });
+});
 
 describe("Windows agent probe owner", () => {
   it("starts the installed owner without credentials and admits the exact command over stdin", async () => {

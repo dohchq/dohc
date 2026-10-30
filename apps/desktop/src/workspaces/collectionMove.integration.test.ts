@@ -1,0 +1,122 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, it } from "vitest";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { fixture as relayFixture, limits as relayLimits } from "../../../../services/sync-relay/src/datasetTestFixture";
+import { compileDatasetOperations } from "../../../../services/sync-relay/src/datasetCompiler";
+import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
+import { createDatasetHandler } from "../ipc/datasetIpc";
+import { readDatasetResponse } from "../ipc/readDatasetResponse";
+import { unguardedCollections } from "../testing/collectionsHolder";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
+import { collectionPlace, moveCollectionToServer } from "./collectionMove";
+import { createLocalDatasetHost } from "./localDatasetHost";
+import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
+
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Items", schemaPath: "items/schema.sql", operationsPath: "items/operations.js",
+  tables: [{ tableId: id(2), name: "Items", sqlName: "items", primaryKey: "id", fields: [
+    { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+    { fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
+  ] }], operations: [
+    { operationId: id(5), name: "list", label: "List items", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3), id(4)] },
+    { operationId: id(6), name: "add", label: "Add item", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] },
+  ] };
+const sources = new Map([
+  ["items/dataset.json", JSON.stringify(definition)],
+  [definition.schemaPath, "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);"],
+  [definition.operationsPath, `globalThis.operations={
+  list(ctx){return ctx.db.query('SELECT name FROM items ORDER BY name');},
+  add(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.name]);return {name:input.name};}
+};`],
+]);
+const roots: string[] = [], hosts: { close(): Promise<void> }[] = [];
+afterEach(async () => {
+  for (const host of hosts.splice(0).reverse()) await host.close();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-collection-move-")); roots.push(workspaceRoot);
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const local = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local",
+    compile: createDatasetFixtureCompiler(), holder: unguardedCollections }); hosts.push(local);
+  const adapter = sourceCaptureAdapter(sources);
+  const prepared = await local.prepare({ descriptorPath: "items/dataset.json", adapter });
+  const approved = await local.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+  const pinned = { revision: approved.revision, revisionSha256: approved.revisionSha256 };
+
+  // The owner's server, with the folder shared with a teammate who accepted it.
+  const relay = relayFixture(), relayDirectory = await mkdtemp(join(tmpdir(), "dohc-collection-move-relay-")); roots.push(relayDirectory);
+  relay.storage.createShare({ share: { shareId: "team", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["items"], versionId: null }), createdAtMs: 1 },
+    grant: { grantId: "team-grant", shareId: "team", principalKind: "user", principalUserId: "teammate", principalEmail: null, access: "edit",
+      generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null } });
+  const relayHost = await relay.storage.createDatasetHost({ directory: relayDirectory, limits: relayLimits, compileOperations: compileDatasetOperations,
+    onShutdownError(error) { throw error; } }); hosts.push(relayHost);
+  const handler = createSyncRelayHandler({ storage: relay.storage, datasetHost: relayHost, appPublicationLimits: relayLimits,
+    resolveActor(request, workspaceId) {
+      const userId = { "Bearer owner-token": "owner", "Bearer teammate-token": "teammate" }[request.headers.get("authorization") ?? ""];
+      if (!userId) throw Error("credentials");
+      return { workspaceId, userId };
+    } });
+  const controller = new AbortController();
+  const transport = async (_credentials: unknown, path: string, init: RequestInit) => {
+    const response = await handler(new Request(`https://relay.test${path}`, { ...init, ...(init.body instanceof ReadableStream ? { duplex: "half" as const } : {}) }));
+    const value = path.includes("/imports/") ? await response.json() : await readDatasetResponse(response, path.split("/").at(-1)!, controller.signal);
+    if (!response.ok) throw Error(`Relay ${response.status}: ${JSON.stringify(value)}`);
+    return value;
+  };
+  const credentials = (user: string) => ({ serverUrl: "https://account.test", relayUrl: "https://relay.test", token: `${user}-token`, userId: user, email: `${user}@example.test` });
+  const session = { credentialGeneration: 1, currentCredentialGeneration: () => 1, signal: controller.signal, assertCurrent() {} };
+  const authorized = (user: string) => async (credentials: { token: string }, path: string, init: RequestInit) =>
+    transport(credentials, path, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), authorization: `Bearer ${user}-token` } });
+  const owner = createRemoteDatasetData({ workspaceId: "w", credentials: credentials("owner"), ...session, relayJson: authorized("owner") });
+  const teammate = createRemoteDatasetData({ workspaceId: "w", shareId: "team", credentials: credentials("teammate"), ...session, relayJson: authorized("teammate") });
+  const workspace = { workspaceId: "w" };
+  const collection = createDatasetHandler({
+    async withWorkspaceOperation(_caller: string, workspaceId, work) {
+      if (workspaceId !== "w") throw Error("wrong workspace");
+      return work({ workspace, signal: controller.signal, assertCurrent() {} });
+    },
+    hostForWorkspace: async () => local,
+    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: async datasetId => local.transferStatus(datasetId),
+      async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } }),
+    collectionPlace: async (_workspace, datasetId) => collectionPlace({ transfer: local.transferStatus(datasetId), relayUrl: "https://relay.test",
+      automations: async () => ({ automations: 0, scheduledAutomations: 0 }), runs: async () => { throw Error("Nothing asks without automations."); } }),
+    moveToServer: (_workspace, datasetId, signal) => moveCollectionToServer({ local, workspaceId: "w", datasetId, credentials: credentials("owner"),
+      credentialGeneration: 1, currentCredentialGeneration: () => 1, relayStream: authorized("owner"), signal }),
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
+    withAdapter: async (_workspace, work) => work(adapter),
+    createSources: async () => { throw Error("Nothing creates sources here."); },
+  });
+  const address = { workspaceId: "w", datasetPath: "items/dataset.json", expectedDatasetId: id(1) };
+  const invoke = (operationId: string, idempotencyKey: string, input = {}) => ({ datasetId: id(1), ...pinned, operationId, idempotencyKey, input });
+  const ownerInvoke = (operationId: string, idempotencyKey: string, input = {}) =>
+    collection("window", { ...address, action: "invoke", ...pinned, operationId, idempotencyKey, input });
+  await ownerInvoke(id(6), "owner-before", { name: "Owner" });
+  const setGrant = { ...address, action: "setGrant", grantId: "team-grant", grant: { ...pinned, operationIds: [id(6)], discover: true } };
+
+  // Without the owner's agreement nothing moves, and the refusal says what moving means.
+  expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({ kind: "permissions",
+    place: { kind: "here", server: { host: "relay.test", runs: null, automations: 0, scheduledAutomations: 0 } } });
+  await expect(collection("window", setGrant)).rejects.toThrow("Giving a person access moves this Collection to relay.test.");
+  expect(local.transferStatus(id(1))).toBeNull();
+  await expect(teammate.invoke(invoke(id(6), "teammate-before", { name: "Too early" }))).rejects.toThrow();
+
+  // Agreeing moves the Collection with its records, then gives the teammate exactly the chosen action.
+  await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
+  expect(local.transferStatus(id(1))?.state).toBe("imported");
+  expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({ kind: "permissions",
+    permissions: [{ kind: "data", current: true, metadata: { operationIds: [id(6)] } }], place: { kind: "server", host: "relay.test" } });
+  await expect(teammate.invoke(invoke(id(6), "teammate-add", { name: "Teammate" }))).resolves.toMatchObject({ result: { name: "Teammate" } });
+  await expect(teammate.invoke(invoke(id(5), "teammate-list"))).rejects.toThrow();
+  expect(await ownerInvoke(id(5), "owner-list")).toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
+
+  // Once the Collection is on the server, the owner changes access with no further agreement.
+  await expect(collection("window", { ...setGrant, grant: { ...setGrant.grant, operationIds: [id(5), id(6)] } })).resolves.toEqual({ kind: "grant-updated" });
+  await expect(teammate.invoke(invoke(id(5), "teammate-list-allowed"))).resolves.toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
+  controller.abort();
+});

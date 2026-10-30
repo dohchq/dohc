@@ -39,11 +39,11 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       // A saved status another user can change reads as none, so this copy has nothing offline.
       const marker = join(options.directory,"archived.json");
       await copy.close(); await chmod(marker,0o666); copy=await createOwnerDatasetCopy(options); offline=true;
-      await expect(copy.data(remote,source,signal).inspect!(id(1))).rejects.toThrow("Download this Collection before opening it offline.");
+      await expect(copy.data(remote,source,signal).inspect!(id(1))).rejects.toThrow("This Collection needs relay, which dohc can't reach.");
       await chmod(marker,0o600); offline=false;
     }
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
-    expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true},copy:{offline:true}});
+    expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true},copy:{offline:true,host:"relay"}});
     await expect(copy.data(remote,source,signal).invoke({...pinned,operationId:id(6),input:{},idempotencyKey:"archived"})).rejects.toThrow(/archived/);
     offline=false;archived=false;
     const inspect=await copy.data(remote,source,signal).inspect!(id(1)); expect(inspect.copy?.offline).toBe(false);
@@ -56,10 +56,10 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries");
     const offlineDescription=await copy.data(remote,source,signal).inspect!(id(1));
     expect(parseDatasetDescription(offlineDescription.dataset)).toEqual(inspect.dataset);
-    expect(offlineDescription.copy).toMatchObject({offline:true});
+    expect(offlineDescription.copy).toMatchObject({offline:true,host:"relay"});
     const read={...pinned,operationId:id(6),input:{},idempotencyKey:"read"};
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"}],copy:{offline:true}});
-    await expect(copy.data(remote,source,signal).invoke({...read,operationId:id(5)})).rejects.toThrow(/read-only/);
+    await expect(copy.data(remote,source,signal).invoke({...read,operationId:id(5)})).rejects.toThrow("dohc didn't save this change. This Collection is read-only until relay is reachable.");
     expect(invoke).toHaveBeenCalledOnce();
     offline=false; await invoke({...pinned,operationId:id(5),input:{name:"Friend"},idempotencyKey:"second"});
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"},{id:2,name:"Friend"}],copy:{offline:false}});
@@ -114,6 +114,6 @@ it.each(["delete", "status", "closing"])("erases a cached Collection after confi
     await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("unavailable");
     expect((await readdir(options.directory)).filter(name=>name.startsWith("read-")||name==="archived.json"||/^[a-f0-9-]{36}\.sqlite$/.test(name))).toHaveLength(0);
     await copy.close();copy=await createOwnerDatasetCopy(options);
-    await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("Download this Collection");
+    await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("This Collection needs relay, which dohc can't reach.");
   }finally{await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 },30_000);

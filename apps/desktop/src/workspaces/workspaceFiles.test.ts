@@ -20,7 +20,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
@@ -52,6 +52,7 @@ import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { deferred } from "../testing/deferred";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 let root: string;
 
@@ -1605,6 +1606,80 @@ describe("copyIntoWorkspace", () => {
 });
 
 describe("importDroppedPaths", () => {
+  it.for([false, true])("differently capitalized source folders keep their screening result (ancestor link: %s)", async (alias, context) => {
+    if (!(await caseInsensitiveFs())) context.skip();
+    const fsPromises = await import("node:fs/promises");
+    const work = join(root, "Work", "A"), lookupWork = join(root, "work", "A");
+    await mkdir(join(work, ".dohc"), { recursive: true });
+    await writeFile(join(work, ".dohc", "credentials.json"), "data");
+    const sibling = join(root, "sibling");
+    await mkdir(sibling);
+    await writeFile(join(sibling, "notes.md"), "outside");
+    const target = join(root, "target");
+    await mkdir(target);
+    const link = join(root, "alias");
+    if (alias) await symlink(lookupWork, link, "junction");
+    const source = join(alias ? link : lookupWork, ".dohc", "credentials.json");
+    const originalRealpath = fsPromises.realpath;
+    const spy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const value = String(path);
+      if (value === source) return join(lookupWork, ".dohc", "credentials.json");
+      await originalRealpath(path);
+      return value;
+    });
+    try {
+      const outcome = await importDroppedPaths(target, [source, join(sibling, "notes.md")], [work]);
+      expect(outcome).toEqual({
+        imported: ["notes.md"],
+        skipped: 1,
+        skippedSources: [{ path: "credentials.json", reason: "workspace-data" }],
+      });
+      expect(existsSync(join(target, "credentials.json"))).toBe(false);
+      expect(await readFile(join(target, "notes.md"), "utf8")).toBe("outside");
+    } finally { spy.mockRestore(); }
+  });
+  describe.each(shortNamePairs(join(process.cwd(), "containment-folders"), ".dohc"))("$name", ({ parent, child }) => {
+    it.each(folderIdentities)("keeps the screening result for $name", async ({ identity }) => {
+      const inside = identity !== "different";
+      const fsPromises = await import("node:fs/promises");
+      const source = join(root, "source", "credentials.json"), registered = join(root, "registered");
+      await mkdir(dirname(source));
+      await writeFile(source, "data");
+      const parentStat = await stat(root, { bigint: true }), otherStat = await stat(dirname(source), { bigint: true });
+      const originalRealpath = fsPromises.realpath;
+      const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+        if (String(path) === registered) return registered;
+        if (String(path) === join(registered, ".dohc")) return parent;
+        if (String(path) === source) return join(child, "credentials.json");
+        return originalRealpath(path);
+      });
+      const statPath = fakeFolderStat(identity, parent, parentStat, otherStat);
+      const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (path) => statPath(path));
+      try {
+        const result = await screenDroppedPaths([source], [registered], "");
+        expect(result.skips.outcome()).toEqual(inside ? { skipped: 1, skippedSources: [{ path: "credentials.json", reason: "workspace-data" }] } : { skipped: 0 });
+        expect(result.usable).toHaveLength(inside ? 0 : 1);
+        expect(statSpy).toHaveBeenCalled();
+      } finally { statSpy.mockRestore(); realpathSpy.mockRestore(); }
+    });
+  });
+
+  it("stored spelling decides screening without stat", async () => {
+    const fsPromises = await import("node:fs/promises");
+    const work = join(root, "Work"), sibling = join(root, "sibling");
+    await mkdir(join(work, ".dohc"), { recursive: true });
+    await mkdir(sibling);
+    const source = join(work, ".dohc", "credentials.json"), outside = join(sibling, "notes.md");
+    await writeFile(source, "data");
+    await writeFile(outside, "notes");
+    const statSpy = vi.spyOn(fsPromises, "stat");
+    try {
+      const result = await screenDroppedPaths([source, outside], [work], "");
+      expect(result.skips.outcome()).toEqual({ skipped: 1, skippedSources: [{ path: "credentials.json", reason: "workspace-data" }] });
+      expect(result.usable.map((item) => item.source)).toEqual([await realpath(outside)]);
+      expect(statSpy).not.toHaveBeenCalled();
+    } finally { statSpy.mockRestore(); }
+  });
   it("imports regular files and folders, and skips symlinks and relative paths", async () => {
     const outside = await createTestScratch("dohc-drop-");
     await writeFile(join(outside, "doc.md"), "dropped");

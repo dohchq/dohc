@@ -696,6 +696,18 @@ impl Ydoc {
         )
     }
 
+    /// The current witness source, if it rebuilds this canonical projection
+    /// under the settled rule's reading, without a file's body comparison.
+    pub(crate) fn reprojected_markdown_source(&self, canonical_projection: &str) -> Option<String> {
+        let reference = self.markdown_source_reference()?;
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return None;
+        }
+        let source = self.markdown_source(&reference)?;
+        self.source_reproduces(&source, canonical_projection, false)
+            .then_some(source)
+    }
+
     /// Whether `source` rebuilds `canonical_projection` under the source or
     /// projection reading. Without `reads_alike`, also try the successor
     /// reading and full reference links as desktop link marks. With it, each
