@@ -2,6 +2,7 @@ import { AppWindow } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
+import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
 import { openLinkExternally } from "./linkActivation";
 import { localLaunchUrl, openLocalApp } from "./OwnerAppPublication";
 import { PrimaryButton, RetryRow } from "./ui/controls";
@@ -193,7 +194,11 @@ export function useAppView(options: {
     if (event.key === "F5" || (primary && event.key.toLowerCase() === "r")) reload();
     else if (event.altKey && event.key === "ArrowLeft") navigate("back");
     else if (event.altKey && event.key === "ArrowRight") navigate("forward");
-    else if (event.key === "F6") toolbarStart.current?.focus();
+    else if (event.key === "F6") {
+      // F6 moves with the keyboard, so the toolbar shows where focus landed.
+      document.documentElement.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, true);
+      toolbarStart.current?.focus();
+    }
     else {
       window.dispatchEvent(new KeyboardEvent("keydown", {
         key: event.key, code: event.code, ctrlKey: event.ctrlKey, shiftKey: event.shiftKey,

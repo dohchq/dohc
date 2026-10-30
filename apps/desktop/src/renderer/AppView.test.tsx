@@ -8,6 +8,7 @@ import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../i
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { deferred } from "../testing/deferred";
 import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
+import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
 import { SitePreviewPage } from "./SitePreviewPage";
 
 configure({ asyncUtilTimeout: 10_000 });
@@ -321,8 +322,11 @@ describe("an owner app in its tab", () => {
     guest.canGoForward.mockReturnValue(false);
     key("ArrowRight", "ArrowRight", { altKey: true });
     expect(guest.goForward).not.toHaveBeenCalled();
+    expect(document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(false);
     key("F6", "F6");
     expect(document.activeElement).toBe(screen.getByTestId("app-view-reload"));
+    expect(document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(true);
+    document.documentElement.removeAttribute(KEYBOARD_NAV_ATTRIBUTE);
     const seen: KeyboardEvent[] = [];
     const listen = (event: KeyboardEvent) => seen.push(event);
     window.addEventListener("keydown", listen);
