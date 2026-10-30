@@ -1,4 +1,4 @@
-import { formatChatDay, formatChatTime, formatClock, formatShortTime } from "../time";
+import { formatChatDay, formatChatTime, formatClock, formatDayClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
 import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, HardDrive, History, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { EmptyState, GhostButton } from "../ui/controls";
@@ -7,7 +7,7 @@ import { LegendList } from "@legendapp/list/react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type SyncStatusResult, type TimelineEntry } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
-import { AgentName, ChatAvatar, LinkMark } from "./ChatAvatar";
+import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 
 // The History timeline: file moments, version markers and Collection
@@ -403,13 +403,16 @@ export function missingSourcesWords(
   };
 }
 
-// One timeline row. A change is two lines, 48px: who made it and when, then
-// what changed. A file under a pass or an edit under a run is one line,
-// 28px, its words starting where the names above it do. Rows touch; hover
-// and the open change take the list ladder's fills. A mark takes an
-// avatar's 18px slot, so every name starts on one edge.
+// One timeline row. A change is two lines, 48px, as Notion's page history
+// reads: when, then who made it and what changed, beside their face. A file
+// under a pass or an edit under a run is one line, 28px, its words starting
+// where the names above it do. Rows touch; hover and the open change take
+// the list ladder's fills. A mark takes an avatar's 18px slot, so every name
+// starts on one edge.
 export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
-const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] content-center gap-x-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-row`;
+const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)] content-center gap-x-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-row`;
+const WHEN = "col-span-2 min-w-0 truncate text-[13px] font-medium leading-5 tabular-nums text-ink";
+const LINE_TWO = "flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted";
 const ONE_LINE = `flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row`;
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
 const countFormat = new Intl.NumberFormat();
@@ -514,17 +517,15 @@ export function momentDescription(moment: EngineMomentRecord): string {
   return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
 }
 
-// Who made a change, beside their face. An agent's name takes its hue; an
-// automation says what it is to a screen reader.
-export function MomentName(props: { moment: CreditedMoment; testId?: string }) {
+// Who made a change, beside their face. The face carries an agent's hue, so
+// the name stays in the line's ink; an automation says what it is to a
+// screen reader.
+export function MomentName(props: { moment: CreditedMoment; testId?: string; className?: string }) {
   const { moment } = props;
-  const label = momentAuthorLabel(moment);
   return (
-    <span data-testid={props.testId ?? "engine-moment-source"} className="min-w-0 truncate text-[13px] font-medium leading-5 text-ink">
+    <span data-testid={props.testId ?? "engine-moment-source"} className={`min-w-0 truncate ${props.className ?? ""}`}>
       {moment.automationAuthor ? <span className="sr-only">Automation </span> : null}
-      {moment.agentAuthorName !== undefined ? (
-        <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
-      ) : label}
+      {momentAuthorLabel(moment)}
     </span>
   );
 }
@@ -589,15 +590,10 @@ export function HistoryRow(props: {
   // The row's name says what it opens; the change itself is its description.
   const descriptionId = useId();
   const holdsOpenId = useId();
-  const time = (
-    <time
-      data-testid="engine-moment-recorded-at"
-      dateTime={recordedAt.iso}
-      title={recordedAt.label}
-      className="shrink-0 text-[12px] tabular-nums text-subtle"
-    >
+  const time = (className: string) => (
+    <time data-testid="engine-moment-recorded-at" dateTime={recordedAt.iso} title={recordedAt.label} className={className}>
       {/* The workspace's History heads each day; one file's dates each row. */}
-      {props.context === "file" ? formatShortTime(moment.recordedAtMs) : formatClock(moment.recordedAtMs)}
+      {props.context === "file" ? formatDayClock(moment.recordedAtMs) : formatClock(moment.recordedAtMs)}
     </time>
   );
   const shared = {
@@ -623,14 +619,19 @@ export function HistoryRow(props: {
               <span className="min-w-0 truncate text-[12px] text-subtle">{dirnameOf(moment.path)}</span>
             </span>
           ) : (
-            <span className="min-w-0 flex-1 truncate">{fileMomentSummary(moment)}</span>
+            // An earlier edit in a run leads with its time, as its head
+            // does; the head already names who made them all.
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              {time("shrink-0 font-medium tabular-nums text-ink")}
+              <span className="min-w-0 truncate text-[12px] text-muted">{fileMomentSummary(moment)}</span>
+            </span>
           )}
           <ContentMark moment={moment} />
           {/* A pass's files share their group's time. Most passes change
               files, so only a rename or a delete says what it did. */}
-          {nested !== "pass" ? time : moment.operation === "write" ? null : (
+          {nested === "pass" && moment.operation !== "write" ? (
             <span className="shrink-0 text-[12px] text-subtle">{engineOperationLabel(moment)}</span>
-          )}
+          ) : null}
         </button>
         {description}
       </>
@@ -638,13 +639,15 @@ export function HistoryRow(props: {
   }
   const open = (
     <button {...shared} className={`${TWO_LINES} ${fold ? "" : rowTone(selected)}`}>
+      {/* A run's count sits at the end of the time's line. */}
+      {time(`${WHEN} ${fold ? "pr-24" : ""}`)}
       <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />
-      <MomentName moment={moment} />
-      {time}
-      {/* A run's count sits at the end of this line, so its words stop short of it. */}
-      <span className={`col-start-2 flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted ${fold ? "pr-20" : "col-end-4"}`}>
-        <MomentWhat moment={moment} context={props.context} fileOnly={fold !== undefined} />
-        <ContentMark moment={moment} />
+      <span className={LINE_TWO}>
+        <MomentName moment={moment} className="max-w-[45%] shrink-0" />
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <MomentWhat moment={moment} context={props.context} fileOnly={fold !== undefined} />
+          <ContentMark moment={moment} />
+        </span>
       </span>
     </button>
   );
@@ -665,7 +668,7 @@ export function HistoryRow(props: {
         aria-describedby={holdsOpen ? holdsOpenId : undefined}
         title={countWords}
         onClick={fold.onToggle}
-        className={`absolute bottom-1 right-1 flex h-5 items-center gap-1 rounded-md px-1 text-[12px] text-subtle hover:bg-hover hover:text-ink focus-visible:-outline-offset-2`}
+        className={`absolute right-1 top-[5px] flex h-5 items-center gap-1 rounded-md px-1 text-[12px] text-subtle hover:bg-hover hover:text-ink focus-visible:-outline-offset-2`}
       >
         <LoadedCount count={fold.count} more={fold.more} noun="changes" />
         <Chevron size={12} aria-hidden />
@@ -745,20 +748,22 @@ function GroupRow(props: {
         onClick={props.onToggle}
         className={`${TWO_LINES} ${rowTone(holdsOpen)}`}
       >
+        <time dateTime={recordedAt.iso} title={recordedAt.label} className={WHEN}>
+          {formatClock(group.recordedAtMs)}
+        </time>
         <span className={`${MARK_BOX} text-subtle`}>
           <Chevron size={14} aria-hidden />
         </span>
-        <span className="min-w-0 truncate text-[13px] font-medium leading-5 text-ink">{group.summary}</span>
-        <time dateTime={recordedAt.iso} title={recordedAt.label} className="shrink-0 text-[12px] tabular-nums text-subtle">
-          {formatClock(group.recordedAtMs)}
-        </time>
-        <span className="col-start-2 col-end-4 flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted">
+        <span className={LINE_TWO}>
           {agentAuthorName !== undefined ? (
-            <span data-testid="engine-moment-group-source" className="min-w-0 truncate text-agent">
+            <span data-testid="engine-moment-group-source" className="min-w-0 max-w-[45%] shrink-0 truncate">
               {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
             </span>
           ) : null}
-          <LoadedCount count={group.moments.length} more={props.more} noun="files" />
+          <span className="min-w-0 truncate">{group.summary}</span>
+          <span className="shrink-0 text-subtle">
+            <LoadedCount count={group.moments.length} more={props.more} noun="files" />
+          </span>
         </span>
       </button>
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
@@ -799,8 +804,9 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
 
 // One saved Collection change. Like a file's row opens its diff, it opens its
 // Collection's History, where the change and its Undo are, when this
-// computer can open that Collection. What changed leads, since a Collection
-// change has no face; who made it and where follow.
+// computer can open that Collection. A Collection change has no face, so
+// what changed follows the time, beside the Collection's mark; who made it
+// and where come after.
 function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
   const { name, change } = props.entry;
   const agent = approvalAgentName(change);
@@ -811,35 +817,33 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
   const metaId = useId();
   const body = (
     <>
-      <span className={`${MARK_BOX} text-subtle`}>
-        <Database size={14} aria-hidden />
-      </span>
-      <span className="min-w-0 truncate text-[13px] font-medium leading-5 text-ink">
-        {collectionChangeTitle(props.entry, props.label)}
-      </span>
       {change.recordedAtMs === null ? (
-        <span data-testid="history-collection-date-unknown" className="shrink-0 text-[12px] text-subtle">Date unknown</span>
+        <span data-testid="history-collection-date-unknown" className="col-span-2 min-w-0 truncate text-[13px] leading-5 text-muted">Date unknown</span>
       ) : (
-        <time
-          dateTime={formatChatTime(change.recordedAtMs).iso}
-          title={formatChatTime(change.recordedAtMs).label}
-          className="shrink-0 text-[12px] tabular-nums text-subtle"
-        >
+        <time dateTime={formatChatTime(change.recordedAtMs).iso} title={formatChatTime(change.recordedAtMs).label} className={WHEN}>
           {formatClock(change.recordedAtMs)}
         </time>
       )}
-      <span id={metaId} className="col-start-2 col-end-4 flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted">
-        {agent !== undefined ? (
-          <span data-testid="history-collection-agent" className="min-w-0 shrink-0 truncate text-agent">{agent}</span>
-        ) : null}
-        {change.automation ? (
-          <span className="inline-flex min-w-0 shrink-0 items-center gap-1">
-            <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-            <span className="sr-only">Automation </span>
-            <span className="truncate">{automationName(change.automation)}</span>
-          </span>
-        ) : null}
-        <span className="min-w-0 truncate text-subtle">{unlabelled ? change.operation : name}</span>
+      <span className={`${MARK_BOX} text-subtle`}>
+        <Database size={14} aria-hidden />
+      </span>
+      <span className={LINE_TWO}>
+        <span data-testid="history-collection-title" className="min-w-0 max-w-[60%] shrink-0 truncate">
+          {collectionChangeTitle(props.entry, props.label)}
+        </span>
+        <span id={metaId} className="flex min-w-0 items-center gap-2">
+          {agent !== undefined ? (
+            <span data-testid="history-collection-agent" className="min-w-0 shrink-0 truncate">{agent}</span>
+          ) : null}
+          {change.automation ? (
+            <span className="inline-flex min-w-0 shrink-0 items-center gap-1">
+              <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+              <span className="sr-only">Automation </span>
+              <span className="truncate">{automationName(change.automation)}</span>
+            </span>
+          ) : null}
+          <span className="min-w-0 truncate text-subtle">{unlabelled ? change.operation : name}</span>
+        </span>
       </span>
     </>
   );

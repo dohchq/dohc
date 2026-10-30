@@ -154,6 +154,22 @@ describe("history diff page", () => {
     expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
   });
 
+  // Restore and Undo restore take each other's place, so a press hands the
+  // focus over and the keyboard can undo at once.
+  it("hands the focus from Restore to Undo restore and back", async () => {
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      restoreEngineMomentFile: vi.fn().mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" }),
+    });
+    renderPage(momentDetail());
+    await screen.findByTestId("engine-diff-lines");
+    screen.getByTestId("engine-diff-restore-file").focus();
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-undo-restore"));
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
+  });
+
   it("diffs a moment once, however often the page renders", async () => {
     const view = renderPage(momentDetail());
     await screen.findByTestId("engine-diff-lines");

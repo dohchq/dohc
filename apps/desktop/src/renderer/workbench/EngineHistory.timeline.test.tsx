@@ -98,9 +98,9 @@ describe("History timeline rows", () => {
   it("titles a Collection change with its operation's label, else by its Collection", () => {
     view({ entries: [change(4, DAY - 2_000), change(2, DAY - 3_000, GUESTS, "Guests")] });
     const [labelled, unlabelled] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
-    expect(labelled!.querySelector(".font-medium")!.textContent).toBe("Add row");
+    expect(labelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Add row");
     expect(labelled!.textContent).not.toContain("addRow");
-    expect(unlabelled!.querySelector(".font-medium")!.textContent).toBe("Changed Guests");
+    expect(unlabelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed Guests");
     expect(unlabelled!.querySelector("[id]")!.lastElementChild!.textContent).toBe("addRow");
     // The title already names the Collection, so the meta line does not.
     expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
@@ -111,11 +111,12 @@ describe("History timeline rows", () => {
     expect(description?.textContent).toContain("Stamp the date");
   });
 
-  it("names the agent that approved a Collection's rules first, in the agent's voice", () => {
+  // The name stays in the line's ink; colour belongs to faces.
+  it("names the agent that approved a Collection's rules first, in the line's ink", () => {
     view({ entries: [change(4, DAY - 2_000, BUDGET, "Budget", { rulesApprovedBy: "trip-agent" }), change(3, DAY - 3_000, BUDGET, "Budget", { rulesApprovedBy: null })] });
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
-    expect(agents[0]!.className).toContain("text-agent");
+    expect(agents[0]!.className).not.toContain("text-agent");
     expect(agents[0]!.parentElement!.firstElementChild).toBe(agents[0]);
   });
 
@@ -124,7 +125,7 @@ describe("History timeline rows", () => {
   it("titles a rules change in words and names its Collection, without an operation", () => {
     view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })] });
     const row = screen.getAllByRole("listitem").find((item) => item.dataset.historyKey)!;
-    expect(row.querySelector(".font-medium")!.textContent).toBe("Changed fields and rules");
+    expect(row.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed fields and rules");
     const meta = row.querySelector("[id]")!;
     expect(meta.textContent).toContain("Guests");
     expect(meta.textContent).not.toContain("Fields and rules");
@@ -179,9 +180,11 @@ describe("History timeline changes", () => {
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
     const calls = view({ entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)] });
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
-    // The run's head names the agent, then its file; each edit's summary is
-    // listed under it.
-    expect(screen.getByTestId("engine-moment-open").textContent).toMatch(/^Nova.*plan\.mdnotes$/);
+    // The run's head leads with its time, then names the agent and its file;
+    // each edit's summary is listed under it.
+    const head = screen.getByTestId("engine-moment-open");
+    expect(head.firstElementChild!.tagName).toBe("TIME");
+    expect(head.textContent).toMatch(/Nova.*plan\.mdnotes$/);
     const toggle = screen.getByTestId("engine-moment-run-toggle");
     expect(toggle.textContent).toBe("3 changes");
     expect(toggle.getAttribute("aria-label")).toBe("3 changes");

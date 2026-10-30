@@ -152,6 +152,15 @@ export function EngineMomentDiffPage({
   const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
+  // Restore and Undo restore take each other's place when one finishes, so
+  // a press on one hands the focus to the other, unless focus has moved on.
+  const actionRef = useRef<HTMLButtonElement | null>(null);
+  const actionPressed = useRef(false);
+  useEffect(() => {
+    if (!actionPressed.current) return;
+    actionPressed.current = false;
+    if (document.activeElement === null || document.activeElement === document.body) actionRef.current?.focus();
+  }, [undoMomentId]);
   const pageRef = useRef<HTMLElement | null>(null);
   const restoreInFlight = useRef(false);
   // Liveness of the change this page shows: bumped when the tab changes or
@@ -523,7 +532,7 @@ export function EngineMomentDiffPage({
           </h2>
           <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />
           <div className="flex min-w-0 items-center gap-2 text-[12px] text-subtle">
-            <MomentName moment={moment} testId="engine-diff-source" />
+            <MomentName moment={moment} testId="engine-diff-source" className="text-[13px] font-medium leading-5 text-ink" />
             <time dateTime={recordedAt.iso} className="shrink-0 tabular-nums">{recordedAt.label}</time>
             {counts ? <DiffCounts counts={counts} testId="engine-diff-counts" /> : null}
           </div>
@@ -547,9 +556,10 @@ export function EngineMomentDiffPage({
           ) : null}
           {readOnly ? null : undoMomentId ? (
             <SecondaryButton
+              ref={actionRef}
               size="compact"
               data-testid="engine-diff-undo-restore"
-              onClick={() => void undoRestore()}
+              onClick={() => { actionPressed.current = true; void undoRestore(); }}
               disabled={restoreBusy}
             >
               {restoreState.status === "undoing" ? "Undoing…" : "Undo restore"}
@@ -558,9 +568,10 @@ export function EngineMomentDiffPage({
             // Restore records a new change and offers Undo, so it asks
             // nothing first. Its title says what it does to the file.
             <PrimaryButton
+              ref={actionRef}
               size="compact"
               data-testid="engine-diff-restore-file"
-              onClick={() => void restoreFile()}
+              onClick={() => { actionPressed.current = true; void restoreFile(); }}
               disabled={!canRestore || restoreBusy}
               title={canRestore ? restoreDetail : "This change can't be restored directly"}
             >
