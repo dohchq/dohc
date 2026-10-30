@@ -231,7 +231,9 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await clickApp(electronApp, guestId, "#download");
     await expect.poll(() => page.evaluate(() => (window as RendererProbe).__appViewEvents!.some(event =>
       event.kind === "download-blocked" && event.filename === "app-view-sentinel.txt"))).toBe(true);
-    expect(await readdir(downloads)).toEqual([]);
+    // On Windows, Chromium creates a temporary file before the cancel and deletes it after. The last check below
+    // still requires the folder to stay empty.
+    await expect.poll(() => readdir(downloads)).toEqual([]);
 
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate(async ({ theme, workspaceId }) => {
