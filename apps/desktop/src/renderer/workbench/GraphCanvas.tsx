@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
 
@@ -144,7 +144,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let snapCamera = true;
   let visible = true;
   let frame: number | null = null;
-  let dirty = true;
   let reduced = prefersReducedMotion();
 
   let hover = -1;
@@ -244,6 +243,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     generation++;
     incoming = null;
     held = null;
+    // A press on the old model must not open or drag a node of the new one.
+    if (gesture) {
+      if (canvas.hasPointerCapture?.(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
+      gesture = null;
+      canvas.style.cursor = "";
+    }
     layoutSettled = !worker || count === 0;
     awaitingLayout = !layoutSettled && reduced;
     send(
@@ -332,7 +337,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   }
 
   function wake(): void {
-    dirty = true;
     if (frame === null && visible) frame = requestAnimationFrame(step);
   }
 
@@ -371,7 +375,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       if (!fading && mixTo === 0) lit = -1;
     }
     if (!awaitingLayout) draw();
-    dirty = false;
     if (fading || easing) {
       frame = requestAnimationFrame(step);
     } else if (layoutSettled && canvas.dataset.settled !== "true") {
@@ -588,6 +591,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     }
     if (!gesture.moved && !moved) return;
     gesture.moved = true;
+    // The camera holds still under a dragged node.
+    followLayout = false;
     const i = gesture.index;
     canvas.style.cursor = "grabbing";
     held = { index: i, x: (point.x - tx) / k, y: (point.y - ty) / k };
@@ -608,7 +613,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (ended.moved) {
       held = null;
       send({ type: "release", index: ended.index });
-      if (!reduced) followLayout = false;
+      followLayout = options.local;
       wake();
       return;
     }
@@ -651,7 +656,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     height = nextHeight;
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
-    if (followLayout) dirty = true;
     wake();
   }
 
@@ -753,6 +757,7 @@ export function GraphCanvas(props: {
   const callbacks = useRef(props);
   callbacks.current = props;
   const [hovered, setHovered] = useState(-1);
+  const describedId = useId();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -866,12 +871,12 @@ export function GraphCanvas(props: {
         role="application"
         aria-roledescription="graph"
         aria-label={props.label}
-        aria-describedby={describedNode ? "graph-focused-node" : undefined}
+        aria-describedby={describedNode ? describedId : undefined}
         onKeyDown={onKeyDown}
         onBlur={() => props.focusIndex >= 0 && props.onFocusChange(-1)}
         className={`block touch-none select-none ${props.className}`}
       />
-      <p id="graph-focused-node" aria-live="polite" className="sr-only">
+      <p id={describedId} data-testid="graph-focused-node" aria-live="polite" className="sr-only">
         {describedNode
           ? `${describedNode.title}, ${describedNode.degree.toLocaleString()} link${describedNode.degree === 1 ? "" : "s"}`
           : ""}

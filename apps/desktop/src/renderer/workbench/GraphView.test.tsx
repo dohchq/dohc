@@ -106,8 +106,9 @@ describe("GraphView", () => {
     await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md"]));
     const beta = screen.getAllByTestId("graph-file-row")[1]!;
     fireEvent.focus(beta);
-    expect(screen.getByTestId("graph-canvas").getAttribute("aria-describedby")).toBe("graph-focused-node");
-    expect(document.getElementById("graph-focused-node")?.textContent).toBe("beta.md, 1 link");
+    const description = screen.getByTestId("graph-focused-node");
+    expect(screen.getByTestId("graph-canvas").getAttribute("aria-describedby")).toBe(description.id);
+    expect(description.textContent).toBe("beta.md, 1 link");
     fireEvent.click(beta);
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
   });
@@ -138,7 +139,7 @@ describe("GraphView", () => {
     canvas.focus();
     fireEvent.keyDown(canvas, { key: "ArrowRight" });
     // With nothing open, focus starts on the most-linked node.
-    expect(document.getElementById("graph-focused-node")?.textContent).toBe("beta.md, 2 links");
+    expect(screen.getByTestId("graph-focused-node").textContent).toBe("beta.md, 2 links");
     fireEvent.keyDown(canvas, { key: "Enter" });
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
     fireEvent.keyDown(canvas, { key: "Escape" });
