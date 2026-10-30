@@ -415,7 +415,7 @@ describe("owner app publication", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
     await userEvent.setup().click(screen.getByTestId("app-publication-withdraw-cancel"));
     expect(screen.queryByTestId("app-publication-withdraw-confirm")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Publish app" }));
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review app" }));
     expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list" || input.action === "listLocal")).toBe(true);
   });
 

@@ -440,7 +440,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     <section role="dialog" aria-modal="true" aria-labelledby="app-publication-title" data-testid="app-publication-dialog"
       className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(560px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5 text-left">
       <header className="flex items-center gap-2">
-        <h2 ref={heading} tabIndex={-1} id="app-publication-title" className="m-0 flex-1 text-base font-semibold text-ink">{prepared?.local ? "Review app for this device" : prepared ? "Review app publication" : "Publish app"}</h2>
+        <h2 ref={heading} tabIndex={-1} id="app-publication-title" className="m-0 flex-1 text-base font-semibold text-ink">{prepared?.local ? "Review app for this device" : prepared ? "Review app publication" : "Review app"}</h2>
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
       </header>
       <p className="m-0 break-all font-mono text-[12px] text-muted">{props.appRoot}</p>

@@ -339,8 +339,8 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
         className={`min-h-0 flex-1 bg-bg ${view.painted ? "" : "opacity-0"}`} />
       {view.loading ? (
         <div data-testid="app-view-loading" role="progressbar" aria-label="Loading app"
-          className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 h-0.5">
-          <div className="size-full animate-pulse bg-accent" />
+          className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden">
+          <div className="dohc-progress-slide h-full bg-accent" />
         </div>
       ) : null}
     </div>
