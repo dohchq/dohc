@@ -237,6 +237,8 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
   const alpha = layout.alpha;
 
   // Links pull toward a rest length; the bias moves the less-linked end more.
+  // Each link's rest length varies by up to a fifth, fixed per link, so a hub's
+  // neighbours scatter around it instead of lining up in rings.
   const distance = 20 + forces.distance * 120;
   const linkScale = forces.link * 2;
   for (let l = 0; l < layout.source.length; l++) {
@@ -244,7 +246,8 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
     let dx = x[t]! + vx[t]! - x[s]! - vx[s]!;
     let dy = y[t]! + vy[t]! - y[s]! - vy[s]!;
     let length = Math.hypot(dx, dy) || 1e-6;
-    length = ((length - distance) / length) * alpha * layout.linkStrength[l]! * linkScale;
+    const rest = distance * (0.8 + 0.4 * ((Math.imul(l, 2654435761) >>> 0) / 4294967296));
+    length = ((length - rest) / length) * alpha * layout.linkStrength[l]! * linkScale;
     dx *= length;
     dy *= length;
     const bias = layout.linkBias[l]!;
