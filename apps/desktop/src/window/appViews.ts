@@ -194,6 +194,8 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         if (entry) emit(entry, { kind: "download-blocked", viewId: entry.viewId, filename });
       });
       isolated.webRequest.onBeforeRequest((details, callback) => {
+        // The app frame never loads a page. Main stops its navigations before they start; this stops any that get past.
+        if (details.resourceType === "subFrame") { callback({ cancel: true }); return; }
         if (details.resourceType !== "mainFrame") { callback({}); return; }
         const entry = details.webContentsId === undefined ? undefined : partitionViews.get(details.webContentsId);
         const allowed = !!entry && !entry.closed && !!entry.launch?.isAlive() &&

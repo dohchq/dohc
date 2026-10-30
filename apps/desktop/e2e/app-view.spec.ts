@@ -201,10 +201,20 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       expected.push(url!);
       await expect.poll(recorded).toEqual(expected);
       await expect.poll(() => electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/bootstrap$/);
+      // The link left through main, and the app's frame still shows the app.
+      expect(await inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
     }
     // Without a press, the app can't send anyone out of dohc. #mailto used up the last one.
     await clickApp(electronApp, guestId, "#plain");
     await inFrame(electronApp, guestId, "window.open('https://example.com/unprompted'); true");
+    expect(await recorded()).toEqual(expected);
+    // An iframe the app adds at an outside address loads nothing and opens nothing.
+    expect(String(await inFrame(electronApp, guestId, `new Promise(resolve => {
+      addEventListener('securitypolicyviolation', event => resolve(event.effectiveDirective + ' ' + event.blockedURI), { once: true });
+      const frame = document.createElement('iframe'); frame.src = 'https://example.com/framed'; document.body.append(frame);
+    })`))).toMatch(/^frame-src https:\/\/example\.com/);
+    expect(await electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.mainFrame.framesInSubtree
+      .filter(frame => frame.url.includes("example.com")).length, guestId)).toBe(0);
     expect(await recorded()).toEqual(expected);
     for (const selector of ["#javascript", "#file"]) {
       await pressApp(page, electronApp, guestId, selector);

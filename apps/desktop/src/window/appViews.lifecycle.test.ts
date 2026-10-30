@@ -127,6 +127,10 @@ it("denies permission checks and display capture, and guards main-frame requests
     const callback = vi.fn(); request({ resourceType: "mainFrame", webContentsId: guest.id, url }, callback);
     expect(callback).toHaveBeenCalledExactlyOnceWith({ cancel });
   }
+  for (const url of [opened.url, "https://example.com/"]) {
+    const callback = vi.fn(); request({ resourceType: "subFrame", webContentsId: guest.id, url }, callback);
+    expect(callback).toHaveBeenCalledExactlyOnceWith({ cancel: true });
+  }
   const download = { getFilename: () => "blocked.txt", cancel: vi.fn() };
   f.isolated.emit("will-download", {}, download, guest);
   expect(download.cancel).toHaveBeenCalledOnce();

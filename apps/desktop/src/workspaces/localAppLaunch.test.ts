@@ -42,10 +42,15 @@ it("serves only an approved snapshot after a one-use fragment handoff", async ()
   expect(html).not.toContain(f.handoff); expect(html).not.toContain("Approved app");
   expect(html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'");
   expect(bootstrap.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+  expect(bootstrap.headers.get("content-security-policy")).toContain("frame-src 'self';");
   expect(bootstrap.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   const opened = await f.open(); expect(opened.html).toContain("Approved app"); expect(opened.html).not.toContain(opened.proof);
   expect((await f.post("/session", { handoff: f.handoff })).status).toBe(404);
   expect((await fetch(f.origin + "/backend.js")).status).toBe(404);
+});
+it("lets the app frame's navigations reach main's gate only in dohc's tab", async () => {
+  const f = await fixture(true);
+  expect((await fetch(f.origin + "/bootstrap")).headers.get("content-security-policy")).toContain("frame-src 'self' http: https: mailto:;");
 });
 it("exposes a managed session that closes its listener and reports approval changes", async () => {
   const f = await fixture();
