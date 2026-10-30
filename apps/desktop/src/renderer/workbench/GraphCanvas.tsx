@@ -540,8 +540,9 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // and fades in or out over FADE_MS, so a still graph has no half-faded
     // labels. The lit node, the open page and the lit neighbours claim space
     // first; a label that would overlap a placed one or run off the canvas is
-    // left out, and so is one that would cross another node's dot. A halo in
-    // the background colour keeps text clear of links.
+    // left out, and so is one that would cross another node's dot, unless it
+    // is lit or the open page. A halo in the background colour keeps text
+    // clear of links.
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
     ctx.textAlign = "center";
@@ -588,10 +589,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
         r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
         // The label may touch its own node's dot, not another's.
         const a0 = dotCol(i, -1), a1 = dotCol(i, 1), b0 = dotRow(i, -1), b1 = dotRow(i, 1);
+        const avoidDots = !own && i !== active;
         for (let r = r0; fits && r <= r1; r++) {
           for (let c = c0; c <= c1; c++) {
             const mine = r >= b0 && r <= b1 && c >= a0 && c <= a1 ? 1 : 0;
-            if (taken[r * cols + c] || dots[r * cols + c]! > mine) fits = false;
+            if (taken[r * cols + c] || (avoidDots && dots[r * cols + c]! > mine)) fits = false;
           }
         }
       }
