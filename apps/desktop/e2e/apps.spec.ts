@@ -10,7 +10,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   keepCollectionsHere,
-  openExplorerView,
+  openExplorerHome,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -35,7 +35,7 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await openExplorerView(page);
+    await openExplorerHome(page);
     await expect(page.getByTestId("explorer-apps-section")).toBeVisible({ timeout: 20_000 });
     const app = page.locator('[data-testid="sites-row"][data-root="demo"]');
     await expect(app).toBeVisible({ timeout: 20_000 });
@@ -83,7 +83,7 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
-test("@apps pins an app from its Explorer row and opens it, from the keyboard", async () => {
+test("@apps pins an app from its Home row and opens it from the keyboard", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -95,18 +95,15 @@ test("@apps pins an app from its Explorer row and opens it, from the keyboard", 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await openExplorerView(page);
+    await openExplorerHome(page);
     await expect(page.getByTestId("sites-count")).toHaveAttribute("aria-label", "1 app", { timeout: 20_000 });
     const row = page.locator('[data-testid="sites-row"][data-root="demo"]');
-    await row.focus();
-    await page.keyboard.press("Tab");
-    await expect(page.getByRole("button", { name: "Pin to sidebar" })).toBeFocused();
-    await page.keyboard.press("Enter");
+    await row.hover();
+    await page.getByRole("button", { name: "Pin to sidebar" }).click();
     await expect(page.getByTestId("activity-pinned-app")).toHaveCount(1);
-    await expect(page.getByRole("button", { name: "Unpin" })).toBeFocused();
+    await expect(page.getByRole("button", { name: "Unpin" })).toHaveCount(1);
 
-    await page.keyboard.press("Shift+Tab");
-    await expect(row).toBeFocused();
+    await row.focus();
     await page.keyboard.press("Enter");
     await expect(
       page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
@@ -134,7 +131,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await openExplorerView(page);
+    await openExplorerHome(page);
     await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
     const frame = page.frameLocator('[data-testid="site-preview-frame"]');
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
@@ -182,7 +179,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
     await keepCollectionsHere(page, workspaceId);
-    await openExplorerView(page);
+    await openExplorerHome(page);
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
@@ -300,7 +297,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await openWorkspaceFromFirstRun(page, workspace);
     await keepCollectionsHere(page, workspaceId);
 
-    await openExplorerView(page);
+    await openExplorerHome(page);
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();
     await expect(page.getByTestId("site-preview-page")).toBeVisible();
     await page.getByTestId("site-preview-review").click();

@@ -141,6 +141,7 @@ pub fn drain_open_document_artifacts(
             .map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)
     })?;
     let mut result = OpenArtifactDrain::default();
+    let mut pending = None;
     for (version, object) in keys {
         let key = DocKey::new(workspace_id, version, object).map_err(SyncError::corrupt)?;
         if leases.is_live(&key) {
@@ -199,6 +200,13 @@ pub fn drain_open_document_artifacts(
                 result.conflicts_opened += drained.conflicts_opened;
             }
             Ok(None) => continue,
+            Err(
+                error @ (SyncError::MarkdownWitnessCheckPending { .. }
+                | SyncError::MarkdownReaderPending(_)),
+            ) => {
+                pending.get_or_insert(error);
+                continue;
+            }
             Err(error) => {
                 if !isolate_document_failure(error)? {
                     continue;
@@ -217,6 +225,15 @@ pub fn drain_open_document_artifacts(
             }
         }
         cache.remove(&key);
+    }
+    if let Some(error) = pending
+        && result.changes.is_empty()
+        && result.record_facts.is_empty()
+        && result.refusals.is_empty()
+        && result.sharing_declined.is_empty()
+        && result.conflicts_opened == 0
+    {
+        return Err(error);
     }
     Ok(result)
 }

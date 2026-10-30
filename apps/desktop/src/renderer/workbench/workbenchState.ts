@@ -384,6 +384,9 @@ export interface EditorGroup {
   size: number;
 }
 
+export const EXPLORER_MODES = ["home", "files"] as const;
+export type ExplorerMode = (typeof EXPLORER_MODES)[number];
+
 export interface WorkbenchState {
   activeView: ActivityViewId;
   sidebarVisible: boolean;
@@ -407,6 +410,9 @@ export interface WorkbenchState {
   // Recently opened files, most recent first, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
+  // The Explorer's view: Home groups the workspace by kind, Files is the
+  // folder tree. Saved per workspace with the rest of the ui-state.
+  explorerMode: ExplorerMode;
   // Which view each collection tab shows, keyed by the collection's folder
   // path (Phase 2 collections). Per-user local state: closing the tab or
   // restarting the app must not reset the open view.
@@ -458,6 +464,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
+    explorerMode: "home",
     collectionViews: {},
   };
 }
@@ -1001,6 +1008,10 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
+export function setExplorerMode(state: WorkbenchState, mode: ExplorerMode): WorkbenchState {
+  return mode === state.explorerMode ? state : { ...state, explorerMode: mode };
+}
+
 export function setAboutWidth(state: WorkbenchState, width: number): WorkbenchState {
   const clamped = clampAboutWidth(width);
   return clamped === state.aboutWidth ? state : { ...state, aboutWidth: clamped };
@@ -1218,6 +1229,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
+    explorerMode: state.explorerMode,
     collectionViews: state.collectionViews,
   };
 }
@@ -1400,6 +1412,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
+    explorerMode: EXPLORER_MODES.find((mode) => mode === own("explorerMode")) ?? defaults.explorerMode,
     collectionViews: collectCollectionViews(own("collectionViews")),
   };
 }

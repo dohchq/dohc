@@ -77,6 +77,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
   return (
     <SidePanel
       title={sidePanelTitle}
+      heading={view?.heading?.(props)}
       width={wb.sidebarWidth}
       onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
       actions={

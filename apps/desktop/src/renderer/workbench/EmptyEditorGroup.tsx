@@ -21,11 +21,11 @@ const KIND_TONE: Record<StartKind, string> = {
   drawing: "text-hue-plum",
 };
 
-// What a person can make, in tile order. A file kind takes its name from the
-// kind registry. The registry names no Collection, so that label lives only
-// here.
+// What a person can make, in tile order. A drawing takes its name from the
+// kind registry. A Markdown file is a Page, as the Explorer's Home calls it.
+// The registry names no Collection, so that label lives only here.
 const START_KINDS: readonly { kind: StartKind; label: string; glyph: ReactNode; shortcut?: "new-file" }[] = [
-  { kind: "markdown", label: FILE_KIND_RECORDS.markdown.name, shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
+  { kind: "markdown", label: "Page", shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
   { kind: "collection", label: "Collection", glyph: <ObjectGlyph kind="collection" size={16} className={KIND_TONE.collection} /> },
   { kind: "drawing", label: FILE_KIND_RECORDS.drawing.name, glyph: <KindGlyph kind={FILE_KIND_RECORDS.drawing} size={16} className={KIND_TONE.drawing} /> },
 ];

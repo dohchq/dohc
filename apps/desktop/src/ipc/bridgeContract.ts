@@ -93,6 +93,7 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  EXPLORER_MODES,
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
@@ -6100,6 +6101,8 @@ export const WorkspaceUiState = z.object({
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
   // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+  // Which view the Explorer shows: Home, or the folder tree.
+  explorerMode: z.enum(EXPLORER_MODES).optional().catch(undefined),
   // Which view each collection tab shows, keyed by the collection folder path.
   collectionViews: z
     .record(PATH_STRING, z.string().min(1).max(4096))

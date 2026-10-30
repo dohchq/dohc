@@ -55,17 +55,23 @@ impl ActorHandle {
         workspace_id: String,
         leases: dohc_engine_collab::LeaseRegistry,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store, cache| {
-            dohc_engine_sync::drain_open_document_artifacts(
-                store,
-                cache,
-                &workspace_id,
-                &leases,
-                &NoFaults,
-            )?;
+        let result = self
+            .run(move |store, cache| {
+                dohc_engine_sync::drain_open_document_artifacts(
+                    store,
+                    cache,
+                    &workspace_id,
+                    &leases,
+                    &NoFaults,
+                )?;
+                Ok(())
+            })
+            .await;
+        if super::pending_reader_preparation(&result).is_some() {
             Ok(())
-        })
-        .await
+        } else {
+            result
+        }
     }
 
     /// The workspace's kept displacements, oldest first: files a replace
