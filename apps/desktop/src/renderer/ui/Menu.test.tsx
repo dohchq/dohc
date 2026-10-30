@@ -262,6 +262,27 @@ describe("Menu", () => {
     expect(forget.className.split(" ")).not.toContain("bg-selected");
   });
 
+  it("adds the keyboard's row line only beside a current or checked row", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const rename = screen.getByRole("menuitem", { name: "Rename" }).className.split(" ");
+    expect(rename).not.toContain("dohc-focus-row");
+    expect(rename).toContain("focus-visible:outline-none");
+    // A mouse open focuses the first row; only the keyboard may draw a line.
+    expect(rename.filter((name) => name.startsWith("focus:outline"))).toEqual([]);
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, checked: true }, { ...items[1]!, checked: false }]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitemradio", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+  });
+
   it("keeps the checked row's selected fill whatever has focus", async () => {
     const user = userEvent.setup();
     render(
@@ -339,7 +360,7 @@ describe("Menu", () => {
     const reason = screen.getByText("Only versions made from Main can merge into Main.");
     expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
     expect(merge.contains(reason)).toBe(true);
-    // The row, its focus outline and the reason keep their strength.
+    // The row, its focus fill and the reason keep their strength.
     expect(merge.className).not.toContain("opacity");
     expect(reason.className).not.toContain("opacity");
     expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");

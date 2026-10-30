@@ -44,7 +44,7 @@ function Archive(props: Props) {
   return <Overlay onClose={busy ? undefined : props.onClose}><section role="dialog" aria-modal="true" aria-labelledby="archive-collection-title" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink">
     <h2 id="archive-collection-title" className="m-0 text-base font-semibold">Archive {props.name}?</h2>
     <p className="m-0 text-[13px] text-muted">Apps will stop reading and changing this Collection. Records and files stay saved.</p>
-    <p className="m-0 text-[13px] text-muted">Restore it from Archived collections to use it again.</p>
+    <p className="m-0 text-[13px] text-muted">Restore it from archived Collections to use it again.</p>
     <div className="min-h-0 overflow-auto">
       <h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
       {!page ? busy ? <SkeletonRows rows={2} label="Loading apps…" /> : <p className="m-0 text-[12px] text-muted">Refresh to see affected apps.</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No apps on this page use this Collection.</p>}

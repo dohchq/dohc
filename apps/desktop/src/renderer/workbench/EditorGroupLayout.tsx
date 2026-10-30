@@ -3,14 +3,14 @@ import { clampEditorGroupPairLeftSize } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
-// The group takes focus when its last tab closes. The global ring would
+// The group takes focus when its last tab closes. The global halo would
 // paint outside the group, where the window edge and its neighbours cut off
 // all but its top edge, and an inset outline would sit under the tab strip.
-// So the same 2px accent ring is drawn inside the group, on a layer above
-// its contents. Forced colors give every other focus ring the system
-// Highlight color, and this one takes it too.
+// So the keyboard's focus draws a row's 1px accent line inside the group, on
+// a layer above its contents. Forced colors give every other focus mark the
+// system Highlight color, and this one takes it too.
 const GROUP_FOCUS_RING =
-  "focus-visible:outline-none focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-20 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-accent forced-colors:focus-visible:after:outline-[Highlight]";
+  "focus-visible:outline-none keyboard:focus-visible:after:pointer-events-none keyboard:focus-visible:after:absolute keyboard:focus-visible:after:inset-0 keyboard:focus-visible:after:z-20 keyboard:focus-visible:after:outline-1 keyboard:focus-visible:after:-outline-offset-1 keyboard:focus-visible:after:outline-accent forced-colors:keyboard:focus-visible:after:outline-[Highlight]";
 
 interface EditorGroupLayoutItem {
   id: string;
@@ -169,7 +169,7 @@ export function EditorGroupLayout(props: {
                 onLostPointerCapture={(event) =>
                   resizeCommit.commit(event.pointerId)
                 }
-                className="group/resize relative z-10 w-px shrink-0 cursor-col-resize bg-line outline-none before:absolute before:-left-1 before:inset-y-0 before:w-[9px] focus-visible:bg-ink/50"
+                className="group/resize relative z-10 w-px shrink-0 cursor-col-resize bg-line outline-none before:absolute before:-left-1 before:inset-y-0 before:w-[9px] keyboard:focus-visible:bg-ink/50"
               >
                 <span
                   aria-hidden
