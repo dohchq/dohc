@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
-const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
+const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously"; url?: string }) => {
   window: Window & typeof globalThis & { value?: string; log?: string[] };
 } };
 
@@ -21,8 +21,8 @@ describe("compiled app document", () => {
     const output = createAppDocument([file("bundle.js", original)], limits);
     const dom = new JSDOM(output.html, { runScripts: "dangerously" });
     const scripts = [...dom.window.document.querySelectorAll("script")];
-    expect(scripts).toHaveLength(2);
-    expect(scripts[1]!.textContent).toBe(original);
+    expect(scripts).toHaveLength(3);
+    expect(scripts[2]!.textContent).toBe(original);
     for (const node of scripts) {
       const source = `'sha256-${createHash("sha256").update(node.textContent!).digest("base64")}'`;
       expect(output.scriptSources).toContain(source);
@@ -49,6 +49,34 @@ describe("compiled app document", () => {
     for (const inventory of [[altered], [file("../bundle.js", "")], [file("bundle.js", ""), file("bundle.js", "")], [file("bundle.css", "")]]) {
       expect(() => createAppDocument(inventory, limits)).toThrow();
     }
+  });
+
+  it("opens a plain link to another site in a new tab, and leaves every other link to the browser", () => {
+    const links = '<a id="out" href="https://example.org/page"><b>Out</b></a><a id="top" target="_top" href="https://example.org/top">Top</a>' +
+      '<a id="own" href="/other">Own</a><a id="blank" target="_blank" href="https://example.org/blank">Blank</a>' +
+      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>' +
+      '<a id="handled" href="https://example.org/handled">Handled</a>';
+    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};` +
+      'document.getElementById("handled").addEventListener("click",e=>e.preventDefault());')], limits);
+    const dom = new JSDOM(output.html, { runScripts: "dangerously", url: "https://app.example.net/bootstrap" });
+    const opened: unknown[][] = [];
+    dom.window.open = (...args: unknown[]) => { opened.push(args); return null; };
+    // The test's own listener comes last: it reads what dohc's did, then keeps jsdom from navigating.
+    let prevented = false;
+    dom.window.addEventListener("click", event => { prevented = event.defaultPrevented; event.preventDefault(); });
+    const click = (selector: string, init: MouseEventInit = {}) => {
+      dom.window.document.querySelector(selector)!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+      return prevented;
+    };
+    expect(click("#out b")).toBe(true);
+    expect(click("#top")).toBe(true);
+    expect(opened).toEqual([["https://example.org/page", "_blank", "noopener"], ["https://example.org/top", "_blank", "noopener"]]);
+    for (const selector of ["#own", "#blank", "#mail", "#file"]) expect(click(selector)).toBe(false);
+    expect(click("#out", { ctrlKey: true })).toBe(false);
+    expect(click("#out", { button: 1 })).toBe(false);
+    expect(click("#handled")).toBe(true);
+    expect(opened).toHaveLength(2);
+    dom.window.close();
   });
 
   it("bounds original and rendered bytes independently", () => {
@@ -85,14 +113,14 @@ describe("compiled app document", () => {
 
     it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
-      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>window\.registry = true;<\/script><title>Trip<\/title>/);
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
       expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
       expect(dom.window.document.title).toBe("Trip");
       expect(dom.window.document.body.className).toBe("trip");
       expect(dom.window.log).toEqual(["head:false", "box:box:false", "last:true"]);
       for (const text of [...scripts, "window.registry = true;"]) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
-      expect(output.scriptSources).toHaveLength(5);
+      expect(output.scriptSources).toHaveLength(6);
       dom.window.close();
     });
 

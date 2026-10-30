@@ -8,7 +8,7 @@ test("real HTTPS top-level handoff keeps app authority outside its opaque child"
   const viewer = "https://viewer.example.com", publicationId = "a".repeat(64);
   let active = true;
   const events: Array<{path: string; status: number; origin: string | null; cookie: boolean}> = [];
-  const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`);
+  const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';document.body.insertAdjacentHTML('beforeend','<a id="out" href="https://external.example.org/page">Outside</a>');fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`);
   const file = {path:"bundle.js",sha256:createHash("sha256").update(bytes).digest("hex"),byteLength:bytes.length,contentType:"text/javascript; charset=utf-8"};
   const app = createAppLaunchHandler({config:{viewerOrigin:viewer,appDomain:"example.net"},relayUrl:"https://relay.example.org",
     resolveMaterial:async (_d,cookie)=>cookie?.includes("viewer=session")?{ok:true,capabilityToken:"private-server-capability",profileSecret:"private-profile",setCookie:null,currentCapability:async()=>"private-server-capability"}:{ok:false,status:404},
@@ -30,7 +30,7 @@ $cert.Dispose();$rsa.Dispose()`;
   const spki = createHash("sha256").update(cert.publicKey.export({type:"spki",format:"der"})).digest("base64");
   const server = https.createServer({pfx:Buffer.from(pfxText!,"base64"),passphrase:""},async(req,res)=>{
     const host=req.headers.host!,path=req.url!;
-    if(host==="external.example.org"){res.writeHead(200,{"access-control-allow-origin":"*"});res.end("received");return;}
+    if(host==="external.example.org"){res.writeHead(200,{"access-control-allow-origin":"*"});res.end(path==="/page"?"<title>Outside</title>":"received");return;}
     if(host==="viewer.example.com"&&path==="/"){
       res.writeHead(200,{"content-type":"text/html","set-cookie":"viewer=session; Secure; HttpOnly; SameSite=Strict; Path=/"});
       res.end(`<!doctype html><button id="open">Open app</button><script>document.getElementById('open').onclick=async()=>{const r=await fetch('/api/apps/launch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({discriminator:'abcdefghijkl',publicationId:'${publicationId}'})});const launch=await r.json();const f=document.createElement('form');f.method='POST';f.action=launch.action;const i=document.createElement('input');i.type='hidden';i.name='handoff';i.value=launch.handoff;f.append(i);document.body.append(f);f.submit();};</script>`);return;
@@ -58,6 +58,10 @@ $cert.Dispose();$rsa.Dispose()`;
     expect(checks).toEqual({parent:true,cookie:true,storage:true});
     await expect.poll(()=>events.some(e=>e.path==="/document"&&e.origin==="null"&&e.status===404)).toBe(true);
     expect(events.some(e=>e.path==="/document"&&e.status===200&&e.cookie)).toBe(true);
+    // A plain link to another site opens it in a new tab, and the app stays.
+    const [opened]=await Promise.all([context.waitForEvent("page"),child.locator("#out").click()]);
+    await expect(opened).toHaveURL("https://external.example.org/page");await expect(opened).toHaveTitle("Outside");await opened.close();
+    await expect(child.locator("#root")).toHaveText("App loaded");
     await page.reload();
     await expect(page.frameLocator("iframe").locator("#root")).toHaveText("App loaded");
     expect(events.filter(e=>e.path==="/bootstrap"&&e.status===200)).toHaveLength(2);
