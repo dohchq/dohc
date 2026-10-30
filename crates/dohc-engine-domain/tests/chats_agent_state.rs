@@ -60,6 +60,7 @@ fn send(
     thread: &str,
     message: &str,
     kind: ChatActorKind,
+    parent: Option<&str>,
     at: i64,
 ) {
     chats
@@ -73,7 +74,7 @@ fn send(
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,
                 author_user_id: Some("ada".to_owned()),
-                parent_message_id: None,
+                parent_message_id: parent.map(str::to_owned),
                 origin: None,
                 body: message.to_owned(),
                 needs_decision: false,
@@ -443,7 +444,7 @@ fn agent_read_cursor_clamps_to_latest_and_never_moves_back() {
     base_chat(&mut store);
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
-    send(&mut chats, "thread", "m2", ChatActorKind::Human, 20);
+    send(&mut chats, "thread", "m2", ChatActorKind::Human, None, 20);
     let clamped = chats
         .mark_thread_read_by_agent(WS, None, "thread", 999, "z", None, 30, &NO_FAULTS)
         .expect("clamp");
@@ -486,7 +487,7 @@ fn agent_unread_requires_latest_human_message_beyond_cursor() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "human", "h1", ChatActorKind::Human, 10);
     start(&mut chats, "agent", "a1", ChatActorKind::Human, 11);
-    send(&mut chats, "agent", "a2", ChatActorKind::Agent, 12);
+    send(&mut chats, "agent", "a2", ChatActorKind::Agent, None, 12);
     chats
         .mark_thread_read_by_agent(WS, None, "human", 10, "h1", None, 20, &NO_FAULTS)
         .expect("read");
@@ -505,7 +506,7 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
     base_chat(&mut store);
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "a", ChatActorKind::Human, 10);
-    send(&mut chats, "thread", "b", ChatActorKind::Human, 10);
+    send(&mut chats, "thread", "b", ChatActorKind::Human, None, 10);
     chats
         .mark_thread_read_by_agent(WS, None, "thread", 10, "a", None, 20, &NO_FAULTS)
         .expect("read a");
@@ -689,7 +690,7 @@ fn recent_dispatch_count_skips_runs_a_person_started_in_their_agent_dm_conversat
             ..start_input("wake", "wake-1", ChatActorKind::Agent, 13)
         };
         chats.start_channel_thread(&wake, &NO_FAULTS).expect("wake");
-        send(&mut chats, "wake", "wake-reply", ChatActorKind::Human, 14);
+        send(&mut chats, "wake", "wake-reply", ChatActorKind::Human, None, 14);
         conversation
     };
     for (index, (trigger, thread)) in [
@@ -1146,5 +1147,62 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
             .expect("claim")
             .is_none(),
         "the request ran once"
+    );
+}
+
+#[test]
+fn claim_folds_pending_triggers_only_from_the_same_place() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    start(&mut chats, "thread", "root-a", ChatActorKind::Human, 10);
+    send(&mut chats, "thread", "root-b", ChatActorKind::Human, None, 11);
+    for (message, parent, at) in [
+        ("main-1", None, 12),
+        ("main-2", None, 13),
+        ("a-1", Some("root-a"), 14),
+        ("a-2", Some("root-a"), 15),
+        ("b-1", Some("root-b"), 16),
+    ] {
+        send(&mut chats, "thread", message, ChatActorKind::Human, parent, at);
+        chats
+            .enqueue_dispatch(WS, message, "default", "thread", at, &NO_FAULTS)
+            .expect("enqueue");
+    }
+    let mut runs = Vec::new();
+    for (run, at) in [("run-1", 20), ("run-2", 30), ("run-3", 40)] {
+        let claim = chats
+            .claim_next_pending(WS, run, "agent", None, at, &NO_FAULTS)
+            .expect("claim")
+            .expect("some claim");
+        runs.push(claim.dispatch.trigger_message_id);
+        chats
+            .complete_dispatch(WS, run, 0, at + 1, &NO_FAULTS)
+            .expect("complete");
+    }
+    assert_eq!(runs, ["main-1", "a-1", "b-1"]);
+    let covered: Vec<(String, Option<String>)> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT trigger_message_id, run_id FROM chat_dispatch_ledger \
+                 WHERE workspace_id = ?1 ORDER BY created_at_ms",
+            )?;
+            let rows = statement
+                .query_map(params![WS], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .expect("ledger");
+    assert_eq!(
+        covered,
+        [
+            ("main-1", "run-1"),
+            ("main-2", "run-1"),
+            ("a-1", "run-2"),
+            ("a-2", "run-2"),
+            ("b-1", "run-3"),
+        ]
+        .map(|(trigger, run)| (trigger.to_owned(), Some(run.to_owned()))),
+        "two stream messages fold, two replies in one thread fold, and another thread's reply waits",
     );
 }
