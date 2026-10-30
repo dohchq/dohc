@@ -42,7 +42,7 @@ fn baseline_preparation(f: &Fixture, fence: NativeRestoreFenceReceipt) -> Native
     }
 }
 
-fn prepare(f: &mut Fixture, input: NativeRestorePreparation, max_bytes: usize) -> Result<NativeRestoreProposal, ApplicationError> {
+fn prepare_restore_for(f: &mut Fixture, input: NativeRestorePreparation, max_bytes: usize) -> Result<NativeRestoreProposal, ApplicationError> {
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     f._owner.prepare_restore(&mut f.store, None, input, coordinate, max_bytes, 100, &NoFaults)
 }
@@ -181,7 +181,7 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
             Err(ApplicationError::Conflict)
         ));
         let preparation = baseline_preparation(&f, fence.clone());
-        assert!(matches!(prepare(&mut f, preparation, 2_000_000), Err(ApplicationError::Conflict)));
+        assert!(matches!(prepare_restore_for(&mut f, preparation, 2_000_000), Err(ApplicationError::Conflict)));
         // The relay's key at the generation before refuses; the key at the
         // fenced generation retires and releases.
         assert!(matches!(begin(&mut f, 10), Err(ApplicationError::Conflict)), "edited={edited}");
@@ -310,7 +310,7 @@ fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applie
     let fence = fence_next(&mut f, "genuine").unwrap();
     assert_eq!(fence.operation.terminal, endpoint.unwrap().terminal_receipt);
     let preparation = baseline_preparation(&f, fence);
-    let proposal = prepare(&mut f, preparation.clone(), 2_000_000).unwrap();
+    let proposal = prepare_restore_for(&mut f, preparation.clone(), 2_000_000).unwrap();
     assert_eq!(proposal.receipt().accepted_history.event_count, 0);
     let input = restore_application(&f, preparation, &proposal, 21);
     apply_restore(&mut f, input).unwrap();
@@ -522,7 +522,7 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     f.adopt().unwrap();
     let fence = fence_next(&mut f, "restore").unwrap();
     let preparation = baseline_preparation(&f, fence);
-    assert!(prepare(&mut f, preparation, 64).is_err(), "the preparation exceeds its limits");
+    assert!(prepare_restore_for(&mut f, preparation, 64).is_err(), "the preparation exceeds its limits");
     cancel_fenced(&mut f, "restore");
 }
 
