@@ -78,6 +78,9 @@ export function accessReasonFor(facts: AccessFacts, path: string): AccessReason 
 export const ABOUT_ROW =
   "flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75";
 export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hover:text-ink dohc-focus-row`;
+// A row of two lines, as History draws a change: its mark, what it is and
+// when, then the words under it.
+const ABOUT_TWO_LINES = "grid h-12 w-full min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)_auto] content-center gap-x-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-row";
 
 // The open object: its mark, its name, then who is here.
 export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
@@ -108,11 +111,16 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
 
 // A section head is its disclosure, drawn like the Explorer's: the label, the
 // count, then the chevron, with the section's own actions at the right. A
-// count of 0 is not drawn: the empty section is its head alone.
+// section with nothing to show is its head alone: its count, or `summary` in
+// its place, and no chevron, since there is nothing to open.
 export function AboutSection(props: {
   id: AboutSectionId;
   label: string;
   count?: string;
+  empty?: boolean;
+  summary?: ReactNode;
+  // What the head's pointer shows, such as when Access was checked.
+  title?: string;
   expanded: boolean;
   onToggle: () => void;
   // For a section that hands focus to its own head.
@@ -121,34 +129,43 @@ export function AboutSection(props: {
   children: ReactNode;
 }) {
   const bodyId = useId();
+  const label = <span className="min-w-0 truncate">{props.label}</span>;
+  const count = props.count !== undefined && (props.empty || props.count !== "0") ? (
+    <span
+      data-testid={`about-${props.id}-count`}
+      className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-subtle"
+    >
+      {props.count}
+    </span>
+  ) : null;
   return (
     <section data-testid={`about-${props.id}`} aria-label={props.label} className="mt-4 first:mt-2">
-      <div className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover">
-        <h3 className="m-0 flex h-full min-w-0 flex-1">
-          <button
-            ref={props.toggleRef}
-            type="button"
-            data-testid={`about-${props.id}-toggle`}
-            aria-expanded={props.expanded}
-            aria-controls={bodyId}
-            onClick={props.onToggle}
-            className="dohc-section-label dohc-focus-row flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left group-hover:text-muted"
-          >
-            <span className="min-w-0 truncate">{props.label}</span>
-            {props.count !== undefined && props.count !== "0" ? (
-              <span
-                data-testid={`about-${props.id}-count`}
-                className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-subtle"
-              >
-                {props.count}
-              </span>
-            ) : null}
-            <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${props.expanded ? "rotate-90" : ""}`} />
-          </button>
-        </h3>
+      <div title={props.title} className={`group mx-1 flex h-6 items-center gap-1 rounded-md ${props.empty ? "" : "hover:bg-hover"}`}>
+        {props.empty ? (
+          <h3 className="dohc-section-label m-0 flex h-full min-w-0 flex-1 items-center gap-2 px-2">
+            {label}
+            {props.summary ?? count}
+          </h3>
+        ) : (
+          <h3 className="m-0 flex h-full min-w-0 flex-1">
+            <button
+              ref={props.toggleRef}
+              type="button"
+              data-testid={`about-${props.id}-toggle`}
+              aria-expanded={props.expanded}
+              aria-controls={bodyId}
+              onClick={props.onToggle}
+              className="dohc-section-label dohc-focus-row flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left group-hover:text-muted"
+            >
+              {label}
+              {count}
+              <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${props.expanded ? "rotate-90" : ""}`} />
+            </button>
+          </h3>
+        )}
         {props.actions ? <div className="flex shrink-0 items-center gap-1">{props.actions}</div> : null}
       </div>
-      {props.expanded ? (
+      {props.expanded && !props.empty ? (
         <div id={bodyId} className="px-1">
           {props.children}
         </div>
@@ -626,7 +643,7 @@ function LinkSnippet(props: { link: LinkEntry }) {
   const start = Math.max(0, Math.min(props.link.highlightStart, snippet.length));
   const end = Math.max(start, Math.min(props.link.highlightEnd, snippet.length));
   return (
-    <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
+    <span className="col-start-2 col-end-4 min-w-0 truncate text-[12px] leading-4 text-subtle">
       {snippet.slice(0, start)}
       <mark className="bg-transparent text-muted">{snippet.slice(start, end)}</mark>
       {snippet.slice(end)}
@@ -634,8 +651,8 @@ function LinkSnippet(props: { link: LinkEntry }) {
   );
 }
 
-// One link into the file, on one line: the file it is in, then the words
-// around it. The tooltip holds the whole line and the file's path.
+// One link into the file: the file it is in, then the words around it. The
+// tooltip holds the whole line and the file's path.
 function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
   const { link } = props;
   return (
@@ -646,12 +663,12 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
       data-line={link.line}
       title={`${link.snippet}\n${link.source}`}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} h-7`}
+      className={ABOUT_TWO_LINES}
     >
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <KindGlyph kind={fileKindForPath(link.source)} size={14} />
       </span>
-      <span className="max-w-[50%] shrink-0 truncate">{link.title}</span>
+      <span className="col-end-4 min-w-0 truncate text-ink">{link.title}</span>
       <LinkSnippet link={link} />
     </button>
   );
@@ -662,6 +679,7 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
 // A row out of the rail's view skips layout and paint until it scrolls in;
 // its focus ring and hover fill sit inside it, so nothing is clipped.
 export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_28px]";
+const OFFSCREEN_TWO_LINES = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
 // What makes a row the same row from one page to the next.
 const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
@@ -671,7 +689,7 @@ const LinkList = memo(function LinkList(props: { rows: LinkEntry[]; onOpenLink: 
   return (
     <ul data-testid="about-links-list" className="m-0 list-none p-0">
       {props.rows.map((link) => (
-        <li key={linkKey(link)} className={OFFSCREEN_ROW}>
+        <li key={linkKey(link)} className={OFFSCREEN_TWO_LINES}>
           <LinkRow link={link} onOpen={() => props.onOpenLink(link.source, link.line)} />
         </li>
       ))}
@@ -686,7 +704,7 @@ const ChatLinkList = memo(function ChatLinkList(props: {
   return (
     <ul data-testid="chat-file-mentions" className="m-0 list-none p-0">
       {props.rows.map((mention) => (
-        <li key={chatLinkKey(mention)} className={OFFSCREEN_ROW}>
+        <li key={chatLinkKey(mention)} className={OFFSCREEN_TWO_LINES}>
           <ChatLinkRow mention={mention} onOpen={() => props.onOpenChat(mention)} />
         </li>
       ))}
@@ -694,9 +712,8 @@ const ChatLinkList = memo(function ChatLinkList(props: {
   );
 });
 
-// A chat message that links to the file, on one line: where it was said,
-// who said what, then when. The record names no author kind, so no avatar
-// guesses one.
+// A chat message that links to the file: where it was said and when, then
+// who said what. The record names no author kind, so no avatar guesses one.
 function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void }) {
   const { mention } = props;
   const when = formatChatTime(mention.message.createdAtMs);
@@ -708,18 +725,18 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       data-thread-id={mention.thread.id}
       title={`${mention.message.authorDisplayName}: ${mention.message.preview}`}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} h-7`}
+      className={ABOUT_TWO_LINES}
     >
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} />
       </span>
-      <span className="max-w-[50%] shrink-0 truncate">{where}</span>
-      <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
-        <span className="text-muted">{mention.message.authorDisplayName}</span> {mention.message.preview}
-      </span>
+      <span className="min-w-0 truncate text-ink">{where}</span>
       <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
         {formatShortTime(mention.message.createdAtMs)}
       </time>
+      <span className="col-start-2 col-end-4 min-w-0 truncate text-[12px] leading-4 text-subtle">
+        <span className="text-muted">{mention.message.authorDisplayName}</span> {mention.message.preview}
+      </span>
     </button>
   );
 }
@@ -785,12 +802,13 @@ export function AboutLinksView(props: {
   const linkRows = links?.status === "ready" ? links : null;
   const chatRows = chats?.status === "ready" ? chats : null;
   const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
+  const empty = count === "0" && linkRows !== null && linkRows.gathering === 0 && (chatRows?.gathering ?? 0) === 0;
   const ownToggle = useRef<HTMLButtonElement>(null);
   const toggleRef = props.toggleRef ?? ownToggle;
   const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, linkKey, toggleRef, '[data-testid="about-link"]');
   const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, chatLinkKey, toggleRef, '[data-testid="chat-file-mention"]');
   return (
-    <AboutSection id="links" label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}
+    <AboutSection id="links" label="Links" count={count} empty={empty} expanded={props.expanded} onToggle={props.onToggle}
       toggleRef={toggleRef}>
       {links === null ? (
         <AboutNote testId="about-links-shared" icon={Link2Off}>
@@ -973,6 +991,7 @@ export function AboutHistoryView(props: {
       id="history"
       label="History"
       count={view.status === "ready" ? `${shown.length}${more ? "+" : ""}` : undefined}
+      empty={view.status === "ready" && view.moments.length === 0 && !view.more && !paused}
       expanded={props.expanded}
       onToggle={props.onToggle}
       actions={props.onOpenHistory ? (
@@ -1064,6 +1083,15 @@ function emptyWithin(answer: AccessAnswer, noun: AccessNoun): EmptyWithin | null
 }
 
 // The one row an answer with nobody else shows.
+function OnlyYou() {
+  return (
+    <span data-testid="about-access-empty" className="flex min-w-0 items-center gap-1 text-[12px] font-normal text-muted">
+      <Lock size={12} aria-hidden className="shrink-0" />
+      <span className="truncate">Only you</span>
+    </span>
+  );
+}
+
 function OnlyYouRow() {
   return (
     <div data-testid="about-access-empty" className={`${ABOUT_ROW} h-7`}>
@@ -1350,11 +1378,20 @@ export function AboutAccessView(props: {
   const { view } = props;
   const noun = props.noun ?? "file";
   const empty = view.status === "ready" ? emptyWithin(view.answer, noun) : null;
+  // A fresh answer says nothing about itself; its head's tooltip holds when
+  // main checked it. A file only you can open says so in its head.
+  const fresh = view.status === "ready" && empty !== null && view.answer.freshness === "fresh";
+  const checkedAtMs = view.status === "ready" ? view.answer.checkedAtMs : null;
+  const onlyYou = fresh && view.status === "ready" && empty?.only === true && view.answer.rows.length === 0 &&
+    view.answer.coverage.complete && view.answer.nextCursor === null;
   return (
     <AboutSection
       id="access"
       label="Access"
       count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
+      empty={onlyYou}
+      summary={onlyYou ? <OnlyYou /> : undefined}
+      {...(fresh && checkedAtMs !== null ? { title: `Checked ${formatChatTime(checkedAtMs).label}` } : {})}
       expanded={props.expanded}
       onToggle={props.onToggle}
       actions={props.onShare ? (
@@ -1377,7 +1414,7 @@ export function AboutAccessView(props: {
               answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>
-              <AccessChecked testId="about-access-freshness" answer={view.answer} />
+              {fresh ? null : <AccessChecked testId="about-access-freshness" answer={view.answer} />}
               {view.answer.rows.length > 0 ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
               ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (

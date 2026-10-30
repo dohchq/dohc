@@ -199,6 +199,7 @@ export function AboutConversationLinksView(props: {
   return (
     <AboutSection id="links" label="Links"
       count={ready ? `${ready.files.length}${ready.more || ready.building ? "+" : ""}` : undefined}
+      empty={ready !== null && ready.files.length === 0 && !ready.more && !ready.building && !ready.partial}
       expanded={props.expanded} onToggle={props.onToggle} toggleRef={toggleRef}>
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />

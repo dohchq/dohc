@@ -554,6 +554,7 @@ export function LinkedChatsPanel(props: {
           id="chats"
           label="Comments"
           count={ready ? String(ready.threads.length) : undefined}
+          empty={ready !== null && ready.threads.length === 0 && commenting === null && !readOnly && !untracked}
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
           actions={canComment ? (
