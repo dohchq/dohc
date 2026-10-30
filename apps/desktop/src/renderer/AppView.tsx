@@ -1,4 +1,4 @@
-import { Globe2 } from "lucide-react";
+import { AppWindow } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
@@ -29,7 +29,7 @@ export const APP_OPEN_FAILED = "dohc could not open this app.";
 export const APP_CRASHED = "This app stopped working.";
 export const APP_LIMIT = "Close another app before opening this one.";
 export const APP_SESSION_ENDED = "This app lost its connection to dohc.";
-export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Open the app in your browser to download it.";
+export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Download it from your browser.";
 const BROWSER_OPEN_FAILED = "dohc could not open this app in your browser.";
 // A load the app replaced before it finished, such as a second click.
 const LOAD_ABORTED = -3;
@@ -223,7 +223,7 @@ export function useAppView(options: {
         notices?.report({ identity: sessionId, message: APP_SESSION_ENDED, retry: null,
           action: { label: "Reload", run: () => void launchRef.current(), ends: true } });
       } else if (event.kind === "download-blocked") {
-        notices?.report({ identity: downloadId, title: `Didn't download ${event.filename}`, message: APP_DOWNLOAD_BLOCKED, retry: null,
+        notices?.report({ identity: downloadId, title: `dohc didn't download ${event.filename}`, message: APP_DOWNLOAD_BLOCKED, retry: null,
           action: { label: "Open in browser", run: () => void openInBrowserRef.current(), ends: true } });
       } else if (event.kind === "external-link") {
         void openLinkExternally(event.url);
@@ -328,7 +328,7 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
   if (state.status === "unapproved") {
     return (
       <div data-testid="app-view-unapproved" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-        <Globe2 size={24} aria-hidden className="text-subtle" />
+        <AppWindow size={24} aria-hidden className="text-subtle" />
         <p className="m-0 max-w-sm text-sm text-muted">
           {state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
         </p>

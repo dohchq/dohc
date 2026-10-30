@@ -291,8 +291,8 @@ describe("an owner app in its tab", () => {
     emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "receipt.pdf" });
     emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "invoice.pdf" });
     const [first, second] = notices.report.mock.calls.map(([notice]) => notice);
-    expect(first).toEqual(expect.objectContaining({ title: "Didn't download receipt.pdf", message: APP_DOWNLOAD_BLOCKED, retry: null }));
-    expect(second).toEqual(expect.objectContaining({ title: "Didn't download invoice.pdf", identity: first.identity }));
+    expect(first).toEqual(expect.objectContaining({ title: "dohc didn't download receipt.pdf", message: APP_DOWNLOAD_BLOCKED, retry: null }));
+    expect(second).toEqual(expect.objectContaining({ title: "dohc didn't download invoice.pdf", identity: first.identity }));
     expect(second.action.label).toBe("Open in browser");
     expect(screen.getByTestId("site-preview-page").textContent).not.toContain("download");
     await act(async () => second.action.run());
