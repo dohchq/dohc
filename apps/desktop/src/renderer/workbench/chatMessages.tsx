@@ -341,7 +341,7 @@ export function MessageReactions(props: {
       className={`${
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
-          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default"
       } aria-disabled:opacity-50 aria-disabled:cursor-default`}
     >
       <SmilePlus size={16} aria-hidden />
@@ -706,7 +706,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div
           className={`group relative grid ${sizes.row} ${continues ? "pt-px" : "pt-1.5"} pb-1 ${
-            open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover focus-within:bg-hover"
+            open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover keyboard:focus-within:bg-hover"
           }`}
         >
           {/* A continued message's time sits in the face's column, ending at

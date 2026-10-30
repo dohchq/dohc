@@ -431,7 +431,7 @@ function NavRow(props: {
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
       {...props.data}
-      className={`mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-visible ${
+      className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
         props.active ? "bg-selected" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
@@ -470,7 +470,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-40"
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40"
     >
       {props.children}
     </button>
@@ -3874,7 +3874,7 @@ export function ChatsView(props: {
                   type="button"
                   data-testid="chats-feed-empty-groups"
                   onClick={variant === "page" ? props.onOpenNavigator : goBack}
-                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-ink"
                 >
                   Open Groups
                 </button>
@@ -4004,7 +4004,7 @@ export function ChatsView(props: {
                     <button
                       type="button"
                       onClick={open}
-                      className="flex w-full cursor-pointer gap-3 text-left dohc-focus-visible"
+                      className="dohc-focus-row flex w-full cursor-pointer gap-3 rounded-md text-left"
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
@@ -4344,7 +4344,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -4378,7 +4378,7 @@ export function ChatsView(props: {
                 data-testid="chats-resume-computer-dispatch"
                 onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
                   props.onError(withErrorWords("dohc could not resume agent replies on this computer.", error), error))}
-                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink"
               >
                 Resume
               </button>
@@ -4398,7 +4398,7 @@ export function ChatsView(props: {
                 data-testid="chats-resume-dispatch"
                 disabled={dispatchActionBusy}
                 onClick={() => void resumeThreadDispatch()}
-                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
                 Resume
               </button>
@@ -4661,7 +4661,7 @@ export function ChatsView(props: {
                   title={channelGrants.length > 0 ? "Members" : "Add members"}
                   aria-expanded={sharePanelOpen}
                   onClick={() => setSharePanelOpen((open) => !open)}
-                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
                 >
                   {channelGrants.length > 0 ? (
                     <span className="flex items-center -space-x-1.5">
@@ -4745,7 +4745,7 @@ export function ChatsView(props: {
                           nav.channel.name,
                         )
                       }
-                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
                     >
                       Remove
                     </button>
@@ -5089,7 +5089,7 @@ export function ChatsView(props: {
                       data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
-                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                     >
                       {joiningShareId === row.shareId ? "Joining…" : "Join"}
                     </button>
@@ -5287,7 +5287,7 @@ export function ChatsView(props: {
                   onClick={() =>
                     hasAgent && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
                   }
-                  className="mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="dohc-focus-row mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                 >
                   {hasAgent ? (
                     <>

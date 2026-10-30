@@ -214,7 +214,7 @@ export function ComposerModeBar(props: {
         data-testid={props.cancelTestId}
         aria-label={props.cancelLabel}
         onClick={props.onCancel}
-        className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded px-1 text-subtle hover:text-ink"
       >
         ×
       </button>

@@ -5,6 +5,7 @@ import { AppErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
 import { restoreOrphanedDrafts } from "./orphanedDrafts";
 import { initTheme } from "./theme";
+import { initKeyboardNavigation } from "./keyboardNavigation";
 import { initReducedMotion } from "./reducedMotion";
 import { initWindowFullScreen } from "./windowFullScreen";
 import "@fontsource-variable/inter";
@@ -19,6 +20,7 @@ initTheme();
 const stopReducedMotion = initReducedMotion();
 window.addEventListener("pagehide", stopReducedMotion, { once: true });
 initWindowFullScreen();
+initKeyboardNavigation();
 installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run
 // left behind go back into the store, so the first paint already carries their

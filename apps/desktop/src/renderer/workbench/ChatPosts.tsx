@@ -164,7 +164,7 @@ export function PollOptions(props: {
               disabled={!props.onChoose}
               aria-pressed={taken}
               onClick={() => props.onChoose?.(option)}
-              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
+              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
                   : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
@@ -222,7 +222,7 @@ export function DecisionStatus(props: {
             type="button"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
+            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink"
           >
             Answer
           </button>
@@ -326,7 +326,7 @@ function RunChip(props: { run: ChatRunRecord }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
@@ -415,7 +415,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -437,7 +437,7 @@ export function BookmarkAction(props: {
               event.stopPropagation();
               props.onToggle?.("live");
             }}
-            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
+            className={`grid size-6 place-items-center rounded disabled:opacity-50 ${
               props.active
                 ? "text-accent hover:bg-hover"
                 : "text-subtle hover:bg-hover hover:text-ink"
@@ -617,7 +617,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>

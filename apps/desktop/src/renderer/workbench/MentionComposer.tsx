@@ -627,7 +627,7 @@ export function MentionComposer(props: {
               aria-label="Write a post"
               title={props.placeholder}
               onClick={() => textareaRef.current?.focus()}
-              className="flex h-9 min-w-0 flex-1 items-center rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted dohc-focus-visible"
+              className="flex h-9 min-w-0 flex-1 items-center rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted"
             >
               <span className="min-w-0 truncate">{props.placeholder}</span>
             </button>

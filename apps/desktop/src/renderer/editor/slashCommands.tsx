@@ -440,7 +440,7 @@ export function makeSlashCommandPlugin({
 
 // The slash menu, drawn from the Menu part's recipe. The editor keeps focus
 // and its keys move the active option (handleKeyDown above), so the option
-// draws the accent outline whenever it is active, and the list scrolls only
+// takes the selected fill whenever it is active, and the list scrolls only
 // itself to show it.
 export function SlashCommandMenu({
   state,

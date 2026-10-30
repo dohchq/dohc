@@ -555,7 +555,7 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
             <li key={index}>
               <button
                 type="button"
-                className={`dohc-outline-item dohc-outline-item--level-${h.level}${
+                className={`dohc-focus-row dohc-outline-item dohc-outline-item--level-${h.level}${
                   index === activeIndex ? " is-active" : ""
                 }`}
                 aria-current={index === activeIndex ? "true" : undefined}
