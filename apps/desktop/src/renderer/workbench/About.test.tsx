@@ -1646,7 +1646,7 @@ describe("About History authors", () => {
       authorPresentations: [token("teal")] }).querySelector('[title="Sam"]')?.className).toContain("text-hue-teal");
   });
 
-  it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the file mark", () => {
+  it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the origin mark", () => {
     setChosenColors(settingsWithAgent({ hue: "teal" }));
     const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
     expect(row({ agentAuthorName: "Nova", authors: [agent], authorPresentations: [token(null, true)] }).querySelector('[title="Nova"]')?.className).toContain("text-hue-teal");
@@ -1667,8 +1667,8 @@ describe("About History authors", () => {
     }
     const several = row({ authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }, agent],
       authorLabels: ["Sam", "Nova"], authorPresentations: [token("plum"), token(null, true)] });
-    expect(several.querySelector("span[title]")).toBeNull();
-    expect(several.querySelector(".lucide-file-text")).not.toBeNull();
+    expect(several.querySelector('[title="Sam"], [title="Nova"]')).toBeNull();
+    expect(several.querySelector(".lucide-pen-line")).not.toBeNull();
   });
 });
 
