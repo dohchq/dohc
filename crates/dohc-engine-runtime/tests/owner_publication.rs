@@ -7165,18 +7165,9 @@ fn owner_source_base() -> Vec<u8> {
     serde_json::from_value(source["bytes"].clone()).unwrap()
 }
 
-fn witness_reader(root: &ScratchDir) -> Arc<dohc_engine_collab::reader_resolver::ReaderResolver> {
-    Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
-        Arc::new(dohc_engine_reader::Reader::new(Some(support::fake_reader(
-            root,
-            "witness-safe",
-        )))),
-    ))
-}
-
 /// Prove the shared source safe before a test measures released-tail waits.
 async fn witness_cache(root: &ScratchDir) -> dohc_engine_collab::WriterDocCache {
-    let resolver = witness_reader(root);
+    let resolver = support::witness_reader(root);
     let doc = Ydoc::wire();
     doc.apply(&owner_source_base()).unwrap();
     loop {
@@ -7466,6 +7457,12 @@ async fn retained_window_keeping(
 }
 
 impl RetainedWindow {
+    fn cache(&self) -> dohc_engine_collab::WriterDocCache {
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        cache.reader_resolver = Some(self.witness.clone());
+        cache
+    }
+
     fn head(&self) -> Ydoc {
         dohc_engine_collab::load_persisted(&self.store, &window_key())
             .unwrap()
@@ -8208,7 +8205,8 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
         let fold = feed.serve(fold, bytes);
         let client = dohc_engine_sync::RelaySyncClient::new(feed);
-        let pass = hosted_pass(&mut w.store, &client, &mut witness_cache(&w.root).await);
+        let mut cache = w.cache();
+        let pass = hosted_pass(&mut w.store, &client, &mut cache);
         assert!(w.text().contains(RETAINED), "{case}: {}", w.text());
         assert_eq!(w.native(), native, "{case}: native structure");
         assert_eq!(ingress_rows(&w.store), rows, "{case}: retained records");
@@ -8221,9 +8219,10 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         );
         // The hold carries the binding admission built. An apply outside a
         // pull names no feed namespace.
+        let mut cache = w.cache();
         let held = settled_apply(
             &mut w.store,
-            &mut witness_cache(&w.root).await,
+            &mut cache,
             &fold,
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,
@@ -8291,7 +8290,7 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
     let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
     let append = feed.serve(append, bytes);
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let pass = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(pass.applied, 1, "{:?}", pass.pending_cursor);
     assert!(journaled(&w.store, &append));
@@ -8449,9 +8448,9 @@ async fn a_kept_edit_meets_the_released_tail_its_release_leaves() {
         };
         // Recording a released-lineage hold counts as a commit, so the pass
         // whose drain records it commits nothing and the next pass commits.
-        let mut cache = witness_cache(&w.root).await;
         let commits: Vec<bool> = (0..3)
             .map(|_| {
+                let mut cache = w.cache();
                 let pass = hosted_pass(&mut w.store, &client, &mut cache);
                 assert!(
                     !pass
@@ -8745,8 +8744,7 @@ fn live_hosted_pass(
 /// The window document's drain as its session ends, run again after each
 /// released-tail validation it waits for completes.
 fn settled_drain(w: &mut RetainedWindow) -> dohc_engine_sync::YdocDrainResult {
-    let mut cache = dohc_engine_collab::WriterDocCache::new();
-    cache.reader_resolver = Some(w.witness.clone());
+    let mut cache = w.cache();
     let store = &mut w.store;
     loop {
         let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(
@@ -9003,7 +9001,7 @@ async fn the_end_of_pass_drain_reports_the_head_it_writes_across_a_validation_wa
         "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting' \
          WHERE object_id='object'",
     );
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let mut waits = 0;
     let pass = loop {
         match client.pull_hosted_workspace(
@@ -9109,7 +9107,7 @@ async fn actor_drain_with_cold_witness(recover_artifact: bool) {
              WHERE object_id='object'",
         );
     }
-    let resolver = witness_reader(&w.root);
+    let resolver = support::witness_reader(&w.root);
     assert!(matches!(
         resolver.check_witness(&w.head(), &window_key(), WINDOW_PATH),
         Err(dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { .. })
@@ -9184,6 +9182,11 @@ async fn actor_drain_with_cold_witness(recover_artifact: bool) {
         snapshot.text
     );
     assert!(snapshot.text.contains(RETAINED), "{}", snapshot.text);
+    assert!(
+        !snapshot.text.contains("A desktop edit."),
+        "{}",
+        snapshot.text
+    );
     w.actor
         .materialize_replay_pending(w.root.path().to_owned(), "workspace".into(), 50)
         .await
@@ -9304,7 +9307,7 @@ async fn artifact_recovery_that_meets_a_released_hold_reports_it_and_records_no_
         ),
     );
 
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let recovered = loop {
         let recovered = dohc_engine_sync::drain_open_document_artifacts(
             &mut w.store,
@@ -10887,7 +10890,7 @@ async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait
                 ),
             );
         }
-        let mut cache = witness_cache(&w.root).await;
+        let mut cache = w.cache();
         let waited = dohc_engine_sync::drain_open_document_artifacts(
             &mut w.store,
             &mut cache,
@@ -10923,7 +10926,7 @@ async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait
                 drop(pending);
                 let db = engine_db_path(&w.root).unwrap();
                 w.store = EngineStore::open(&db, 0).unwrap();
-                cache = witness_cache(&w.root).await;
+                cache = w.cache();
             }
         }
         let (mut facts, mut changes) = (Vec::new(), Vec::new());
@@ -11203,7 +11206,7 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
     let id = head.frontmatter_set("id", WINDOW_RECORD_ID).unwrap();
     fill_window_journal(&mut w, &head, vec![id]);
     let doc = w.head();
-    let witness = witness_cache(&w.root).await;
+    let witness = w.cache();
     w.store
         .write_with(&NoFaults, |tx| {
             dohc_engine_sync::project_and_write_in_tx(
@@ -11262,7 +11265,7 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
     // A host applied the retained delivery, so the tails validate for the
     // current generation with nothing protected; then validation pauses.
     prove_retained_delivery(&w);
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let tails = cache.released_tails(&w.store);
     assert!(
         !validated_protection(&w, &tails),
@@ -11390,7 +11393,7 @@ async fn a_protected_drain_that_waits_after_a_committed_prefix_keeps_its_rows() 
 
         // The tails validate for the current generation and still protect
         // the window; then validation pauses.
-        let mut cache = witness_cache(&w.root).await;
+        let mut cache = w.cache();
         let tails = cache.released_tails(&w.store);
         assert!(validated_protection(&w, &tails), "{case}: still protected");
         let (generation, snapshot) = (window_generation(&w.store), window_snapshot(&w.store));
@@ -12659,9 +12662,10 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
     ];
     let native = w.native();
     for (case, op) in &cases {
+        let mut cache = w.cache();
         let held = settled_apply(
             &mut w.store,
-            &mut witness_cache(&w.root).await,
+            &mut cache,
             op,
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,
@@ -12685,9 +12689,10 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
         WINDOW_PATH,
         false,
     );
+    let mut cache = w.cache();
     let applied = settled_apply(
         &mut w.store,
-        &mut witness_cache(&w.root).await,
+        &mut cache,
         &op,
         &NoFaults,
         &dohc_engine_sync::NoLiveLeases,
@@ -13034,7 +13039,7 @@ async fn validated_tails_stand_across_passes_until_a_tail_input_changes() {
     let created = feed.create("neighbour", "notes/neighbour.md", "A neighbour.\n");
     let fold = feed.serve(fold, fold_bytes);
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let validations = |w: &RetainedWindow, cache: &dohc_engine_collab::WriterDocCache| {
         cache.released_tails(&w.store).validations()
     };
@@ -13320,7 +13325,7 @@ async fn a_pass_waiting_for_validation_goes_on_from_the_row_that_waited() {
     );
     let fold = feed.serve(fold, fold_bytes);
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let mut cache = witness_cache(&w.root).await;
+    let mut cache = w.cache();
     let tails = cache.released_tails(&w.store);
     let scans = released_tail_scans_on_this_thread();
     let pull = |store: &mut EngineStore, cache: &mut _| {
@@ -13699,7 +13704,8 @@ async fn with_nothing_retained_a_desktop_fold_applies_in_the_released_window() {
     let feed = HostedFeed::new(&[("object", WINDOW_PATH)]);
     let fold = feed.serve(fold, bytes);
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let pass = hosted_pass(&mut w.store, &client, &mut witness_cache(&w.root).await);
+    let mut cache = witness_cache(&w.root).await;
+    let pass = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(pass.applied, 1, "{:?}", pass.pending_cursor);
     assert!(journaled(&w.store, &fold));
     let projection = |store: &EngineStore| {
@@ -14052,7 +14058,8 @@ async fn a_desktop_edit_in_the_released_window_holds_its_settlement_before_a_con
     let later = feed.serve(later, later_bytes);
     let created = feed.create("neighbour", NEIGHBOUR_PATH, "A neighbour.\n");
     let client = dohc_engine_sync::RelaySyncClient::new(feed);
-    let pass = hosted_pass(&mut w.store, &client, &mut witness_cache(&w.root).await);
+    let mut cache = w.cache();
+    let pass = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(pass.applied, 2, "{:?}", pass.pending_cursor);
     assert_eq!(pass.conflicts_opened, 0);
     for op in [&update, &created] {
@@ -14096,7 +14103,8 @@ async fn a_desktop_edit_in_the_released_window_holds_its_settlement_before_a_con
         Some("A neighbour.\n"),
         "A neighbour, edited.\n",
     );
-    let again = hosted_pass(&mut w.store, &client, &mut witness_cache(&w.root).await);
+    let mut cache = w.cache();
+    let again = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
     assert!(journaled(&w.store, &edited));
     assert!(held_binding(&again, &settlement).is_some(), "{again:?}");

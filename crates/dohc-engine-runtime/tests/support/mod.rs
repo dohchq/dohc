@@ -37,17 +37,24 @@ pub fn fake_reader(
     }
 }
 
+pub fn witness_reader(
+    scratch: &dohc_engine_testkit::ScratchDir,
+) -> std::sync::Arc<dohc_engine_collab::reader_resolver::ReaderResolver> {
+    use std::sync::Arc;
+    Arc::new(dohc_engine_collab::reader_resolver::ReaderResolver::new(
+        Arc::new(dohc_engine_reader::Reader::new(Some(fake_reader(
+            scratch,
+            "witness-safe",
+        )))),
+    ))
+}
+
 pub async fn configure_witness_reader(
     actor: &dohc_engine_runtime::ActorHandle,
     scratch: &dohc_engine_testkit::ScratchDir,
 ) {
-    use std::sync::Arc;
     actor
-        .configure_reader_resolver(Arc::new(
-            dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
-                dohc_engine_reader::Reader::new(Some(fake_reader(scratch, "witness-safe"))),
-            )),
-        ))
+        .configure_reader_resolver(witness_reader(scratch))
         .await
         .unwrap();
 }
