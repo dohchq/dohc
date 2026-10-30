@@ -519,6 +519,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
+      transferInFlight(datasetId: string) { assertCurrent(); return transfers.inFlight(datasetId); },
       // Each end, failed or not, tells the automation runner, which reads the transfer record again.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
         return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
