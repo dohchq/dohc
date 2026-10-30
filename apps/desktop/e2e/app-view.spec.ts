@@ -213,8 +213,9 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       addEventListener('securitypolicyviolation', event => resolve(event.effectiveDirective + ' ' + event.blockedURI), { once: true });
       const frame = document.createElement('iframe'); frame.src = 'https://example.com/framed'; document.body.append(frame);
     })`))).toMatch(/^frame-src https:\/\/example\.com/);
+    // Chromium commits the blocked frame as an error page at that address, with an opaque origin, so check origins.
     expect(await electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.mainFrame.framesInSubtree
-      .filter(frame => frame.url.includes("example.com")).length, guestId)).toBe(0);
+      .filter(frame => frame.origin === "https://example.com").length, guestId)).toBe(0);
     expect(await recorded()).toEqual(expected);
     for (const selector of ["#javascript", "#file"]) {
       await pressApp(page, electronApp, guestId, selector);
