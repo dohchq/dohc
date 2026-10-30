@@ -4,6 +4,7 @@
   "addRelayShareLink",
   "agentColorChanged",
   "agentRunState",
+  "appViewEvent",
   "appendRelayShareDiscussion",
   "applyDatabaseEdit",
   "archiveChatBookmark",

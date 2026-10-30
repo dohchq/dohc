@@ -1862,7 +1862,7 @@ function relayCloseTargetsForPhysicalWorkspace(
   ];
 }
 
-let appViews: ReturnType<typeof registerAppViews> | undefined;
+let appViews: ReturnType<typeof registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>> | undefined;
 const workspaceAuthorities = createWorkspaceAuthorityOwner({
   findWorkspace,
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),

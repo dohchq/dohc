@@ -44,8 +44,9 @@ function fixture() {
     }),
   });
   // Calls go through the row, as main registers it, in a window whose open workspace is "w".
-  registerOperations({ handle: (_channel, listener) => { handler = listener; }, assertTrustedSender: () => {},
-    withActiveWorkspace: async (_event: IpcMainInvokeEvent, workspaceId, _message, work) => {
+  registerOperations<typeof appViewOperations, IpcMainInvokeEvent, typeof operation>({
+    handle: (_channel, listener) => { handler = listener; }, assertTrustedSender: () => {},
+    withActiveWorkspace: async (_event, workspaceId, _message, work) => {
       if (workspaceId !== "w") throw Error("Wrong workspace");
       return work(operation);
     } }, appViewOperations, { appView: manager.appView });
