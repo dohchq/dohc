@@ -314,6 +314,32 @@ describe("workspace switch admission", () => {
       }
     });
 
+    it("keeps the Restore tabs row when 4 minutes pass after a read worked", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        renderShell(bridge);
+        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+        await openFile(user, "a.md");
+        await act(() => vi.advanceTimersByTimeAsync(60_000));
+        act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+        await user.click(screen.getByTestId("notice-center-toggle"));
+        const center = await screen.findByTestId("notice-center");
+        await within(center).findByText(SAVED_TABS_RESTORE);
+
+        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS));
+
+        const row = within(center).getByText(SAVED_TABS_RESTORE).closest("li")!;
+        expect(within(row).getByRole("button", { name: "Restore tabs" })).toBeTruthy();
+        expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("offers Restore tabs once a tab is open, unread again without a toast, and keeps that tab", async () => {
       const second = deferred<WorkspaceUiState | null>();
       const bridge = makeBridge(second.promise);
