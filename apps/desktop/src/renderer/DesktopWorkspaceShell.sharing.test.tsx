@@ -408,21 +408,17 @@ describe("active file sharing", () => {
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
 describe("shared view banner", () => {
-  it("does not offer app creation in a received share workspace", async () => {
+  it("shows no Apps section and no app creation in a received share workspace without apps", async () => {
     const user = userEvent.setup();
-    const bridge = Object.assign(makeShareBridge(), {
-      listSites: vi.fn(async () => ({ sites: [] })),
-    });
+    const bridge = makeShareBridge();
     renderShell(bridge, SHARE_VIEW);
 
-    await user.click(await screen.findByTestId("activity-sites"));
-
-    expect(
-      await screen.findByText(
-        "This shared view cannot create an app. Ask the workspace owner to add one.",
-      ),
-    ).toBeTruthy();
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
+    await screen.findByTestId("explorer-files-section");
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
     expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
   });

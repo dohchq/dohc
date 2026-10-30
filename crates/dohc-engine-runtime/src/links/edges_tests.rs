@@ -311,3 +311,76 @@ async fn edges_exclude_self_ambiguous_and_unresolved_literals() {
     );
     assert_eq!(page["nextCursor"], Value::Null);
 }
+
+#[tokio::test]
+async fn edges_list_drawings_as_files_without_reading_links_from_them() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    let scene = r#"{"type":"excalidraw","elements":[{"type":"text","text":"[[note]]"}]}"#;
+    for i in 0..150 {
+        write(
+            &mut store,
+            &format!("d{i}"),
+            &format!("d{i:03}.excalidraw"),
+            scene,
+            i + 1,
+        );
+    }
+    write(&mut store, "shout", "SHOUT.EXCALIDRAW", scene, 151);
+    write(
+        &mut store,
+        "note",
+        "note.md",
+        "[[d000.excalidraw]] [[SHOUT.EXCALIDRAW]]",
+        152,
+    );
+    write(&mut store, "data", "data.json", "[[note]]", 153);
+    drain(&mut store);
+    // An oversized drawing has no usable index row, which must not make it unchecked.
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE link_sources SET status='unindexed',reason='byte-bound' WHERE object_id='d1'",[]).map_err(sql)?;
+        Ok::<_,StorageError>(())
+    }).unwrap();
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let _hold = actor.hold_link_drain();
+    let mut cursor = None;
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+    let mut pages = 0;
+    loop {
+        let page = edges(&actor, cursor).await;
+        bounded(&page);
+        assert_eq!(page["complete"], true);
+        assert_eq!(page["unchecked"], json!([]));
+        files.extend(page["files"].as_array().unwrap().iter().cloned());
+        entries.extend(page["entries"].as_array().unwrap().iter().cloned());
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        pages += 1;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    assert!(files.iter().all(|file| file["title"] == file["path"]));
+    let mut paths = files
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut expected = (0..150)
+        .map(|i| format!("d{i:03}.excalidraw"))
+        .chain(["SHOUT.EXCALIDRAW".into(), "note.md".into()])
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(paths, expected);
+    assert_eq!(
+        entries,
+        vec![
+            json!({"source":"note.md","target":"d000.excalidraw","kind":"wikilink","ordinal":0}),
+            json!({"source":"note.md","target":"SHOUT.EXCALIDRAW","kind":"wikilink","ordinal":1}),
+        ]
+    );
+}

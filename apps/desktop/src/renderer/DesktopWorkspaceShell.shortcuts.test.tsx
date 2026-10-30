@@ -2,7 +2,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
@@ -50,7 +49,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
 
   it("labels the start surface's document tile with the new-file binding", async () => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([])), platform));
-    const tile = await within(await screen.findByTestId("start-surface")).findByRole("button", { name: FILE_KIND_RECORDS.markdown.name });
+    const tile = await within(await screen.findByTestId("start-surface")).findByRole("button", { name: "Page" });
     expect(tile.textContent).toContain(platform === "darwin" ? "⌘N" : "Ctrl N");
     expect(tile.getAttribute("aria-keyshortcuts")).toBe(platform === "darwin" ? "Meta+N" : "Control+N");
   });

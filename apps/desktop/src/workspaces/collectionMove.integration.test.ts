@@ -42,13 +42,14 @@ afterEach(async () => {
 /**
  * The owner's Collection on this computer, with one record, and the owner's server with the folder shared with a teammate who accepted it.
  * `relay` sees each request of the owner's move before it is sent. `restart` closes this computer's Collections and opens them again.
+ * `changed` hears what this computer's Collections tell the automation runner.
  */
-async function collectionOnThisComputer(options: { relay?(path: string, init: RequestInit, send: (init: RequestInit) => Promise<unknown>): Promise<unknown> } = {}) {
+async function collectionOnThisComputer(options: { relay?(path: string, init: RequestInit, send: (init: RequestInit) => Promise<unknown>): Promise<unknown>; changed?(): void } = {}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-collection-move-")); roots.push(workspaceRoot);
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const open = async () => {
     const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local",
-      compile: createDatasetFixtureCompiler(), holder: unguardedCollections }); hosts.push(host);
+      compile: createDatasetFixtureCompiler(), holder: unguardedCollections, onDatasetsChanged: () => options.changed?.() }); hosts.push(host);
     return host;
   };
   let local = await open();
@@ -183,5 +184,37 @@ it.each([
   await expect(collection("window", setGrant)).resolves.toEqual({ kind: "grant-updated" });
   await expect(teammate.invoke(invoke(id(6), "teammate-add", { name: "Teammate" }))).resolves.toMatchObject({ result: { name: "Teammate" } });
   expect(await ownerInvoke(id(5), "owner-list-after")).toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
+  controller.abort();
+});
+
+it("leaves a stopped move alone until a person tries it again, so the reads a change sets off don't retry it while the server is away", async () => {
+  // The Collection's page reads it again each time the automation runner hears its Collections changed.
+  let down = false, uploads = 0, refusals = 0, readAgain = () => {};
+  const reads: Promise<unknown>[] = [];
+  const { collection, address, setGrant, controller, transferStatus } = await collectionOnThisComputer({
+    changed: () => readAgain(),
+    async relay(path, init, send) {
+      if (down) { refusals++; throw Error("The server stopped answering."); }
+      if (init.method !== "POST" || !path.includes("/imports/") || uploads++) return send(init);
+      down = true;
+      throw Error("The server stopped answering.");
+    } });
+  readAgain = () => { reads.push(collection("window", { ...address, action: "describe" }).catch(() => undefined)); };
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  expect(transferStatus(id(1))?.state).toBe("ready");
+
+  // The move's own check of its upload is the one refusal so far. Every read the move set off settles without trying it again.
+  for (let round = 0; round < 5 && reads.length > 0; round++) await Promise.all(reads.splice(0));
+  const pending = reads.length, afterStop = refusals;
+  readAgain = () => {};
+  await Promise.all(reads.splice(0));
+  expect({ pending, afterStop }).toEqual({ pending: 0, afterStop: 1 });
+
+  // A person's Try again tries the move once, and its stop sets off nothing either.
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  expect(refusals).toBe(2);
+  down = false;
+  await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
+  expect(transferStatus(id(1))?.state).toBe("imported");
   controller.abort();
 });

@@ -195,6 +195,7 @@ fn recover(
     // document's drain waits: a request that never resumes, or a restart,
     // then leaves them for the next recovery to report.
     let mut completed = Vec::new();
+    let mut pending = None;
     for (version, object) in keys {
         let key = DocKey::new(workspace_id, version, object).map_err(SyncError::corrupt)?;
         if leases.is_live(&key) {
@@ -258,15 +259,24 @@ fn recover(
                 completed.push((key.clone(), drained, cleanup, changes));
             }
             Ok(None) => continue,
+            Err(
+                error @ (SyncError::MarkdownWitnessCheckPending { .. }
+                | SyncError::MarkdownReaderPending(_)),
+            ) => {
+                pending.get_or_insert(error);
+                continue;
+            }
             Err(error) => record_failure(store, &key, leases, faults, error)?,
         }
         cache.remove(&key);
     }
+    let mut completed_rows = false;
     for (key, mut drained, mut cleanup, mut changes) in completed {
         // In a pass, what the rows the cleanup removes committed becomes
         // their drain reports in that transaction; a drain that removes no
         // row reports only a head an earlier attempt wrote.
-        if reporting == DrainReporting::Durable && !cleanup.consumed().is_empty() {
+        let consumes_rows = !cleanup.consumed().is_empty();
+        if reporting == DrainReporting::Durable && consumes_rows {
             cleanup.report_durably(crate::drain_report::DrainExtras {
                 conflicts_opened: std::mem::take(&mut drained.conflicts_opened),
                 sharing_declined: std::mem::take(&mut drained.sharing_declined),
@@ -279,6 +289,7 @@ fn recover(
             store, &key, leases, cleanup, faults,
         ) {
             Ok(refusal) => {
+                completed_rows |= consumes_rows;
                 result.changes.extend(changes);
                 result.record_facts.extend(drained.record_facts);
                 result.refusals.extend(drained.refusals);
@@ -291,6 +302,16 @@ fn recover(
                 record_failure(store, &key, leases, faults, error)?;
             }
         }
+    }
+    if let Some(error) = pending
+        && !completed_rows
+        && result.changes.is_empty()
+        && result.record_facts.is_empty()
+        && result.refusals.is_empty()
+        && result.sharing_declined.is_empty()
+        && result.conflicts_opened == 0
+    {
+        return Err(error);
     }
     Ok(result)
 }

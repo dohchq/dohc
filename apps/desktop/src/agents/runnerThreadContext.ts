@@ -83,9 +83,15 @@ export async function buildRunnerThreadContext(
     readThreadDispatchState(input.dispatchStore, workspaceId, threadId),
   ]);
   let messages = newestMessages;
-  if (!messages.some((message) => message.id === input.askingMessageId)) {
+  // A request asked in a thread of a conversation reads that thread: the
+  // message it hangs from and every reply, wherever they sit in the stream.
+  let inThread = false;
+  const asking = messages.find((message) => message.id === input.askingMessageId);
+  if (asking === undefined || (thread.lane === "chat" && asking.parentMessageId)) {
     const all = await read(null, Number.POSITIVE_INFINITY);
-    messages = all.slice(Math.max(0, all.findIndex((message) => message.id === input.askingMessageId)));
+    const branch = thread.lane === "chat" ? threadBranch(all, input.askingMessageId) : null;
+    inThread = branch !== null;
+    messages = branch ?? all.slice(Math.max(0, all.findIndex((message) => message.id === input.askingMessageId)));
   }
   const decisionByMessage = new Map(
     decisions.map((decision) => [
@@ -118,16 +124,41 @@ export async function buildRunnerThreadContext(
     });
     const omitted = messageCount - shown.length;
     if (omitted <= 0) return markdown;
-    const note = `${omitted} earlier ${omitted === 1 ? "message in this thread isn't" : "messages in this thread aren't"} shown.${
-      input.readEarlier ? ` Read ${omitted === 1 ? "it" : "them"} with \`${input.readEarlier}\`.` : ""
-    }`;
+    const readThem = input.readEarlier ? ` Read ${omitted === 1 ? "it" : "them"} with \`${input.readEarlier}\`.` : "";
+    const note = inThread
+      ? `This request was asked in a thread of this conversation, so only that thread is shown. ${omitted} other ${omitted === 1 ? "message isn't" : "messages aren't"} shown.${readThem}`
+      : `${omitted} earlier ${omitted === 1 ? "message in this thread isn't" : "messages in this thread aren't"} shown.${readThem}`;
     // The note goes under the thread's header, before its first message.
     return markdown.replace("\n\n", `\n${note}\n\n`);
   };
+  // A thread keeps the message it hangs from; its oldest replies go first.
+  const kept = inThread ? 1 : 0;
   let markdown = render(messages);
-  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > 1 && messages[0]?.id !== input.askingMessageId) {
-    messages = messages.slice(1);
+  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > kept + 1 && messages[kept]?.id !== input.askingMessageId) {
+    messages = [...messages.slice(0, kept), ...messages.slice(kept + 1)];
     markdown = render(messages);
   }
   return markdown;
+}
+
+// The thread a reply sits in: the message it hangs from, then every reply
+// under it in order. Null for a message that is not a reply.
+function threadBranch(all: readonly ChatMessage[], askingMessageId: string): ChatMessage[] | null {
+  const byId = new Map(all.map((message) => [message.id, message]));
+  const rootOf = (message: ChatMessage): ChatMessage => {
+    let root = message;
+    const seen = new Set<string>();
+    while (root.parentMessageId && !seen.has(root.id)) {
+      seen.add(root.id);
+      const parent = byId.get(root.parentMessageId);
+      if (!parent) break;
+      root = parent;
+    }
+    return root;
+  };
+  const asking = byId.get(askingMessageId);
+  if (!asking?.parentMessageId) return null;
+  const root = rootOf(asking);
+  if (root.id === asking.id) return null;
+  return all.filter((message) => message.id === root.id || (message.parentMessageId && rootOf(message).id === root.id));
 }

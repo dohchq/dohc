@@ -70,6 +70,8 @@ export async function finishedTransfer(input: {
   const { credentials, credentialGeneration } = await input.server().catch((error: unknown) => { throw needsHost(error); });
   input.signal.throwIfAborted();
   if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw needsHost();
+  // Another read resumed the move while this one asked for the session: wait for that move, not after it.
+  if (input.local.transferInFlight(input.datasetId)) return finishedTransfer(input);
   await moveCollectionToServer({ ...input, credentials, credentialGeneration });
   input.signal.throwIfAborted();
   const finished = input.local.transferStatus(input.datasetId);

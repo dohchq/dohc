@@ -70,6 +70,32 @@ describe("state fills", () => {
   });
 });
 
+// A focus mark is a graphical object: 3:1 against what it sits on, a surface
+// or a hover or selected fill on that surface. The halo is the accent at the
+// focus alpha; a row's line is the accent itself.
+describe("keyboard focus marks", () => {
+  for (const mode of ["light", "dark"] as const) {
+    it(`${mode} halo and row line clear 3:1 on every surface and fill`, () => {
+      const tokens = palette[mode];
+      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(tokens.focus);
+      expect(alpha, "focus").not.toBeNull();
+      for (const surface of SURFACES) {
+        const unders = [
+          ["", tokens[surface]],
+          ["hover/", mix(tokens.ink, tokens[surface], inkAlpha(tokens.hover, "hover"))],
+          ["selected/", mix(tokens.ink, tokens[surface], inkAlpha(tokens.selected, "selected"))],
+        ] as const;
+        for (const [fill, under] of unders) {
+          const halo = contrast(mix(tokens.accent, under, Number(alpha![1]) / 100), under);
+          expect(halo, `halo on ${fill}${surface} (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+          const line = contrast(tokens.accent, under);
+          expect(line, `row line on ${fill}${surface} (${mode}) = ${line.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+        }
+      }
+    });
+  }
+});
+
 describe("WCAG AA contrast, both modes", () => {
   const PAIRS: Array<{
     fg: keyof ThemeTokens;

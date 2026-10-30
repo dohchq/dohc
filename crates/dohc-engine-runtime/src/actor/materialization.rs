@@ -60,7 +60,7 @@ impl ActorHandle {
         // validates; the recovery then runs again.
         loop {
             let (workspace_id, leases) = (workspace_id.clone(), leases.clone());
-            let waiting = self
+            let result = self
                 .run(move |store, cache| {
                     Ok(dohc_engine_sync::drain_open_document_artifacts(
                         store,
@@ -71,8 +71,11 @@ impl ActorHandle {
                     )?
                     .waiting)
                 })
-                .await?;
-            let Some(pending) = waiting else {
+                .await;
+            if super::pending_reader_preparation(&result).is_some() {
+                return Ok(());
+            }
+            let Some(pending) = result? else {
                 return Ok(());
             };
             pending
