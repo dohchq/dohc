@@ -59,6 +59,29 @@ it("reads a file that is not a list as no records, and keeps it aside", async ()
   } finally {vi.restoreAllMocks();}
 });
 
+it("keeps a held first release across restart after a safe peer is written", async () => {
+  const file = join(await createTestScratch("dohc-unwritten-held-batch-"), "owner-live-releases.json");
+  const held = {...release("held"), reason: "markdown-write-held"};
+  const safe = release("safe");
+  const releases = createUnwrittenReleases(() => file);
+  await releases.put(held, "held accepted edits and private tail");
+  await releases.put(safe, "safe edits");
+  await releases.written("owner", "safe", {binding: safe.binding, snapshot: safe.snapshot});
+
+  const restarted = createUnwrittenReleases(() => file);
+  expect(await restarted.list("owner")).toEqual([held]);
+  expect(await restarted.recovery("owner", "held")).toBe("held accepted edits and private tail");
+  expect(await restarted.recovery("owner", "safe")).toBeNull();
+  await restarted.written("owner", "held", {binding: binding("held", 1), snapshot: held.snapshot});
+  await restarted.written("owner", "held", {binding: held.binding, snapshot: "9".repeat(64)});
+  expect(await restarted.list("owner")).toEqual([held]);
+
+  await restarted.written("owner", "held", {binding: held.binding, snapshot: held.snapshot});
+  const finished = createUnwrittenReleases(() => file);
+  expect(await finished.list("owner")).toEqual([]);
+  expect(await finished.recovery("owner", "held")).toBeNull();
+});
+
 it("still lists the records when their file cannot be set aside", async () => {
   const file = join(await createTestScratch("dohc-unwritten-aside-"), "owner-live-releases.json");
   await writeFile(file, JSON.stringify([release("good"), {objectId: "bad"}]));

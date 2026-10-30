@@ -235,6 +235,7 @@ fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reade
 pub struct ReaderResolver {
     reader: Arc<Reader>,
     entries: Mutex<VecDeque<Entry>>,
+    witness_checks: crate::markdown_write_safety::WitnessChecks,
 }
 impl ReaderResolver {
     /// Outside-fold construction has no snapshot-witness cache or retry policy.
@@ -269,7 +270,12 @@ impl ReaderResolver {
         Self {
             reader,
             entries: Mutex::new(VecDeque::new()),
+            witness_checks: Default::default(),
         }
+    }
+
+    pub fn check_witness(&self, doc: &Ydoc, key: &DocKey, path: &str) -> Result<bool, CollabError> {
+        self.witness_checks.check(&self.reader, doc, key, path)
     }
 
     pub(crate) fn resolve_snapshot(

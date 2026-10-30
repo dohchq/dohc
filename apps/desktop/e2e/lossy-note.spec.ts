@@ -101,7 +101,7 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await explorerRow(page, "readme.md").click();
     const notice = page.getByTestId("lossy-note-notice");
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText("dohc can't edit this document yet without changing parts it can't show.");
+    await expect(notice).toContainText("dohc can't edit this note yet without changing parts it can't show.");
     await expect(page.getByTestId("view-markdown")).toContainText("Hidden until opened.");
     await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
@@ -142,7 +142,7 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     const editAnyway = page.getByTestId("lossy-note-edit-anyway");
     await editAnyway.focus();
     await page.keyboard.press("Enter");
-    const dialog = page.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = page.getByRole("dialog", { name: "Edit this note anyway?" });
     await expect(dialog).toContainText("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.");
     await shoot(page, "lossy-note-edit-anyway");
     await page.keyboard.press("Escape");

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { createHash } from "node:crypto";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -31,12 +32,14 @@ vi.mock("./collab/useEngineDoc", () => ({
 }));
 
 const INITIAL_MARKDOWN = "# Plan\n\nInitial paragraph.\n";
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const SOURCE_UPDATE_DELAY_MS = 150;
 const SOURCE_UPDATE_MAX_WAIT_MS = 500;
 
 function engineState(doc: Y.Doc): UseEngineDoc {
   return {
     available: true,
+    headSha256: sha(INITIAL_MARKDOWN),
     opening: false,
     doc,
     objectId: "object-1",
@@ -265,13 +268,34 @@ describe("FileInspector engine source update scheduling", () => {
     expect(serialize).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps painting delayed replies during continuing edits with one proof in flight',async()=>{
-    const doc=markdownToYDoc(INITIAL_MARKDOWN);doc.getMap('meta').set('dohcMarkdownSource','stale');
-    await openSourceView(doc);vi.useFakeTimers();delayedProof.delay=750;delayedProof.maximum=0;
-    for(let t=0;t<2000;t+=100){act(()=>{replaceYDocWithMarkdown(doc,`# Plan\n\nUpdate at ${t} ms.\n`);doc.getMap('meta').set('dohcMarkdownSource','stale');});await act(async()=>{await vi.advanceTimersByTimeAsync(100)});}
-    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at');
+  it("keeps painting delayed replies during continuing edits with one proof in flight", async () => {
+    const doc = markdownToYDoc(INITIAL_MARKDOWN);
+    const witness = {
+      dohcMarkdownSource: INITIAL_MARKDOWN,
+      dohcMarkdownSourceSha256: sha(INITIAL_MARKDOWN),
+      dohcMarkdownSourceProjectionSha256: sha(yDocToMarkdown(doc)),
+    };
+    for (const [key, value] of Object.entries(witness)) doc.getMap("meta").set(key, value);
+    // A complete safe witness stays safe when later edits expire its proof.
+    const paragraph = new Y.XmlElement("paragraph");
+    const text = new Y.XmlText("An unsettled edit.");
+    paragraph.insert(0, [text]);
+    doc.getXmlFragment("body").push([paragraph]);
+    await openSourceView(doc);
+    vi.useFakeTimers();
+    delayedProof.delay = 750;
+    delayedProof.maximum = 0;
+    for (let t = 0; t < 2000; t += 100) {
+      act(() => doc.transact(() => {
+        text.delete(0, text.length);
+        text.insert(0, `Update at ${t} ms.`);
+      }));
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+    }
+    expect(screen.getByTestId("markdown-source-view").textContent).toContain("Update at");
     expect(delayedProof.maximum).toBe(1);
-    await act(async()=>{await vi.advanceTimersByTimeAsync(2500)});
-    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at 1900');doc.destroy();
+    await act(async () => vi.advanceTimersByTimeAsync(2500));
+    expect(screen.getByTestId("markdown-source-view").textContent).toContain("Update at 1900");
+    doc.destroy();
   });
 });

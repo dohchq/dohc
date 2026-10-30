@@ -2449,9 +2449,16 @@ fn assert_durable_update_refusals_after_dismissal(engine: &mut EngineStore) {
         )
         .unwrap();
         for coordinate in notice.refusal_coordinates {
+            let crate::RefusalCoordinate::Replication {
+                origin_id,
+                origin_seq,
+            } = coordinate
+            else {
+                panic!("expected a replication refusal coordinate");
+            };
             let disposition: String = engine.read_with(|conn| conn.query_row(
                 "SELECT apply_disposition FROM replication_log WHERE workspace_id='ws' AND origin_id=?1 AND origin_seq=?2",
-                rusqlite::params![coordinate.origin_id, coordinate.origin_seq], |row| row.get(0))).unwrap();
+                rusqlite::params![origin_id, origin_seq], |row| row.get(0))).unwrap();
             assert_eq!(
                 disposition, "refused",
                 "refusal must survive notice dismissal"

@@ -1,3 +1,5 @@
+mod support;
+
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::owner_outbox::release::{MAX_RELEASE_BYTES, MAX_RELEASE_ENTRIES};
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
@@ -378,6 +380,7 @@ impl Fixture {
                 faults,
                 CancellationToken::new(),
                 None,
+                None,
             )
             .await
     }
@@ -487,6 +490,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     f.binding.validate_canonical().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -669,7 +673,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             )
         })
         .unwrap();
-    assert_eq!(settled.local_ydoc_sequence, head);
+    assert!(settled.local_ydoc_sequence < head);
     assert!(
         boundary.is_none_or(|boundary| boundary < head),
         "the file lacks the private edit"
@@ -710,6 +714,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     assert!(native_text.contains(SECOND));
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 4).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -773,6 +778,7 @@ async fn projection_neutral_settlements_keep_the_application_interval_bounded() 
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -855,6 +861,7 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -951,6 +958,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -1132,6 +1140,11 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     // A peer's ordinary edits arrive before sharing; each import writes its
     // own native projection moment.
     let mut cache = dohc_engine_collab::WriterDocCache::new();
+    cache.reader_resolver = Some(Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+            dohc_engine_reader::Reader::new(Some(support::fake_reader(&root, "witness-safe"))),
+        )),
+    ));
     for (seq, update, is_base) in [(0, &base, true), (1, &human, false), (2, &agent, false)] {
         let digest = store.put_binary_blob(update).unwrap();
         let op = ReplicationEnvelope {
@@ -1148,9 +1161,18 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
             }),
             recorded_at_ms: 10 + seq,
         };
-        let applied =
-            apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases)
-                .unwrap();
+        let applied = loop {
+            match apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases)
+            {
+                Ok(applied) => break applied,
+                Err(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending {
+                    pending, ..
+                }) => {
+                    pending.resolve().await;
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        };
         assert!(!matches!(applied.primary, ApplyDisposition::Refused(_)));
     }
     let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -1440,6 +1462,7 @@ async fn observed_owner_cannot_use_ordinary_runtime_settlement() {
     let before = f.counts();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     assert_eq!(
         f.ordinary_settle(&actor).await.err().unwrap().code(),
         "owner-outbox-frozen"
@@ -1475,6 +1498,7 @@ async fn enrolled_owner_keeps_its_lineage_when_an_old_conflict_is_resolved_after
     incoming.updated_at_ms = 3;
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     actor
         .conflict_open(
             Box::new(TextConflict {
@@ -1634,6 +1658,7 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     };
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
 
     // H1: a private draft settles locally.
     f.record(
@@ -1862,6 +1887,7 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     assert_eq!(allowed(&reopened, &published), 0);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -1915,6 +1941,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph("Private refused seed"),
@@ -2105,6 +2132,7 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2259,6 +2287,7 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2430,6 +2459,7 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     .unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2638,6 +2668,7 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
         let key = DocKey::new("workspace", "main", "object").unwrap();
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         let pending = f
             .doc
             .frontmatter_set("pending", "Owner pending edit")
@@ -2754,6 +2785,7 @@ async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
     let f = observed_release_fixture();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let update = f
         .doc
         .frontmatter_set("pending", "Frozen restore work")
@@ -2811,6 +2843,7 @@ async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let owner = actor
         .live_application_owner("workspace".into())
         .await
@@ -2849,6 +2882,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             let f = observed_release_fixture();
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 3).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             for index in 0..count {
                 let update = f
                     .doc
@@ -2896,6 +2930,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             supervisor.close_all().unwrap();
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 31).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             if point == FaultPoint::StorageBeforePersist {
                 assert_eq!(release_snapshot(&f), before);
             }
@@ -2935,6 +2970,7 @@ async fn stop_refuses_device_hosts_and_synthetic_restore_fences_without_mutation
         if !hosted {
             let supervisor = WorkspaceSupervisor::new();
             let actor = supervisor.open(&f.db, 3).unwrap().actor;
+            support::configure_witness_reader(&actor, &f.root).await;
             stop_action(&actor, &f, "request").await.unwrap();
             supervisor.close_all().unwrap();
         }
@@ -2949,6 +2985,7 @@ async fn stop_refuses_device_hosts_and_synthetic_restore_fences_without_mutation
         let before = f.counts();
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         let result = stop_action(&actor, &f, if hosted { "request" } else { "release" }).await;
         assert!(if hosted {
             matches!(
@@ -3023,6 +3060,7 @@ async fn pending_release_fixture_updates(
 ) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     let count = updates.len();
     if let Some(first) = updates.first() {
         let entry = actor
@@ -3176,6 +3214,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
         .unwrap();
     let host = Fixture::new();
     let host_actor = supervisor.open(&host.db, 3).unwrap().actor;
+    support::configure_witness_reader(&host_actor, &host.root).await;
     let host_owner = host_actor
         .live_application_owner("workspace".into())
         .await
@@ -3380,6 +3419,7 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             44,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -3761,6 +3801,7 @@ async fn stop_without_pending_entries_releases_ordinary_sized_documents() {
         let f = observed_release_fixture_with_size(size);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        support::configure_witness_reader(&actor, &f.root).await;
         stop_action(&actor, &f, "request").await.unwrap();
         let rows = stop_action(&actor, &f, "release").await.unwrap();
         assert!(rows[0].deferred.is_none());
@@ -4221,6 +4262,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     let mut f = observed_release_fixture();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
     for (index, kind) in [
         "person",
         "agent",

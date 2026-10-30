@@ -563,7 +563,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
+        listener({ sessionId, workspaceId: WORKSPACE.workspaceId, path: "tasks/one.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
 

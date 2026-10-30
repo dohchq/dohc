@@ -307,6 +307,10 @@ export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-remote-updates-pending";
 }
 
+export function isMarkdownWriteHeldRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "CONFLICT") === "markdown-write-held";
+}
+
 const REFUSAL_DETAIL_DELIMITER = ": ";
 
 function refusalMessageMatchesToken(

@@ -6531,7 +6531,10 @@ export const AutomationControlsTargetShape = z.object({
   path: codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS),
   run: NOTICE_TARGET_FIELD,
 }).refine(isNoticeTarget);
-export const RefusalCoordinate = z.object({ originId: z.string(), originSeq: z.number().int() });
+export const RefusalCoordinate = z.union([
+  z.object({ originId: z.string(), originSeq: z.number().int() }),
+  z.object({ obligationOrder: z.number().int().positive(), checkpointSha256: z.string(), headSha256: z.string().nullable() }),
+]);
 export type RefusalCoordinate = z.infer<typeof RefusalCoordinate>;
 export const NoticeRow = z.object({
   store: NoticeStoreName,
@@ -6893,6 +6896,7 @@ const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
 });
 
 export const OpenEngineYDocSessionPayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   sessionId: ENGINE_YDOC_SESSION_ID,
   path: PATH_STRING,
@@ -6915,6 +6919,7 @@ export const engineYDocAdmissionOperations = {
 } satisfies OperationTable;
 
 export const RetryEngineYDocSavePayload = z.object({
+  allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
   // Save it again, on a document whose file was deleted outside dohc: main
@@ -6947,6 +6952,7 @@ export const engineYDocSaveOperations = {
 } satisfies OperationTable;
 
 export const OpenEngineYDocSessionResult = z.object({
+  headSha256: z.string().nullable().optional(),
   available: z.boolean(),
   captureHeld: z.boolean().optional(),
   // A close released the file, but capture has not recorded the version
@@ -7111,6 +7117,7 @@ export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  headSha256: z.string().min(1).nullable().optional(),
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),

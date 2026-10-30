@@ -1,5 +1,5 @@
 import {beforeEach, expect, it, vi} from "vitest";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
@@ -185,6 +185,70 @@ it("propagates a failed settlement and keeps the owner entry", async () => {
   expect(offered(f)).toEqual([declared(1),declared(2)]);
   expect(f.outboxAcks).toEqual([]);
   expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("resumes a held file settlement without reconnecting or accepting the deliveries again", async () => {
+  const f = fixture({prefix: 1, owners: 2});
+  const settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(f.store.acknowledgeOwnerDeliveryApplication.mock.calls.map(([, ack]) => ack.journalCursor)).toEqual([1, 2, 3]);
+  f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
+    {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
+  expect(await f.consumer.settle(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 3, materialized: true});
+  expect(settled).toEqual([receipt(3)]);
+  expect(offered(f)).toEqual([declared(1), declared(2), declared(3)]);
+  expect(f.store.acknowledgeOwnerDeliveryApplication).toHaveBeenCalledTimes(3);
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
+});
+
+// Proves: an ordinary settle reuses this connection's settlement of the same
+// terminal, and one its owner wants, as after consenting to a held write, asks the host again.
+it("settles a terminal again when its owner wants it, past the settlement an ordinary settle reuses", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 2, materialized: true});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  expect(settled).toEqual([receipt(2)]);
+  expect(await f.consumer.settleWanted(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
+// Proves: a held settlement of a terminal, or one that has not reached the file, ends
+// the reuse of that terminal's earlier settlement, so the next ordinary settle asks the host again.
+it.each(["held", "unmaterialized"] as const)("asks the host again once a settlement of a terminal it settled before comes back %s", async outcome => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  if (outcome === "held") {
+    f.client.sendRequest.mockRejectedValueOnce(new EngineRequestError(7,
+      {code: "CONFLICT", message: "markdown-write-held", retry: "no"}));
+    expect(await f.consumer.settleWanted(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  } else {
+    const settle = f.client.sendRequest.getMockImplementation()!;
+    f.client.sendRequest.mockImplementationOnce(async (input, signal) => {
+      const reply = await settle(input, signal) as {id: number; result: {status: string; settlement: object}};
+      return {...reply, result: {...reply.result, settlement: {...reply.result.settlement, materialized: false}}};
+    });
+    expect(await f.consumer.settleWanted(document)).toMatchObject({settlementId: "settlement-2", materialized: false});
+  }
+  expect(await f.consumer.settle(document)).toMatchObject({terminalCursor: 2, materialized: true});
+  expect(settled).toHaveLength(outcome === "held" ? 2 : 3);
+});
+
+// Proves: a settle its owner wants that fails also ends the reuse, so the
+// next ordinary settle asks the host again instead of returning the old settlement.
+it("asks the host again after a settle its owner wanted fails", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-1", terminalCursor: 2});
+  const failure = new Error("queue full");
+  f.client.sendRequest.mockRejectedValueOnce(failure);
+  await expect(f.consumer.settleWanted(document)).rejects.toBe(failure);
+  expect(await f.consumer.settle(document)).toMatchObject({settlementId: "settlement-2", terminalCursor: 2, materialized: true});
+  expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
 it("leaves an earlier unresolved file write to backoff without settling", async () => {

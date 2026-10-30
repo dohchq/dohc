@@ -28,6 +28,8 @@ dohc-macos-files = { path = "../dohc-macos-files" }
 dohc-linux-files = { path = "../dohc-linux-files" }
 
 [dev-dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
+tokio = { version = "1", features = ["macros", "rt"] }
 yrs = "=0.27.3"
 quote = "1"
 syn = { version = "2", features = ["full"] }

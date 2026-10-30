@@ -222,7 +222,7 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     const ownerSeen = [fieldWhen(first.provider, "owner", "from-owner"), fieldWhen(peer.provider, "owner", "from-owner")];
     await active.drain(document); await Promise.all(ownerSeen);
     const settlement = await active.settle(document);
-    expect(settlement.materialized).toBe(true); expect(capture.invalidated.aborted).toBe(false);
+    expect(settlement).toMatchObject({materialized: true}); expect(capture.invalidated.aborted).toBe(false);
     expect((await active.captureNative(current.binding)).registrationId).toBe(capture.registrationId);
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(ownerDoc));
     results.ownerAccepted = ownerAccepted.result; results.settlement = settlement;

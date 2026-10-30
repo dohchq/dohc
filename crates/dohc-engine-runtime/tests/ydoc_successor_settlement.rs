@@ -1,3 +1,5 @@
+mod support;
+
 use dohc_engine_collab::{ContentKind, DocKey};
 use dohc_engine_domain::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, DomainError,
@@ -143,6 +145,7 @@ async fn settle_document_successor(
     now_ms: i64,
 ) -> Box<dohc_engine_runtime::YdocSettlement> {
     use std::sync::Arc;
+    support::configure_witness_reader(actor, scratch).await;
     actor
         .ydoc_settle(
             scratch.path().to_path_buf(),
@@ -156,6 +159,7 @@ async fn settle_document_successor(
             now_ms,
             Arc::new(NoFaults),
             dohc_engine_runtime::CancellationToken::new(),
+            None,
             None,
         )
         .await

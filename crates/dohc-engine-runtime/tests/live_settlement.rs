@@ -1,3 +1,5 @@
+mod support;
+
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
@@ -692,6 +694,7 @@ impl Fixture {
         drop(store);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).unwrap().actor;
+        support::configure_witness_reader(&actor, &root).await;
         let owner = actor
             .live_application_owner("workspace".into())
             .await

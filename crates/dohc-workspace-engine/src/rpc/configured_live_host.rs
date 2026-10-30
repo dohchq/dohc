@@ -1187,6 +1187,17 @@ impl EngineService {
         Ok(result)
     }
 
+    pub(super) fn configured_settlement_limit(&self) -> Option<usize> {
+        self.ordinary_live_host
+            .get()
+            .map(|host| host.settlement.0)
+            .or_else(|| {
+                self.configured_live_host
+                    .get()
+                    .and_then(|host| host.settlement.as_ref().map(|row| row.0))
+            })
+    }
+
     pub(super) fn configured_settlement_admission(
         &self,
         ctx: &RequestContext,
@@ -2939,7 +2950,7 @@ mod tests {
         // The migration this build adds then fails on the copy.
         rusqlite::Connection::open(database(store.path()))
             .unwrap()
-            .execute_batch("CREATE TABLE replication_log_conflict_resolution (planted INTEGER)")
+            .execute_batch("CREATE TABLE markdown_write_obligations (planted INTEGER)")
             .unwrap();
         let before = store_files(store.path());
         let handle = open_prepared(

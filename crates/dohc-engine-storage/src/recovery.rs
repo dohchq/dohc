@@ -664,10 +664,10 @@ mod tests {
         std::fs::create_dir(&store).unwrap();
         let source = store.join("engine.db");
         earlier_store(&source);
-        // The last migration creates an index of this name, so on this store it fails.
+        // The last migration creates this table, so on this store it fails.
         Connection::open(&source)
             .unwrap()
-            .execute_batch("CREATE TABLE replication_log_conflict_resolution (planted INTEGER)")
+            .execute_batch("CREATE TABLE markdown_write_obligations (planted INTEGER)")
             .unwrap();
         let before = contents(&store);
         let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();

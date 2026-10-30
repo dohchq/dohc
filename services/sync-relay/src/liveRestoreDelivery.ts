@@ -7,7 +7,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {settlementResult} from "./liveSettlement";
+import {settlementResponse,settlementPending} from "./liveSettlement";
 
 export type StopRestoreOutcome = {kind: "pending"; reason: string} | {kind: "done"; receipt: NativeRestoreFenceReceipt};
 export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestoreLookup {
@@ -60,11 +60,12 @@ export async function deliverStopRestore(options: {
           // The host's author coverage is full. Settle once through what the
           // old cut applied, then offer the identical event again.
           if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-          const settling = await c.client.sendRequest({...request(), method: "liveApplication.settle",
-            params: {registrationId, terminalReceipt: next.predecessor ? {...next.predecessor} : null}}, signal);
+          const settled = await settlementResponse(c.client.sendRequest({...request(), method: "liveApplication.settle",
+            params: {registrationId, terminalReceipt: next.predecessor ? {...next.predecessor} : null}}, signal), next.predecessor);
           check();
           // Its file write has not landed; the next attempt retries after it does.
-          if (!settlementResult(settling.result, next.predecessor).materialized) return {kind: "pending", reason: "settlement-materialization-pending"};
+          if (settlementPending(settled)) return settled;
+          if (!settled.materialized) return {kind: "pending", reason: "settlement-materialization-pending"};
           settledSinceApply = true;
           continue;
         }
