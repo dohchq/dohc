@@ -279,12 +279,17 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await shown(page.getByTestId("quick-open"));
     await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
-    // Reload reloads the same guest, so the app starts over, in a new frame that starts in dark and stays there.
+    // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark.
     await page.getByTestId("app-view-reload").click();
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count')?.textContent").catch(() => null)).toBe("0");
     await ready(page);
     expect(await guestIds(electronApp)).toEqual([guestId]);
-    await expect.poll(() => inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches")).toBe(true);
+    // Playwright's own session on a new frame then sets light, the scheme it emulates. Users have no such session, so
+    // this sends dohc's scheme until it lands after Playwright's. Only main's session on the new frame can carry it.
+    await expect.poll(async () => {
+      await page.evaluate(workspaceId => window.dohcDesktop!.appView({ action: "colorScheme", workspaceId, colorScheme: "dark" }), workspaceId);
+      return inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches");
+    }).toBe(true);
     await clickApp(electronApp, guestId, "#counter");
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("1");
     expect(await inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches")).toBe(true);

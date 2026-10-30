@@ -270,13 +270,11 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
       if (event.isMainFrame && !event.isSameDocument && !event.initiator) entry.lastPress = undefined;
     });
     guest.once("destroyed", () => { void close(entry); });
-    // A child frame starts once it has the theme, or once sending it fails. Frames in one process share the theme, and
-    // a frame's session clears it as it detaches. A reload's old frame can detach after the new one starts, so the frames
-    // still attached get the theme again.
+    // A child frame starts once it has the theme, or once sending it fails.
     guest.debugger.on("message", (_event, method: string, params: { sessionId?: string; targetInfo?: { type?: string } }) => {
       const sessionId = params.sessionId;
       if (!sessionId) return;
-      if (method === "Target.detachedFromTarget") { if (entry.frames.delete(sessionId)) void theme(entry); return; }
+      if (method === "Target.detachedFromTarget") { entry.frames.delete(sessionId); return; }
       if (method !== "Target.attachedToTarget") return;
       const frame = params.targetInfo?.type === "iframe";
       if (frame) entry.frames.add(sessionId);
