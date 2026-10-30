@@ -26,7 +26,8 @@ export function appViewExternalUrl(raw: string): string | null {
 
 // Like Chromium's popup blocker: a link leaves dohc only within 5 s of a real press in the app, once per press.
 const EXTERNAL_LINK_ACTIVATION_MS = 5_000;
-const ACTIVATING_INPUT = new Set(["mouseDown", "rawKeyDown", "keyDown", "touchEnd", "gestureTap"]);
+const ACTIVATING_INPUT = new Set(["mouseDown", "keyDown", "touchEnd", "gestureTap"]);
+const NOT_A_PRESS = new Set(["Escape", "Control", "Shift", "Alt", "Meta", "AltGraph"]);
 
 export function appViewLaunchUrl(raw: string): string | null {
   try {
@@ -236,18 +237,20 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.on("will-redirect", navigate);
     guest.on("will-frame-navigate", navigate);
     guest.setWindowOpenHandler(({ url }) => { external(entry, url); return { action: "deny" }; });
-    // The before- events cover the app's child frames; input-event sees only the guest's main frame, but also sees taps.
+    // The before- events cover the app's child frames. input-event sees only the guest's main frame, so it adds only taps.
     const press = (input: { type: string }) => { if (ACTIVATING_INPUT.has(input.type)) entry.lastPress = Date.now(); };
     guest.on("before-mouse-event", (_event, mouse) => press(mouse));
-    guest.on("input-event", (_event, input) => press(input));
+    guest.on("input-event", (_event, input) => { if (input.type === "touchEnd" || input.type === "gestureTap") press(input); });
     guest.on("before-input-event", (event, input) => {
       const shortcut = appViewShortcut(input);
       if (shortcut) { event.preventDefault(); emit(entry, { kind: "shortcut", viewId: entry.viewId, ...shortcut }); }
-      // Like Chromium, dohc's shortcuts and Escape aren't a press in the app.
-      else if (input.key !== "Escape") press(input);
+      // Like Chromium, dohc's shortcuts, a modifier key alone and Escape aren't a press in the app.
+      else if (!NOT_A_PRESS.has(input.key)) press(input);
     });
-    // A press doesn't carry over into a reloaded page.
-    guest.on("did-start-navigation", event => { if (event.isMainFrame && !event.isSameDocument) entry.lastPress = undefined; });
+    // A press doesn't carry over into a page dohc reloads. A navigation the page starts has an initiator.
+    guest.on("did-start-navigation", event => {
+      if (event.isMainFrame && !event.isSameDocument && !event.initiator) entry.lastPress = undefined;
+    });
     guest.once("destroyed", () => { void close(entry); });
     void theme(entry).catch(() => {
       emit(entry, { kind: "session-ended", viewId: entry.viewId }); void close(entry);

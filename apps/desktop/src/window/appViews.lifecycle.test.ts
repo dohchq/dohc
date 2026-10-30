@@ -136,16 +136,22 @@ it("denies permission checks and display capture, and guards main-frame requests
   expect(f.owner.send).toHaveBeenCalledWith(CHANNELS.appViewEvent, { kind: "external-link", viewId: "one", url: navigation.url });
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/again" });
   expect(links()).toHaveLength(1);
-  // A dohc shortcut or Escape isn't a press, and a reload drops one.
-  for (const key of [{ key: "Tab", code: "Tab", control: true }, { key: "Escape", code: "Escape" }]) {
+  // Ctrl+Tab as typed (Control, then Tab) and Escape aren't a press.
+  for (const key of [{ key: "Control", code: "ControlLeft", control: true }, { key: "Tab", code: "Tab", control: true }, { key: "Escape", code: "Escape" }]) {
     guest.emit("before-input-event", { preventDefault: vi.fn() }, { type: "keyDown", shift: false, alt: false, meta: false, control: false, isComposing: false, ...key });
   }
+  guest.emit("input-event", {}, { type: "rawKeyDown", key: "Escape" });
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/shortcut" });
   expect(links()).toHaveLength(1);
+  // A navigation the page starts keeps a press; a reload by dohc drops it.
   guest.emit("before-mouse-event", {}, { type: "mouseDown" });
-  guest.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+  guest.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false, initiator: {} });
+  guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/kept" });
+  expect(links()).toHaveLength(2);
+  guest.emit("before-mouse-event", {}, { type: "mouseDown" });
+  guest.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false, initiator: null });
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/reloaded" });
-  expect(links()).toHaveLength(1);
+  expect(links()).toHaveLength(2);
   expect(guest.setWindowOpenHandler.mock.calls[0]![0]({ url: "file:///evil" })).toEqual({ action: "deny" });
   guest.emit("destroyed");
   await expect.poll(() => f.launches[0]!.stop.mock.calls.length).toBeGreaterThan(0);
