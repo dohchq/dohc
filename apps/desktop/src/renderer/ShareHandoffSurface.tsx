@@ -20,7 +20,7 @@ const BUSY_COPY =
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 // A Group invitation or message request is joined from Chats.
-const CHATS_COPY = "This opens in Chats. Open a workspace of your own, then open Chats.";
+const CHATS_COPY = "This opens in Chats, in a workspace of your own. Open or create one, then open Chats.";
 
 type ReceivedShareState =
   | { kind: "idle" }

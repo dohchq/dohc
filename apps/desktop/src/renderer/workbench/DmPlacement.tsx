@@ -230,6 +230,7 @@ export function DmRequestListItem(props: {
               <button
                 type="button"
                 data-testid="chats-dm-request-accept"
+                data-invitation={props.request.shareId}
                 onClick={props.onAccept}
                 className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink"
               >

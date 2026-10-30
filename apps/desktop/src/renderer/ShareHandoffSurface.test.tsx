@@ -573,7 +573,7 @@ describe("ShareHandoffSurface", () => {
     );
 
     expect((await screen.findByTestId("handoff-opens-in-chats")).textContent)
-      .toBe("This opens in Chats. Open a workspace of your own, then open Chats.");
+      .toBe("This opens in Chats, in a workspace of your own. Open or create one, then open Chats.");
     expect(screen.queryByTestId("open-shared-view")).toBeNull();
     expect(screen.queryByText(MISSING_COPY)).toBeNull();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();

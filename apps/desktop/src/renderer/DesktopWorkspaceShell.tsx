@@ -2791,6 +2791,13 @@ export function DesktopWorkspaceShell(props: {
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => showView(state, "chats"));
   }, [mutateWb]);
+  // A notice's Open shows Chats at the invitation it names.
+  const [revealedInvitation, setRevealedInvitation] = useState<string | null>(null);
+  const openChatsInvitation = useCallback((shareId: string) => {
+    setRevealedInvitation(shareId);
+    openChatsNavigator();
+  }, [openChatsNavigator]);
+  const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -2802,8 +2809,8 @@ export function DesktopWorkspaceShell(props: {
       openFile(open);
       return;
     }
-    if ("chats" in open) {
-      openChatsNavigator();
+    if ("chatsInvitation" in open) {
+      openChatsInvitation(open.chatsInvitation);
       return;
     }
     const openSwitch = () => {
@@ -2815,7 +2822,7 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openChatsNavigator, openFile, reportShellError, workbenchRestored]);
+  }, [openAutomationControls, openChatsInvitation, openFile, reportShellError, workbenchRestored]);
   // Files the OS opened with dohc. Main sends each once this window has opened
   // this workspace, and they open in order when the workspace is ready.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
@@ -4957,10 +4964,11 @@ export function DesktopWorkspaceShell(props: {
     openAutomation: openNoticeAutomation,
     openAutomationControls,
     openChat: openChatsNavInTab,
-    openChatsNavigator,
+    openChatsInvitation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
+    clearShellError: clearIdentity,
   });
   const shareChangeNotices = useMemo(
     () =>
@@ -5209,6 +5217,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceFiles: files,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
+    ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,

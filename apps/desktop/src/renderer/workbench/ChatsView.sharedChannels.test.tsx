@@ -1003,6 +1003,26 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
   });
 
+  it("shows the invitation a notice's Open names, with its Join focused, once", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: ["share-in", "share-in-2"].map((shareId) => ({
+          shareId,
+          channelWireId: `wire-${shareId}`,
+          access: "read-write" as const,
+          granterEmail: "owner@example.com",
+        })),
+      }),
+    );
+    const onInvitationRevealed = vi.fn();
+    renderView(vi.fn(), vi.fn(), { revealInvitation: "share-in-2", onInvitationRevealed });
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const joins = screen.getAllByTestId("chats-join-shared");
+    expect(document.activeElement).toBe(joins[1]);
+    expect(joins[1]!.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+  });
+
   it("offers an explicit rejoin action for an ended leave tombstone", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue(

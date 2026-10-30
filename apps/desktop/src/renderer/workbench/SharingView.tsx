@@ -815,7 +815,7 @@ export function SharingView(props: {
     try {
       const found = await bridge().getRelayReceivedShare({ shareId });
       if (!found.found) throw new Error(found.removed?.message ?? "This share is no longer shared with you.");
-      if ("chats" in found) throw new Error("A Group or message request is joined from Chats.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
       await bridge().mountShare({ workspaceId, shareCode: found.share.shareCode });
       props.onMountsChanged();
     } catch (cause) {

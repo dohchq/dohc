@@ -74,6 +74,8 @@ afterEach(() => {
 });
 
 const live = () => new AbortController().signal;
+// The shell's error for one notice's Open, which a later Open replaces or takes back.
+const OPEN_ERROR = "sent-notice-open:account:n1";
 
 function sentNoticesOf(notices: NoticeRow[], extra: Partial<SentNotices> = {}): SentNotices {
   return {
@@ -105,13 +107,14 @@ function setup(
     openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
     openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
     openChat: vi.fn((_nav: ChatsNav) => undefined),
-    openChatsNavigator: vi.fn(),
+    openChatsInvitation: vi.fn(),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
+    clearShellError: vi.fn(),
   };
-  const { result } = renderHook(() => useSentNoticeProps(input));
-  return { ...input, sentNotices, result };
+  const { result, unmount } = renderHook(() => useSentNoticeProps(input));
+  return { ...input, sentNotices, result, unmount };
 }
 
 describe("opening a sent notice", () => {
@@ -192,19 +195,33 @@ describe("opening a sent notice", () => {
   it("reports a failed share lookup with its cause, and Try again opens the share", async () => {
     const cause = new Error("relay unreachable");
     getRelayReceivedShare.mockRejectedValueOnce(cause);
-    const { result, onOpenShare, reportShellError } = setup([notice()], [workspace("notes")]);
+    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(onOpenShare).not.toHaveBeenCalled();
-    expect(reportShellError).toHaveBeenCalledWith(SHARE_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    expect(reportShellError).toHaveBeenCalledWith(SHARE_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, OPEN_ERROR);
+    expect(clearShellError).not.toHaveBeenCalled();
     getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
     await waitFor(() => expect(onOpenShare).toHaveBeenCalledTimes(1));
-    // A Try again that finds the access ended reports that instead.
+    // The share opened, so the error goes.
+    expect(clearShellError).toHaveBeenCalledWith(OPEN_ERROR);
+    // A Try again that finds the access ended reports that in its place.
     getRelayReceivedShare.mockRejectedValueOnce(cause);
     await result.current.onOpenSentNotice(notice(), live());
     getRelayReceivedShare.mockResolvedValueOnce({ found: false });
     await act(async () => vi.mocked(reportShellError).mock.calls[1]?.[2]?.());
-    await waitFor(() => expect(reportShellError).toHaveBeenLastCalledWith(ACCESS_ENDED_NOTE, expect.any(Error)));
+    await waitFor(() => expect(reportShellError).toHaveBeenLastCalledWith(ACCESS_ENDED_NOTE, expect.any(Error), null, undefined, OPEN_ERROR));
+  });
+
+  it("takes back a failed Open's error when the notice's Open later succeeds", async () => {
+    getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
+    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
+    await result.current.onOpenSentNotice(notice(), live());
+    expect(reportShellError).toHaveBeenCalledTimes(1);
+    getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
+    await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
+    expect(onOpenShare).toHaveBeenCalledTimes(1);
+    expect(clearShellError).toHaveBeenCalledWith(OPEN_ERROR);
   });
 
   it("reports nothing when the share lookup fails after Open was cancelled", async () => {
@@ -223,11 +240,11 @@ describe("opening a sent notice", () => {
     const INVITATION = { found: true as const, chats: true as const };
     const view = workspace("trip-view", { shareView: { shareId: "trip-share", granterEmail: null }, lastOpenedAt: 9 });
 
-    it("opens Chats in this workspace, where it waits with Join", async () => {
+    it("opens Chats in this workspace at the invitation, where it waits with Join", async () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
-      const { result, openChatsNavigator, onOpenShare, onSwitchWorkspace } = setup([notice()], [workspace("notes")]);
+      const { result, openChatsInvitation, onOpenShare, onSwitchWorkspace } = setup([notice()], [workspace("notes")]);
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(openChatsNavigator).toHaveBeenCalledTimes(1);
+      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith("share-1");
       expect(onOpenShare).not.toHaveBeenCalled();
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
     });
@@ -236,18 +253,45 @@ describe("opening a sent notice", () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
       const older = workspace("notes", { lastOpenedAt: 1 });
       const latest = workspace("trip", { lastOpenedAt: 5 });
-      const { result, openChatsNavigator, onSwitchWorkspace } = setup([notice()], [older, latest, view], "trip-view");
+      const { result, openChatsInvitation, onSwitchWorkspace } = setup([notice()], [older, latest, view], "trip-view");
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { chats: true });
-      expect(openChatsNavigator).not.toHaveBeenCalled();
+      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { chatsInvitation: "share-1" });
+      expect(openChatsInvitation).not.toHaveBeenCalled();
+    });
+
+    it("switches nowhere when the person left the workspace before the lookup answered, from Open or Try again", async () => {
+      const own = workspace("notes", { lastOpenedAt: 5 });
+      // Open: this workspace's shell closes while the lookup is out.
+      const first = deferred<typeof INVITATION>();
+      getRelayReceivedShare.mockReturnValueOnce(first.promise);
+      const opening = setup([notice()], [own, view], "trip-view");
+      const opened = opening.result.current.onOpenSentNotice(notice(), live());
+      opening.unmount();
+      first.resolve(INVITATION);
+      await expect(opened).resolves.toBeNull();
+      expect(opening.onSwitchWorkspace).not.toHaveBeenCalled();
+      // Try again, whose own signal never aborts.
+      getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
+      const retrying = setup([notice()], [own, view], "trip-view");
+      await retrying.result.current.onOpenSentNotice(notice(), live());
+      const second = deferred<typeof INVITATION>();
+      getRelayReceivedShare.mockReturnValueOnce(second.promise);
+      vi.mocked(retrying.reportShellError).mock.calls[0]?.[2]?.();
+      retrying.unmount();
+      second.resolve(INVITATION);
+      // A macrotask runs after every queued continuation of the lookup.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(getRelayReceivedShare).toHaveBeenCalledTimes(3);
+      expect(retrying.onSwitchWorkspace).not.toHaveBeenCalled();
+      expect(retrying.reportShellError).toHaveBeenCalledTimes(1);
     });
 
     it("says on the row to create a workspace when they have none of their own", async () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
-      const { result, openChatsNavigator, onSwitchWorkspace } = setup([notice()], [view], "trip-view");
+      const { result, openChatsInvitation, onSwitchWorkspace } = setup([notice()], [view], "trip-view");
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(NO_OWN_WORKSPACE_NOTE);
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
-      expect(openChatsNavigator).not.toHaveBeenCalled();
+      expect(openChatsInvitation).not.toHaveBeenCalled();
     });
   });
 
@@ -326,7 +370,7 @@ describe("a failed run's notice", () => {
     const cause = new Error("The workspace engine is not running.");
     listChatChannels.mockRejectedValueOnce(cause);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
-    expect(reportShellError).toHaveBeenCalledWith(RUN_THREAD_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    expect(reportShellError).toHaveBeenCalledWith(RUN_THREAD_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, "sent-notice-open:local:n1");
     expect(openChat).not.toHaveBeenCalled();
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
     await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
@@ -371,7 +415,7 @@ describe("a failed run's notice", () => {
     const cause = new Error("The workspace engine is not running.");
     openAutomation.mockRejectedValueOnce(cause);
     await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
-    expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, OPEN_ERROR);
     openAutomation.mockClear();
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
     await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", expect.any(AbortSignal)));
@@ -416,7 +460,7 @@ describe("a failed run's notice", () => {
 
     openAutomationControls.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
     await act(async () => result.current.onRetrySentNotice(failed));
-    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_NOT_HERE_NOTE, expect.any(Error)));
+    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_NOT_HERE_NOTE, expect.any(Error), null, undefined, OPEN_ERROR));
   });
 
   it("carries the switch through a switch to the workspace that holds it, for Open and Try again", async () => {

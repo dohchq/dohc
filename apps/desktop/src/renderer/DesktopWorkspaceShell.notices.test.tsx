@@ -1919,7 +1919,7 @@ describe("notices sent to you", () => {
   });
 
   it("opens Chats, where a Group invitation waits, once the workspace it switched to is ready", async () => {
-    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { chats: true } });
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { chatsInvitation: "share-1" } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
   });
 

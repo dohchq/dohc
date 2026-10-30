@@ -577,6 +577,11 @@ export function ChatsView(props: {
   // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
+  // The share id of an invitation to show: its row scrolls into view and its
+  // first action, Join or Accept, takes focus once the row is listed. Then
+  // onInvitationRevealed reports it shown.
+  revealInvitation?: string;
+  onInvitationRevealed?: () => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -2793,6 +2798,8 @@ export function ChatsView(props: {
     }
     return map;
   }, [channelShares]);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const { revealInvitation, onInvitationRevealed } = props;
   const receivedNotJoined = useMemo(() => {
     if (!channelShares) return [];
     // An ended row is a durable leave tombstone, not an active join. Keep its
@@ -2811,6 +2818,14 @@ export function ChatsView(props: {
     }
     return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
   }, [channelShares]);
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    const action = viewRef.current?.querySelector<HTMLElement>(`[data-invitation="${CSS.escape(revealInvitation)}"]`);
+    if (!action) return;
+    action.scrollIntoView({ block: "nearest" });
+    action.focus();
+    onInvitationRevealed?.();
+  }, [onInvitationRevealed, pendingDmRequests, receivedNotJoined, revealInvitation]);
   const joinedFor = useCallback(
     (channel: ChatChannelRecord) =>
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
@@ -4900,6 +4915,7 @@ export function ChatsView(props: {
 
   return (
     <div
+      ref={viewRef}
       data-testid="chats-view"
       data-variant={variant}
       className="flex min-h-0 flex-1 flex-col"
@@ -5003,6 +5019,7 @@ export function ChatsView(props: {
                     <button
                       type="button"
                       data-testid="chats-join-shared"
+                      data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
                       className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
