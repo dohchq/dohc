@@ -319,9 +319,7 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
       vy[i] = 0;
       continue;
     }
-    // An unlinked node's pull varies by up to a fifth, fixed per node, so
-    // unlinked files settle in a loose band rather than even rows.
-    const pull = layout.lonely[i] ? center * LONELY_PULL * (0.8 + 0.4 * ((Math.imul(i, 2654435761) >>> 0) / 4294967296)) : center;
+    const pull = layout.lonely[i] ? center * LONELY_PULL : center;
     vx[i] = (vx[i]! - x[i]! * pull) * VELOCITY_KEEP;
     vy[i] = (vy[i]! - y[i]! * pull) * VELOCITY_KEEP;
     x[i] = x[i]! + vx[i]!;
