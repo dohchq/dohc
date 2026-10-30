@@ -531,7 +531,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={collectionKey(prepared.approvalId, capability.datasetId)} moves={!prepared.local}
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={collectionKey(prepared.approvalId, capability.datasetId)} moves={!prepared.local && !reactivating}
             onPlace={server => collectionPlaced(collectionKey(prepared.approvalId, capability.datasetId), server)} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
             <CollectionApproval key={capability.collectionPath} capability={capability} local={prepared.local === true} />)}
           {!prepared.local && !reactivating ? prepared.capabilities.filter(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.access === "helper" && operation.fields !== undefined)).map(capability => capability.kind === "dataset" ? <fieldset key={capability.datasetId} disabled={!!busy} className="space-y-2 border-0 p-0">

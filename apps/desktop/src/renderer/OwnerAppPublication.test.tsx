@@ -551,6 +551,23 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
   });
 
+  it("republishes a Collection app without checking where its Collection is, even with its source file gone", async () => {
+    api.dataset.mockImplementation(async () => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: null, datasetAddressStatus: "missing" }], nextCursor: null }));
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "list") return { kind: "listed", publications: [{ ...published, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: false, authorityRevision: 8, datasetCapability, collectionCapability: null, linkCurrent: true, manifestUnavailable: false }], nextCursor: null };
+      if (request.action === "reviewReactivation") return { ...prepared, capabilities: [datasetCapability] };
+      return answer(request);
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Review and republish" }));
+    await screen.findByText("Republish this stored revision. It does not include later source edits.");
+    await waitFor(() => expect(api.dataset).toHaveBeenCalled());
+    await waitFor(() => expect((screen.getByRole("button", { name: "Republish this revision" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(api.dataset.mock.calls.every(([input]) => (input as { action: string }).action === "list")).toBe(true);
+    expect(screen.queryByTestId("collection-move-note")).toBeNull();
+  });
+
   it("cancels withdrawal confirmation without mutation", async () => {
     api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ ...published, datasetCapability: null, collectionCapability: null, linkCurrent: true, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true }], nextCursor: null } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
