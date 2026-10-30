@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
-import { createLayout, reheat, settled, tick, type GraphForces, type GraphLayout } from "./graphLayout";
+import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
 
 export type GraphShape = "circle" | "ring" | "diamond" | "square" | "bubble" | "pill";
 
@@ -108,8 +108,13 @@ type Callbacks = {
   settled(): void;
 };
 
-// Owns the canvas: layout, camera, input and drawing. React hands it a model
-// and options; everything per frame stays out of React.
+function sameForces(a: GraphForces, b: GraphForces): boolean {
+  return a.center === b.center && a.repel === b.repel && a.link === b.link && a.distance === b.distance;
+}
+
+// Owns the canvas: camera, input and drawing. The layout runs in a worker; see
+// LayoutRequest. React hands it a model and options; everything per frame stays
+// out of React.
 export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "panel", callbacks: Callbacks) {
   const ctx = canvas.getContext("2d");
   let palette = readPalette(surface);
@@ -117,8 +122,16 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let active = -1;
   // Per node, an index into GROUP_HUES, or -1 when no group matches.
   let groups: Int16Array = new Int16Array(0);
-  let options: Options = { display: { arrows: false, textFade: 0.5, nodeSize: 0.5, linkThickness: 0.5 }, forces: { center: 0.5, repel: 0.5, link: 0.5, distance: 0.5 }, local: false };
-  let layout: GraphLayout = createLayout(0, [], [], () => undefined);
+  let options: Options = { display: DEFAULT_DISPLAY, forces: DEFAULT_FORCES, local: false };
+  // The positions last drawn, as interleaved x, y, and the newest from the worker.
+  let positions: Float32Array = new Float32Array(0);
+  let incoming: LayoutFrame | null = null;
+  let generation = 0;
+  let layoutSettled = true;
+  // With reduced motion, a new layout draws nothing until it has settled.
+  let awaitingLayout = false;
+  let source = new Uint32Array(0);
+  let target = new Uint32Array(0);
   let radius = new Float64Array(0);
   // Neighbours as compressed rows: node i's are adjacency[offsets[i]..offsets[i+1]].
   let offsets = new Uint32Array(1);
@@ -128,6 +141,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let width = 0, height = 0, dpr = 1;
   let k = 1, tx = 0, ty = 0;
   let followLayout = true;
+  let snapCamera = true;
   let visible = true;
   let frame: number | null = null;
   let dirty = true;
@@ -144,11 +158,40 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     | { kind: "node"; index: number; pointerId: number; startX: number; startY: number; moved: boolean }
     | { kind: "pan"; pointerId: number; startX: number; startY: number; tx: number; ty: number };
   let gesture: Gesture | null = null;
+  // Where a dragged node is held, in graph space.
+  let held: { index: number; x: number; y: number } | null = null;
+
+  // Without its worker the graph keeps the places it has.
+  let worker: Worker | null = null;
+  try {
+    worker = new Worker(new URL("./graphLayout.worker.ts", import.meta.url), { type: "module" });
+  } catch {
+    worker = null;
+  }
+  function send(request: LayoutRequest, transfer: Transferable[] = []): void {
+    worker?.postMessage(request, transfer);
+  }
+  if (worker) {
+    worker.onmessage = ({ data }: MessageEvent<LayoutFrame>) => {
+      if (data.generation !== generation) return;
+      incoming = data;
+      wake();
+    };
+    worker.onerror = () => {
+      worker?.terminate();
+      worker = null;
+      layoutSettled = true;
+      awaitingLayout = false;
+      wake();
+    };
+    send({ type: "reduced", reduced });
+  }
+
+  const px = (i: number) => positions[i * 2]!;
+  const py = (i: number) => positions[i * 2 + 1]!;
 
   function remember(): void {
-    for (let i = 0; i < model.nodes.length; i++) {
-      remembered.set(model.nodes[i]!.path, { x: layout.x[i]!, y: layout.y[i]! });
-    }
+    for (let i = 0; i < model.nodes.length; i++) remembered.set(model.nodes[i]!.path, { x: px(i), y: py(i) });
   }
 
   function setModel(next: Model): void {
@@ -158,10 +201,14 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     radius = new Float64Array(count);
     for (let i = 0; i < count; i++) radius[i] = nodeRadius(next.nodes[i]!.degree, options.display);
     const degree = new Uint32Array(count);
-    for (const [s, t] of next.links) {
+    source = new Uint32Array(next.links.length);
+    target = new Uint32Array(next.links.length);
+    next.links.forEach(([s, t], l) => {
+      source[l] = s;
+      target[l] = t;
       degree[s]!++;
       degree[t]!++;
-    }
+    });
     offsets = new Uint32Array(count + 1);
     for (let i = 0; i < count; i++) offsets[i + 1] = offsets[i]! + degree[i]!;
     adjacency = new Uint32Array(offsets[count]!);
@@ -171,7 +218,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       adjacency[fill[t]!++] = s;
     }
     const seeded = new Set<number>();
-    layout = createLayout(count, next.links, degree, (i) => {
+    const placed = placeNodes(count, (i) => {
       const previous = remembered.get(next.nodes[i]!.path);
       if (previous) seeded.add(i);
       return previous;
@@ -183,22 +230,44 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
         for (let a = offsets[i]!; a < offsets[i + 1]!; a++) {
           const n = adjacency[a]!;
           if (!seeded.has(n)) continue;
-          layout.x[i] = layout.x[n]! + ((i % 7) - 3) * 4;
-          layout.y[i] = layout.y[n]! + ((i % 5) - 2) * 4;
+          placed.x[i] = placed.x[n]! + ((i % 7) - 3) * 4;
+          placed.y[i] = placed.y[n]! + ((i % 5) - 2) * 4;
           break;
         }
       }
     }
+    positions = new Float32Array(count * 2);
+    for (let i = 0; i < count; i++) {
+      positions[i * 2] = placed.x[i]!;
+      positions[i * 2 + 1] = placed.y[i]!;
+    }
+    generation++;
+    incoming = null;
+    held = null;
+    layoutSettled = !worker || count === 0;
+    awaitingLayout = !layoutSettled && reduced;
+    send(
+      { type: "model", generation, x: placed.x, y: placed.y, source: source.slice(), target: target.slice(), alpha: placed.alpha },
+      [placed.x.buffer, placed.y.buffer],
+    );
     litSet = new Uint8Array(count);
     if (hover >= count) hover = -1;
     if (focus >= count) focus = -1;
     lit = -1;
     relight();
     followLayout = followLayout || seeded.size === 0 || options.local;
+    // A layout that starts from scratch opens framed, without zooming in from the last view.
+    if (seeded.size === 0) snapCamera = true;
     canvas.dataset.nodeCount = String(count);
     canvas.dataset.linkCount = String(next.links.length);
     canvas.dataset.settled = "false";
     wake();
+  }
+
+  function unsettle(): void {
+    if (!worker) return;
+    layoutSettled = false;
+    canvas.dataset.settled = "false";
   }
 
   function setActive(index: number): void {
@@ -213,12 +282,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
 
   function setOptions(next: Options): void {
     const sizeChanged = next.display.nodeSize !== options.display.nodeSize;
-    const forcesChanged = next.forces !== options.forces;
+    const forcesChanged = !sameForces(next.forces, options.forces);
     options = next;
     if (sizeChanged) for (let i = 0; i < model.nodes.length; i++) radius[i] = nodeRadius(model.nodes[i]!.degree, next.display);
     if (forcesChanged) {
-      reheat(layout, 0.5);
-      canvas.dataset.settled = "false";
+      send({ type: "forces", forces: next.forces });
+      if (model.nodes.length > 0) unsettle();
     }
     wake();
   }
@@ -246,14 +315,15 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   }
 
   function fitTarget(): { k: number; tx: number; ty: number } {
-    if (layout.count === 0 || width === 0 || height === 0) return { k: 1, tx: width / 2, ty: height / 2 };
+    const count = model.nodes.length;
+    if (count === 0 || width === 0 || height === 0) return { k: 1, tx: width / 2, ty: height / 2 };
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (let i = 0; i < layout.count; i++) {
+    for (let i = 0; i < count; i++) {
       const r = radius[i]!;
-      x0 = Math.min(x0, layout.x[i]! - r);
-      x1 = Math.max(x1, layout.x[i]! + r);
-      y0 = Math.min(y0, layout.y[i]! - r);
-      y1 = Math.max(y1, layout.y[i]! + r);
+      x0 = Math.min(x0, px(i) - r);
+      x1 = Math.max(x1, px(i) + r);
+      y0 = Math.min(y0, py(i) - r);
+      y1 = Math.max(y1, py(i) + r);
     }
     const pad = options.local ? 32 : 48;
     const scale = Math.min((width - pad * 2) / Math.max(1, x1 - x0), (height - pad * 2) / Math.max(1, y1 - y0));
@@ -269,35 +339,29 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   function step(now: number): void {
     frame = null;
     if (!visible) return;
-    let moving = false;
-    const pinned = gesture?.kind === "node" && gesture.moved;
-    if (!settled(layout)) {
-      if (reduced) {
-        // Settle out of sight: no drift, then one still picture.
-        if (!pinned) {
-          const end = performance.now() + 12;
-          while (!settled(layout) && performance.now() < end) tick(layout, options.forces);
-          if (!settled(layout)) {
-            frame = requestAnimationFrame(step);
-            return;
-          }
-          for (let i = 0; i < layout.count; i++) {
-            layout.vx[i] = 0;
-            layout.vy[i] = 0;
-          }
-        }
-      } else {
-        tick(layout, options.forces);
-        moving = true;
+    if (incoming) {
+      // Hand the drawn buffer back; the worker fills it with the next tick.
+      const drawn = positions;
+      positions = incoming.positions;
+      layoutSettled = incoming.settled;
+      awaitingLayout = false;
+      incoming = null;
+      send({ type: "frame", generation, positions: drawn }, [drawn.buffer]);
+      if (held) {
+        positions[held.index * 2] = held.x;
+        positions[held.index * 2 + 1] = held.y;
       }
     }
-    if (followLayout && (moving || dirty)) {
-      const target = fitTarget();
-      const ease = reduced ? 1 : moving ? 0.12 : 1;
-      k += (target.k - k) * ease;
-      tx += (target.tx - tx) * ease;
-      ty += (target.ty - ty) * ease;
-      if (!moving) followLayout = options.local;
+    let easing = false;
+    if (followLayout && !awaitingLayout) {
+      const goal = fitTarget();
+      const ease = reduced || snapCamera ? 1 : 0.15;
+      snapCamera = false;
+      k += (goal.k - k) * ease;
+      tx += (goal.tx - tx) * ease;
+      ty += (goal.ty - ty) * ease;
+      easing = Math.abs(goal.k - k) > k * 1e-3 || Math.abs(goal.tx - tx) > 0.5 || Math.abs(goal.ty - ty) > 0.5;
+      if (!easing && layoutSettled) followLayout = options.local;
     }
     let fading = false;
     if (mix !== mixTo && !reduced) {
@@ -306,11 +370,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       fading = t < 1;
       if (!fading && mixTo === 0) lit = -1;
     }
-    draw();
+    if (!awaitingLayout) draw();
     dirty = false;
-    if (moving || fading) {
+    if (fading || easing) {
       frame = requestAnimationFrame(step);
-    } else if (canvas.dataset.settled !== "true" && settled(layout)) {
+    } else if (layoutSettled && canvas.dataset.settled !== "true") {
       canvas.dataset.settled = "true";
       callbacks.settled();
     }
@@ -321,14 +385,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = palette.bg;
     ctx.fillRect(0, 0, width, height);
-    const count = layout.count;
+    const count = model.nodes.length;
     if (count === 0) return;
-    const { x, y } = layout;
     const { display } = options;
     const highlight = lit >= 0 && mix > 0;
     const rest = highlight ? 1 - (1 - DIM) * mix : 1;
-    const sx = (i: number) => x[i]! * k + tx;
-    const sy = (i: number) => y[i]! * k + ty;
+    const sx = (i: number) => px(i) * k + tx;
+    const sy = (i: number) => py(i) * k + ty;
     const minR = options.local ? 2.5 : 1.25;
     const screenR = (i: number) => Math.max(minR, radius[i]! * k);
 
@@ -338,7 +401,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ctx.strokeStyle = palette.edge;
     ctx.globalAlpha = palette.edgeAlpha * rest;
     ctx.beginPath();
-    const { source, target } = layout;
     for (let l = 0; l < source.length; l++) {
       const s = source[l]!, t = target[l]!;
       if (highlight && (s === lit || t === lit)) continue;
@@ -386,8 +448,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // Nodes: batched by color, rings stroked over their paper fill.
     const visibleNode = (i: number) => {
       const r = screenR(i) * 1.3 + 2;
-      const px = sx(i), py = sy(i);
-      return px > -r && py > -r && px < width + r && py < height + r;
+      const x = sx(i), y = sy(i);
+      return x > -r && y > -r && x < width + r && y < height + r;
     };
     const fillPass = (color: string, alpha: number, include: (i: number) => boolean) => {
       ctx.fillStyle = color;
@@ -470,10 +532,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ctx.globalAlpha = 1;
   }
 
-  function hitTest(px: number, py: number): number {
+  function hitTest(x: number, y: number): number {
     let best = -1, bestDistance = Infinity;
-    for (let i = 0; i < layout.count; i++) {
-      const dx = layout.x[i]! * k + tx - px, dy = layout.y[i]! * k + ty - py;
+    for (let i = 0; i < model.nodes.length; i++) {
+      const dx = px(i) * k + tx - x, dy = py(i) * k + ty - y;
       const distance = Math.hypot(dx, dy);
       const reach = Math.max(options.local ? 2.5 : 1.25, radius[i]! * k) + 4;
       if (distance <= reach && distance < bestDistance) {
@@ -528,14 +590,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     gesture.moved = true;
     const i = gesture.index;
     canvas.style.cursor = "grabbing";
-    layout.pinned[i] = 1;
-    layout.x[i] = (point.x - tx) / k;
-    layout.y[i] = (point.y - ty) / k;
-    if (!reduced) {
-      layout.alphaTarget = 0.25;
-      reheat(layout, 0.25);
-      canvas.dataset.settled = "false";
-    }
+    held = { index: i, x: (point.x - tx) / k, y: (point.y - ty) / k };
+    positions[i * 2] = held.x;
+    positions[i * 2 + 1] = held.y;
+    send({ type: "pin", ...held });
+    if (!reduced) unsettle();
     wake();
   }
 
@@ -547,8 +606,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     canvas.style.cursor = hover >= 0 ? "pointer" : "";
     if (ended.kind === "pan") return;
     if (ended.moved) {
-      layout.pinned[ended.index] = 0;
-      layout.alphaTarget = 0;
+      held = null;
+      send({ type: "release", index: ended.index });
       if (!reduced) followLayout = false;
       wake();
       return;
@@ -556,10 +615,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (!cancelled) callbacks.open(ended.index);
   }
 
-  function zoomAt(px: number, py: number, factor: number): void {
+  function zoomAt(x: number, y: number, factor: number): void {
     const next = Math.max(0.02, Math.min(8, k * factor));
-    tx = px - ((px - tx) * next) / k;
-    ty = py - ((py - ty) * next) / k;
+    tx = x - ((x - tx) * next) / k;
+    ty = y - ((y - ty) * next) / k;
     k = next;
     followLayout = false;
     wake();
@@ -597,6 +656,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   }
 
   function setVisible(next: boolean): void {
+    if (next !== visible) send({ type: "visible", visible: next });
     visible = next;
     if (!next && frame !== null) {
       cancelAnimationFrame(frame);
@@ -618,10 +678,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       relight();
       if (index < 0) return;
       // Bring a focused node into view.
-      const px = layout.x[index]! * k + tx, py = layout.y[index]! * k + ty;
-      if (px < 24 || py < 24 || px > width - 24 || py > height - 24) {
-        tx += width / 2 - px;
-        ty += height / 2 - py;
+      const x = px(index) * k + tx, y = py(index) * k + ty;
+      if (x < 24 || y < 24 || x > width - 24 || y > height - 24) {
+        tx += width / 2 - x;
+        ty += height / 2 - y;
         followLayout = false;
       }
       wake();
@@ -631,7 +691,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       let best = -1, bestScore = -Infinity;
       for (let a = offsets[index]!; a < offsets[index + 1]!; a++) {
         const n = adjacency[a]!;
-        const vx = layout.x[n]! - layout.x[index]!, vy = layout.y[n]! - layout.y[index]!;
+        const vx = px(n) - px(index), vy = py(n) - py(index);
         const length = Math.hypot(vx, vy) || 1;
         const along = (vx * dx + vy * dy) / length;
         if (along <= 0.2) continue;
@@ -652,12 +712,16 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     },
     retheme() {
       palette = readPalette(surface);
-      reduced = prefersReducedMotion();
+      const nextReduced = prefersReducedMotion();
+      if (nextReduced !== reduced) send({ type: "reduced", reduced: nextReduced });
+      reduced = nextReduced;
       wake();
     },
     destroy() {
       if (frame !== null) cancelAnimationFrame(frame);
       frame = null;
+      worker?.terminate();
+      worker = null;
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onUp);

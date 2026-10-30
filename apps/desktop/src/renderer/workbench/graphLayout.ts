@@ -27,51 +27,58 @@ export type GraphLayout = {
   alphaTarget: number;
 };
 
-export function createLayout(
+// Starting places: a remembered place where the seed has one, else a spot on a
+// phyllotaxis disc, an even spread with no two nodes on one point. A layout that
+// kept most of its places only needs to settle the new ones, so it starts cooler.
+export function placeNodes(
   count: number,
-  links: readonly (readonly [number, number])[],
-  degree: ArrayLike<number>,
   seed: (index: number) => { x: number; y: number } | undefined,
-): GraphLayout {
-  const layout: GraphLayout = {
-    count,
-    x: new Float64Array(count),
-    y: new Float64Array(count),
-    vx: new Float64Array(count),
-    vy: new Float64Array(count),
-    pinned: new Uint8Array(count),
-    source: new Uint32Array(links.length),
-    target: new Uint32Array(links.length),
-    linkBias: new Float64Array(links.length),
-    linkStrength: new Float64Array(links.length),
-    alpha: 1,
-    alphaTarget: 0,
-  };
+): { x: Float64Array; y: Float64Array; alpha: number } {
+  const x = new Float64Array(count), y = new Float64Array(count);
   let seeded = 0;
   for (let i = 0; i < count; i++) {
     const previous = seed(i);
     if (previous) {
-      layout.x[i] = previous.x;
-      layout.y[i] = previous.y;
+      x[i] = previous.x;
+      y[i] = previous.y;
       seeded++;
       continue;
     }
-    // Phyllotaxis: an even disc with no two nodes on one point.
     const radius = 10 * Math.sqrt(0.5 + i);
     const angle = i * Math.PI * (3 - Math.sqrt(5));
-    layout.x[i] = radius * Math.cos(angle);
-    layout.y[i] = radius * Math.sin(angle);
+    x[i] = radius * Math.cos(angle);
+    y[i] = radius * Math.sin(angle);
   }
-  links.forEach(([s, t], index) => {
-    layout.source[index] = s;
-    layout.target[index] = t;
-    const ds = Math.max(1, degree[s] ?? 1), dt = Math.max(1, degree[t] ?? 1);
-    layout.linkBias[index] = ds / (ds + dt);
-    layout.linkStrength[index] = 1 / Math.min(ds, dt);
-  });
-  // A layout that kept most of its places only needs to settle the new ones.
-  if (count > 0 && seeded / count > 0.8) layout.alpha = 0.3;
-  return layout;
+  return { x, y, alpha: count > 0 && seeded / count > 0.8 ? 0.3 : 1 };
+}
+
+export function createLayout(x: Float64Array, y: Float64Array, source: Uint32Array, target: Uint32Array, alpha = 1): GraphLayout {
+  const count = x.length;
+  const degree = new Uint32Array(count);
+  for (let l = 0; l < source.length; l++) {
+    degree[source[l]!]!++;
+    degree[target[l]!]!++;
+  }
+  const linkBias = new Float64Array(source.length), linkStrength = new Float64Array(source.length);
+  for (let l = 0; l < source.length; l++) {
+    const ds = Math.max(1, degree[source[l]!]!), dt = Math.max(1, degree[target[l]!]!);
+    linkBias[l] = ds / (ds + dt);
+    linkStrength[l] = 1 / Math.min(ds, dt);
+  }
+  return {
+    count,
+    x,
+    y,
+    vx: new Float64Array(count),
+    vy: new Float64Array(count),
+    pinned: new Uint8Array(count),
+    source,
+    target,
+    linkBias,
+    linkStrength,
+    alpha,
+    alphaTarget: 0,
+  };
 }
 
 export function reheat(layout: GraphLayout, alpha: number): void {
@@ -307,4 +314,104 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
     x[i] = x[i]! + vx[i]!;
     y[i] = y[i]! + vy[i]!;
   }
+}
+
+// The layout runs in a worker so settling never holds up the main thread.
+// Positions travel as interleaved x, y in one of two Float32Array buffers. The
+// renderer keeps the one it last drew and hands the other back after drawing
+// the next, so the worker ticks at most once per drawn frame and stops when
+// drawing stops.
+export type LayoutRequest =
+  | { type: "model"; generation: number; x: Float64Array; y: Float64Array; source: Uint32Array; target: Uint32Array; alpha: number }
+  | { type: "frame"; generation: number; positions: Float32Array }
+  | { type: "forces"; forces: GraphForces }
+  | { type: "reduced"; reduced: boolean }
+  | { type: "visible"; visible: boolean }
+  | { type: "pin"; index: number; x: number; y: number }
+  | { type: "release"; index: number };
+
+export type LayoutFrame = { generation: number; positions: Float32Array; settled: boolean };
+
+export function createLayoutEngine(post: (frame: LayoutFrame) => void, later: (run: () => void) => void) {
+  let layout: GraphLayout | null = null;
+  let generation = -1;
+  let forces = DEFAULT_FORCES;
+  let reduced = false;
+  let visible = true;
+  let free: Float32Array | null = null;
+  let scheduled = false;
+
+  function schedule(): void {
+    if (scheduled || !layout || !free || !visible || settled(layout)) return;
+    scheduled = true;
+    later(run);
+  }
+
+  function run(): void {
+    scheduled = false;
+    if (!layout || !free || !visible || settled(layout)) return;
+    if (reduced && layout.alphaTarget === 0) {
+      // Settle out of sight in short slices, so new requests still arrive,
+      // then post one still picture.
+      const end = performance.now() + 30;
+      while (!settled(layout) && performance.now() < end) tick(layout, forces);
+      if (!settled(layout)) {
+        scheduled = true;
+        later(run);
+        return;
+      }
+      layout.vx.fill(0);
+      layout.vy.fill(0);
+    } else {
+      tick(layout, forces);
+    }
+    const positions = free;
+    free = null;
+    for (let i = 0; i < layout.count; i++) {
+      positions[i * 2] = layout.x[i]!;
+      positions[i * 2 + 1] = layout.y[i]!;
+    }
+    post({ generation, positions, settled: settled(layout) });
+  }
+
+  return {
+    receive(request: LayoutRequest): void {
+      switch (request.type) {
+        case "model":
+          generation = request.generation;
+          layout = createLayout(request.x, request.y, request.source, request.target, request.alpha);
+          free = new Float32Array(layout.count * 2);
+          break;
+        case "frame":
+          if (request.generation === generation) free = request.positions;
+          break;
+        case "forces":
+          forces = request.forces;
+          if (layout) reheat(layout, 0.5);
+          break;
+        case "reduced":
+          reduced = request.reduced;
+          break;
+        case "visible":
+          visible = request.visible;
+          break;
+        case "pin":
+          if (!layout) break;
+          layout.pinned[request.index] = 1;
+          layout.x[request.index] = request.x;
+          layout.y[request.index] = request.y;
+          if (!reduced) {
+            layout.alphaTarget = 0.25;
+            reheat(layout, 0.25);
+          }
+          break;
+        case "release":
+          if (!layout) break;
+          layout.pinned[request.index] = 0;
+          layout.alphaTarget = 0;
+          break;
+      }
+      schedule();
+    },
+  };
 }
