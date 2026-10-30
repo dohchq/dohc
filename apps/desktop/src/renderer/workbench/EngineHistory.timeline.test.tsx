@@ -101,7 +101,7 @@ describe("History timeline rows", () => {
     expect(labelled!.querySelector(".font-medium")!.textContent).toBe("Add row");
     expect(labelled!.textContent).not.toContain("addRow");
     expect(unlabelled!.querySelector(".font-medium")!.textContent).toBe("Changed Guests");
-    expect(unlabelled!.querySelector(".font-mono:last-child")!.textContent).toBe("addRow");
+    expect(unlabelled!.querySelector("[id]")!.lastElementChild!.textContent).toBe("addRow");
     // The title already names the Collection, so the meta line does not.
     expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
     // The row's name says what it opens; the change describes it.
@@ -161,28 +161,29 @@ describe("History timeline changes", () => {
   const agentEdit = (id: string, minutes: number): TimelineEntry =>
     file(id, { recordedAtMs: DAY - minutes * 60_000, agentAuthorName: "Nova", summary: "Updated plan.md", authors: [nova], authorPresentations: [{ group: "nova", hue: null, self: false }] });
 
-  it("draws each change on one line: who, the file, its folder, and the time", () => {
+  it("draws each change on two lines: who and when, then the file and its folder", () => {
     view({ entries: [agentEdit("m-2", 0), file("m-1", { recordedAtMs: DAY - 3_600_000 })] });
     const [agent, local] = screen.getAllByTestId("engine-moment-open");
     // The agent's square avatar leads, and its name follows in the agent voice.
     expect(agent!.querySelector('[title="Nova"]')?.className).toContain("rounded");
     expect(agent!.querySelector('[title="Nova"]')?.className).not.toContain("rounded-full");
     expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
-    // A local edit leads with its origin's mark, says its folder, and keeps
-    // its origin in words for screen readers.
+    // A local edit leads with its origin's mark and names it, then says
+    // its file and folder.
     expect(local!.querySelector('[title="Local file edit"] .lucide-hard-drive')).not.toBeNull();
     expect(local!.textContent).toContain("plan.mdnotes");
     expect(local!.textContent).not.toContain("Edited");
-    expect(screen.getAllByTestId("engine-moment-source")[1]!.className).toBe("sr-only");
+    expect(screen.getAllByTestId("engine-moment-source")[1]!.textContent).toBe("Local file edit");
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
     const calls = view({ entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)] });
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
-    // The run's head names its file; each edit's summary is listed under it.
-    expect(screen.getByTestId("engine-moment-open").textContent).toMatch(/^plan\.mdNova/);
+    // The run's head names the agent, then its file; each edit's summary is
+    // listed under it.
+    expect(screen.getByTestId("engine-moment-open").textContent).toMatch(/^Nova.*plan\.mdnotes$/);
     const toggle = screen.getByTestId("engine-moment-run-toggle");
-    expect(toggle.textContent).toBe("3");
+    expect(toggle.textContent).toBe("3 changes");
     expect(toggle.getAttribute("aria-label")).toBe("3 changes");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(screen.getByTestId("engine-moment-open"));
@@ -202,15 +203,15 @@ describe("History timeline changes", () => {
   it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
     const pass = (id: string) => file(id, { correlationId: "import", path: `notes/${id}.md` });
     view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2"), pass("p-1")], hasMore: true });
-    expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2");
+    expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2 changes");
     const count = screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!;
-    expect(count.textContent).toBe("2+ or more files");
-    expect(count.querySelector("[aria-hidden]")?.textContent).toBe("+");
+    expect(count.querySelector("[aria-hidden]")?.textContent).toBe("2+ files");
+    expect(count.querySelector(".sr-only")?.textContent).toBe("2 or more files");
     cleanup();
 
     view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: true });
     const run = screen.getByTestId("engine-moment-run-toggle");
-    expect(run.textContent).toBe("2+");
+    expect(run.querySelector("[aria-hidden]")?.textContent).toBe("2+ changes");
     expect(run.getAttribute("aria-label")).toBe("2 or more changes");
     expect(run.getAttribute("title")).toBe("2 or more changes");
     expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!.textContent).toBe("2 files");

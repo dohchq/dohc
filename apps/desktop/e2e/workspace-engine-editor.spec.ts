@@ -94,7 +94,6 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   const kept = await page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId);
   expect(kept.captureRecoveries.map(recovery => recovery.momentId)).toContain(recoveryId);
   await page.getByTestId("engine-diff-restore-file").click();
-  await page.getByTestId("engine-diff-confirm-restore").click();
   await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
   await expect.poll(() => readFile(join(rootPath,path), "utf8")).toContain(human);
   await expect.poll(() => page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId)).toEqual({captureRecoveries: []});

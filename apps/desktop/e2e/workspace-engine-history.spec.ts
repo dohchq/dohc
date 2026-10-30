@@ -78,8 +78,6 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
 
     // Engine restore: back to the state before this change...
     await page.getByTestId("engine-diff-restore-file").click();
-    await expect(page.getByTestId("engine-diff-restore-confirm")).toBeVisible();
-    await page.getByTestId("engine-diff-confirm-restore").click();
     await expect(page.getByTestId("engine-diff-restore-status")).toContainText(
       "Restored the earlier state",
     );

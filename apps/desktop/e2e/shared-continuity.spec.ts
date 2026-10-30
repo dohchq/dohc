@@ -171,6 +171,7 @@ async function openSharedRestore(page: Page) {
   await expect(moment).toBeVisible({ timeout: 60_000 });
   await moment.click();
   await expect(page.getByTestId("engine-moment-diff-page")).toBeVisible();
+  await page.getByTestId("engine-diff-more").click();
   await page.getByTestId("engine-diff-shared-restore").click();
   const dialog = page.getByTestId("owner-restore-dialog");
   await expect(dialog).toBeVisible();

@@ -110,8 +110,7 @@ describe("history diff page", () => {
       />,
     );
     await act(async () => {});
-    fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
     if (undo) {
       expect(order).toEqual(["restored", "release"]);
       order.length = 0;
@@ -138,8 +137,7 @@ describe("history diff page", () => {
     const status = screen.getByRole("status");
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(status.textContent).toBe("");
-    fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
     await act(async () => {
       if (failure) reject(new Error("Could not restore this file."));
       else resolve({ restored: "text", restoredMomentId: "restore-1" });
