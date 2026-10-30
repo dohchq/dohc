@@ -11,7 +11,7 @@ import type { AppViewEvent } from "../src/ipc/bridgeContract";
 type MainProbe = typeof globalThis & { __appViewProbe?: {
   urls: string[];
   openExternal: typeof import("electron").shell.openExternal;
-  attaches: Array<{ src: string; refused: boolean }>;
+  attaches: Array<{ src: string; refused: boolean; partition: string }>;
   guestsCreated: number;
 } };
 type RendererProbe = Window & { __appViewEvents?: AppViewEvent[]; __stopAppViewEvents?: () => void };
@@ -106,7 +106,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       app.setPath("downloads", downloads);
       // Added after dohc's own handlers, so these record what dohc decided.
       BrowserWindow.getAllWindows()[0]!.webContents.on("will-attach-webview", (event, _preferences, params) => {
-        probe.__appViewProbe!.attaches.push({ src: params.src, refused: event.defaultPrevented });
+        probe.__appViewProbe!.attaches.push({ src: params.src, refused: event.defaultPrevented, partition: params.partition });
       });
       app.on("web-contents-created", (_event, contents) => { if (contents.getType() === "webview") probe.__appViewProbe!.guestsCreated++; });
     }, downloads);
@@ -144,7 +144,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     // An unapproved app has no address dohc issued, so a guest the page adds itself is refused before Electron creates it.
     const unissued = `http://127.0.0.1:1/bootstrap#${"a".repeat(43)}`;
     await injectGuest(page, unissued, preload);
-    await expect.poll(attaches).toContainEqual({ src: unissued, refused: true });
+    await expect.poll(attaches).toContainEqual({ src: unissued, refused: true, partition: "persist:injected" });
     await removeInjected();
     expect(await guestsCreated()).toBe(0);
 
@@ -164,28 +164,31 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
     const guestId = (await guestIds(electronApp))[0]!;
     await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
-    // The approved app's address admits one guest. A second guest at the same address is refused. The page drops
-    // the address's fragment once it loads, so the address comes from main's record.
+    // The approved app's address admits one guest, in the app's own partition. A second guest at the same address is
+    // refused. Only the injected element asks for its own partition, so that refusal isn't dohc's webview attaching
+    // again. The page drops the address's fragment once it loads, so the address comes from main's record.
     const admitted = (await attaches()).filter(attach => !attach.refused);
-    const issued = admitted.at(-1)!.src;
+    const { src: issued, partition } = admitted.at(-1)!;
+    expect(partition).toMatch(/^dohc-app:[a-f0-9]+$/);
     await expect.poll(() => electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId)).toBe(issued.split("#")[0]);
     await injectGuest(page, issued, preload);
-    await expect.poll(attaches).toContainEqual({ src: issued, refused: true });
+    await expect.poll(attaches).toContainEqual({ src: issued, refused: true, partition: "persist:injected" });
     await removeInjected();
     // Electron created a guest only for each attach dohc admitted.
     expect(await guestsCreated()).toBe(admitted.length);
     expect(await guestIds(electronApp)).toEqual([guestId]);
-    const isolation = await electronApp.evaluate(({ webContents, BrowserWindow }, id) => {
+    // Electron doesn't report a guest's preload or partition, so the session shows the partition and the globals below
+    // show there's no preload.
+    const isolation = await electronApp.evaluate(({ webContents, BrowserWindow, session }, { id, partition }) => {
       const guest = webContents.fromId(id)!;
       const owner = BrowserWindow.getAllWindows().find(window => window.webContents === guest.hostWebContents)!.webContents;
       const prefs = (guest as typeof guest & { getLastWebPreferences(): import("electron").WebPreferences }).getLastWebPreferences();
-      return { preload: prefs.preload ?? null, sandbox: prefs.sandbox, contextIsolation: prefs.contextIsolation,
-        nodeIntegration: prefs.nodeIntegration, nodeIntegrationInSubFrames: prefs.nodeIntegrationInSubFrames,
-        webviewTag: prefs.webviewTag, partition: prefs.partition, distinctSession: guest.session !== owner.session };
-    }, guestId);
-    expect(isolation).toMatchObject({ preload: null, sandbox: true, contextIsolation: true, nodeIntegration: false,
-      nodeIntegrationInSubFrames: false, webviewTag: false, distinctSession: true });
-    expect(isolation.partition).toMatch(/^dohc-app:[a-f0-9]+$/);
+      return { sandbox: prefs.sandbox, contextIsolation: prefs.contextIsolation, nodeIntegration: prefs.nodeIntegration,
+        nodeIntegrationInSubFrames: prefs.nodeIntegrationInSubFrames, webviewTag: prefs.webviewTag,
+        issuedSession: guest.session === session.fromPartition(partition), distinctSession: guest.session !== owner.session };
+    }, { id: guestId, partition });
+    expect(isolation).toEqual({ sandbox: true, contextIsolation: true, nodeIntegration: false,
+      nodeIntegrationInSubFrames: false, webviewTag: false, issuedSession: true, distinctSession: true });
     for (const child of [false, true]) expect(await inFrame(electronApp, guestId,
       "['dohcDesktop','require','process','ipcRenderer','electron'].map(key => typeof window[key])", child))
       .toEqual(["undefined", "undefined", "undefined", "undefined", "undefined"]);
