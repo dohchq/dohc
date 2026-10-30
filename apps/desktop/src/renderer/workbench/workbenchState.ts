@@ -276,8 +276,9 @@ const diffTitle: TabTitle = (_tab, label) => {
   return name ? `Diff: ${name}` : "History change";
 };
 const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
-// An app's folder, as typed. A folder that cannot be decoded keeps its address.
-const appTitle: TabTitle = tab => basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
+// The app's title once its page reads it, and until then its folder, as typed. A folder that cannot be decoded keeps
+// its address. The tooltip names the folder.
+const appTitle: TabTitle = (tab, label) => label ?? basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
 const collectionFolder = (tab: ParsedTab) => tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection";
 export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   file: {
