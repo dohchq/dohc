@@ -3793,7 +3793,9 @@ export function createWorkspaceEngineCapture(
         // and may have been refused — because the release below hands over
         // anything the engine is still missing whatever `settle` says, and
         // refuses to release while it is behind (ydocProviderSession `close`).
-        if (entry.status === "live") {
+        // A workspace close also settles a dead generation, which revives it:
+        // nothing after this close can save its text.
+        if (entry.status === "live" || (tryEvery && entry.status === "dead-generation")) {
           await entry.session.settleNow({ summary, ifNeeded: true });
         }
         await entry.close({ settle: false });

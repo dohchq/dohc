@@ -3247,6 +3247,42 @@ it("a settling close persists outage text when the user never types again", asyn
   await capture.stop();
 });
 
+// Forget closes every session through the workspace close before anything
+// else closes the document, so that close is the last chance to persist it.
+it("a workspace close persists outage text when the user never types again", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-forget-",
+    "ydoc-death-forget",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-forget",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  await capture.settleAndCloseAllLiveSessions();
+
+  expect(state.settled.at(-1)).toBe("alive PRE_KILL");
+  expect(state.diskMarkdown).toBe("alive PRE_KILL");
+  expect(state.generation).toBe(2);
+  await capture.stop();
+});
+
 // Forget stops the capture, which closes the workspace's engine session, and
 // then closes the sessions its close loop could not save. Their close must not
 // open an engine session that nothing would close.
