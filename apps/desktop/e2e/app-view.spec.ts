@@ -2,10 +2,10 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { activityPin, editorTabTestId } from "../src/testPins";
+import { editorTabTestId } from "../src/testPins";
 import { siteTabPath } from "../src/renderer/workbench/workbenchState";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, writeWorkspaceFiles } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, writeWorkspaceFiles } from "./helpers/workspace";
 import type { AppViewEvent } from "../src/ipc/bridgeContract";
 
 type MainProbe = typeof globalThis & { __appViewProbe?: {
@@ -135,8 +135,8 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await hidden(formDialog);
     await writeWorkspaceFiles(workspace, [{ path: `${appRoot}/frontend.js`, contents: frontend }]);
-    const explorer = page.getByTestId(activityPin("explorer"));
-    if (await explorer.getAttribute("aria-pressed") === "false") await explorer.click();
+    // Only Explorer Home lists apps.
+    await openExplorerHome(page);
     const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
     await shown(row);
     await row.click();
