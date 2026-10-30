@@ -16,6 +16,11 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map(cleanup => cleanup()));
   app.removeAllListeners(); vi.clearAllMocks();
 });
+function fakeDebugger() {
+  let attached = false;
+  return Object.assign(new EventEmitter(), { isAttached: () => attached, attach: vi.fn(() => { attached = true; }),
+    detach: vi.fn(() => { attached = false; }), sendCommand: vi.fn(async (_method: string, _params?: unknown, _sessionId?: string) => {}) });
+}
 function fixture() {
   const isolated = Object.assign(new EventEmitter(), { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn(),
     setDevicePermissionHandler: vi.fn(), setDisplayMediaRequestHandler: vi.fn(), webRequest: { onBeforeRequest: vi.fn() } });
@@ -112,7 +117,7 @@ it("denies permission checks and display capture, and guards main-frame requests
   f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, prefs, { src: opened.url });
   const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
     getType: () => "webview", isDestroyed: () => false,
-    close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: { isAttached: () => true, sendCommand: vi.fn(async () => {}) } });
+    close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: fakeDebugger() });
   app.emit("web-contents-created", {}, guest);
   const permission = vi.fn();
   f.isolated.setPermissionRequestHandler.mock.calls[0]![0](guest, "notifications", permission);
@@ -170,6 +175,57 @@ it("denies permission checks and display capture, and guards main-frame requests
   guest.emit("destroyed");
   await expect.poll(() => f.launches[0]!.stop.mock.calls.length).toBeGreaterThan(0);
 });
+it("gives the app's frame dohc's theme before it starts, follows each change, and detaches with the tab", async () => {
+  const f = fixture();
+  const opened = await f.open() as { url: string };
+  f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, {}, { src: opened.url });
+  const debug = fakeDebugger();
+  debug.sendCommand.mockImplementation(async (method, _params, sessionId) => {
+    if (method === "Emulation.setEmulatedMedia" && sessionId === "gone") throw Error("No session with given id");
+  });
+  const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
+    getType: () => "webview", isDestroyed: () => false, close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: debug });
+  app.emit("web-contents-created", {}, guest);
+  await expect.poll(() => debug.sendCommand.mock.calls)
+    .toContainEqual(["Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }]);
+  const scheme = (value: string) => ({ features: [{ name: "prefers-color-scheme", value }] });
+  // The app's frame gets the theme, then starts. A frame the theme can't reach and a worker start anyway.
+  for (const [sessionId, type] of [["app", "iframe"], ["gone", "iframe"], ["worker", "worker"]]) {
+    debug.emit("message", {}, "Target.attachedToTarget", { sessionId, targetInfo: { type }, waitingForDebugger: true }, "");
+  }
+  const started = () => debug.sendCommand.mock.calls.filter(([method]) => method === "Runtime.runIfWaitingForDebugger").map(call => call[2]);
+  await expect.poll(() => started().sort()).toEqual(["app", "gone", "worker"]);
+  const calls = debug.sendCommand.mock.calls;
+  expect(calls.findIndex(call => call[0] === "Emulation.setEmulatedMedia" && call[2] === "app"))
+    .toBeLessThan(calls.findIndex(call => call[0] === "Runtime.runIfWaitingForDebugger" && call[2] === "app"));
+  expect(calls).toContainEqual(["Emulation.setEmulatedMedia", scheme("dark"), "app"]);
+  expect(calls.some(call => call[0] === "Emulation.setEmulatedMedia" && call[2] === "worker")).toBe(false);
+  // A change reaches the guest's page and the app's frame, and not a frame that has gone.
+  debug.emit("message", {}, "Target.detachedFromTarget", { sessionId: "gone" }, "");
+  debug.sendCommand.mockClear();
+  await f.invoke({ action: "colorScheme", workspaceId: "w", colorScheme: "light" });
+  expect(debug.sendCommand.mock.calls.filter(([method]) => method === "Emulation.setEmulatedMedia"))
+    .toEqual([["Emulation.setEmulatedMedia", scheme("light")], ["Emulation.setEmulatedMedia", scheme("light"), "app"]]);
+  await f.invoke({ action: "close", workspaceId: "w", viewId: "one" });
+  expect(debug.detach).toHaveBeenCalledOnce();
+  expect(debug.detach.mock.invocationCallOrder[0]).toBeLessThan(guest.close.mock.invocationCallOrder[0]!);
+});
+it("runs an app whose guest the debugger can't reach", async () => {
+  const f = fixture();
+  const opened = await f.open() as { url: string };
+  f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, {}, { src: opened.url });
+  const debug = fakeDebugger();
+  debug.attach.mockImplementation(() => { throw Error("Another debugger is already attached"); });
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanups.push(async () => logged.mockRestore());
+  const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
+    getType: () => "webview", isDestroyed: () => false, close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: debug });
+  app.emit("web-contents-created", {}, guest);
+  await expect.poll(() => logged.mock.calls.length).toBe(1);
+  expect(guest.close).not.toHaveBeenCalled();
+  expect(f.owner.send).not.toHaveBeenCalledWith(CHANNELS.appViewEvent, expect.objectContaining({ kind: "session-ended" }));
+  await expect(f.invoke({ action: "colorScheme", workspaceId: "w", colorScheme: "light" })).resolves.toEqual({ kind: "colorScheme" });
+});
 it("retires a session when its owner reloads", async () => {
   const f = fixture(); await f.open();
   f.owner.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
@@ -184,7 +240,7 @@ it("keeps a page whose session ended until its tab reloads, and removes one whos
     f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, prefs, { src: opened.url });
     const guest = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
       getType: () => "webview", isDestroyed: () => false,
-      close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: { isAttached: () => true, sendCommand: vi.fn(async () => {}) } });
+      close: vi.fn(), setWindowOpenHandler: vi.fn(), debugger: fakeDebugger() });
     app.emit("web-contents-created", {}, guest);
     return guest;
   };

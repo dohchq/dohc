@@ -85,6 +85,8 @@ interface Entry {
   closed: boolean;
   closing?: Promise<void>;
   themeUpdate?: Promise<void>;
+  // The debugger sessions of the guest's child frames. The app's frame runs in its own process.
+  frames: Set<string>;
   removeLifetime(): void;
 }
 const issuedByOwner = new Map<number, Map<string, Entry>>();
@@ -148,7 +150,10 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     if (entry.guest) partitions.get(entry.partition)?.delete(entry.guest.id);
     entry.removeLifetime();
     entry.closing = Promise.resolve().then(async () => {
-      if (entry.guest && !entry.guest.isDestroyed()) entry.guest.close({ waitForBeforeUnload: false });
+      if (entry.guest && !entry.guest.isDestroyed()) {
+        if (entry.guest.debugger.isAttached()) entry.guest.debugger.detach();
+        entry.guest.close({ waitForBeforeUnload: false });
+      }
       await entry.launch?.stop();
     });
     return entry.closing;
@@ -205,21 +210,30 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     }
     return entries;
   };
+  const media = (entry: Entry) => ({ features: [{ name: "prefers-color-scheme", value: entry.colorScheme }] });
+  // A guest the debugger can't reach still runs its app, in the page's own scheme.
   const theme = (entry: Entry): Promise<void> => {
     const guest = entry.guest;
     if (!guest || guest.isDestroyed()) return Promise.resolve();
     const update = async () => {
       if (entry.closed || guest.isDestroyed()) return;
-      if (!guest.debugger.isAttached()) guest.debugger.attach("1.3");
-      await guest.debugger.sendCommand("Emulation.setEmulatedMedia", {
-        features: [{ name: "prefers-color-scheme", value: entry.colorScheme }],
-      });
+      if (!guest.debugger.isAttached()) {
+        guest.debugger.attach("1.3");
+        // The guest's own session doesn't reach a frame in another process, so each child frame gets its own session
+        // and waits for its theme before it starts.
+        await guest.debugger.sendCommand("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+      }
+      await guest.debugger.sendCommand("Emulation.setEmulatedMedia", media(entry));
       const hex = palette[entry.colorScheme].bg;
       await guest.debugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", { color: {
         r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16), a: 1,
       } });
+      await Promise.all([...entry.frames].map(sessionId =>
+        guest.debugger.sendCommand("Emulation.setEmulatedMedia", media(entry), sessionId).catch(() => {})));
     };
-    entry.themeUpdate = (entry.themeUpdate ?? Promise.resolve()).catch(() => {}).then(update);
+    entry.themeUpdate = (entry.themeUpdate ?? Promise.resolve()).then(update).catch(error => {
+      if (!entry.closed) console.error("[desktop] app view theme:", error);
+    });
     return entry.themeUpdate;
   };
   // Electron creates the guest before loading src, but emits did-attach-webview after loadURL. createGuest emits
@@ -256,9 +270,19 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
       if (event.isMainFrame && !event.isSameDocument && !event.initiator) entry.lastPress = undefined;
     });
     guest.once("destroyed", () => { void close(entry); });
-    void theme(entry).catch(() => {
-      emit(entry, { kind: "session-ended", viewId: entry.viewId }); void close(entry);
+    // A child frame starts once it has the theme, or once sending it fails.
+    guest.debugger.on("message", (_event, method: string, params: { sessionId?: string; targetInfo?: { type?: string } }) => {
+      const sessionId = params.sessionId;
+      if (!sessionId) return;
+      if (method === "Target.detachedFromTarget") { entry.frames.delete(sessionId); return; }
+      if (method !== "Target.attachedToTarget") return;
+      const frame = params.targetInfo?.type === "iframe";
+      if (frame) entry.frames.add(sessionId);
+      void (frame ? guest.debugger.sendCommand("Emulation.setEmulatedMedia", media(entry), sessionId) : Promise.resolve())
+        .catch(() => {}).then(() => guest.debugger.sendCommand("Runtime.runIfWaitingForDebugger", {}, sessionId)).catch(() => {});
     });
+    guest.debugger.on("detach", () => entry.frames.clear());
+    void theme(entry);
   });
   dependencies.registerHandler(CHANNELS.appView, async (event, raw): Promise<AppViewResult> => {
     dependencies.assertTrustedSender(event);
@@ -283,7 +307,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         if (entries.size >= 8) throw Error("Close another app before opening this one.");
         const entry: Entry = { owner: event.sender, workspaceId: input.workspaceId, appRoot: input.appRoot,
           viewId: input.viewId, publicationId: "", partition: appViewPartition(input.workspaceId, input.appRoot),
-          colorScheme: input.colorScheme, attached: false, closed: false, removeLifetime() {} };
+          colorScheme: input.colorScheme, attached: false, closed: false, frames: new Set(), removeLifetime() {} };
         entries.set(input.viewId, entry);
         const retire = () => { void close(entry); };
         operation.signal.addEventListener("abort", retire, { once: true });
