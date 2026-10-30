@@ -582,29 +582,35 @@ describe("a Collection this computer cannot use", () => {
 });
 
 describe("a read that waited for this Collection's move", () => {
-  it("files a row naming the Collection, then reads again and takes the row back once saving access finishes the move", async () => {
+  it("files one row naming the Collection, and takes it back when a save that moves the Collection reads it again", async () => {
     const waited = Error("CollectionMoveUnfinishedError [waited]: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
     const shareable: DatasetDescription = { ...dataset, operations: [{ ...dataset.operations[0]!, access: "helper" }] };
     let describes = 0;
     backend.dataset.mockImplementation(async (input: { action: string }) => {
       if (input.action === "describe") { describes += 1; if (describes === 2) throw waited; return { kind: "description", dataset: shareable }; }
-      if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null };
+      if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null,
+        place: { kind: "here", server: { host: "sync.example.test", runs: "off", automations: 0, scheduledAutomations: 0 } } };
       return { kind: "grant-updated" };
     });
+    // Another request that waited for the move: the save leaves it to its own Try again.
+    backend.findDatasetCollection.mockRejectedValueOnce(waited);
     backend.listRelayShares.mockResolvedValue({ granted: [{ workspaceId: "workspace-a", grantId: "grant", recipientUserId: "person", recipientEmail: "friend@example.test", revokedAtMs: null }] });
     const onError = vi.fn(), onSettled = vi.fn();
     render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onSettled={onSettled} onNotice={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    const named = "CollectionMoveUnfinishedError [waited]: \"Fundraiser\" didn't finish moving to sync.example.test. Its records are kept on this computer.";
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(String), named, expect.any(Function)));
     fireEvent.click(await screen.findByRole("button", { name: "Refresh records" }));
-    const row = "collection-move-waited:data/dataset.json:Could not open this Collection.";
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("Could not open this Collection.",
-      "CollectionMoveUnfinishedError [waited]: Fundraiser didn't finish moving to sync.example.test. Its records are kept on this computer.", expect.any(Function), row));
+    const row = "collection-open:data/dataset.json";
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Could not open this Collection.", named, expect.any(Function), row));
+    onSettled.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "Manage access" }));
     await screen.findByRole("option", { name: /friend@example.test/ });
     fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Create/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-    await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
+    fireEvent.click(screen.getByRole("button", { name: "Move and save access" }));
     await waitFor(() => expect(describes).toBe(3));
-    expect(onError).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
+    expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(2);
   });
 });
