@@ -710,7 +710,7 @@ describe("About Links", () => {
     openChat.mockReset();
   });
 
-  it("reads one page of links, draws each with its file and line, and opens the file at the linking line", async () => {
+  it("reads one page of links, draws each on one line with its file in the tooltip, and opens the file at the linking line", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2), link("notes/alpha.md", 9, 1), link("notes/beta.md", 5)]));
     render(<Links />);
 
@@ -718,12 +718,17 @@ describe("About Links", () => {
     expect(bridgeMock.linksIn).toHaveBeenCalledOnce();
     expect(bridgeMock.linksIn).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
     expect(screen.getByTestId("about-links-count").textContent).toBe("3");
-    // A file's next link leaves out its chip, and still names it to a screen reader.
+    // Each row is the linking file's title, then what it says; its path is in the tooltip.
     const rows = linkRows();
     expect(rows.map((row) => row.textContent)).toEqual([
-      "alphanotesnotes/alpha.mdalpha cites [[plan]] here.",
-      "alpha notes/alpha.mdalpha cites [[plan]] here.",
-      "betanotesnotes/beta.mdbeta cites [[plan]] here.",
+      "alphaalpha cites [[plan]] here.",
+      "alphaalpha cites [[plan]] here.",
+      "betabeta cites [[plan]] here.",
+    ]);
+    expect(rows.map((row) => row.getAttribute("title"))).toEqual([
+      "alpha cites [[plan]] here.\nnotes/alpha.md",
+      "alpha cites [[plan]] here.\nnotes/alpha.md",
+      "beta cites [[plan]] here.\nnotes/beta.md",
     ]);
     expect(rows[0]!.querySelector("mark")?.textContent).toBe("[[plan]]");
 
@@ -1243,11 +1248,11 @@ describe("About Links", () => {
     render(<Links chats />);
     const rows = await screen.findAllByTestId("chat-file-mention");
     expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
-    // Where it was said, when, then who said what.
+    // Where it was said, who said what, then when.
     const when = formatShortTime(CHECKED_AT);
     expect(rows.map((row) => row.textContent)).toEqual([
-      `general${when}Sam See docs/plan.md general`,
-      `Thread file-thread${when}Sam See docs/plan.md file-thread`,
+      `generalSam See docs/plan.md general${when}`,
+      `Thread file-threadSam See docs/plan.md file-thread${when}`,
     ]);
     expect(rows[0]!.querySelector("time")?.getAttribute("title")).toBeTruthy();
     expect(screen.getByTestId("about-links-count").textContent).toBe("3");
