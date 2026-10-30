@@ -1047,7 +1047,9 @@ async fn markdown_hold_accepted_prefix_survives_restart_without_publishing_a_pri
             'source',?3,?4,0,0,?3,?3,0,0,0,'null','{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
             rusqlite::params![claim,serde_json::to_string(&binding).unwrap(),hex_sha256(source.as_bytes()),source.len() as i64])
             .map_err(StorageError::persist_public)?;
-        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+        tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                    rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
             .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);
@@ -1362,7 +1364,9 @@ async fn markdown_hold_accepted_prefix_settles_full_intervals_with_interleaved_p
             'source',?3,?4,0,0,?3,?3,0,0,0,'null','{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
             rusqlite::params![claim,serde_json::to_string(&binding).unwrap(),hex_sha256(source.as_bytes()),source.len() as i64])
             .map_err(StorageError::persist_public)?;
-        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+        tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                    rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
+                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
             .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);

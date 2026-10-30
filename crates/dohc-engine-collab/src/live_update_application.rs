@@ -1008,6 +1008,7 @@ pub fn initialize_adopted_history_for_test(
             connection_id: "test-connection".into(),
         },
         binding: binding.clone(),
+        activation_id: None,
         live: true,
     };
     accepted_history::initialize(tx, &held, &baseline)

@@ -2846,7 +2846,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                     faults,
                 )
-                .map_err(|error| self.local(error))?;
+                .map_err(local)?;
             for change in recovered.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
@@ -2994,7 +2994,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
                 leases,
             )
-            .map_err(|error| self.local(error))?;
+            .map_err(local)?;
             p.pass.replace_drain_holds(released.holds);
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
@@ -3025,7 +3025,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
-            Err(error) => return Err(self.local(error)),
+            Err(error) => return Err(local(error)),
         }
         let completed: Vec<&ReplicationEnvelope> =
             p.completed.iter().map(|&index| &ordered[index]).collect();
@@ -3048,7 +3048,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // queue reaches the pass here, under the same token.
         let drained =
             crate::drain_report::claim(store, workspace_id, &mut settlements.report_id, faults)
-                .map_err(|error| self.local(error))?;
+                .map_err(local)?;
         pass.record_facts.extend(drained.record_facts);
         for change in drained.extras.changes {
             insert_changed_path(&mut pass.changed_paths, change);
@@ -3071,8 +3071,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
         // the claimed token; a later drain remains unowned, while a newer pull
         // retags relay rows so a stale cursor cannot destroy an unread refusal.
-        let pending_refusals = crate::apply::read_pending_refusals(store, workspace_id)
-            .map_err(|error| self.local(error))?;
+        let pending_refusals =
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
         for refusal in pending_refusals {
             push_refusal_once(&mut pass.refusals, refusal);
         }
@@ -3152,7 +3152,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     Ok(hold)
                 })
-                .map_err(|error| self.local(error))?
+                .map_err(local)?
                 .map(|hold| (object_id.to_owned(), hold)),
             _ => None,
         };

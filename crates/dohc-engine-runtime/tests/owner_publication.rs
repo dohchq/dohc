@@ -2556,19 +2556,55 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     supervisor.close_all().unwrap();
 }
 
+fn refuse_handover_publication(store: &mut EngineStore, settlement: &LiveSettlementResult) {
+    use dohc_engine_sync::{NoLiveLeases, SettlementAdmission, apply_replication_envelope};
+    let mut echoes =
+        dohc_engine_sync::list_replication_ops(store, "workspace", "origin", -1, 500).unwrap();
+    let last = echoes
+        .iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == settlement.moment_id)
+        .unwrap()
+        .origin_seq;
+    for echoed in &mut echoes {
+        if echoed.origin_seq > last {
+            break;
+        }
+        echoed.relay_seq = Some(echoed.origin_seq + 1);
+        if echoed.op_kind == "moment.append" && echoed.payload["momentId"] == settlement.moment_id {
+            echoed.settlement_admission = Some(SettlementAdmission::Refused {
+                settlement_id: settlement.settlement_id.clone().unwrap(),
+                reason: "authorship-mismatch".into(),
+            });
+        }
+        apply_replication_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            echoed,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn refused_publications_after_a_handover_keep_the_cut_across_a_restart() {
     for changes_content in [false, true] {
         for canonical in [false, true] {
-            unavailable_publication_after_handover(changes_content, canonical, false).await;
+            unavailable_publication_after_handover(changes_content, canonical, false, false).await;
         }
     }
 }
 
 #[tokio::test]
+async fn a_resumed_owners_empty_handover_publishes_after_a_refused_interval() {
+    unavailable_publication_after_handover(true, true, true, true).await;
+}
+
+#[tokio::test]
 async fn terminal_owner_source_after_a_handover_keeps_the_cut_across_a_restart() {
     for changes_content in [false, true] {
-        unavailable_publication_after_handover(changes_content, false, true).await;
+        unavailable_publication_after_handover(changes_content, false, true, false).await;
     }
 }
 
@@ -2576,14 +2612,13 @@ async fn unavailable_publication_after_handover(
     changes_content: bool,
     canonical: bool,
     terminal_source: bool,
+    resumed: bool,
 ) {
-    use dohc_engine_sync::{
-        NoLiveLeases, SettlementAdmission, apply_replication_envelope, owner_publication_prefix,
-    };
+    use dohc_engine_sync::owner_publication_prefix;
     let mut f = Fixture::with_source(0, canonical);
-    let cut = f.edit_accepted_before_handover_with_source(7, changes_content, !canonical);
-    let handover_bytes = f.doc.encode_full_state();
-    let receipt = cut.terminal_receipt.clone();
+    let cut = (!resumed)
+        .then(|| f.edit_accepted_before_handover_with_source(7, changes_content, !canonical));
+    let mut receipt = cut.as_ref().and_then(|cut| cut.terminal_receipt.clone());
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
     support::configure_witness_reader(&actor, &f.root).await;
@@ -2591,9 +2626,183 @@ async fn unavailable_publication_after_handover(
         .live_application_owner("workspace".into())
         .await
         .unwrap();
-    let handle = f.adopt_cut(&owner, cut).await;
+    let handle = if let Some(cut) = cut {
+        f.adopt_cut(&owner, cut).await
+    } else {
+        let first = f.adopt(&owner).await;
+        let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+            namespace: "relay".into(),
+            max_deliveries: 100,
+            max_applications: 100,
+        };
+        assert_eq!(
+            owner
+                .prepare_retirement(
+                    scope.clone(),
+                    PreparationKey {
+                        object_id: "object".into(),
+                        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+                        activation_id: "adoption".into(),
+                        restore_fence_generation: 0,
+                    }
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        // The accepted owner edit arrives while Stop prepares its fence.
+        let update = f
+            .doc
+            .richdoc_append_paragraph("Owner edit accepted before Resume");
+        let accepted = LiveUpdateReceipt {
+            delivery_id: "stopped-owner-edit".into(),
+            update_digest: hex_sha256(&update),
+            journal_cursor: 7,
+            accepting_host_epoch: 1,
+        };
+        assert!(matches!(
+            deliver_owned(&first, &f.binding, &accepted, update).await,
+            ApplicationResult::Applied(..)
+        ));
+        let retired = f.settle(&first, Some(accepted.clone())).await;
+        refuse_handover_publication(&mut f.store, &retired);
+        // An uncaptured historical settlement has no retained publication
+        // state. Its replay must keep that absence, as live_settlement tests.
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM live_settlement_publication_states WHERE settlement_id=?1",
+                    [retired.settlement_id.as_deref().unwrap()],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let coordinate = window_host_coordinate();
+        let key = RetirementKey {
+            object_id: "object".into(),
+            lineage_claim_id: f.binding.lineage_claim_id.clone(),
+            activation_id: "adoption".into(),
+            restore_fence_generation: 0,
+            accepted_through: 7,
+        };
+        owner
+            .begin_retirement(scope.clone(), coordinate.clone(), key.clone(), false)
+            .await
+            .unwrap();
+        // Give this native fixture ordinary sync's imported base and cursor.
+        f.store.write_with(&NoFaults, |tx| {
+            let payload = serde_json::json!({"versionId":"main","objectId":"object","contentKind":"richdoc",
+                "isBaseState":true,"lineageClaimId":f.binding.lineage_claim_id,"updateBlobSha256":f.binding.lineage_claim_id});
+            tx.execute("UPDATE ydoc_docs SET base_origin_id='remote',base_origin_seq=7,base_relay_seq=9", []).unwrap();
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+                VALUES('workspace','remote',7,'ydoc.update',?1,1,1)", [payload.to_string()]).unwrap();
+            tx.execute("INSERT INTO sync_relay_cursors(workspace_id,cursor,replication_epoch,stream_identity)
+                VALUES('workspace','9','epoch','stream')", []).unwrap();
+            tx.execute("INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor,last_outbound_seq)
+                VALUES('workspace',1,0,9,(SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log WHERE origin_id='origin'))", []).unwrap();
+            tx.execute("INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+                VALUES('workspace','object','notes/owner.md','parked',0)", []).unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let Release::Released {
+            boundary: Some(boundary),
+            ..
+        } = owner
+            .release_activation(scope, coordinate.clone(), key, 40)
+            .await
+            .unwrap()
+        else {
+            panic!("Stop releases the adopted activation");
+        };
+        execute(
+            &mut f.store,
+            "UPDATE hosted_documents SET state='ready',scope_generation=1",
+        );
+        let captured = actor
+            .capture_imported_owner_activation(
+                "relay".into(),
+                DocKey::new("workspace", "main", "object").unwrap(),
+                f.binding.current_path.clone(),
+                1_000_000,
+                None,
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            captured.source.predecessor_activation_id.as_deref(),
+            Some("adoption")
+        );
+        let successor = owner
+            .register_activation(
+                "relay".into(),
+                coordinate,
+                f.binding.clone(),
+                captured.activation_id.clone(),
+            )
+            .await
+            .unwrap();
+        successor
+            .adopt_owner(
+                imported_cut(
+                    &captured,
+                    Some(RetainedPrefix {
+                        terminal_receipt: boundary.terminal_receipt,
+                        event_count: boundary.event_count,
+                        history_evidence_digest: boundary.history_evidence_digest,
+                        predecessor_activation_id: "adoption".into(),
+                    }),
+                ),
+                1_000_000,
+                100,
+                Arc::new(NoFaults),
+                Arc::new(()),
+            )
+            .await
+            .unwrap();
+        receipt = Some(accepted);
+        successor
+    };
+    let handover_bytes = f.doc.encode_full_state();
     let empty = f.settle(&handle, receipt).await;
-    assert_eq!(recorded_settlements(&f.store), (0, 0));
+    if resumed {
+        assert!(
+            empty.settlement_id.is_some(),
+            "the empty handover replays the retired settlement"
+        );
+        assert_eq!((empty.previous_cursor, empty.terminal_cursor), (0, 7));
+        let retry = f
+            .store
+            .read_with(|conn| {
+                dohc_engine_collab::markdown_write_obligations::AuditedRetry::adopted_owner_in(
+                    conn,
+                    &DocKey::new("workspace", "main", "object").unwrap(),
+                    1,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.binding, f.binding, "retry uses the successor binding");
+        assert_eq!(retry.terminal_cursor, 7);
+        let mut renamed_binding = f.binding.clone();
+        renamed_binding.selector_paths = vec!["notes".into()];
+        f.store.read_with(|conn| {
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute("UPDATE live_owner_activations SET binding_json=?1 WHERE released_at_ms IS NULL",
+                [serde_json::to_string(&renamed_binding).unwrap()]).unwrap();
+            let retry = dohc_engine_collab::markdown_write_obligations::AuditedRetry::adopted_owner_in(
+                &tx, &DocKey::new("workspace", "main", "object").unwrap(), 1,
+            ).unwrap().unwrap();
+            assert_eq!(retry.binding, renamed_binding, "retry reads the successor's binding");
+            tx.rollback().unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+    }
+    assert_eq!(
+        recorded_settlements(&f.store),
+        if resumed { (1, 1) } else { (0, 0) }
+    );
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph("Accepted first content"),
@@ -2630,40 +2839,13 @@ async fn unavailable_publication_after_handover(
     }
     let first = f.settle(&handle, Some(first_receipt)).await;
     if !terminal_source {
-        let mut echoes =
-            dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500)
-                .unwrap();
-        let last = echoes
-            .iter()
-            .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == first.moment_id)
-            .unwrap()
-            .origin_seq;
-        for echoed in &mut echoes {
-            if echoed.origin_seq > last {
-                break;
-            }
-            echoed.relay_seq = Some(echoed.origin_seq + 1);
-            if echoed.op_kind == "moment.append" && echoed.payload["momentId"] == first.moment_id {
-                echoed.settlement_admission = Some(SettlementAdmission::Refused {
-                    settlement_id: first.settlement_id.clone().unwrap(),
-                    reason: "authorship-mismatch".into(),
-                });
-            }
-            apply_replication_envelope(
-                &mut f.store,
-                &mut dohc_engine_collab::WriterDocCache::new(),
-                echoed,
-                &NoFaults,
-                &NoLiveLeases,
-            )
-            .unwrap();
-        }
+        refuse_handover_publication(&mut f.store, &first);
     }
     assert_eq!(
         f.store
             .table_row_count("live_settlement_attribution_unavailable")
             .unwrap(),
-        1
+        if resumed { 2 } else { 1 }
     );
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
@@ -3195,7 +3377,13 @@ async fn the_settlement_after_an_empty_one_starts_at_the_handover_across_a_reloa
     assert_eq!(recorded_settlements(&f.store), (0, 0));
     assert_eq!(
         owner
-            .unload("object".into(), vec![key], f.root.path().to_owned(), 40)
+            .unload(
+                "object".into(),
+                Some("adoption".into()),
+                vec![key],
+                f.root.path().to_owned(),
+                40
+            )
             .await
             .unwrap(),
         None

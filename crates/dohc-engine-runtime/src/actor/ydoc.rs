@@ -3870,6 +3870,7 @@ pub(super) fn refresh_markdown_witnesses_on_store(
     key: &DocKey,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
+    let preparations = cache.retirement_preparations();
     let pending = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
     for owed in pending
         .into_iter()
@@ -4006,6 +4007,7 @@ pub(super) fn refresh_markdown_witnesses_on_store(
                     None,
                     None,
                     resolver.as_deref(),
+                    &preparations,
                     &mut None,
                     outcome,
                     now_ms,

@@ -531,6 +531,8 @@ it("refuses a changed retry of an accepted proof after stripping its client auth
 });
 it.each([
   ["before", "first-baseline-markdown"],
+  ["binding", "record-binding"],
+  ["previous-cursor", "record-previous-cursor"],
   ["state", "state-digest"],
   ["scope", "record-namespace"],
   ["moment", "moment-payload"],
@@ -565,6 +567,8 @@ it.each([
           record: Record<string, unknown>;
           recordDigest: string;
         };
+      if (field === "binding") reference.record.binding = {...first.record.binding, selectorPaths: []};
+      if (field === "previous-cursor") reference.record.previousCursor = -1;
       if (field === "before") payload.payloadBeforeBlobSha256 = "a".repeat(64);
       if (field === "state") {
         reference.record.acceptedStateBlobSha256 =

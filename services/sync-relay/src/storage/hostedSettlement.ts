@@ -49,11 +49,11 @@ const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 /** A failed proof check. `check` names it in the relay's log; the admission keeps one reason. */
 class SettlementProofRefusal extends Error {
-  constructor(readonly check = "native-record") {
+  constructor(readonly check: string) {
     super(`Settlement proof check ${check} failed.`);
   }
 }
-function require(value: unknown, check = "native-record"): asserts value {
+function require(value: unknown, check: string): asserts value {
   if (!value) throw new SettlementProofRefusal(check);
 }
 // A proof this push's budget could not finish. A larger budget may prove it.
@@ -72,20 +72,20 @@ export function settlementResponseIdentifier(value: unknown) {
     return "unavailable";
   }
 }
-const integer = (value: unknown, check = "record-integer") => {
+const integer = (value: unknown, check: string) => {
   require(
     typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
     check,
   );
   return value;
 };
-const bag = (value: unknown, check = "record-object") => {
+const bag = (value: unknown, check: string) => {
   require(value && typeof value === "object" && !Array.isArray(value), check);
   return value as Record<string, unknown>;
 };
-const exact = (value: unknown, fields: readonly string[]) => {
-  const record = bag(value);
-  require(Object.keys(record).length === fields.length && fields.every((field) => Object.hasOwn(record, field)));
+const exact = (value: unknown, fields: readonly string[], check: string) => {
+  const record = bag(value, check);
+  require(Object.keys(record).length === fields.length && fields.every((field) => Object.hasOwn(record, field)), check);
   return record;
 };
 // Native `SettlementRecord` and `ApplicationHostCoordinate` (`settlement_record.rs`), with no optional field.
@@ -95,7 +95,7 @@ const SETTLEMENT_RECORD_FIELDS = ["settlementId", "relayDatabaseNamespace", "bin
   "restoreOperationId"];
 const HOST_COORDINATE_FIELDS = ["hostId", "hostEpoch", "instanceId", "connectionId"];
 const BINDING_FIELDS = ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"];
-const inOrder = (value: unknown, fields: readonly string[]) => Object.fromEntries(fields.map((field) => [field, bag(value)[field]]));
+const inOrder = (value: unknown, fields: readonly string[]) => Object.fromEntries(fields.map((field) => [field, bag(value, "native-record")[field]]));
 /** The settlement ID native derives from a record's identity fields, with the binding in its native field order. */
 export function nativeSettlementId(record: Record<string, unknown>): string {
   return `live-settlement-${hash(JSON.stringify([record.relayDatabaseNamespace, inOrder(record.binding, BINDING_FIELDS),
@@ -108,11 +108,16 @@ export function settlementRecordDigest(record: Record<string, unknown>): string 
 }
 /** What native validation requires of a settlement record before its interval is read. */
 function nativeSettlementRecord(record: Record<string, unknown>): LiveObjectBinding {
-  exact(record, SETTLEMENT_RECORD_FIELDS);
-  const host = exact(record.hostCoordinate, HOST_COORDINATE_FIELDS);
+  exact(record, SETTLEMENT_RECORD_FIELDS, "native-record");
+  const host = exact(record.hostCoordinate, HOST_COORDINATE_FIELDS, "native-record");
   let binding: LiveObjectBinding;
   try {
     binding = parseLiveObjectBinding(record.binding);
+  } catch {
+    throw new SettlementProofRefusal("record-binding");
+  }
+  require(isDeepStrictEqual(binding, record.binding), "record-binding");
+  try {
     for (const value of [record.relayDatabaseNamespace, host.hostId, host.instanceId, host.connectionId]) parseHostControlIdentifier(value);
     parseHostEpoch(host.hostEpoch);
     parseLiveUpdateIdentifier(record.momentId);
@@ -120,19 +125,20 @@ function nativeSettlementRecord(record: Record<string, unknown>): LiveObjectBind
     for (const value of [record.nativeIntervalDigest, record.acceptedIntervalDigest, record.markdownDigest,
       record.sourceStateVectorDigest, record.acceptedStateBlobSha256]) parseLiveUpdateDigest(value);
   } catch {
-    throw new SettlementProofRefusal();
+    throw new SettlementProofRefusal("native-record");
   }
-  const [previousCursor, terminalCursor, previousSequence, localSequence, applications, events] = [record.previousCursor,
-    record.terminalCursor, record.previousYdocSequence, record.localYdocSequence, record.applicationCount, record.acceptedEventCount].map(value => integer(value));
-  integer(record.recordedAtMs);
-  require(isDeepStrictEqual(binding, record.binding) && previousCursor! <= terminalCursor! && previousSequence! <= localSequence! &&
-    applications! <= events! && record.settlementId === nativeSettlementId(record));
+  const previousCursor = integer(record.previousCursor, "record-previous-cursor"),
+    terminalCursor = integer(record.terminalCursor, "record-terminal-cursor");
+  const [previousSequence, localSequence, applications, events] = [record.previousYdocSequence, record.localYdocSequence, record.applicationCount, record.acceptedEventCount].map(value => integer(value, "native-record"));
+  integer(record.recordedAtMs, "native-record");
+  require(previousCursor <= terminalCursor && previousSequence! <= localSequence! &&
+    applications! <= events! && record.settlementId === nativeSettlementId(record), "native-record");
   return binding;
 }
 /** Whether native would accept `record` as a settlement record, under the settlement ID it derives. */
 export function isNativeSettlementRecord(record: unknown): boolean {
   try {
-    nativeSettlementRecord(bag(record));
+    nativeSettlementRecord(bag(record, "native-record"));
     return true;
   } catch (error) {
     if (error instanceof SettlementProofRefusal) return false;
@@ -459,7 +465,7 @@ async function proveSettlementRecord(
   signal: AbortSignal | undefined,
   check: (record: Record<string, unknown>, binding: LiveObjectBinding) => void = () => {},
 ): Promise<ProvedSettlement> {
-  const ref = exact(reference, ["formatVersion", "recordDigest", "record"]),
+  const ref = exact(reference, ["formatVersion", "recordDigest", "record"], "settlement-reference"),
     record = bag(ref.record, "settlement-record");
   require(ref.formatVersion === 1 && ref.recordDigest === settlementRecordDigest(record), "record-digest");
   const binding = nativeSettlementRecord(record), settlementId = String(record.settlementId);
@@ -496,7 +502,7 @@ async function proveSettlementRecord(
     throw error;
   }
   // A record naming a restore names the one its terminal applied, as native requires.
-  require(record.restoreOperationId === null || events.at(-1)?.restoreOperationId === record.restoreOperationId);
+  require(record.restoreOperationId === null || events.at(-1)?.restoreOperationId === record.restoreOperationId, "native-record");
   const transitions = restoreChecks(
     storage,
     namespace,
@@ -516,7 +522,7 @@ async function proveSettlementRecord(
     .get(workspaceId, stateBlob);
   if (!header) throw relayError("blob_missing");
   require(integer(header.byte_length, "state-blob-length") <= 20_971_520, "state-blob-size");
-  budget.chargeBytes(integer(header.byte_length));
+  budget.chargeBytes(integer(header.byte_length, "state-blob-length"));
   const bytes = storage.getBlob(workspaceId, stateBlob);
   require(bytes && hash(bytes) === stateBlob, "state-blob-bytes");
   const normalized = await liveValidation.normalizeSettlement(
@@ -553,7 +559,7 @@ async function proveSettlementRecord(
     state: String(cut.state_sha256),
     markdown: String(cut.markdown_sha256),
     terminalDigest: accepted.evidenceDigest,
-    markdownByteLength: integer(cut.markdown_byte_length),
+    markdownByteLength: integer(cut.markdown_byte_length, "markdown-length"),
     events,
   };
 }
@@ -635,7 +641,7 @@ export async function prepareHostedSettlements(
     let settlementId = "unavailable";
     try {
       require(!Object.hasOwn(payload, "authors"), "client-authors");
-      settlementId = settlementResponseIdentifier(bag(bag(payload.settlementReference).record).settlementId);
+      settlementId = settlementResponseIdentifier(bag(bag(payload.settlementReference, "settlement-reference").record, "settlement-record").settlementId);
       const { events, ...proved } = await proveSettlementRecord(storage, input.workspaceId,
         payload.settlementReference, budget, input.ops.length > 1, signal, (record, binding) => require(
           payload.momentId === record.momentId &&
