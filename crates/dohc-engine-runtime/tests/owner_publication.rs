@@ -7767,6 +7767,7 @@ impl Desktop {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -11025,6 +11026,7 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
                 63,
                 1_000,
                 None,
+                None,
             )
         })
         .unwrap();
@@ -11400,6 +11402,7 @@ async fn actor_drains_wait_for_validation_and_finish() {
                         1_000_000,
                         Arc::new(NoFaults),
                         token(),
+                        None,
                         None,
                     )
                     .await

@@ -5265,6 +5265,7 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
                 0,
                 1_100,
                 None,
+                None,
             )
         })
         .expect("settle the losing base projection");

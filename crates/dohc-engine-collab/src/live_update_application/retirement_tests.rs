@@ -1422,7 +1422,7 @@ fn record_text(
         )
         .map_err(write_sql)?;
         let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, vector, 30)?;
-        Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
+        Ok(audit.result(Some(id), moment.into(), written.snapshot.blob_sha256, false))
     })?;
     let TxnOutcome::Committed(result) = result else {
         return Err(ApplicationError::Interrupted);
