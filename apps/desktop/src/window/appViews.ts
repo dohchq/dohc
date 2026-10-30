@@ -19,7 +19,7 @@ export function appViewExternalUrl(raw: string): string | null {
     const url = new URL(raw);
     const host = url.hostname.toLowerCase().replace(/\.$/, "");
     if (host === "localhost" || host.endsWith(".localhost") || host === "0.0.0.0" || /^127(\.\d+){3}$/.test(host) ||
-      host === "[::1]" || host === "[::]" || host.startsWith("[::ffff:7f")) return null;
+      host === "[::1]" || host === "[::]" || host === "[::ffff:0:0]" || /^\[::(ffff:)?7f[0-9a-f]{2}:/.test(host)) return null;
     return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.toString() : null;
   } catch { return null; }
 }

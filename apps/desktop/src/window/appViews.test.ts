@@ -8,7 +8,8 @@ describe("app view boundaries", () => {
     for (const url of ["https://example.com/path", "http://example.com/path", "mailto:a@example.com", "https://127.example.com/"]) expect(appViewExternalUrl(url)).toBe(url);
     for (const url of ["file:///tmp/app", "javascript:alert(1)", "data:text/html,x", "dohc:open", "//example.com", "bad",
       "http://127.0.0.1:43210/other", "http://localhost/", "http://localhost./", "http://127.1/", "http://[::1]/",
-      "http://0.0.0.0:8080/", "http://127.0.0.2/", "http://app.localhost/", "http://[::ffff:127.0.0.1]/", "http://[::]/"])
+      "http://0.0.0.0:8080/", "http://127.0.0.2/", "http://app.localhost/", "http://[::ffff:127.0.0.1]/", "http://[::]/",
+      "http://[::127.0.0.1]/", "http://[::127.255.255.255]/", "http://[::ffff:0.0.0.0]/"])
       expect(appViewExternalUrl(url)).toBeNull();
   });
   it("loads only the launcher's loopback bootstrap handoff", () => {
