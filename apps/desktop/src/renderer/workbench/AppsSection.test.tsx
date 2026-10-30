@@ -3,7 +3,8 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
-import { AppsSection, hasApps, useApps } from "./AppsSection";
+import { hasApps, useApps } from "./AppsSection";
+import { Explorer, type ExplorerProps } from "./Explorer";
 import { siteTabPath } from "./workbenchState";
 import { deferred } from "../../testing/deferred";
 
@@ -49,7 +50,9 @@ type HarnessProps = {
   onHasApps?: (has: boolean) => void;
 };
 
-// The shell reads the apps; the Explorer draws the section from them.
+const noop = () => undefined;
+
+// The shell reads the apps; the Explorer's Home draws the section from them.
 function Harness(props: HarnessProps) {
   const apps = useApps(
     props.workspaceId ?? "ws-apps",
@@ -58,20 +61,58 @@ function Harness(props: HarnessProps) {
     props.enabled ?? true,
   );
   props.onHasApps?.(hasApps(apps));
-  return (
-    <AppsSection
-      {...apps}
-      activePath={props.activePath ?? null}
-      pinnedApps={props.pinnedApps ?? []}
-      onSetPinned={props.onSetPinned ?? vi.fn()}
-      onOpenPath={props.onOpenPath ?? vi.fn()}
-      reveal={props.reveal ?? false}
-      onRevealed={props.onRevealed ?? vi.fn()}
-    />
-  );
+  const activeTab = props.activePath ?? null;
+  const explorer: ExplorerProps = {
+    workspaceId: props.workspaceId ?? "ws-apps",
+    mode: "home",
+    onModeChange: noop,
+    listed: true,
+    recentFiles: [],
+    files: [{ path: "client-portal/index.html", kind: "file" }, { path: "docs/index.html", kind: "file" }],
+    folders: ["client-portal", "docs"],
+    editorGroups: [{ id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 }],
+    activeEditorGroup: "group-1",
+    dirtyPaths: new Set(),
+    recoveryPaths: new Set(),
+    expandedFolders: [],
+    pinned: [],
+    openEditorsHeight: 180,
+    onOpenEditorsHeightChange: noop,
+    newFolderRequest: null,
+    onNewPage: noop,
+    onOpenFile: props.onOpenPath ?? vi.fn(),
+    onActivateTab: noop,
+    onCloseTab: noop,
+    onCloseAllTabs: noop,
+    onNewUntitledTextFile: noop,
+    onCollapseFolders: noop,
+    onSetFolderExpanded: noop,
+    onToggleFolder: noop,
+    onTogglePin: noop,
+    collectionFolders: new Set(),
+    appFolders: new Set(["client-portal", "docs"]),
+    onOpenCollection: noop,
+    apps: {
+      ...apps,
+      pinnedApps: props.pinnedApps ?? [],
+      onSetPinned: props.onSetPinned ?? vi.fn(),
+      reveal: props.reveal ?? false,
+      onRevealed: props.onRevealed ?? vi.fn(),
+    },
+    onPathsChanged: noop,
+    onImportFiles: noop,
+    shareView: null,
+    onRefreshShareMounts: noop,
+    onUnmountShare: noop,
+    onShare: noop,
+    onRefresh: noop,
+    onError: noop,
+    onNewCollection: noop,
+  };
+  return <Explorer {...explorer} />;
 }
 
-describe("AppsSection", () => {
+describe("Home's Apps section", () => {
   beforeEach(() => {
     bridgeMock.listSites.mockReset();
     bridgeMock.listSites.mockResolvedValue({ sites: [app] });
@@ -142,36 +183,31 @@ describe("AppsSection", () => {
     expect(onOpenPath).not.toHaveBeenCalled();
   });
 
-  it("reaches the header, each row and its pin from the keyboard", async () => {
+  it("reaches the header and each row from the keyboard", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
     const onOpenPath = vi.fn();
-    const onSetPinned = vi.fn();
     const user = userEvent.setup();
-    render(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} />);
+    render(<Harness onOpenPath={onOpenPath} />);
     await screen.findByText("Docs");
     const toggle = screen.getByTestId("explorer-apps-toggle");
     const [portalRow, docsRow] = screen.getAllByTestId("sites-row");
-    const [portalPin] = screen.getAllByTestId("sites-pin");
+    // A pin is a pointer shortcut; the keyboard pins through the row's menu.
+    for (const pin of screen.getAllByTestId("sites-pin")) expect(pin.tabIndex).toBe(-1);
 
-    await user.tab();
-    expect(document.activeElement).toBe(toggle);
-    await user.tab();
+    toggle.focus();
+    await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(portalRow);
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenLastCalledWith(siteTabPath("client-portal"));
 
-    await user.tab();
-    expect(document.activeElement).toBe(portalPin);
-    await user.keyboard(" ");
-    expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", true);
-
-    await user.tab();
+    await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(docsRow);
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenLastCalledWith(siteTabPath("docs"));
 
-    toggle.focus();
-    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(toggle);
+    await user.keyboard("{ArrowLeft}");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByTestId("sites-row")).toBeNull();
   });

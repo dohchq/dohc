@@ -310,7 +310,26 @@ export async function openWorkspaceFromFirstRun(
     await openFolder.click();
   }
   await waitForWorkspaceReady(page);
+  await showExplorerFiles(page);
   return activeWorkspace(page, workspace.rootPath);
+}
+
+// A workspace opens its Explorer on Home. Most specs drive the file tree, so
+// once the saved layout is restored they switch a shown Explorer to Files.
+// A spec that needs Home's sections calls openExplorerHome.
+async function showExplorerFiles(page: Page): Promise<void> {
+  await expect(page.getByTestId("workspace-workbench")).not.toHaveAttribute("inert");
+  const files = page.getByTestId("explorer-mode-files");
+  if ((await files.count()) === 0 || (await files.getAttribute("aria-selected")) === "true") return;
+  await files.click();
+  await expect(files).toHaveAttribute("aria-selected", "true");
+}
+
+/** Switches the Explorer to Home, where Pinned, Pages, Collections and Apps live. */
+export async function openExplorerHome(page: Page): Promise<void> {
+  await openExplorerView(page);
+  await page.getByTestId("explorer-mode-home").click();
+  await expect(page.getByTestId("explorer-home")).toBeVisible();
 }
 
 export async function activeWorkspace(

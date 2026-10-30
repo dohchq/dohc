@@ -8,7 +8,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { generateDatasetSources } from "../src/workspaces/datasetGenerator";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = {
@@ -119,6 +119,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await openExplorerHome(page);
 
     const section = page.getByRole("region", { name: "Collections", exact: true });
     await expect(section.getByRole("button", { name: "Registrations", exact: true })).toBeVisible();
@@ -195,6 +196,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await desktop.close(); desktop = null;
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
+    await openExplorerHome(desktop.page);
     const offline = desktop.page.getByRole("region", { name: "Collections", exact: true });
     await expectRowTooltip(desktop.page, offline.getByTestId("collections-elsewhere"), "On Studio Mac",
       "These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.", "collections-server-offline");
@@ -208,6 +210,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await rm(join(workspace.homeDir, "dohc-cloud.json"));
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
+    await openExplorerHome(desktop.page);
     const signedOut = desktop.page.getByRole("region", { name: "Collections", exact: true });
     await expect(signedOut.getByTestId("collections-refusal").getByRole("button", { name: "Try again", exact: true })).toBeVisible();
     await expectRowTooltip(desktop.page, signedOut.getByTestId("collections-refusal"), "On Studio Mac",

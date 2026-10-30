@@ -655,7 +655,7 @@ describe("collection folders", () => {
     expect(within(palette).queryByText("New folder")).toBeNull();
   });
 
-  const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+  const DOCUMENT = "Page";
   const DRAWING = FILE_KIND_RECORDS.drawing.name;
   it.each<[string, Workspace, string[]]>([
     ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
@@ -684,7 +684,7 @@ describe("start surface", () => {
 
   it("opens a new page from the document tile", async () => {
     const start = await startSurface();
-    fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
+    fireEvent.click(start.getByRole("button", { name: "Page" }));
     expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 

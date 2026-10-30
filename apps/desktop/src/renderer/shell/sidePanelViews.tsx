@@ -9,7 +9,8 @@ import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { VIEW_IDENTITY, type ViewIdentity } from "../workbench/viewIdentity";
-import { type ViewId } from "../workbench/workbenchState";
+import { setExplorerMode, type ViewId } from "../workbench/workbenchState";
+import { ExplorerModeSwitch } from "../workbench/ExplorerModeSwitch";
 import { chatsOffCopy } from "./capabilityOffCopy";
 import { LazyChatsView, LazyGraphView } from "./lazyViews";
 import type { ShellSidePanelProps } from "./ShellSidePanel";
@@ -22,6 +23,8 @@ export interface SidePanelView extends ViewIdentity {
   // What the panel menu's Customize… opens while this view is selected.
   customize?: CustomizePart;
   render: (context: ShellSidePanelProps) => ReactNode;
+  // What the header shows in place of the view's name.
+  heading?: (context: ShellSidePanelProps) => ReactNode;
   actions?: (context: ShellSidePanelProps) => ReactNode;
 }
 
@@ -50,6 +53,12 @@ const openInTabIcon = <Maximize2 size={13} aria-hidden />;
 export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
   explorer: {
     ...VIEW_IDENTITY.explorer,
+    heading: (context) => (
+      <ExplorerModeSwitch
+        mode={context.wb.explorerMode}
+        onChange={(mode) => context.mutateWb((state) => setExplorerMode(state, mode))}
+      />
+    ),
     render: (context) => context.explorerView,
   },
   chats: {

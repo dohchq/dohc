@@ -5,7 +5,7 @@ import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
 async function dataset(page: Page, request: DatasetRequest): Promise<DatasetResult> {
   return JSON.parse(await page.evaluate(async input => JSON.stringify(await window.dohcDesktop!.dataset(JSON.parse(input))), JSON.stringify(request))) as DatasetResult;
@@ -88,6 +88,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     restoredDesktop = await launchDesktopApp({ workspace: target });
     const restored = restoredDesktop.page;
     expect((await openWorkspaceFromFirstRun(restored, target)).workspaceId).toBe(workspaceId);
+    await openExplorerHome(restored);
     // The copied manifest names no computer for the Collections, so this computer neither opens nor creates a store until the person keeps them here.
     const collections = restored.getByRole("region", { name: "Collections", exact: true });
     await expect(collections.getByTestId("collections-refusal")).toHaveText("Which computer keeps these Collections?Use this computer");

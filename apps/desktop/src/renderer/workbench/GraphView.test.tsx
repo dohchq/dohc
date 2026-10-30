@@ -185,7 +185,7 @@ describe("GraphView", () => {
       screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
     ).toBe(true);
     // The side panel shows the notice as its icon, named with the full words.
-    const notice = screen.getByRole("img", { name: /240 of 2000 docs shown/ });
+    const notice = screen.getByRole("img", { name: /240 of 2000 pages shown/ });
     expect(notice.dataset.testid).toBe("graph-unresolved-count");
     expect(notice.title).toBe(notice.getAttribute("aria-label"));
     expect(notice.textContent).toBe("");
@@ -227,7 +227,7 @@ describe("GraphView", () => {
     expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
     const notice = screen.getByTestId("graph-unresolved-count");
     expect(notice.getAttribute("role")).toBeNull();
-    expect(notice.textContent).toContain("500 of 900 docs shown");
+    expect(notice.textContent).toContain("500 of 900 pages shown");
   });
 
   it.each([
@@ -628,10 +628,10 @@ describe("GraphView", () => {
       {source:"a.md",target:"b.md",kind:"wikilink",ordinal:0},
       {source:"a.md",target:"b.md",kind:"wikilink",ordinal:1},
     ] }));
-    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 docs"));
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 pages"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
     // The counts truncate together in a narrow panel, so their tooltip holds both.
-    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 docs · 1 link");
+    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 pages · 1 link");
     const row=screen.getAllByTestId("graph-file-row").find(row=>row.dataset.path==="a.md")!;
     expect(row.textContent).toContain("0/1");
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();

@@ -289,6 +289,7 @@ import {
   siteTabPath,
   setCollectionActiveView,
   setFolderExpanded,
+  setExplorerMode,
   setOpenEditorsHeight,
   setView,
   showView,
@@ -299,6 +300,7 @@ import {
   SHARING_VIEW_ID,
   type ActivityViewId,
   type EditorGroup,
+  type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
@@ -3735,8 +3737,17 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
     [mutateWb],
   );
+  // An app folder's pin is its sidebar pin, kept in the settings file.
+  // Anything else is pinned in Home, in the workspace's ui-state.
   const toggleExplorerPin = useCallback(
-    (path: string) => mutateWb((state) => togglePinned(state, path)),
+    (path: string) => {
+      if (appFolders.has(path)) void setAppPinned(path, !pinnedRoots.includes(path));
+      else mutateWb((state) => togglePinned(state, path));
+    },
+    [appFolders, mutateWb, pinnedRoots, setAppPinned],
+  );
+  const setExplorerModeInWb = useCallback(
+    (mode: ExplorerMode) => mutateWb((state) => setExplorerMode(state, mode)),
     [mutateWb],
   );
   const collapseExplorerFolders = useCallback(() => {
@@ -3866,7 +3877,7 @@ export function DesktopWorkspaceShell(props: {
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
   const clearAppsReveal = useCallback(() => setAppsReveal(null), []);
   const showAppsInExplorer = useCallback(() => {
-    mutateWb((state) => showView(state, "explorer"));
+    mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
     setAppsReveal(workspaceId);
   }, [mutateWb, workspaceId]);
   const explorerApps = useMemo<ExplorerApps>(
@@ -5107,6 +5118,10 @@ export function DesktopWorkspaceShell(props: {
     <>
       <Explorer
         workspaceId={workspaceId}
+        mode={wb.explorerMode}
+        onModeChange={setExplorerModeInWb}
+        listed={fileListingCommit !== null}
+        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}
