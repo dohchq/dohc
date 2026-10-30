@@ -23,6 +23,7 @@ import {
 } from "./useSentNoticeProps";
 import type { SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
+import { inputCount } from "../ui/inputCount";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -262,7 +263,7 @@ describe("opening a sent notice", () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
       const { result, openChatsInvitation, onOpenShare, onSwitchWorkspace } = setup([notice()], [workspace("notes")]);
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith("share-1");
+      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1", inputs: inputCount() });
       expect(onOpenShare).not.toHaveBeenCalled();
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
     });
@@ -273,8 +274,21 @@ describe("opening a sent notice", () => {
       const latest = workspace("trip", { lastOpenedAt: 5 });
       const { result, openChatsInvitation, onSwitchWorkspace } = setup([notice()], [older, latest, view], "trip-view");
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { chatsInvitation: "share-1" });
+      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { chatsInvitation: { shareId: "share-1", inputs: inputCount() } });
       expect(openChatsInvitation).not.toHaveBeenCalled();
+    });
+
+    it("sends the input count from when Open was pressed, so input while the lookup is out still counts", async () => {
+      const lookup = deferred<typeof INVITATION>();
+      getRelayReceivedShare.mockReturnValueOnce(lookup.promise);
+      const { result, openChatsInvitation } = setup([notice()], [workspace("notes")]);
+      const pressed = inputCount();
+      const opened = result.current.onOpenSentNotice(notice(), live());
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+      lookup.resolve(INVITATION);
+      await expect(opened).resolves.toBeNull();
+      expect(inputCount()).toBe(pressed + 1);
+      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1", inputs: pressed });
     });
 
     it("switches nowhere when the person left the workspace before the lookup answered, from Open or Try again", async () => {

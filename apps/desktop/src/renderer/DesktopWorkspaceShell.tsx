@@ -244,6 +244,7 @@ import {
 } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
+  ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
@@ -2792,24 +2793,12 @@ export function DesktopWorkspaceShell(props: {
     mutateWb((state) => showView(state, "chats"));
   }, [mutateWb]);
   // A notice's Open shows Chats at the invitation it names.
-  const [revealedInvitation, setRevealedInvitation] = useState<string | null>(null);
-  const openChatsInvitation = useCallback((shareId: string) => {
-    setRevealedInvitation(shareId);
+  const [revealedInvitation, setRevealedInvitation] = useState<ChatsInvitation | null>(null);
+  const openChatsInvitation = useCallback((invitation: ChatsInvitation) => {
+    setRevealedInvitation(invitation);
     openChatsNavigator();
   }, [openChatsNavigator]);
   const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
-  // The reveal waits for Chats to list the invitation only until the person
-  // clicks or presses a key, so focus never jumps to Join after they moved on.
-  useEffect(() => {
-    if (revealedInvitation === null) return;
-    const end = () => setRevealedInvitation(null);
-    window.addEventListener("pointerdown", end, true);
-    window.addEventListener("keydown", end, true);
-    return () => {
-      window.removeEventListener("pointerdown", end, true);
-      window.removeEventListener("keydown", end, true);
-    };
-  }, [revealedInvitation]);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);

@@ -8,7 +8,8 @@ import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { useRequestSequence } from "../useRequestSequence";
 import { workspaceName } from "../Titlebar";
 import { AUTOMATION_NOTICE_KINDS, type SentNotice } from "../workbench/NoticeCenter";
-import type { ChatsNav } from "../workbench/ChatsView";
+import type { ChatsInvitation, ChatsNav } from "../workbench/ChatsView";
+import { inputCount } from "../ui/inputCount";
 import type { ShellErrorKind } from "./useShellError";
 import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice } from "./sentNoticePlace";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
@@ -28,11 +29,10 @@ export const RUN_THREAD_LOOKUP_FAILED_NOTE = "dohc could not open this run's thr
 
 /**
  * What a notice's Open asks the workspace it switches to to open once it is
- * ready: a file, an automation's switch in the ⚡ panel, or Chats at the
- * invitation a share id names. `sharedFile` is the automations.yaml a share
- * holds there.
+ * ready: a file, an automation's switch in the ⚡ panel, or Chats at an
+ * invitation. `sharedFile` is the automations.yaml a share holds there.
  */
-export type OpenOnSwitch = string | { automationControls: string; sharedFile?: string } | { chatsInvitation: string };
+export type OpenOnSwitch = string | { automationControls: string; sharedFile?: string } | { chatsInvitation: ChatsInvitation };
 
 // The shell's error for a notice whose Open failed. A later Open of the
 // notice replaces it or takes it back.
@@ -90,7 +90,7 @@ export function useSentNoticeProps(input: {
   /** Opens a conversation in a chat tab. */
   openChat: (nav: ChatsNav) => void;
   /** Shows the Chats panel at a Group invitation or message request, with its Join or Accept focused. */
-  openChatsInvitation: (shareId: string) => void;
+  openChatsInvitation: (invitation: ChatsInvitation) => void;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: OpenOnSwitch) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null, kind?: ShellErrorKind, identity?: string) => void;
@@ -244,6 +244,7 @@ export function useSentNoticeProps(input: {
     async function go(notice: NoticeRow, signal: AbortSignal, controls: boolean): Promise<string | null> {
       const identity = openErrorIdentity(notice);
       const epoch = workspace.current();
+      const inputs = inputCount();
       const attempt = (latestOpens.current.get(identity) ?? 0) + 1;
       latestOpens.current.set(identity, attempt);
       const stale = () => signal.aborted || !workspace.isCurrent(epoch) || latestOpens.current.get(identity) !== attempt;
@@ -321,7 +322,7 @@ export function useSentNoticeProps(input: {
               // A shared view holds no Chats, so Open goes to the workspace of
               // this person's own they opened last.
               if (workspaces.some((candidate) => candidate.workspaceId === workspaceId && candidate.shareView === undefined)) {
-                openChatsInvitation(place.shareId);
+                openChatsInvitation({ shareId: place.shareId, inputs });
                 return null;
               }
               const own = workspaces
@@ -331,7 +332,7 @@ export function useSentNoticeProps(input: {
                   null,
                 );
               if (own === null) return NO_OWN_WORKSPACE_NOTE;
-              onSwitchWorkspace(own, { chatsInvitation: place.shareId });
+              onSwitchWorkspace(own, { chatsInvitation: { shareId: place.shareId, inputs } });
               return null;
             }
             const automation = controls && AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;

@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
+import { inputCount } from "../ui/inputCount";
 import {
   ChatsView,
   channel,
@@ -1016,7 +1017,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       }),
     );
     const onInvitationRevealed = vi.fn();
-    renderView(vi.fn(), vi.fn(), { revealInvitation: "share-in-2", onInvitationRevealed });
+    renderView(vi.fn(), vi.fn(), { revealInvitation: { shareId: "share-in-2", inputs: inputCount() }, onInvitationRevealed });
     await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
     const joins = screen.getAllByTestId("chats-join-shared");
     expect(document.activeElement).toBe(joins[1]);

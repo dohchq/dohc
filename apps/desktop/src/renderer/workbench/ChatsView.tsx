@@ -56,6 +56,7 @@ import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
+import { inputCount } from "../ui/inputCount";
 import {
   AtSign,
   Bot,
@@ -188,6 +189,10 @@ type OverviewState =
 // readers write them, each authoritative for a different subset, so each part
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
+
+// An invitation a notice's Open asks Chats to show, with the input count from
+// when the person pressed Open.
+export type ChatsInvitation = { shareId: string; inputs: number };
 
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
@@ -577,10 +582,10 @@ export function ChatsView(props: {
   // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
-  // The share id of an invitation to show: its row scrolls into view and its
-  // first action, Join or Accept, takes focus once the row is listed. Then
+  // An invitation to show: its row scrolls into view and its first action,
+  // Join or Accept, takes focus once the row is listed. Then
   // onInvitationRevealed reports it shown.
-  revealInvitation?: string;
+  revealInvitation?: ChatsInvitation;
   onInvitationRevealed?: () => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
@@ -2820,7 +2825,13 @@ export function ChatsView(props: {
   }, [channelShares]);
   useEffect(() => {
     if (revealInvitation === undefined) return;
-    const action = viewRef.current?.querySelector<HTMLElement>(`[data-invitation="${CSS.escape(revealInvitation)}"]`);
+    // A person who clicked, typed or left the window after pressing Open has
+    // moved on, so focus stays where they put it.
+    if (inputCount() !== revealInvitation.inputs) {
+      onInvitationRevealed?.();
+      return;
+    }
+    const action = viewRef.current?.querySelector<HTMLElement>(`[data-invitation="${CSS.escape(revealInvitation.shareId)}"]`);
     if (!action) return;
     action.scrollIntoView({ block: "nearest" });
     action.focus();
