@@ -3141,7 +3141,7 @@ describe("owner live documents", () => {
   });
 
   it.each((["failure", "quarantine"] as const).flatMap(source =>
-    (["withheld", "resumable", "failed-read", "missing-row"] as const).map(kind => ({source, kind}))))(
+    (["withheld", "unavailable", "resumable", "failed-read", "missing-row"] as const).map(kind => ({source, kind}))))(
     "reads the $source Stop refusal's $kind row once", async ({source, kind}) => {
     const bridge = makeBridge(Promise.resolve(null));
     const kept = {objectId: LIVE_ROW.objectId, path: LIVE_ROW.path, reason: "invalid-update", storedOn: "this-computer" as const,
@@ -3161,16 +3161,25 @@ describe("owner live documents", () => {
     else await act(async () => reading.resolve({documents: kind === "missing-row" ? [] : [
       {...LIVE_ROW, saveOnly: true, canResume: kind !== "resumable"},
       {...LIVE_ROW, objectId: "other-document", canResume: kind !== "resumable"},
-      {...LIVE_ROW, path: kind === "resumable" ? "notes/relay-path.md" : LIVE_ROW.path, ...(kind === "withheld" ? {status: "unavailable", reason: "conflict-parent-withheld", canResume: false}
+      {...LIVE_ROW, path: "notes/relay-path.md", ...(kind === "withheld" ? {status: "unavailable", reason: "conflict-parent-withheld", canResume: false}
+        : kind === "unavailable" ? {status: "unavailable", reason: "document-unavailable", canResume: false}
         : {status: "paused", canResume: true})},
     ], nextCursor: null}));
     if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
-    const pendingTitle = `Live editing didn't stop for ${kind === "resumable" ? "notes/relay-path.md" : LIVE_ROW.path}${kind === "withheld" ? "." : ""}`;
+    const pendingTitle = `Live editing didn't stop for ${LIVE_ROW.path}${kind === "withheld" ? "." : ""}`;
     const center = within(await screen.findByTestId("notice-center"));
-    const pending = (kind === "resumable" ? await center.findByRole("button", {name: "Resume live editing"}) : await center.findByText(pendingTitle)).closest("li")!;
+    const pending = (await center.findByText(/^Live editing didn't stop for /)).closest("li")!;
+    expect(within(pending).queryByText(pendingTitle)).toBeTruthy();
+    expect(bridge.listOwnerLiveDocuments).toHaveBeenCalledTimes(1);
     if (kind === "withheld") {
       expect(within(pending).queryByRole("button", {name: /Try again|Resume/})).toBeNull();
-      expect(within(pending).getByRole("button", {name: "Open Live documents"})).toBeTruthy();
+      bridge.listOwnerLiveDocuments.mockResolvedValueOnce({documents: [
+        {...LIVE_ROW, path: "notes/relay-path.md", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
+        {...LIVE_ROW, objectId: "other-document"}], nextCursor: null});
+      await user.click(within(pending).getByRole("button", {name: "Open Live documents"}));
+      const dialog = within(await screen.findByTestId("live-documents-dialog"));
+      expect((await dialog.findByTestId("live-document-row-notes/relay-path.md")).getAttribute("aria-current")).toBe("true");
+      expect(dialog.getByTestId(`live-document-row-${LIVE_ROW.path}`).getAttribute("aria-current")).toBeNull();
     } else if (kind === "resumable") {
       expect(within(pending).queryByRole("button", {name: "Try again"})).toBeNull();
       await user.click(within(pending).getByRole("button", {name: "Resume live editing"}));
@@ -3178,8 +3187,12 @@ describe("owner live documents", () => {
     } else {
       expect(within(pending).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
       expect(within(pending).getByRole("button", {name: "Try again"})).toBeTruthy();
+      if (kind === "unavailable") {
+        await user.click(within(pending).getByRole("button", {name: "Try again"}));
+        await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenNthCalledWith(2,
+          {workspaceId: WORKSPACE.workspaceId, path: LIVE_ROW.path, objectId: LIVE_ROW.objectId}));
+      }
     }
-    expect(bridge.listOwnerLiveDocuments).toHaveBeenCalledTimes(1);
   });
 
   it.each((["failure", "quarantine"] as const).flatMap(source =>
