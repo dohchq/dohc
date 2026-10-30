@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import {
   MENU_ACTIVE_OPTION,
+  MENU_ACTIVE_OPTION_BESIDE_CURRENT,
   MENU_ENTER,
   MENU_FRAME,
   MENU_ICON,
@@ -637,8 +638,8 @@ export async function copyBlockAsMarkdown(
 // The block handle's menu, drawn from the Menu part's recipe. ProseMirror
 // owns the handle, so this cannot be the Menu component; it closes by the
 // same rule (useDismiss) and moves by the same keys (moveInMenu). Focus stays
-// on the frame and aria-activedescendant names the active row, which draws
-// the accent outline whichever of the keyboard or the pointer moved it there.
+// on the frame and aria-activedescendant names the active row, which takes
+// the selected fill whichever of the keyboard or the pointer moved it there.
 export function BlockMenu({
   state,
   onSelect,
@@ -824,8 +825,8 @@ export function resolveTurnIntoDropdown(
  *
  * The dropdown is a listbox drawn from the Menu part's recipe. It holds focus
  * for its options and names the active one with aria-activedescendant; that
- * option draws the accent outline, and the block's current type keeps the
- * selected fill.
+ * option takes the selected fill and, while the keyboard moves, the row's
+ * accent line. The block's current type keeps the selected fill.
  */
 export function TurnIntoMenu({
   editor,
@@ -959,7 +960,7 @@ export function TurnIntoMenu({
                 tabIndex={-1}
                 aria-selected={index === selected}
                 data-active={index === selected || undefined}
-                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${
+                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION_BESIDE_CURRENT} ${
                   current ? MENU_ROW_TONE.current : `${MENU_ROW_TONE.rest} data-active:text-ink`
                 }`}
                 // Only a pointer that moves picks the active option, so a

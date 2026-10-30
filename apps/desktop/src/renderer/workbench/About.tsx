@@ -78,7 +78,7 @@ export function accessReasonFor(facts: AccessFacts, path: string): AccessReason 
 // A row in a section, inset from the panel's edges like the drawing's rows.
 export const ABOUT_ROW =
   "flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75";
-export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`;
+export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hover:text-ink dohc-focus-row`;
 
 // The open object: its mark, its name, then who is here.
 export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
@@ -131,7 +131,7 @@ export function AboutSection(props: {
           aria-expanded={props.expanded}
           aria-controls={bodyId}
           onClick={props.onToggle}
-          className="dohc-section-label flex h-6 w-full cursor-pointer items-center gap-2 px-3 text-left hover:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          className="dohc-section-label dohc-focus-row mx-1 flex h-6 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left hover:text-muted"
         >
           <Icon size={12} strokeWidth={1.9} aria-hidden />
           {props.label}

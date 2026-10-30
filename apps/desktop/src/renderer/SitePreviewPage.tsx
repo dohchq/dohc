@@ -832,7 +832,7 @@ export function SitePreviewPage(props: {
                       setBlocked(null);
                       void start(mode, true);
                     }}
-                    className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+                    className="dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
                     {mode === "build" ? (
                       <Hammer size={12} aria-hidden />
