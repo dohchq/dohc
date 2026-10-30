@@ -1460,8 +1460,11 @@ it("focuses the withheld conflict cause once after Stop refuses, without retry o
   expect(live.querySelectorAll("p")).toHaveLength(1);
   expect(actions("held.md")).toEqual([]);
 });
-it.each(["paused", "copied", "unreadable", "not-written", "cannot-write"] as const)(
-  "keeps the %s quarantine and recovery copy after a non-resumable Stop refuses", async quarantine => {
+it.each((["paused", "copied", "unreadable", "not-written", "cannot-write"] as const).map(quarantine => ({
+  quarantine,
+  expectation: quarantine === "unreadable" ? "hides the unreadable note and read action, then restores them after retry"
+    : `keeps the ${quarantine} note and recovery copy`,
+})))("$expectation after a non-resumable Stop refuses", async ({quarantine}) => {
   const h = harness(), user = userEvent.setup();
   h.load.mockResolvedValue(page([row("held.md", {quarantine, incident: "kept-1"})]));
   h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));

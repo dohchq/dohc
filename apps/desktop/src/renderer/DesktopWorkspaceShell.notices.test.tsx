@@ -3092,20 +3092,22 @@ describe("owner live documents", () => {
     await waitFor(() => expect(bridge.listOwnerLiveDocuments).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId}));
     if (kind === "failed-read") await act(async () => reading.reject(new Error("offline")));
     else await act(async () => reading.resolve({documents: kind === "missing-row" ? [] : [
+      {...LIVE_ROW, saveOnly: true, canResume: kind !== "resumable"},
       {...LIVE_ROW, objectId: "other-document", canResume: kind !== "resumable"},
-      {...LIVE_ROW, ...(kind === "withheld" ? {status: "unavailable", reason: "conflict-parent-withheld", canResume: false}
+      {...LIVE_ROW, path: kind === "resumable" ? "notes/relay-path.md" : LIVE_ROW.path, ...(kind === "withheld" ? {status: "unavailable", reason: "conflict-parent-withheld", canResume: false}
         : {status: "paused", canResume: true})},
     ], nextCursor: null}));
     if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
-    const pendingTitle = `Live editing didn't stop for ${LIVE_ROW.path}${kind === "withheld" ? "." : ""}`;
-    const pending = (await within(await screen.findByTestId("notice-center")).findByText(pendingTitle)).closest("li")!;
+    const pendingTitle = `Live editing didn't stop for ${kind === "resumable" ? "notes/relay-path.md" : LIVE_ROW.path}${kind === "withheld" ? "." : ""}`;
+    const center = within(await screen.findByTestId("notice-center"));
+    const pending = (kind === "resumable" ? await center.findByRole("button", {name: "Resume live editing"}) : await center.findByText(pendingTitle)).closest("li")!;
     if (kind === "withheld") {
       expect(within(pending).queryByRole("button", {name: /Try again|Resume/})).toBeNull();
       expect(within(pending).getByRole("button", {name: "Open Live documents"})).toBeTruthy();
     } else if (kind === "resumable") {
       expect(within(pending).queryByRole("button", {name: "Try again"})).toBeNull();
       await user.click(within(pending).getByRole("button", {name: "Resume live editing"}));
-      expect(bridge.resumeOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: LIVE_ROW.path});
+      expect(bridge.resumeOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/relay-path.md"});
     } else {
       expect(within(pending).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
       expect(within(pending).getByRole("button", {name: "Try again"})).toBeTruthy();
@@ -3135,16 +3137,50 @@ describe("owner live documents", () => {
     await waitFor(() => expect(bridge.listOwnerLiveDocuments).toHaveBeenCalledTimes(1));
     view.rerender(shell(OTHER_WORKSPACE));
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledWith({workspaceId: OTHER_WORKSPACE.workspaceId}));
-    if (mode === "superseded-admission") view.rerender(shell(WORKSPACE));
+    if (mode === "superseded-admission") {
+      view.rerender(shell(WORKSPACE));
+      await waitFor(() => {
+        const latest: ReturnType<typeof shellError.useShellError> = notices.mock.results.at(-1)!.value;
+        expect(latest.shellErrors.some(error => error.identity === (source === "failure"
+          ? `owner-stop:${WORKSPACE.workspaceId}:${LIVE_ROW.path}`
+          : `owner-live-quarantine:${WORKSPACE.workspaceId}:${LIVE_ROW.objectId}`))).toBe(true);
+      });
+    }
     await act(async () => reading.resolve({documents: [{...LIVE_ROW, canResume: true}], nextCursor: null}));
     const latest: ReturnType<typeof shellError.useShellError> = notices.mock.results.at(-1)!.value;
     expect(latest.shellErrors.some(error => error.identity === `live-stop-edits-pending:${LIVE_ROW.objectId}`)).toBe(false);
+    if (source === "failure" && mode === "superseded-admission") {
+      expect(latest.shellErrors.some(error => error.identity === `owner-stop:${WORKSPACE.workspaceId}:${LIVE_ROW.path}`)).toBe(true);
+    }
     notices.mockRestore();
+  });
+
+  it.each(["toast", "Notices"] as const)("starts only one quarantine Stop for two synchronous clicks in %s", async surface => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    const kept = {...LIVE_ROW, reason: "invalid-update", storedOn: "this-computer" as const, incident: "kept-1", recovery: "not-written" as const};
+    bridge.getSyncStatus.mockImplementation(async () => ({...SYNC_STATUS, ownerLiveQuarantines: [{...kept}]}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValue(stopping.promise);
+    const user = userEvent.setup(); renderShell(bridge);
+    let actionSurface = await screen.findByTestId("workspace-shell-error");
+    if (surface === "Notices") {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      actionSurface = (await within(await screen.findByTestId("notice-center")).findByText(`Edits not written to ${LIVE_ROW.path}`)).closest("li")!;
+    }
+    const retry = within(actionSurface).getByRole("button", {name: "Try again"});
+    act(() => {
+      retry.click();
+      expect(retry.isConnected).toBe(true);
+      expect((retry as HTMLButtonElement).disabled).toBe(false);
+      retry.click();
+    });
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1));
+    await act(async () => stopping.resolve({keptEdits: "none"}));
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
   });
 
   it.each((["toast", "Notices"] as const).flatMap(surface =>
     (["snapshot", "refusal", "success-then-snapshot"] as const).map(ending => ({surface, ending}))))(
-    "keeps the quarantine Stop retry busy in $surface until $ending", async ({surface, ending}) => {
+    "keeps the quarantine Stop retry busy in $surface through $ending and clears it when Stop ends", async ({surface, ending}) => {
     const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
     const kept = {...LIVE_ROW, reason: "invalid-update", storedOn: "this-computer" as const, incident: "kept-1", recovery: "not-written" as const};
     bridge.getSyncStatus.mockImplementation(async () => ({...SYNC_STATUS, ownerLiveQuarantines: [{...kept}]}));
@@ -3178,13 +3214,21 @@ describe("owner live documents", () => {
     } else {
       if (ending === "success-then-snapshot") {
         await act(async () => stopping.resolve({keptEdits: "none"}));
-        expect(retry.disabled).toBe(true);
+        expect(retry.disabled).toBe(false);
       }
-      const before = bridge.getSyncStatus.mock.calls.length;
+      const before = bridge.getSyncStatus.mock.calls.length, snapshot = deferred<SyncStatusResult>();
+      bridge.getSyncStatus.mockReturnValueOnce(snapshot.promise);
       act(() => bridge.emitWorkspaceActivity());
       await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(before));
+      await act(async () => snapshot.resolve({...SYNC_STATUS, ownerLiveQuarantines: [{...kept}]}));
+      if (ending === "snapshot") {
+        expect(retry.getAttribute("aria-busy")).toBe("true");
+        expect(retry.disabled).toBe(true);
+        fireEvent.click(retry);
+        expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
+        await act(async () => stopping.resolve({keptEdits: "none"}));
+      }
       await waitFor(() => expect(retry.disabled).toBe(false));
-      if (ending === "snapshot") await act(async () => stopping.resolve({keptEdits: "none"}));
     }
     expect(settledRetry.hasAttribute("aria-busy")).toBe(false);
     expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
