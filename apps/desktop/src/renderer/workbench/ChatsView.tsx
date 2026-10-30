@@ -2837,9 +2837,12 @@ export function ChatsView(props: {
     if (!action) return;
     action.scrollIntoView({ block: "nearest" });
     action.focus();
+    // Join or Accept is disabled while another join or request is in flight.
+    // The reveal waits until it can take focus.
+    if (document.activeElement !== action) return;
     setMarkedInvitation({ shareId: revealInvitation.shareId, inputs: inputCount() });
     onInvitationRevealed?.();
-  }, [onInvitationRevealed, pendingDmRequests, receivedNotJoined, revealInvitation]);
+  }, [dmRequestBusy, joiningShareId, onInvitationRevealed, pendingDmRequests, receivedNotJoined, revealInvitation]);
   // The revealed row stays marked until the person's next click or key press,
   // which joins it or acts elsewhere.
   useEffect(() => {
