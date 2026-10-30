@@ -36,6 +36,9 @@ type Palette = {
 
 const DIM = 0.12;
 const LABEL_LIMIT = 600;
+// Above this many links on screen, links draw as hairlines (under a device pixel).
+const DENSE_LINKS = 1000;
+const HAIRLINE = 0.99;
 const LABEL_HEIGHT = 15;
 // Labels claim space on a grid of cells this many pixels wide and high.
 const CELL = 6;
@@ -422,11 +425,14 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const screenR = (i: number) => Math.max(minR, radius[i]! * k);
 
     // Links: one batched stroke for the rest, one for the lit node's own.
+    // Many links wider than a device pixel stall the GPU for hundreds of
+    // milliseconds a frame, so a dense stroke stays a hairline.
     const lineWidth = Math.max(0.35, Math.min(2.4, (0.4 + display.linkThickness * 1.6) * Math.sqrt(Math.min(k, 2))));
-    ctx.lineWidth = lineWidth;
+    const strokeWidth = (links: number, wide: number) => (links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide);
     ctx.strokeStyle = palette.edge;
     ctx.globalAlpha = palette.edgeAlpha * rest;
     ctx.beginPath();
+    let shown = 0;
     for (let l = 0; l < source.length; l++) {
       const s = source[l]!, t = target[l]!;
       if (highlight && (s === lit || t === lit)) continue;
@@ -434,12 +440,14 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       if ((x1 < 0 && x2 < 0) || (y1 < 0 && y2 < 0) || (x1 > width && x2 > width) || (y1 > height && y2 > height)) continue;
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
+      shown++;
     }
+    ctx.lineWidth = strokeWidth(shown, lineWidth);
     ctx.stroke();
     if (highlight) {
       ctx.strokeStyle = palette.match;
       ctx.globalAlpha = palette.edgeAlpha + (0.75 - palette.edgeAlpha) * mix;
-      ctx.lineWidth = lineWidth * (1 + 0.4 * mix);
+      ctx.lineWidth = strokeWidth(offsets[lit + 1]! - offsets[lit]!, lineWidth * (1 + 0.4 * mix));
       ctx.beginPath();
       for (let a = offsets[lit]!; a < offsets[lit + 1]!; a++) {
         const n = adjacency[a]!;
@@ -865,6 +873,9 @@ export function GraphCanvas(props: {
       settled: () => undefined,
     });
     rendererRef.current = renderer;
+    // Size now, so the first frame draws the graph instead of waiting for the observer.
+    const rect = canvas.getBoundingClientRect();
+    renderer.resize(rect.width, rect.height);
     const sizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(([entry]) => {
       if (entry) renderer.resize(entry.contentRect.width, entry.contentRect.height);
     });
