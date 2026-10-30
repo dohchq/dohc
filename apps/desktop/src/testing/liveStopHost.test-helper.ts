@@ -20,7 +20,7 @@ export const HOST_STOP_CASES = [
   [
     "host-moved",
     "running without this document (moved from old/plan.md)",
-    "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from old/plan.md. Move it back there, then try again.",
+    "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from old/plan.md. Put it back there, then try again.",
     "retry"
   ],
   [

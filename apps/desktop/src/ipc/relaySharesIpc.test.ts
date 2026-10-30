@@ -1,6 +1,5 @@
-import { liveStopError } from "./liveEditingStop";
 import { HOST_STOP_CASES } from "../testing/liveStopHost.test-helper";
-import { liveStopHostCopy } from "./liveEditingStop";
+import { liveStopError, liveStopHostCopy } from "./liveEditingStop";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -1601,17 +1600,6 @@ it("keeps a Stop request on a failure other than edits-pending", async () => {
   expect(h.recorded()?.state).toBe("requested");
   expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
 });
-it("relayShareErrorCopy maps edits-pending to the agreed sentence", () => {
-  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
-  const start = source.indexOf("function relayShareErrorCopy(");
-  const end = source.indexOf("\ntype RelayShareRetainedDependentSetResult", start);
-  const js = stripTypeScriptTypes(source.slice(start, end));
-  const words = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
-  const copy = new Function("LIVE_STOP_EDITS_PENDING", `${js}; return relayShareErrorCopy;`)(words) as
-    (status: number, data: {code: string; error?: string}) => string;
-  expect(copy(409, {code: "edits-pending", error: "arbitrary server wording"})).toBe(words);
-});
-
 it.each(HOST_STOP_CASES)("relayShareErrorCopy maps %s and %s to the desktop's copy and detail", (code, sessionHost, words) => {
   const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
   const start = source.indexOf("function relayShareErrorCopy(");

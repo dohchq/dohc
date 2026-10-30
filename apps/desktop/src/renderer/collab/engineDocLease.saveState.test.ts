@@ -1,5 +1,5 @@
-import { liveStopError } from "../../ipc/liveEditingStop";
 // @vitest-environment jsdom
+import { liveStopError } from "../../ipc/liveEditingStop";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";

@@ -37,7 +37,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
-import { LIVE_STOP_EDITS_PENDING, liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
+import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
@@ -1256,8 +1256,6 @@ function relayShareErrorCopy(
   data: { error?: string; code?: string; sessionHost?: unknown; path?: unknown } | null,
 ): string {
   switch (data?.code) {
-    case "edits-pending":
-      return LIVE_STOP_EDITS_PENDING;
     case "host-paused":
     case "host-diverged":
     case "host-no-edit-grant":

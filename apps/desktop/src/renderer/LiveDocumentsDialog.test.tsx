@@ -1472,7 +1472,15 @@ it.each(["paused", "copied", "unreadable", "not-written", "cannot-write"] as con
   const note = await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
   expect(document.activeElement).toBe(within(live).getByRole("button", {name: "Try again to stop live editing for held.md"}));
   expect(within(live).queryByRole("button", {name: /Resume live/})).toBeNull();
-  expect([...live.querySelectorAll("p")].map(p => p.textContent)).toEqual([note.textContent, cause]);
+  expect([...live.querySelectorAll("p")].map(p => p.textContent)).toEqual(
+    quarantine === "unreadable" ? [note.textContent] : [note.textContent, cause]);
+  if (quarantine === "unreadable") {
+    expect(live.children[1]?.textContent).toBe("Can't read edits");
+    expect(within(live).queryByRole("button", {name: "Try again to read your kept edits for held.md"})).toBeNull();
+    await user.click(within(live).getByRole("button", {name: "Try again to stop live editing for held.md"}));
+    await within(live).findByText(cause!);
+    expect(within(live).getByRole("button", {name: "Try again to read your kept edits for held.md"})).toBeTruthy();
+  }
   const save = within(live).getByRole("button", {name: "Save recovery copy of held.md"}) as HTMLButtonElement;
   expect(save.disabled).toBe(quarantine === "unreadable");
   if (!save.disabled) {

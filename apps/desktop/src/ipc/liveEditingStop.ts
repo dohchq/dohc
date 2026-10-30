@@ -5,7 +5,7 @@ export const HOST_STOP_REFUSALS = {
   "host-paused": {message: LIVE_STOP_EDITS_PENDING_RESUME, action: "resume"},
   "host-diverged": {message: "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.", action: "none"},
   "host-no-edit-grant": {message: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.", action: "retry"},
-  "host-moved": {message: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from {path}. Move it back there, then try again.", action: "retry"},
+  "host-moved": {message: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.", action: "retry"},
   "host-start-failed": {message: "Live editing didn't stop. The server's session host couldn't start and may hold recent edits. Contact the server's operator, then try again.", action: "retry"},
   "host-not-loaded": {message: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.", action: "retry"},
 } as const;

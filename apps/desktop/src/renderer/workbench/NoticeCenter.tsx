@@ -27,6 +27,7 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  busy?: boolean;
 };
 
 export type Notice = {
@@ -77,6 +78,7 @@ export interface WorkspaceErrorNotice {
   filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
+  retryBusy?: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
   additionalActionLabels?: string[];
@@ -619,8 +621,10 @@ export function WorkspaceErrorToast(props: {
         <button
           type="button"
           data-testid="workspace-shell-error-retry"
+          disabled={error.retryBusy}
+          aria-busy={error.retryBusy || undefined}
           onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
         >
           Try again
         </button>
@@ -735,6 +739,7 @@ export function LocalNoticeRow(props: {
                     key={action.label}
                     type="button"
                     disabled={action.disabled}
+                    aria-busy={action.busy || undefined}
                     onClick={() => props.onAction(action)}
                     className={ROW_ACTION_CLASS}
                   >
@@ -1194,6 +1199,8 @@ export function NoticeCenter(props: {
             ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
+                disabled: error.retryBusy,
+                busy: error.retryBusy,
               }]
             : []),
         ],

@@ -781,7 +781,7 @@ export function LiveDocumentsDialog({
                   </div>
                 ) : null}
                 {quarantineNote(row) !== null && (!(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) &&
-                  (!pendingStops.has(row.objectId) || (!row.canResume && pendingStops.get(row.objectId)?.code === "edits-pending"))) ? (
+                  (!pendingStops.has(row.objectId) || (!row.canResume && row.quarantine !== "unreadable" && pendingStops.get(row.objectId)?.code === "edits-pending"))) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">{quarantineNote(row)}</p>
                 ) : !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) && row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">

@@ -1,7 +1,6 @@
-import {liveStopError} from "./liveEditingStop";
 import {describe, expect, it} from "vitest";
 import {RELAY_ERROR_MESSAGES} from "../../../../services/sync-relay/src/errors";
-import {liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
+import {liveStopError, liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
 import {HOST_STOP_CASES, hostStopWireError} from "../testing/liveStopHost.test-helper";
 
 describe("session-host Stop contract", () => {
@@ -54,7 +53,7 @@ it("does not read a host refusal's shared prefix as edits-pending", () => {
   expect(readLiveStopRefusal(error)?.code).toBe("host-not-loaded");
   expect(readLiveStopRefusal(new Error(HOST_STOP_CASES[5][2]))).toBeNull();
 });
-it("reads the relay's edits-pending code without trusting words or a Resume hint", () => {
+it("reads the relay's edits-pending code and Resume hint without trusting words", () => {
   const error = liveStopRelayError({code: "edits-pending", error: "untrusted", resume: true});
   expect(error).toBeInstanceOf(Error);
   expect(readLiveStopRefusal(error)).toEqual({code: "edits-pending", resume: true});
