@@ -53,7 +53,8 @@ pub struct ReplicaRestoreCancellation {
     pub relay_database_namespace: String,
     pub journal_cursor: i64,
     pub cancellation: NativeRestoreCancellationReceipt,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Require the field while allowing an explicit null.
+    #[serde(deserialize_with = "Option::<ReplicaAuthority>::deserialize")]
     pub authority: Option<ReplicaAuthority>,
 }
 
@@ -535,7 +536,7 @@ fn apply_cancellation(
         let retired = record
             .authority
             .as_ref()
-            .is_some_and(|a| retired_by(a, b, log_cursor, epoch_log_floor));
+            .is_none_or(|a| retired_by(a, b, log_cursor, epoch_log_floor));
         return Ok(if held || retired || retired_lineage(tx, b)? {
             Control::Skipped
         } else {

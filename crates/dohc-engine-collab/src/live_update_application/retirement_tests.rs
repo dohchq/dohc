@@ -1629,6 +1629,13 @@ fn a_restore_waits_while_its_activation_retires() {
             &mut f.store,
             None,
             NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: terminal.as_ref().map_or(0, |r| r.journal_cursor),
+                    receipt_digest: terminal.as_ref().map_or_else(
+                        || f.binding.lineage_claim_id.clone(),
+                        |r| r.update_digest.clone(),
+                    ),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: "namespace".into(),
                 old_binding: f.binding.clone(),
@@ -2007,6 +2014,10 @@ fn readers_after_a_release() {
     let bootstrap_tip = |f: &Fixture| {
         let held = f.handle.registration.lock().unwrap();
         let input = NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
             operation_id: "restore".into(),
             relay_database_namespace: "namespace".into(),
             old_binding: f.binding.clone(),

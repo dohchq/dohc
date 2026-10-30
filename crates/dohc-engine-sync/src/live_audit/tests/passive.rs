@@ -501,8 +501,8 @@ fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
         "no retained work arrives"
     );
     // The authority is current when the relay serves the page, so the replica
-    // keeps the record without it, and a replay under a later or no
-    // authority is still that record.
+    // clears that authority in its kept record. A replay under a later or
+    // no authority is still that record.
     let kept: String = replica
         .read_with(|c| {
             c.query_row(
@@ -512,7 +512,8 @@ fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
             )
         })
         .unwrap();
-    assert!(!kept.contains("authority"), "{kept}");
+    let kept: serde_json::Value = serde_json::from_str(&kept).unwrap();
+    assert_eq!(kept.get("authority"), Some(&serde_json::Value::Null));
     let mut later = record.clone();
     later.authority = Some(ReplicaAuthority {
         lineage_claim_id: "e".repeat(64),
@@ -574,6 +575,10 @@ fn opening_cancellation(
         cancellation: NativeRestoreCancellationReceipt {
             fence: NativeRestoreFenceReceipt {
                 operation: NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: 0,
+                        receipt_digest: source.binding.lineage_claim_id.clone(),
+                    },
                     operation_id: format!("restore-{cursor}"),
                     relay_database_namespace: "relay".into(),
                     old_binding: from,
@@ -656,7 +661,7 @@ fn passive_replica_crosses_cancellations_before_the_first_accepted_event() {
     replica
         .write_with(&NoFaults, |tx| {
             tx.execute_batch(
-                "UPDATE replica_restore_cancellations SET record_json=json_object('cancellation',json(json_extract(record_json,'$.cancellation')),'journalCursor',json_extract(record_json,'$.journalCursor'),'relayDatabaseNamespace',json_extract(record_json,'$.relayDatabaseNamespace'))",
+                "UPDATE replica_restore_cancellations SET record_json=json_object('authority',NULL,'cancellation',json(json_extract(record_json,'$.cancellation')),'journalCursor',json_extract(record_json,'$.journalCursor'),'relayDatabaseNamespace',json_extract(record_json,'$.relayDatabaseNamespace'))",
             )
             .map_err(StorageError::persist_public)
         })
@@ -769,9 +774,9 @@ fn passive_replica_crosses_cancellations_before_the_first_accepted_event() {
 
 /// Opus 2: a cancellation of a lineage the replica held and no longer marks,
 /// replaced or deleted, skips as its deliveries do. One of a lineage the
-/// replica never saw blocks at its cursor.
+/// replica never saw also skips when the relay reports no current authority.
 #[test]
-fn passive_cancellation_skips_a_lineage_it_held_and_blocks_one_it_never_saw() {
+fn passive_cancellation_skips_retired_lineages_with_null_authority() {
     let mut source = fixture_with_binding_generation(true, None, 1);
     bootstrap(&mut source, false).unwrap();
     let record = opening_cancellation(&source, 1, 1);
@@ -789,10 +794,14 @@ fn passive_cancellation_skips_a_lineage_it_held_and_blocks_one_it_never_saw() {
     let scratch = ScratchDir::new().unwrap();
     let mut unseen =
         EngineStore::open_passive(&scratch.path().join("unseen.db"), 0, None, None).unwrap();
-    let blocked = page(&mut unseen);
+    let skipped = page(&mut unseen);
     assert_eq!(
-        (blocked.blocked_cursor, blocked.journal_cursor),
-        (Some(1), 0)
+        (
+            skipped.skipped,
+            skipped.blocked_cursor,
+            skipped.journal_cursor
+        ),
+        (1, None, 1)
     );
     let (_replaced_scratch, _path, mut replaced) = receiver(&source);
     replaced
@@ -827,8 +836,8 @@ fn passive_cancellation_skips_a_lineage_it_held_and_blocks_one_it_never_saw() {
 /// no marker, archive or base, skips when its authority retires that
 /// lineage, as a delivery's does: another lineage whose baseline the log has
 /// reached, or a baseline at or below the epoch floor. Rows for another
-/// document then apply on the same page. Without authority, or under
-/// authority that still names the lineage, it blocks at its cursor.
+/// document then apply on the same page. Null authority means no current
+/// lineage. Authority that still names the lineage blocks at its cursor.
 #[test]
 fn passive_cancellation_of_an_unseen_lineage_skips_by_its_authority() {
     let mut source = fixture_with_binding_generation(true, None, 1);
@@ -858,7 +867,7 @@ fn passive_cancellation_of_an_unseen_lineage_skips_by_its_authority() {
     for (case, named, log_cursor, floor, skips) in [
         ("epoch", authority(&other, 1_000_000), 0, 1_000_000, true),
         ("authority", authority(&other, 999_999), 1_000_000, 0, true),
-        ("none", None, 1_000_000, 1_000_000, false),
+        ("none", None, 1_000_000, 1_000_000, true),
         (
             "current",
             authority(&unseen, 1_000_001),
@@ -919,6 +928,21 @@ fn passive_cancellation_of_an_unseen_lineage_skips_by_its_authority() {
     }
 }
 
+#[test]
+fn passive_cancellation_authority_is_required_and_nullable() {
+    use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
+    let source = fixture_with_binding_generation(true, None, 1);
+    let record = opening_cancellation(&source, 1, 1);
+    let mut wire = serde_json::to_value(&record).unwrap();
+    assert_eq!(wire.get("authority"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        serde_json::from_value::<ReplicaRestoreCancellation>(wire.clone()).unwrap(),
+        record
+    );
+    wire.as_object_mut().unwrap().remove("authority");
+    assert!(serde_json::from_value::<ReplicaRestoreCancellation>(wire).is_err());
+}
+
 /// Fence a restore of `source`'s lineage at `terminal`, cancel it, and
 /// register the lineage again at the generation after, as the host does once
 /// the relay ends a fence nothing applied. Returns the cancellation.
@@ -961,6 +985,13 @@ fn fence_and_cancel(
     };
     let next = source.binding.restore_fence_generation + 1;
     let fence = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: terminal.as_ref().map_or(0, |r| r.journal_cursor),
+            receipt_digest: terminal.as_ref().map_or_else(
+                || source.binding.lineage_claim_id.clone(),
+                |r| r.update_digest.clone(),
+            ),
+        },
         operation_id: format!("restore-{next}"),
         relay_database_namespace: "relay".into(),
         old_binding: source.binding.clone(),
@@ -1328,6 +1359,10 @@ fn a_successors_cancelled_restore_exports_and_imports_with_its_origin() {
                 &mut f.store,
                 None,
                 NativeRestoreFence {
+                    point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                        journal_cursor: first.journal_cursor,
+                        receipt_digest: first.update_digest.clone(),
+                    },
                     operation_id: operation.clone(),
                     relay_database_namespace: "relay".into(),
                     old_binding: f.binding.clone(),
@@ -1712,6 +1747,10 @@ fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() 
             &mut f.store,
             None,
             NativeRestoreFence {
+                point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                    journal_cursor: first.journal_cursor,
+                    receipt_digest: first.update_digest.clone(),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: "relay".into(),
                 old_binding: f.binding.clone(),

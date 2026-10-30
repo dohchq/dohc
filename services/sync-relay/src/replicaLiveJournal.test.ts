@@ -90,7 +90,7 @@ it("already exposes the applied admitted metadata and author snapshot through th
     const row = f.journalRows().journal[0]!;
     const record = {kind: "application", relayDatabaseNamespace: row.relay_database_namespace,
       eventCount: row.accepted_event_count, evidenceDigest: row.accepted_evidence_digest, updateByteLength: input.updateBytes.byteLength,
-      metadata, sourceApplication: null, sourceRestore: null, contentCoordinate: {originId: "device", originSeq: 0}};
+      metadata, sourceApplication: null, sourceRestore: null, cancelledRestores: [], contentCoordinate: {originId: "device", originSeq: 0}};
     const bytes = Buffer.from(JSON.stringify(record)), digest = hash(bytes);
     f.storage.putBlob({workspaceId: "workspace", sha256: receipt.updateDigest, content: input.updateBytes, createdAtMs: 1});
     f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: bytes, createdAtMs: 1});

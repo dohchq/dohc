@@ -57,7 +57,7 @@ it.skipIf(binary.missing || process.platform !== "linux")("R4: a real journal-on
     expect(errors).toEqual([]);
   } finally {watches.dispose();await supervisor.close();await f.close();}
 },120_000);
-async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8Array) {
+async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8Array,cancelled=false) {
   const f=registered({deployment:true,baselineBytes});
   f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
   const root=await mkdtemp(join(tmpdir(),"replica5b-native-"));
@@ -73,6 +73,30 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
   let retiredCursor=0;
   if(retired) {
     retiredCursor=commit("before-rotation");
+    if(cancelled) {
+      const committed=f.storage.readCommittedLiveUpdate({host:f.input.host,document:f.input.evidence.document,journalCursor:retiredCursor});
+      if(committed.kind!=="committed")throw new Error("Expected committed update.");
+      const {binding,receipt:terminal}=committed.admitted.metadata.accepted;
+      const row=f.journalRows().journal[0]!,namespace=String(row.relay_database_namespace),operationId="cancel-before-rotation";
+      const operation={point:{journalCursor:terminal.journalCursor,receiptDigest:terminal.updateDigest},operationId,
+        relayDatabaseNamespace:namespace,oldBinding:binding,hostId:"host",newFence:binding.restoreFenceGeneration+1,
+        origin:{kind:"bootstrap",id:"bootstrap"},terminal,appliedSequence:0};
+      const stopped={...binding,restoreFenceGeneration:operation.newFence};
+      const receipt={fence:{operation,localHeadSequence:0,recordedAtMs:30},binding:stopped,
+        endpoint:{terminalReceipt:terminal,eventCount:Number(row.accepted_event_count),historyEvidenceDigest:String(row.accepted_evidence_digest)},recordedAtMs:31};
+      retiredCursor++;
+      f.write(db=>{
+        db.prepare(`INSERT INTO sync_relay_live_restore_operations
+          (operation_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,
+           phase,old_fence,revoked_generation,invalidated_at_ms,declined_at_ms,accounted_bytes)
+          VALUES (?,?,'workspace','main','object',?,'{}','{}','declined',?,2,20,31,1)`)
+          .run(operationId,namespace,binding.lineageClaimId,binding.restoreFenceGeneration);
+        db.prepare(`INSERT INTO sync_relay_live_restore_cancellations
+          (relay_database_namespace,operation_id,workspace_id,requested_at_ms,outcome,acknowledgment_json,journal_cursor,accounted_bytes)
+          VALUES (?,?,'workspace',30,'fence-cancelled',?,?,1)`)
+          .run(namespace,operationId,JSON.stringify({status:"fenceCancelled",hostId:"host",generation:operation.newFence,binding:stopped,receipt}),retiredCursor);
+      });
+    }
     if(retireAuthority)f.write(db=>db.exec("UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=40"));
     expect(f.storage.rotateWorkspaceIdentity({workspaceId:"workspace",ownerUserId:"owner",replicationEpoch:"epoch-2",streamIdentity:"stream-2",rotatedAtMs:50})).toBe("rotated");
     f.write(db=>{expect(db.prepare("SELECT epoch_log_floor FROM sync_relay_workspaces").get()?.epoch_log_floor).toBe(2);});
@@ -110,6 +134,18 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
 
 it.skipIf(binary.missing || process.platform !== "linux")("drains pre-epoch retired journal rows without fetching their missing baseline",async()=>{
   const f=await fixture(true);try {
+    await f.child.pull();
+    f.read(db=>{
+      expect(db.prepare("SELECT count(*) AS n FROM ydoc_docs").get()?.n).toBe(0);
+      expect(db.prepare("SELECT log_cursor,journal_cursor FROM replica_frontiers").get()).toEqual({log_cursor:0,journal_cursor:f.retiredCursor});
+    });
+  }finally{await f.close();}
+},120_000);
+
+it.skipIf(binary.missing || process.platform !== "linux")("drains pre-epoch retired cancellations with null authority and no baseline",async()=>{
+  const f=await fixture(true,true,undefined,true);try {
+    const page=await f.f.storage.readReplicaLiveJournal({workspaceId:"workspace",after:0,limit:500});
+    expect(page.rows.at(-1)).toMatchObject({journalCursor:f.retiredCursor,authority:null,cancellation:expect.any(Object)});
     await f.child.pull();
     f.read(db=>{
       expect(db.prepare("SELECT count(*) AS n FROM ydoc_docs").get()?.n).toBe(0);

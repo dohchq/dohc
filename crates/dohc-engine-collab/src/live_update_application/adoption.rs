@@ -1701,7 +1701,12 @@ pub fn adopt_owner_committed(
                 // The accepted state at B, which local state must contain:
                 // merging it into a copy of local state adds nothing.
                 let through = succession.prefix.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
-                let accepted = accepted_history::read_state(tx, &held, through, cut.reconstruction)?;
+                // Adoption still answers a missing dependency as a conflict.
+                let accepted = accepted_history::read_state(tx, &held, through, cut.reconstruction)
+                    .map_err(|error| match error {
+                        ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                        error => error,
+                    })?;
                 let accepted_full = accepted.encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
                     .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
                 let merged = Ydoc::wire();

@@ -5,10 +5,16 @@ import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
 import {LIVE_JOURNAL_TABLE, LIVE_APPLICATION_AUTHORSHIP_INDEX} from "./schema";
 import {readAcceptedHistoryDeliveryMetadata, RestoreHistoryBudget, RestoreHistoryBudgetExceeded} from "./liveAcceptedHistory";
+import {parseNativeRestoreCancellationReceipt} from "../liveRestoreFence";
 import {parseSettlementAuthors} from "./hostedSettlement";
 
 const PUSH_BYTES = 64_000_000;
-const RECORD_OVERHEAD_BYTES = 8192;
+// Match live_audit/chunks.rs and live_update_application::MAX_CANCELLED_RESTORES.
+const MAX_CANCELLED_RESTORES = 4095;
+const CANCELLATION_RECEIPT_BYTES = 643_576;
+const CANCELLED_RESTORE_BYTES = CANCELLATION_RECEIPT_BYTES +
+  Buffer.byteLength('{"originAdoptionId":"","cancellation":}') + 2 * 1024;
+const RECORD_OVERHEAD_BYTES = MAX_CANCELLED_RESTORES * (CANCELLED_RESTORE_BYTES + 1) + 32_768;
 const CHUNK_BYTES = 4 * 1024 * 1024;
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function require(value: unknown): asserts value {if (!value) throw new Error("Unconfirmed live application.");}
@@ -31,6 +37,18 @@ function canonicalRestore(value: Record<string, unknown> | null) {
     result[field] = end;
   }
   return result;
+}
+
+function canonicalCancellations(value: unknown) {
+  require(Array.isArray(value) && value.length <= MAX_CANCELLED_RESTORES);
+  return value.map(entry => {
+    const result = ordered(entry, ["originAdoptionId", "cancellation"]);
+    require(result.originAdoptionId === null || (typeof result.originAdoptionId === "string" &&
+      Buffer.byteLength(result.originAdoptionId) <= 1024));
+    result.cancellation = parseNativeRestoreCancellationReceipt(result.cancellation);
+    require(Buffer.byteLength(JSON.stringify(result.cancellation)) <= CANCELLATION_RECEIPT_BYTES);
+    return result;
+  });
 }
 
 const journalWhere = `workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
@@ -138,7 +156,8 @@ export async function prepareLiveApplications(storage: StorageContext,
         metadata: trusted, sourceApplication: source === null ? null : {localYDocSequence: source.localYDocSequence,
           hostCoordinate: {hostId: source.hostCoordinate.hostId, hostEpoch: source.hostCoordinate.hostEpoch,
             instanceId: source.hostCoordinate.instanceId, connectionId: source.hostCoordinate.connectionId}},
-        sourceRestore: canonicalRestore(record.sourceRestore), contentCoordinate: {originId: coordinate.originId, originSeq: coordinate.originSeq}};
+        sourceRestore: canonicalRestore(record.sourceRestore), cancelledRestores: canonicalCancellations(record.cancelledRestores),
+        contentCoordinate: {originId: coordinate.originId, originSeq: coordinate.originSeq}};
       // Reject alternate key order, whitespace and extra top-level/metadata/source fields.
       require(bytes.equals(Buffer.from(JSON.stringify(canonical))));
       const authors = new Map<string, unknown>();
