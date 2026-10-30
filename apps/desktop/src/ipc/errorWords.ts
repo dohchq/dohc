@@ -479,10 +479,13 @@ export function waitedForCollectionMove(error: unknown): boolean {
   return name === "CollectionMoveUnfinishedError" && code === "waited";
 }
 
-/** A stopped Collection move's error with the Collection's name in place of "This Collection", for a row among others in Notices. */
+/**
+ * A stopped Collection move's error with the Collection's name in place of "This Collection", for a row among others in Notices.
+ * The name goes in quotes, so a name such as "CRM: Accounts" never reads as a code that hides the words.
+ */
 export function namingCollectionMove(error: unknown, collection: string): unknown {
   const { name, text } = parse(error);
-  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: ${collection} `) : error;
+  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `) : error;
 }
 
 /** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */

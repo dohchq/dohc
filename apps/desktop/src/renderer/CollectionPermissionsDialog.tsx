@@ -16,11 +16,17 @@ interface Props {
   dataset: DatasetDescription;
   onClose(): void;
   onError(fallback: string, cause: unknown, retry?: (() => void) | null): void;
-  /** A save or removal succeeded, so this Collection isn't partway through a move. */
-  onSaved?(): void;
+  /** Removes the row in Notices a report with this identity left. */
+  onSettled?(identity: string): void;
+  /** A save moved this Collection to the server. */
+  onMoved?(): void;
 }
 type Target = { workspaceId: string; datasetPath: string; expectedDatasetId: string };
 type Change = { principalKey: string } | { principalKey?: undefined; grantId: string; person: string; operationIds: string[]; moveToServer: boolean };
+type Failure = { principalKey?: string; words: string };
+// One row in Notices for a person's failed change, which their next change that succeeds removes.
+const changeIdentity = (datasetId: string, change: Change) =>
+  `collection-access:${datasetId}:${change.principalKey !== undefined ? change.principalKey : change.grantId}`;
 async function changeAccess(target: Target, dataset: DatasetDescription, change: Change) {
   const result = await bridge().dataset(change.principalKey !== undefined ? { ...target, action: "removeGrant", principalKey: change.principalKey } : {
     ...target, action: "setGrant", grantId: change.grantId, grant: { revision: dataset.revision, revisionSha256: dataset.revisionSha256,
@@ -29,23 +35,28 @@ async function changeAccess(target: Target, dataset: DatasetDescription, change:
   if (result.kind !== "grant-updated") throw Error("dohc could not confirm Collection access. Try again.");
 }
 // A change that answered after its dialog closed takes a toast and a row, whose Try again runs it again.
-function reportClosed(report: ReportShellFailure, run: () => Promise<void>, change: Change, collection: string, cause: unknown, onSaved?: () => void) {
+function reportClosed(report: ReportShellFailure, run: () => Promise<void>, change: Change, dataset: DatasetDescription, cause: unknown) {
   report({ title: change.principalKey !== undefined ? "Access wasn't removed" : `Access wasn't saved for ${change.person}`,
-    message: readError(namingCollectionMove(cause, collection)).words ?? UNKNOWN_ERROR_WORDS, cause,
-    retry: () => { void run().then(onSaved, (error: unknown) => reportClosed(report, run, change, collection, error, onSaved)); } });
+    message: readError(namingCollectionMove(cause, dataset.name)).words ?? UNKNOWN_ERROR_WORDS, cause, identity: changeIdentity(dataset.datasetId, change),
+    retry: () => { void run().catch((error: unknown) => reportClosed(report, run, change, dataset, error)); } });
 }
 export function CollectionPermissionsDialog(props: Props) {
-  return <Permissions key={`${props.workspaceId}:${props.dataset.datasetId}:${props.dataset.revisionSha256}`} {...props} />;
+  // New rules remount the form below while the dialog stays open, so whether
+  // it is open, and the failure it shows in place, live here.
+  const open = useRef(true);
+  useEffect(() => { open.current = true; return () => { open.current = false; }; }, []);
+  const [failure, setFailure] = useState<Failure | null>(null);
+  return <Permissions key={`${props.workspaceId}:${props.dataset.datasetId}:${props.dataset.revisionSha256}`} {...props} open={open} failure={failure} onFailure={setFailure} />;
 }
-function Permissions({ workspaceId, datasetPath, dataset, onClose, onError, onSaved }: Props) {
+function Permissions({ workspaceId, datasetPath, dataset, onClose, onError, onSettled, onMoved, open, failure, onFailure }: Props & {
+  open: { readonly current: boolean }; failure: Failure | null; onFailure(failure: Failure | null): void;
+}) {
   const [page, setPage] = useState<DatasetPermissionsPage | null>(null);
   const [place, setPlace] = useState<DatasetPlace | null>(null);
   const [recipients, setRecipients] = useState<RelayShareGrantedRow[]>([]);
   const [grantId, setGrantId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  // While the dialog is open, it says in place why its own save or removal failed.
-  const [failure, setFailure] = useState<{ principalKey?: string; words: string } | null>(null);
   const report = useContext(ShellErrorReporter);
   const alive = useRef(true), request = useRef(0), locked = useRef(false);
   const target: Target = { workspaceId, datasetPath, expectedDatasetId: dataset.datasetId };
@@ -75,15 +86,17 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError, onSa
     const asked: Change = principalKey ? { principalKey }
       : { grantId, person: recipient?.recipientEmail ?? recipient?.recipientUserId ?? grantId, operationIds: selected, moveToServer: moving !== null };
     const run = () => changeAccess(target, dataset, asked);
-    locked.current = true; const token = ++request.current; setBusy(true); setFailure(null);
+    locked.current = true; const token = ++request.current; setBusy(true); onFailure(null);
     try {
       await run();
-      onSaved?.();
+      onSettled?.(changeIdentity(dataset.datasetId, asked));
+      if (asked.principalKey === undefined && asked.moveToServer) onMoved?.();
       if (!alive.current || token !== request.current) return;
       setGrantId(""); setSelected([]); locked.current = false; await load();
     } catch (cause) {
-      if (!alive.current) { if (report) reportClosed(report, run, asked, dataset.name, cause, onSaved); }
-      else if (token === request.current) setFailure({ ...(principalKey ? { principalKey } : {}), words: withErrorWords(principalKey ? "Access wasn't removed." : "Access wasn't saved.", cause) });
+      // While the dialog is open, it says in place why its own save or removal failed.
+      if (open.current) onFailure({ ...(principalKey ? { principalKey } : {}), words: withErrorWords(principalKey ? "Access wasn't removed." : "Access wasn't saved.", cause) });
+      else if (report) reportClosed(report, run, asked, dataset, cause);
     } finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   return <Overlay onClose={busy ? undefined : onClose}><section role="dialog" aria-modal="true" aria-labelledby="collection-access-title"

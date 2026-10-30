@@ -61,26 +61,16 @@ export function ConnectedTransactionalCollection(props: ConnectedTransactionalCo
 function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
-  // A read that only waited for this Collection's move, which stopped, files a
-  // quiet row that names the Collection. Once a save finishes the move, the
-  // reads that can run again do, and each takes back its row; one that fails
-  // again files it again.
+  // A request that only waited for this Collection's move, which stopped,
+  // files a quiet row, and the row names the Collection.
   const described = useRef(dataset);
   described.current = dataset;
-  const waited = useRef(new Map<string, () => void>());
   const onError = useCallback((...report: Parameters<typeof reportError>) => {
-    const [fallback, error, retry, identity] = report;
-    if (!waitedForCollectionMove(error)) { reportError(...report); return; }
-    const row = identity ?? `collection-move-waited:${datasetPath}:${fallback}`;
-    const again = retry ? () => { waited.current.delete(row); retry(); } : null;
-    if (again) waited.current.set(row, again);
-    reportError(fallback, described.current ? namingCollectionMove(error, described.current.name) : error, again, row);
-  }, [reportError, datasetPath]);
-  const readAgain = useCallback(() => {
-    const reads = [...waited.current];
-    waited.current.clear();
-    for (const [row, again] of reads) { onSettled?.(row); again(); }
-  }, [onSettled]);
+    const [fallback, error, ...rest] = report;
+    reportError(fallback, described.current && waitedForCollectionMove(error) ? namingCollectionMove(error, described.current.name) : error, ...rest);
+  }, [reportError]);
+  // One row in Notices for this page's failed reads of the Collection; a read that succeeds removes it.
+  const openIdentity = `collection-open:${datasetPath}`;
   const addressInput = <T extends { datasetId: string },>(input: T) => {
     const { datasetId: expectedDatasetId, ...fields } = input;
     return { ...fields, datasetPath, expectedDatasetId };
@@ -131,6 +121,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
+      onSettled?.(openIdentity);
       setRefusal(null);
       setUnreachable(null);
       setDataset(result.dataset);
@@ -144,9 +135,9 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       setUnreachable(away);
       // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
       if (refused || away) setDataset(null);
-      else onError("Could not open this Collection.", error, () => { void refresh(); });
+      else onError("Could not open this Collection.", error, () => { void refresh(); }, openIdentity);
     } finally { if (sequence === request.current) setLoading(false); }
-  }, [workspaceId, datasetPath, onError, owner]);
+  }, [workspaceId, datasetPath, onError, onSettled, openIdentity, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
@@ -386,7 +377,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
         if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
         return result;
       }} />}
-    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} onSaved={readAgain} />}
+    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} onSettled={onSettled} onMoved={() => void refresh()} />}
     {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
       onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
       onExport={exportRecovery} />}
