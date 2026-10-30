@@ -138,6 +138,31 @@ describe("ChatsView channels", () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a taken name as the new reason when Try again fails", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const taken = new Error("A group with that name already exists.");
+    bridgeMock.createChatChannel
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockRejectedValueOnce(taken);
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    const retry = onError.mock.calls[0]?.[2] as () => void;
+    act(() => retry());
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(onError).toHaveBeenLastCalledWith(
+      "A group with that name already exists.",
+      taken,
+      expect.any(Function),
+    );
+  });
+
   it("reports nothing when a retry creates the group", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
