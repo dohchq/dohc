@@ -29,6 +29,13 @@ describe("sendToWorkspaceWindows", () => {
 });
 
 describe("broadcastWorkspaceActivity", () => {
+  it("delivers a successful agent Stop's object ID only to its workspace", () => {
+    const onA = fakeWindow(1), onB = fakeWindow(2);
+    const scope = {workspaceId: "ws-a", liveDocumentStopped: "object-a"};
+    broadcastWorkspaceActivity({windows: [onA, onB], activeWorkspaceIdOf: id => id === 1 ? "ws-a" : "ws-b", scope});
+    expect(onA.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.workspaceActivity, scope);
+    expect(onB.webContents.send).not.toHaveBeenCalled();
+  });
   it.each([true, false])("preserves a summary change beside file activity (summary first: %s)", async summaryFirst => {
     vi.useFakeTimers();
     try {

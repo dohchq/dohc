@@ -177,7 +177,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
-  const ownerStopFailures = new Map<string, Map<string,{path:string;detail:string}>>();
+  const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -354,7 +354,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     stopsChanged=true;
                     const failures=ownerStopFailures.get(workspaceId) ?? new Map();
                     const detail=error instanceof Error ? error.message : String(error);
-                    failures.set(row.document.objectId,{path:row.document.currentPath,detail});
+                    failures.set(row.document.objectId,{objectId:row.document.objectId,path:row.document.currentPath,detail});
                     ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
                   },
                   onComplete:row => {stopsChanged=true;if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},

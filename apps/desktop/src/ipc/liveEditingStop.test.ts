@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 import {RELAY_ERROR_MESSAGES} from "../../../../services/sync-relay/src/errors";
-import {liveStopHostCopy, readLiveStopRefusal, liveStopRelayError} from "./liveEditingStop";
+import {liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
 import {HOST_STOP_CASES, hostStopWireError} from "../testing/liveStopHost.test-helper";
 
 describe("session-host Stop contract", () => {
@@ -22,4 +22,18 @@ describe("session-host Stop contract", () => {
   it("does not infer a session-host code from server prose", () => {
     expect(readLiveStopRefusal(new Error(HOST_STOP_CASES[5][2]))).toBeNull();
   });
+});
+
+it("drops an unknown sessionHost while keeping the Stop answer", () => {
+  const error = liveStopRelayError({code: "host-not-loaded", sessionHost: "private arbitrary text"});
+  expect(error?.message).toBe(HOST_STOP_CASES.find(([code]) => code === "host-not-loaded")?.[2]);
+  expect(readLiveStopRefusal(new Error(`Error invoking remote method: ${error}`))).toEqual({code: "host-not-loaded"});
+});
+it("drops a moved sessionHost whose path disagrees with the answer", () => {
+  expect(liveStopHostCopy("host-moved", "running without this document (moved from wrong.md)", "old/plan.md"))
+    .not.toContain("Session host:");
+});
+
+it("does not offer Resume for an ineligible row, even with a Resume hint", () => {
+  expect(liveStopAction({code: "edits-pending", resume: true}, {canResume: false})).toBe("retry");
 });

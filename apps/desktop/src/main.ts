@@ -6608,9 +6608,9 @@ function registerIpcHandlers(): void {
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
   ownerLiveStopAgainForCli = async (operation, kept) => {
-    const result = await agentOwnerLiveDocuments.stop(
+    const result = await agentOwnerLiveDocuments.stopForAgent(
       {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
-    notifyRenderer({workspaceId: operation.workspace.workspaceId});
+    sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
   };
   const relayShareHandlers = createRelaySharesIpcHandlers<

@@ -17,21 +17,19 @@ export type LiveStopRefusal = {
   path?: string;
   resume?: true;
 };
-type LiveStopRow = {status: string; reason?: string; quarantine?: string};
+type LiveStopRow = {canResume: boolean};
 
 function isHostStopCode(code: unknown): code is HostStopCode {
   return typeof code === "string" && Object.hasOwn(HOST_STOP_REFUSALS, code);
 }
 
 export function liveStopNeedsResume(row: LiveStopRow | undefined): boolean {
-  return row !== undefined && (row.status === "paused" || row.reason !== undefined ||
-    row.quarantine === "paused" || row.quarantine === "copied" || row.quarantine === "unreadable" ||
-    row.quarantine === "not-written" || row.quarantine === "cannot-write");
+  return row?.canResume === true;
 }
 
 export function liveStopAction(refusal: LiveStopRefusal, row?: LiveStopRow): "resume" | "retry" | "none" {
   if (refusal.code !== "edits-pending") return HOST_STOP_REFUSALS[refusal.code].action;
-  return refusal.resume === true || liveStopNeedsResume(row) ? "resume" : "retry";
+  return (row === undefined ? refusal.resume === true : liveStopNeedsResume(row)) ? "resume" : "retry";
 }
 
 export function liveStopOffersResume(refusal: LiveStopRefusal, row?: LiveStopRow): boolean {
@@ -42,12 +40,19 @@ export function liveStopMessage(refusal: LiveStopRefusal): string {
   if (refusal.code === "edits-pending") return refusal.resume ? LIVE_STOP_EDITS_PENDING_RESUME : LIVE_STOP_EDITS_PENDING;
   const message = HOST_STOP_REFUSALS[refusal.code].message;
   if (refusal.code !== "host-moved") return message;
-  if (!refusal.path) throw new Error("The server sent an answer dohc could not read. Try again later.");
+  if (!refusal.path) return "The server sent an answer dohc could not read. Try again later.";
   return message.replace("{path}", () => refusal.path!);
 }
 
+function knownSessionHost(value: unknown, path?: unknown): value is string {
+  return typeof value === "string" && (["couldn't start", "starting", "restarting", "running, document not loaded yet",
+    "running without this document (paused)", "running without this document (no Edit grant)",
+    "running without this document (server copy diverged)"].includes(value) ||
+    (typeof path === "string" && path.length > 0 && value === `running without this document (moved from ${path})`));
+}
+
 export function liveStopHostCopy(code: HostStopCode, sessionHost: unknown, path?: unknown): string {
-  return `${liveStopMessage({code, ...(typeof path === "string" ? {path} : {})})}${typeof sessionHost === "string" ? `\nSession host: ${sessionHost}` : ""}`;
+  return `${liveStopMessage({code, ...(typeof path === "string" ? {path} : {})})}${knownSessionHost(sessionHost, path) ? `\nSession host: ${sessionHost}` : ""}`;
 }
 
 // Electron preserves Error.toString(), so keep the code and metadata in its name.
@@ -62,9 +67,10 @@ function hostRefusal(data: unknown): LiveStopRefusal | null {
   if (data === null || typeof data !== "object") return null;
   const code: unknown = Reflect.get(data, "code"), sessionHost: unknown = Reflect.get(data, "sessionHost");
   const path: unknown = Reflect.get(data, "path");
-  if (!isHostStopCode(code) || typeof sessionHost !== "string") return null;
+  if (!isHostStopCode(code)) return null;
   if (code === "host-moved" && (typeof path !== "string" || path.length === 0)) return null;
-  return {code, sessionHost, ...(code === "host-moved" && typeof path === "string" ? {path} : {})};
+  return {code, ...(knownSessionHost(sessionHost, path) ? {sessionHost} : {}),
+    ...(code === "host-moved" && typeof path === "string" ? {path} : {})};
 }
 
 export function liveStopRelayError(data: unknown): Error | null {

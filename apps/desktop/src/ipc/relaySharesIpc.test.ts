@@ -1620,3 +1620,68 @@ it.each(HOST_STOP_CASES)("relayShareErrorCopy maps %s and %s to the desktop's co
   expect(copy(409, {code, sessionHost, path: code === "host-moved" ? "old/plan.md" : undefined, error: "arbitrary server wording"})).toBe(`${words}\nSession host: ${sessionHost}`);
   expect(hostCopy).toHaveBeenCalledExactlyOnceWith(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined);
 });
+
+it("relayShareErrorCopy safely handles host-moved without path", () => {
+  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function relayShareErrorCopy(");
+  const end = source.indexOf("\ntype RelayShareRetainedDependentSetResult", start);
+  const js = stripTypeScriptTypes(source.slice(start, end));
+  const copy = new Function("liveStopHostCopy", `${js}; return relayShareErrorCopy;`)(liveStopHostCopy) as
+    (status: number, data: {code: string}) => string;
+  expect(copy(409, {code: "host-moved"})).toBe("The server sent an answer dohc could not read. Try again later.");
+});
+it("does not read the live list for a dialog's pending Stop", async () => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Live editing didn't stop. Recent edits haven't reached the server yet.");
+  expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
+});
+
+it("reads the agent's live list only after its editors reopen", async () => {
+  let closed = false;
+  const readsWhileClosed: boolean[] = [];
+  const h = pendingStopHarness("workspace", "live.md", "object", {withoutEditors: async (_workspace, _path, change) => {
+    closed = true;
+    try { return await change(); } finally { closed = false; }
+  }});
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet.");
+    readsWhileClosed.push(closed);
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "paused"}]};
+  });
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.");
+  expect(readsWhileClosed).toEqual([false]);
+  expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE", "GET"]);
+  expect(closed).toBe(false);
+});
+
+it.each(["workspace-changed", "document-unavailable", "conflict-parent-withheld", "session-host-diverged"])(
+  "keeps the agent's two-sentence pending Stop answer when %s cannot Resume", async reason => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet.");
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable", reason}]};
+  });
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"},
+    {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow(/^Live editing didn't stop\. Recent edits haven't reached the server yet\.$/);
+});
+
+it("main names the document in an agent Stop success notification", async () => {
+  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("ownerLiveStopAgainForCli = async (operation, kept) => {");
+  const end = source.indexOf("\n  const relayShareHandlers", start);
+  const js = stripTypeScriptTypes(source.slice(start, end));
+  const result = {keptEdits: "none" as const};
+  const stop = vi.fn(async () => result), send = vi.fn();
+  const agentStop = new Function("agentOwnerLiveDocuments", "sendRendererActivity", "notifyRenderer",
+    `let ownerLiveStopAgainForCli; ${js}; return ownerLiveStopAgainForCli;`)({stop, stopForAgent: stop}, send, send) as
+    (operation: {workspace: {workspaceId: string}}, kept: {path: string; objectId: string; recovery: "stopping"}) => Promise<typeof result>;
+  const kept = {path: "live.md", objectId: "object", recovery: "stopping" as const};
+  expect(await agentStop({workspace: {workspaceId: "workspace"}}, kept)).toEqual(result);
+  expect(send).toHaveBeenCalledExactlyOnceWith({workspaceId: "workspace", liveDocumentStopped: "object"});
+  stop.mockRejectedValueOnce(new Error("refused"));
+  await expect(agentStop({workspace: {workspaceId: "workspace"}}, kept)).rejects.toThrow("refused");
+  expect(send).toHaveBeenCalledTimes(1);
+});

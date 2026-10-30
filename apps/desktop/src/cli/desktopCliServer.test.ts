@@ -1660,7 +1660,7 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
     const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
@@ -1680,7 +1680,7 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
         ...(state === "paused" ? {} : {reason: state})}]};
     });
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
@@ -1695,7 +1695,7 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     const answer = `${words}\nSession host: ${sessionHost}`;
     h.relay.mockRejectedValueOnce(hostStopWireError(code, sessionHost, "untrusted relay text"));
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });

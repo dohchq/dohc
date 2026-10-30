@@ -971,18 +971,11 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
-  const pendingLiveStops = useRef(new Set<string>());
-  const pendingStopsWorkspace = useRef(workspaceId);
-  if (pendingStopsWorkspace.current !== workspaceId) {
-    pendingLiveStops.current.clear();
-    pendingStopsWorkspace.current = workspaceId;
-  }
   // A Stop names the row's document. A Try again closes that document's
   // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
       if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
-        pendingLiveStops.current.delete(objectId);
         clearIdentity(`live-stop-edits-pending:${objectId}`);
       }
       let result: LiveDocumentStopResult = { keptEdits: "none" };
@@ -1010,11 +1003,10 @@ export function DesktopWorkspaceShell(props: {
     const identity = `live-stop-edits-pending:${objectId}`;
     const report = () => {
       if (!current()) return;
-      pendingLiveStops.current.add(objectId);
       const needsResume = liveStopOffersResume(refusal);
       reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
         message: refusal.code === "edits-pending"
-          ? needsResume ? LIVE_STOP_EDITS_PENDING_RESUME : "Recent edits haven't reached the server yet."
+          ? needsResume ? LIVE_STOP_EDITS_PENDING_RESUME.slice("Live editing didn't stop. ".length) : "Recent edits haven't reached the server yet."
           : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
         ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
         ...(needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
@@ -1023,7 +1015,6 @@ export function DesktopWorkspaceShell(props: {
       if (!current()) return;
       void resumeLiveDocument(id, path).then(() => {
         if (!current()) return;
-        pendingLiveStops.current.delete(objectId);
         clearIdentity(identity);
       }).catch(error => {
         if (current()) reportShellError(`dohc could not resume live editing for ${path}.`, error, resume, undefined, identity);
@@ -1878,28 +1869,6 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  useEffect(() => {
-    if (captureDecidedFor !== workspaceId || syncStatus === null || pendingLiveStops.current.size === 0) return;
-    let active = true;
-    const current = () => active && workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded;
-    void (async () => {
-      let cursor: string | undefined;
-      const seen = new Set<string>();
-      do {
-        const page = await loadLiveDocuments(workspaceId, cursor);
-        if (!current()) return;
-        for (const row of page.documents) {
-          if (!row.saveOnly && row.status === "retired" && pendingLiveStops.current.delete(row.objectId)) {
-            clearIdentity(`live-stop-edits-pending:${row.objectId}`);
-          }
-        }
-        cursor = page.nextCursor ?? undefined;
-        if (cursor === undefined || seen.has(cursor) || pendingLiveStops.current.size === 0) return;
-        seen.add(cursor);
-      } while (current());
-    })().catch(() => { /* An unproven read cannot take back a failure. */ });
-    return () => { active = false; };
-  }, [captureDecidedFor, syncStatus, workspaceId, workspaceAdmission, loadLiveDocuments, clearIdentity]);
   const shownStopFailures=useRef(new Map<string,string>());
   useEffect(() => {
     if (captureDecidedFor!==workspaceId || syncStatus===null) return;
@@ -1914,12 +1883,17 @@ export function DesktopWorkspaceShell(props: {
       const identity=`owner-stop:${workspaceId}:${failure.path}`;
       if (shownStopFailures.current.get(identity)===failure.detail) continue;
       shownStopFailures.current.set(identity,failure.detail);
-      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
-        if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
+      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path,objectId:failure.objectId});}).catch(error => {
+        if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+        const refusal=readLiveStopRefusal(error);
+        if (refusal) {
+          clearIdentity(identity);
+          reportPendingLiveStop(workspaceId,failure.path,failure.objectId,refusal);
+        } else reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
       });};
       reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
     }
-  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,reportPendingLiveStop]);
   // One notice per document whose edits the server refused, once per
   // incident and recovery step: a refusal after a Try again is a new
   // incident. Dismissing the row hides it and leaves the edits kept. While a
@@ -1971,13 +1945,16 @@ export function DesktopWorkspaceShell(props: {
         void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
           .then(() => {
             if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
-            pendingLiveStops.current.delete(row.objectId);
             clearIdentity(`live-stop-edits-pending:${row.objectId}`);
             if (result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");
           },
             (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
-              reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
+              const refusal=readLiveStopRefusal(error);
+              if (refusal) {
+                clearIdentity(identity);
+                reportPendingLiveStop(workspaceId,row.path,row.objectId,refusal);
+              } else reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
             });
       };
       // An earlier Stop's edits: the document may be live again, so the row names only the edits.
@@ -2032,7 +2009,7 @@ export function DesktopWorkspaceShell(props: {
         message:`The server could not accept your edits. dohc kept them ${onServer ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`,
         details,retry,action:save,identity});
     }
-  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped]);
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped,reportPendingLiveStop]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -4380,6 +4357,10 @@ export function DesktopWorkspaceShell(props: {
     });
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
+        if (event.liveDocumentStopped && event.workspaceId === workspaceId &&
+          workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded) {
+          clearIdentity(`live-stop-edits-pending:${event.liveDocumentStopped}`);
+        }
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
         if (event.workspaceId === workspaceId &&
@@ -4418,6 +4399,7 @@ export function DesktopWorkspaceShell(props: {
     hasCommittedListing,
     invalidateVisibility,
     readCloudStatusAgainIfBusy,
+    clearIdentity,
   ]);
 
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {

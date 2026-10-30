@@ -1055,7 +1055,7 @@ describe("server owner peer lifecycle", () => {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
       expect(documents).toHaveBeenCalled();
-      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([{path: "broken.md", detail: "owner-stop-corrupt"}]);
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([{objectId: "broken", path: "broken.md", detail: "owner-stop-corrupt"}]);
       f.engine.clearOwnerLiveStopFailure("owner",{objectId:"broken"});
       expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}

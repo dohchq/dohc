@@ -2,7 +2,8 @@ import { vi } from "vitest";
 import { createOwnerLiveDocumentActions, type OwnerLiveDocumentActionDependencies } from "../ipc/relaySharesIpc";
 import type { OwnerLiveStop } from "../workspaces/ownerLiveStop";
 
-export function pendingStopHarness(workspaceId: string, path: string, objectId: string) {
+export function pendingStopHarness(workspaceId: string, path: string, objectId: string,
+  options: Partial<Pick<OwnerLiveDocumentActionDependencies<{workspaceId: string}>, "withoutEditors">> = {}) {
   const document = { mainVersionId: "main", objectId, currentPath: path };
   let recorded: OwnerLiveStop | undefined;
   const ownerLiveStop = vi.fn<OwnerLiveDocumentActionDependencies<{workspaceId: string}>["ownerLiveStop"]>(async (_workspace, action) => {
@@ -25,6 +26,7 @@ export function pendingStopHarness(workspaceId: string, path: string, objectId: 
     unwrittenOwnerLiveReleases: async () => [],
     retryOwnerLiveRelease: async () => undefined,
     listOwnerLiveStops: async () => recorded ? [recorded] : [],
+    ...options,
   });
   return { actions, document, ownerLiveStop, relay, recorded: () => recorded };
 }

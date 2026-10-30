@@ -151,6 +151,11 @@ async function pushRecordedFirst(push: () => Promise<void>): Promise<void> {
 /** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
 export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "stopping"};
 
+function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
+  return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
+    document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused"));
+}
+
 /**
  * Stop and Resume of one owner live document, with the owner's credentials
  * and this workspace's own record of its kept edits. A window closes its own
@@ -184,8 +189,7 @@ export function createOwnerLiveDocumentActions<
     try {
       const page = activeLiveDocuments.parse(await liveHost(operation, "GET"));
       const row = page.documents.find(row => row.objectId === objectId);
-      const kept = dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId === objectId && !row.saveOnly);
-      needsResume = liveStopNeedsResume(row && {...row, quarantine: kept?.recovery});
+      needsResume = liveStopNeedsResume(row && {canResume: ownerLiveDocumentCanResume(row)});
     } catch {
       // An unproven list adds no explanation of why edits could not reach the server.
     }
@@ -204,7 +208,7 @@ export function createOwnerLiveDocumentActions<
         operation.assertCurrent();
         const refusal = readLiveStopRefusal(error);
         if (refusal) {
-          if (refusal.code === "edits-pending") throw await pendingStopError(operation, input.objectId);
+          if (refusal.code === "edits-pending") throw new Error(LIVE_STOP_EDITS_PENDING);
           const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
           console.warn(`[desktop] ${copy}`);
           throw liveStopError(refusal);
@@ -268,7 +272,7 @@ export function createOwnerLiveDocumentActions<
         if (refusal) {
           await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
           operation.assertCurrent();
-          if (refusal.code === "edits-pending") throw await pendingStopError(operation, local.document.objectId);
+          if (refusal.code === "edits-pending") throw new Error(LIVE_STOP_EDITS_PENDING);
           const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
           console.warn(`[desktop] ${copy}`);
           throw liveStopError(refusal);
@@ -321,6 +325,16 @@ export function createOwnerLiveDocumentActions<
   return {
     /** A Stop, or with `again` a Stop again of that row's document only, for the window and agents alike. */
     stop,
+    async stopForAgent(input: Parameters<typeof stop>[0], operation: Operation): Promise<StopOwnerLiveDocumentResult> {
+      try { return await stop(input, operation); }
+      catch (error) {
+        if (readLiveStopRefusal(error)?.code !== "edits-pending") throw error;
+        operation.assertCurrent();
+        const objectId = input.again?.objectId ?? input.objectId;
+        if (objectId === undefined) throw error;
+        throw await pendingStopError(operation, objectId);
+      }
+    },
     resume,
   };
 }
@@ -399,8 +413,7 @@ export function createRelaySharesIpcHandlers<
       // copy is missing an owner edit: Resume retires the held session so the
       // edit can apply.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
-        ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-          document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused")),
+        ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));
       // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
       const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);

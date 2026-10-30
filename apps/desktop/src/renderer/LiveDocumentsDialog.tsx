@@ -744,7 +744,7 @@ export function LiveDocumentsDialog({
                     Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
                   </p>
                 ) : null}
-                {/* A Resume retries the edit. One that would remove live work stays held. */}
+                {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
                 {row.reason === "live-edit-unadmitted" && !row.deferredStop && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     The server hasn't applied an edit to this document. Resume live editing to try again.
@@ -768,7 +768,8 @@ export function LiveDocumentsDialog({
                   <p className="m-0 basis-full text-[12px] text-muted">Stopping live editing…</p>
                 ) : pendingStops.has(row.objectId) && !row.saveOnly ? (
                   <div className="flex basis-full items-start gap-2">
-                    <p className="m-0 flex-1 text-[12px] text-muted">{liveStopOffersResume(pendingStops.get(row.objectId)!, row)
+                    <p tabIndex={-1} data-live-document-pending-action={liveStopAction(pendingStops.get(row.objectId)!, row) === "none" ? "" : undefined}
+                      className="m-0 flex-1 text-[12px] text-muted">{liveStopOffersResume(pendingStops.get(row.objectId)!, row)
                       ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!)}</p>
                     {pendingStops.get(row.objectId)?.sessionHost ? (
                       <CopyButton iconOnly label="Copy error details" getText={() => errorDetails([
