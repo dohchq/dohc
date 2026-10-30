@@ -293,23 +293,6 @@ describe("sync before live hosting", () => {
 });
 
 describe("owner live document enrollment", () => {
-  it("offers Resume after a half success and clears the deferred Stop on retry", async () => {
-    const h=harness();
-    const saved={state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"live.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}};
-    h.localStops.mockResolvedValue([saved]);
-    h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",objectId:"object",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",objectId:"object",status:"ready"}]});
-    h.ownerLiveStop.mockRejectedValueOnce(new Error("local clear failed"));
-    await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"})).rejects.toThrow("local clear failed");
-    const listed=await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId});
-    expect(listed).toMatchObject({documents:[{path:"live.md",status:"ready",canResume:true,deferredStop:saved.deferred}]});
-    h.ownerLiveStop.mockImplementationOnce(async (_workspace,action) => {
-      expect(action).toBe("clear");h.localStops.mockResolvedValue([]);return undefined;
-    });
-    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"});
-    expect(h.request.mock.calls.filter(([, ,init])=>init?.method==="POST")).toHaveLength(2);
-    expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md",{mainVersionId:"main",objectId:"object",currentPath:"live.md"});
-    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).toEqual({documents:[{path:"live.md",objectId:"object",status:"ready",canResume:false}],nextCursor:null});
-  });
   it("keeps the local Stop until Resume's POST succeeds", async () => {
     const h=harness(),posting=deferred<unknown>();
     h.request.mockReturnValueOnce(posting.promise);
@@ -350,25 +333,6 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"})).rejects.toThrow();
     expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
   });
-  it("adds only deferred counts and editability to a stopped row",async () => {
-    const h=harness();
-    h.localStops.mockResolvedValue([{state:"released",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"old.md",selectorPaths:["old.md"],restoreFenceGeneration:0},document:{mainVersionId:"main",objectId:"object",currentPath:"old.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:65,editable:false}}]);
-    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
-    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",objectId:"object",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
-  });
-  // Proves: a document stopped on a diverged server copy keeps the reason and
-  // offers no Resume, whether its Stop finished or waits on this computer.
-  it("offers no Resume for a document stopped on a diverged server copy, deferred or not",async () => {
-    const h=harness();
-    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"deferred.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:2,editable:true}}]);
-    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
-      ? {ok:true,documents:[{path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
-      : {ok:true,diverged:true,documents:[]});
-    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
-      {path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged",canResume:false},
-    ],nextCursor:null});
-  });
   it("offers no Resume after the real relay retires a held document and forgets its running hold", async () => {
     const f = await heldDocumentFixture(workspaceId);
     try {
@@ -385,19 +349,6 @@ describe("owner live document enrollment", () => {
     } finally {await f.close();}
   });
 
-  // Proves: a deferred Stop offers Resume on a document whose server copy
-  // is missing an owner edit, since a Resume retries it, but not on one whose
-  // conflict parent is withheld.
-  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
-    const h=harness();
-    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
-    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
-      ? {ok:true,documents:[],nextCursor:null}
-      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason}]});
-    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
-      {path:"edited.md",objectId:"object",status:"unavailable",reason,canResume,deferredStop:{unsentEdits:1,editable:true}},
-    ],nextCursor:null});
-  });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {

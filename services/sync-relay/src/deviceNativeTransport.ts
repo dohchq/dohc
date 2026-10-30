@@ -48,7 +48,8 @@ export function startDeviceNativeTransport(options: {
         workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement, restore: config.restore, sync: config.sync }), { flag: "wx", mode: 0o600 });
       if (stopping) return;
       child = spawn(config.engineExecutable, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
-        env: { ...process.env, DOHC_ENGINE_READER_CONFIG: undefined, DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_AUTH_TOKEN: start.authToken } });
+        env: { ...process.env, DOHC_ENGINE_READER_CONFIG: config.reader ? JSON.stringify(config.reader) : undefined,
+          DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_AUTH_TOKEN: start.authToken } });
       const launched = child;
       exited = new Promise<void>(resolve => launched.once("close", () => {
         if (killTimer) clearTimeout(killTimer);

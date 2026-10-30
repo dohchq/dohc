@@ -111,6 +111,20 @@ function setup(
 }
 
 describe("opening a sent notice", () => {
+  it.each(["sync-refusal", "markdown-write-held"])("leaves this workspace's %s row and toast to the shell", kind => {
+    const held = notice({ kind, store: "local", workspaceId: "notes", recipientShareId: null });
+    const { result } = setup([held], [workspace("notes")], "notes", { toast: held });
+    expect(result.current.sentNotices).toEqual([]);
+    expect(result.current.sentNoticeToast).toBeNull();
+  });
+
+  it.each(["sync-refusal", "markdown-write-held"])("keeps another workspace's %s row and toast", kind => {
+    const held = notice({ kind, store: "local", workspaceId: "other", recipientShareId: null });
+    const { result } = setup([held], [workspace("notes"), workspace("other")], "notes", { toast: held });
+    expect(result.current.sentNotices.map(row => row.notice)).toEqual([held]);
+    expect(result.current.sentNoticeToast?.notice).toEqual(held);
+  });
+
   it("keeps other and removed workspace refusals reachable while this shell shows its own", () => {
     const notices = ["notes", "other", "removed"].map(workspaceId => notice({kind: "sync-refusal", store: "local", workspaceId, recipientShareId: null, noticeId: workspaceId}));
     const {result} = setup(notices, [workspace("notes"), workspace("other")]);

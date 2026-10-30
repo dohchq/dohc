@@ -8,6 +8,7 @@ import {forgedSources} from './artifact-witness.fixture.js'
 import rows from './engine-markdown-reader.fixture.json'
 import {resolveMarkdownSource} from './artifact-markdown.js'
 import {createLiveMarkdownJournalValidator} from './liveDocumentValidation.js'
+import {patchFrontmatter} from './frontmatter-map.js'
 
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000}
@@ -97,6 +98,25 @@ it('positively proves body expiry while metadata-only staleness still refuses', 
     doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('forged'))
     expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
   } finally {doc.destroy(); edited.destroy()}
+})
+
+it.each([
+  'A setext heading\n================\n\n* first\n* second\n',
+  '---\nid: record\nstatus: open\n---\n\nRecord body',
+])('proves frontmatter-only expiry without changing the body for %j', source => {
+  const doc = markdownToYDoc(source)
+  try {
+    const made = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)})
+    if (made.kind !== 'accepted') throw Error(JSON.stringify(made))
+    Y.applyUpdate(doc, made.delta)
+    const body = tree(doc)
+    patchFrontmatter(doc, new Map([['Name', 'Edited']]))
+    expect(tree(doc).eq(body)).toBe(true)
+    expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}))
+      .toMatchObject({kind: 'expired', sourceSha256: sha(source), projectionSha256: sha(yDocToMarkdown(doc))})
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('forged'))
+    expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy()}
 })
 
 it('strictly proves canonical continuation while fresh unanchored source still holds', () => {

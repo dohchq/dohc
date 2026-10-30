@@ -68,32 +68,18 @@ export function lossyNoteRefusal(path: string): string {
 const utf8 = new TextEncoder()
 const sha256 = (text: string) => Array.from(digest(utf8.encode(text)), byte => byte.toString(16).padStart(2, '0')).join('')
 
-/**
- * Whether a live note's file is a lossy note. Its file holds the source a
- * current witness records, and the next write would change what that source
- * means. A note with no witness, or one an edit already changed, is not.
- * Neither is one dohc can't write at all; its write refuses on its own.
- */
-export function isLossyDocument(doc: Y.Doc): boolean {
-  const meta = doc.getMap('meta')
-  const source = meta.get('dohcMarkdownSource')
-  if (typeof source !== 'string') return false
-  let canonical: string
-  try {
-    canonical = yDocToMarkdown(doc)
-  } catch {
-    return false
-  }
-  return meta.get('dohcMarkdownSourceProjectionSha256') === sha256(canonical)
-    && !sameMarkdownMeaning(source, canonical)
+/** Whether saving needs consent for the source the current head still holds. */
+export function isLossyDocument(doc: Y.Doc, headSha256: string | null): boolean {
+  return !witnessKeepsMeaning(doc) && (headSha256 === null
+    || headSha256 === doc.getMap('meta').get('dohcMarkdownSourceSha256'))
 }
 
 /** isLossyDocument for a document's encoded state, as a session holds it. */
-export function isLossyDocumentState(state: Uint8Array): boolean {
+export function isLossyDocumentState(state: Uint8Array, headSha256: string | null): boolean {
   const doc = new Y.Doc()
   try {
     Y.applyUpdate(doc, state)
-    return isLossyDocument(doc)
+    return isLossyDocument(doc, headSha256)
   } finally {
     doc.destroy()
   }
@@ -112,6 +98,11 @@ export function witnessKeepsMeaning(doc: Y.Doc): boolean {
   const sourceSha = meta.get('dohcMarkdownSourceSha256')
   const projectionSha = meta.get('dohcMarkdownSourceProjectionSha256')
   if (source === undefined && sourceSha === undefined && projectionSha === undefined) return true
+  return checkMarkdownWitness(source, sourceSha, projectionSha)
+}
+
+/** Check the saved source, independently of the document's later edits. */
+export function checkMarkdownWitness(source: unknown, sourceSha: unknown, projectionSha: unknown): boolean {
   if (typeof source !== 'string' || sourceSha !== sha256(source) || typeof projectionSha !== 'string') return false
   let canonical: string
   try {
@@ -125,21 +116,6 @@ export function witnessKeepsMeaning(doc: Y.Doc): boolean {
     return false
   }
   return projectionSha === sha256(canonical) && sameMarkdownMeaning(source, canonical)
-}
-
-/**
- * isLossyDocument for a session's encoded state, and whether its witness
- * alone settled it, so the caller can remember that witness.
- */
-export function sessionVerdict(state: Uint8Array): { lossy: boolean; witnessKeepsMeaning: boolean } {
-  const doc = new Y.Doc()
-  try {
-    Y.applyUpdate(doc, state)
-    const keeps = witnessKeepsMeaning(doc)
-    return { lossy: !keeps && isLossyDocument(doc), witnessKeepsMeaning: keeps }
-  } finally {
-    doc.destroy()
-  }
 }
 
 /** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */

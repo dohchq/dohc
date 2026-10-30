@@ -388,13 +388,14 @@ export class LiveCommittedDeliveryStore {
    * `sequence` is the greatest native sequence delivery proved. `adoptionSequence`
    * is the native head the host adopted at, as its adoption ACK confirmed.
    */
-  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number} {
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number;adoptionTerminal: LiveUpdateReceipt | null} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
     const parsed = this.#ownerTip(row);
     integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
     const origin = JSON.parse(String(row.origin_json));
     return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
-      adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
+      adoptionSequence: authorityInteger(origin.expectedLocalSequence),
+      adoptionTerminal: origin.terminalReceipt === null ? null : parseLiveUpdateReceipt(origin.terminalReceipt)};
   }
   /**
    * The adoption's owner delivery once its owner lost live authority, as after

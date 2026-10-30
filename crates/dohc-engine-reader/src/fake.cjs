@@ -11,6 +11,18 @@ function frame(type, flags, data) {
 const control = o => process.stdout.write(frame(1, 0, Buffer.from(JSON.stringify(o))));
 const eof = bytes => process.stdout.end(bytes, () => process.exit(0));
 function answer(r) {
+  if (r.method === 'check-markdown-witness') {
+    const keys = Object.keys(r).sort();
+    if (JSON.stringify(keys) !== JSON.stringify(['id', 'method', 'projectionSha256', 'source', 'sourceSha256'].sort())) process.exit(20);
+    if (mode === 'witness-over-cap') {
+      const header = frame(1, 0, Buffer.alloc(0)); header.writeUInt32LE(65537, 8);
+      return process.stdout.write(header);
+    }
+    return control({id: r.id, kind: 'witness-checked',
+      sourceSha256: mode === 'witness-source-mismatch' ? hash('wrong') : r.sourceSha256,
+      projectionSha256: mode === 'witness-projection-mismatch' ? hash('wrong') : r.projectionSha256,
+      keepsMeaning: mode !== 'witness-unsafe'});
+  }
   const fault = r.currentPath;
   if (fault === 'crash') return process.exit(17);
   if (fault === 'hang') return;

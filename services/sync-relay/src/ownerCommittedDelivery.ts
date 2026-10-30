@@ -6,7 +6,7 @@ import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
 import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
-import {settlementResult,type CommittedSettlement} from "./liveSettlement.js";
+import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
@@ -60,8 +60,8 @@ export class OwnerCommittedDelivery {
   }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
-  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<CommittedSettlement>;
-  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal): Promise<OwnerDeliveryOutcome | CommittedSettlement> {
+  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal,wanted?: boolean): Promise<SettlementOutcome>;
+  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal,wanted = false): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
     const document = parseLiveDocumentKey(value), key = JSON.stringify(document), c = this.connection;
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
@@ -115,6 +115,9 @@ export class OwnerCommittedDelivery {
         this.#registrations.remember(saved.binding, saved.registrationId);
       }
       const adopted = saved, {registrationId} = adopted;
+      // A pass the owner wants drops the reused settlement before it waits on
+      // anything, so if it fails, the next ordinary settle asks the host again.
+      if (wanted) adopted.settled = undefined;
       const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
       if (!isDeepStrictEqual(adopted.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
       let latest = current;
@@ -123,6 +126,33 @@ export class OwnerCommittedDelivery {
       // greatest sequence delivery has reached since.
       if (progress.adoptionId !== adopted.adoptionId) throw new Error("Owner adoption changed.");
       const recorded = {adoptionId: progress.adoptionId, sequence: progress.adoptionSequence};
+      // Materialize the handover cut before accepting or applying another edit.
+      // A resumed registration repeats this empty settle if its reply was lost.
+      if (!adopted.settled && progress.adoptionTerminal !== null &&
+        isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+        // One recovered ACK moves past the cut. Later applications replay in
+        // applyPending under its event budget, without repeating the cut settle.
+        const next = this.#store.nextOwnerApplication(latest);
+        if (next) {
+          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},next.metadata.accepted.receipt,signal);
+          check(); latest.assertCurrent();
+          if (ack) {
+            this.#store.acknowledgeOwnerDeliveryApplication(latest,ack);
+            progress = this.#store.ownerDeliveryProgress(latest);
+          }
+        }
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+          const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
+            registrationId,terminalReceipt: {...progress.adoptionTerminal},
+          }},signal),progress.adoptionTerminal);
+          check(); latest.assertCurrent();
+          if (settlementPending(settled) || !settled.materialized) {
+            if (settle) return settled;
+            return {kind: "pending",reason: settlementPending(settled) ? settled.reason : SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+          }
+          adopted.settled = settled;
+        }
+      }
       let appliedCount = 0;
       // Set inside applyPending, so declared wide for the reads after it.
       let pendingReason = null as string | null;
@@ -153,11 +183,11 @@ export class OwnerCommittedDelivery {
           if (result.status === "pending" && result.reason === "settlement-required") {
             // The host's author coverage is full. Settle what it applied once, then offer the identical event again.
             if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-            const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
+            const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
             check(); latest.assertCurrent();
-            const settled = settlementResult(response.result,progress.terminal);
+            adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
+            if (settlementPending(settled)) {pendingReason = settled.reason; break;}
             if (!settled.materialized) { pendingReason = SETTLEMENT_UNMATERIALIZED; break; }
-            adopted.settled = settled;
             settledSinceApply = true;
             continue;
           }
@@ -187,16 +217,16 @@ export class OwnerCommittedDelivery {
       await applyPending();
       if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
         ? {kind: "pending",reason: pendingReason ?? "Owner delivery pass reached its work budget.",
-          continueDrain: pendingReason !== SETTLEMENT_UNMATERIALIZED && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
+          continueDrain: pendingReason === null && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
         : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
+      if (pendingReason === "markdown-write-held" || pendingReason === "markdown-witness-check-pending") return {kind: "pending", reason: pendingReason};
       if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
-      if (adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
-      const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
+      if (!wanted && adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
+      const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
-      const settled = settlementResult(response.result,progress.terminal);
-      if (settled.materialized) adopted.settled = settled;
+      adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
       return settled;
     } finally { this.#active.delete(key); }
   }
@@ -216,6 +246,8 @@ export class OwnerCommittedDelivery {
     finally {this.#active.delete(key);}
   }
   settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
+  /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
+  settleWanted(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal,true); }
   async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
     const restore = this.connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");

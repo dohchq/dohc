@@ -165,7 +165,8 @@ async function openHost(configured = true) {
       if (!sessionId) {sessionId = String((await rpc("ydoc.open", {versionId: main, path: entry.path, contentKind: "richdoc"})).sessionId); sessions.set(binding.objectId, sessionId);}
       return {nativeSessionId: sessionId, assertCurrent() {assert.equal(hostProcess.exitCode, null);},
         async prepareHandoff(signal) {signal.throwIfAborted();}, async finishHandoff() {},
-        async remoteApplied(update) {Y.applyUpdate(entry.doc, update);}, onDurableLocalChange() {return () => {};}};
+        async remoteApplied(update) {Y.applyUpdate(entry.doc, update);}, onDurableLocalChange() {return () => {};},
+        onSettlementWanted() {return () => {};}};
     });
     consumer = new OwnerCommittedDelivery(storage, deployment.history, {client: bridge.client, workspace: handle, host: coordinate,
       deadlineMs: 120_000, nextRequestId: () => id++, bounds: {maxBytes: 4 * 1024 * 1024, maxEvents: 64},

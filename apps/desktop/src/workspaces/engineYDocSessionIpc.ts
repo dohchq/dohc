@@ -9,6 +9,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
@@ -160,6 +161,7 @@ function saveFailureReason(absolutePath: string, failure: unknown, shared: boole
 }
 
 interface SessionEvent {
+  headSha256?: string | null;
   readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
@@ -285,6 +287,7 @@ export interface LiveDocumentEditOrigin {
 }
 
 export interface LiveDocumentEdit {
+  allowLossySourceSha256?: string;
   workspaceId: string;
   /** Validated and normalized; resolved again to the path sessions use. */
   path: string;
@@ -293,7 +296,7 @@ export interface LiveDocumentEdit {
    * current state, or null for no change. `keepBlocks` says someone may be
    * typing in the document.
    */
-  change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  change(state: Uint8Array, options: { keepBlocks: boolean; headSha256?: string | null }): Promise<Uint8Array | null>;
   /**
    * Throws when the document at the resolved `path` is a lossy note
    * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
@@ -686,11 +689,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let lastEvent: SessionEvent | null = null;
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         const emit = (event: SessionEvent): void => {
+          if (provider?.headSha256 !== undefined) event = { ...event, headSha256: provider.headSha256 };
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.headSha256 === event.headSha256 &&
             lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
@@ -708,6 +713,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
+            ...(!shared && input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             path: canonicalPath,
             contentKind: documentKind,
             assertRecordWritable: () => {
@@ -740,6 +746,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
+            },
+            onHeadChanged: headSha256 => {
+              publish(() => emit({ ...(lastEvent ?? { state: "settling", seq: 0 }), headSha256 }));
             },
             onLineageReplaced: (update, recoveredPaths) => {
               lastEvent = null;
@@ -830,6 +839,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
+        headSha256: owned.provider.headSha256,
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
         ...(owned.provider.versionId
@@ -918,7 +928,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
-      settle = held.session.provider.settleNow();
+      settle = held.session.provider.settleNow(
+        !this.#isSharedView(authority.workspace) && input.allowLossySourceSha256
+          ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined,
+      );
     } finally {
       authority.release();
     }
@@ -1131,6 +1144,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
     if (!capture) throw new Error("The workspace engine is not running.");
     const provider = await capture.openYDocSession({
+      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
       path,
       contentKind: "richdoc",
       // Nothing else reads this session's doc before it closes.
@@ -1210,6 +1224,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         onDurableLocalChange: (handler: () => void) => {
           assertCurrent();
           return native.onDurableLocalChange(handler);
+        },
+        onSettlementWanted: (handler: () => void) => {
+          assertCurrent();
+          return native.onSettlementWanted(handler);
         },
         prepareHandoff: async (signal: AbortSignal) => {
           assertCurrent(); signal.throwIfAborted();
@@ -1481,18 +1499,31 @@ async function applyDocumentEdit(
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,
+    headSha256: provider.headSha256,
   });
   if (update === null) return { changed: false };
   session.assertSame();
-  const admitted = await provider.applyDecidedLocalUpdate(() => {
+  const options = { ...input.origin, idempotencyKey: randomUUID() };
+  const append = () => provider.applyDecidedLocalUpdate(() => {
     session.assertSame();
     return update;
-  }, undefined, { ...input.origin, idempotencyKey: randomUUID() });
-  if (!admitted) throw new Error(`The engine did not accept the edit to ${path}.`);
+  }, undefined, options);
+  let accepted: boolean;
+  try {
+    accepted = await append();
+  } catch (error) {
+    if (!input.allowLossySourceSha256 || !isYdocAuthorCapacityRefusal(error)) throw error;
+    session.assertSame();
+    await settleNow.call(provider, { allowLossySourceSha256: input.allowLossySourceSha256 });
+    session.assertSame();
+    accepted = await append();
+  }
+  if (!accepted) throw new Error(`The engine did not accept the edit to ${path}.`);
   let pending = false;
   session.show(update);
   try {
-    await settleNow.call(provider);
+    await settleNow.call(provider, input.allowLossySourceSha256
+      ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
   } catch (error) {
     if (error instanceof YdocOwnerDraftPendingError) {
       pending = true;

@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {expect, it, vi} from "vitest";
 import type {WebSocket} from "ws";
-import {EngineClient, FrameDecoder} from "@dohc/workspace-engine-client/daemon";
+import {EngineClient, EngineRequestError, FrameDecoder} from "@dohc/workspace-engine-client/daemon";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import type {DeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import {DeviceEngineConnection} from "./deviceEngineConnection.js";
@@ -49,7 +49,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
           if (queued) peer = queueLiveHostRequests(peer, {maxPendingReads: 8, maxPendingWrites: 8, deadlineMs: 30_000,
             maxRetainedInputBytes: 200_000_000,
             signal: lifetime.signal, retire: () => lifetime.abort()});
-          peer.onEvent(event => {if (event.name === "liveApplication.ownerOutboxChanged") events.push(event);});
+          peer.onEvent(event => {if (event.name === "liveApplication.ownerOutboxChanged" || event.name === "liveApplication.settlementWanted") events.push(event);});
           started.resolve();
         } else connection!.credit(value.receivedBytes);
       }
@@ -59,8 +59,9 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
   const relay = {readyState: 1, bufferedAmount: 0, send(bytes: Buffer, options: {binary: boolean}, done: () => void) {
     queueMicrotask(() => {if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done();});
   }} as unknown as WebSocket;
-  const listeners = new Set<() => void>(), disposed = vi.fn();
+  const listeners = new Set<() => void>(), settlementListeners = new Set<() => void>(), disposed = vi.fn();
   const owner = {nativeSessionId: "session", assertCurrent: vi.fn(), prepareHandoff: vi.fn(async () => undefined),
+    onSettlementWanted: (handler: () => void) => {settlementListeners.add(handler); return () => settlementListeners.delete(handler);},
     onDurableLocalChange: vi.fn((handler: () => void) => {listeners.add(handler); return () => {disposed(); listeners.delete(handler);};}),
     finishHandoff: vi.fn(async () => undefined), remoteApplied: vi.fn(async () => undefined)};
   const singleton = {ready: vi.fn(async () => undefined), close: vi.fn(),
@@ -83,6 +84,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
     ...(adopted ? {resumeAdoptionId: "adoption"} : {})}});
   let id = 1;
   return {peer: peer!, singleton, owner, disposed, events, replies, change: () => {for (const listener of listeners) listener();},
+    settlementWanted: () => {for (const listener of settlementListeners) listener();},
     holdOutput() {
       const gate = deferred<void>(); outputGate = gate; outputEntered = deferred<void>();
       return {entered: outputEntered.promise, release() {outputGate = undefined; gate.resolve();}};
@@ -90,6 +92,36 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
     next: () => ({id: ++id, workspace: "handle", registrationId: 9, deadlineMs: 30_000}),
     async close() {lifetime.abort(); await transport.close(); peer!.close();}};
 }
+
+it("sends a settlement request separately from an edit in the same notify pass", async () => {
+  const f = await fixture();
+  try {
+    await expect.poll(() => f.events.length).toBe(1);
+    f.change(); f.settlementWanted();
+    await expect.poll(() => f.events.length).toBe(3);
+    expect(f.events.slice(1).map(event => event.name)).toEqual([
+      "liveApplication.ownerOutboxChanged", "liveApplication.settlementWanted",
+    ]);
+    await f.peer.sendRequest({id: f.next().id, method: "liveApplication.hosts", params: {}});
+    expect(f.singleton.close).not.toHaveBeenCalled();
+  } finally {await f.close();}
+});
+
+it.each(["markdown-write-held", "markdown-witness-check-pending"])("preserves %s through the owner's settle forward", async reason => {
+  const f = await fixture();
+  try {
+    f.singleton.sendRequest.mockRejectedValueOnce(new EngineRequestError(1, {
+      code: "CONFLICT", message: reason, retry: "no",
+    }));
+    const response = await f.peer.sendRequest({...f.next(), method: "liveApplication.settle",
+      params: {registrationId: 9, terminalReceipt: null}});
+    expect(response.result).toEqual({status: "pending", reason});
+    expect(f.singleton.sendRequest.mock.calls.at(-1)?.[0]).toMatchObject({
+      params: {ownerSessionId: "session"},
+    });
+    expect(f.singleton.close).not.toHaveBeenCalled();
+  } finally {await f.close();}
+});
 
 it("queues three reader requests through a one-operation desktop peer", async () => {
   const f = await fixture({maxUploads: 1, queued: true});

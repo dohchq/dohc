@@ -1,5 +1,6 @@
 import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
+import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
@@ -184,6 +185,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
+import { isLiveStopEditsPending } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -974,14 +976,33 @@ export function DesktopWorkspaceShell(props: {
   // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
+      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) clearIdentity(`live-stop-edits-pending:${objectId}`);
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
       });
       return result;
     },
-    [],
+    [clearIdentity, workspaceAdmission],
   );
+  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string) => {
+    const current = () => workspaceIdRef.current === id && !workspaceAdmission.superseded;
+    const identity = `live-stop-edits-pending:${objectId}`;
+    const report = () => {
+      if (!current()) return;
+      reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
+        message: "Recent edits haven't reached the server yet.", retry});
+    };
+    const retry = () => {
+      if (!current()) return false;
+      void stopLiveDocument(id, path, objectId).catch(error => {
+        if (!current()) return;
+        if (isLiveStopEditsPending(error)) report();
+        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+      });
+    };
+    report();
+  }, [workspaceAdmission, stopLiveDocument, reportShellFailure, reportShellError]);
   const resumeLiveDocument = useCallback(
     (id: string, path: string) =>
       bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
@@ -5289,6 +5310,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
+        ...(error.read ? { read: true } : {}),
       })),
     [shellErrors, reportFacts],
   );
@@ -5420,19 +5442,24 @@ export function DesktopWorkspaceShell(props: {
       clearIdentity("file-observation");
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
-  useEffect(() => {
-    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
-      notice.kind === "sync-refusal" && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView);
-  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView]);
-  const hideWorkspaceError = useCallback((id: string) => {
-    hideShellError(id);
-    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+  // Reading a refusal's row stores its read mark. Closing its toast alone
+  // doesn't, so an unread one toasts again the next time dohc starts.
+  const readWorkspaceError = useCallback((id: string) => {
+    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
     if (!refusal) return;
     const askedFor = workspaceId;
     void props.sentNotices!.read([refusal]).catch(error => {
       if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
     });
-  }, [hideShellError, props.sentNotices, workspaceId, reportShellError]);
+  }, [props.sentNotices, workspaceId, reportShellError]);
+  useEffect(() => {
+    showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
+      isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
+  }, [props.sentNotices?.notices, workspaceId, showSyncRefusals, syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError]);
+  // The notes whose change dohc holds, for their band.
+  const heldNotes = useMemo(() => new Set((props.sentNotices?.notices ?? []).flatMap(notice =>
+    notice.kind === "markdown-write-held" && notice.workspaceId === workspaceId && notice.target?.path ? [notice.target.path] : [])),
+  [props.sentNotices?.notices, workspaceId]);
   const driveLimitNotice = useDriveLimitNotice({
     workspaceId,
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
@@ -5531,7 +5558,7 @@ export function DesktopWorkspaceShell(props: {
         });
         return;
       }
-      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && notice.kind === "sync-refusal");
+      const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
       if (refusal) {
         const askedFor = workspaceId;
         void props.sentNotices!.dismiss(refusal).catch(error => {
@@ -5827,7 +5854,8 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onWorkspaceErrorAction={runShellErrorAction}
-              onHideWorkspaceError={hideWorkspaceError}
+              onHideWorkspaceError={hideShellError}
+              onReadWorkspaceError={readWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}
@@ -6271,6 +6299,7 @@ export function DesktopWorkspaceShell(props: {
                 onEditorReady={onEditorReady}
                 workspaceId={workspaceId}
                 path={tabPath}
+                changeHeld={heldNotes.has(tabPath)}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, and share-mount pulls all
                 // re-read the open file (every counter only ever increases).
@@ -6885,6 +6914,7 @@ export function DesktopWorkspaceShell(props: {
           retryRefusal={retryLiveShare}
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
+          onStopPending={reportPendingLiveStop}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
           readKeptEdits={readKeptEdits}
           {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}

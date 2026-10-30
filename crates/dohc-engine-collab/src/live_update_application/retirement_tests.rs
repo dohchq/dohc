@@ -592,6 +592,274 @@ fn a_quarantined_service_seed_is_reported_and_still_retires() {
     );
 }
 
+fn outbox_of(f: &Fixture, delivery: &str) -> String {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [delivery],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The relay's final refusal of the outbox's head, as delivery records it.
+fn refuse_head(f: &mut Fixture, delivery: &str, reason: &str) -> String {
+    let outbox = outbox_of(f, delivery);
+    owner_outbox::record_refusal(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: reason.into(),
+            observed_binding: None,
+        },
+        owner_outbox::OwnerOutboxRefusal {
+            delivery_id: delivery.into(),
+            key: format!("refusal-{delivery}"),
+        },
+        5,
+    )
+    .unwrap();
+    outbox
+}
+
+/// The outbox's state and how many refusals it keeps.
+fn quarantine_state(f: &Fixture, outbox: &str) -> (String, i64) {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state,(SELECT COUNT(*) FROM owner_ydoc_outbox_refusals r WHERE r.outbox_id=o.outbox_id)
+                 FROM owner_ydoc_outboxes o WHERE outbox_id=?1",
+                [outbox],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+/// The relay refused an ordinary edit, and nothing grants it a Try again.
+/// Once the journal proves it and the edit behind it absent, retirement
+/// keeps both with their bytes, and the outbox keeps its quarantine and
+/// refusal for the owner's recovery copy.
+#[test]
+fn a_kept_refusal_retires_with_its_bytes() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let first = native_tail_edit(&mut f, "# Refused\n", 11);
+    let second = native_tail_edit(&mut f, "# Behind\n", 12);
+    let outbox = refuse_head(&mut f, &first.delivery_id, "delivery-conflict");
+    assert_eq!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::PendingDelivery(vec![
+            first.delivery_id.clone(),
+            second.delivery_id.clone()
+        ])
+    );
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![first.delivery_id.clone(), second.delivery_id.clone()],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    let kept = |entry: &owner_outbox::OwnerOutboxEntry| {
+        (
+            entry.delivery_id.clone(),
+            false,
+            None,
+            None,
+            Some(entry.update_digest.clone()),
+            Some("retirement-kept".to_owned()),
+        )
+    };
+    assert_eq!(native_entries(&f), vec![kept(&first), kept(&second)]);
+    assert_eq!(pending_bytes(&f), 0);
+    assert_eq!(quarantine_state(&f, &outbox), ("quarantined".to_owned(), 1));
+    assert_eq!(entry_update(&f, &first.delivery_id), first.update);
+    // Every later pass reads the same kept entries.
+    assert!(matches!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+}
+
+/// Opus's N1 on round 2: the engine never heard the relay's refusal, so the
+/// queue was still active at Stop. Stop's quarantine records the refusal of
+/// its head, as delivery does, and after the copy retirement keeps the edit.
+/// A quarantine with no refusal recorded leaves nothing to keep it by, and
+/// every pass fails.
+#[test]
+fn a_refusal_recorded_at_stop_retires_with_its_bytes() {
+    for recorded in [true, false] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let entry = native_tail_edit(&mut f, "# Refused\n", 11);
+        let outbox = outbox_of(&f, &entry.delivery_id);
+        let input = owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "delivery-conflict".into(),
+            observed_binding: None,
+        };
+        if recorded {
+            let refusal = owner_outbox::OwnerOutboxRefusal {
+                delivery_id: entry.delivery_id.clone(),
+                key: format!("quarantined:{}", entry.delivery_id),
+            };
+            owner_outbox::record_refusal(&mut f.store, "workspace", input, refusal, 5).unwrap();
+        } else {
+            owner_outbox::quarantine(&mut f.store, "workspace", input, 5).unwrap();
+        }
+        assert_eq!(
+            quarantine_state(&f, &outbox),
+            ("quarantined".to_owned(), i64::from(recorded))
+        );
+        let absent = JournalEvidence {
+            receipts: vec![],
+            absent: vec![entry.delivery_id.clone()],
+        };
+        if !recorded {
+            for _ in 0..2 {
+                assert!(matches!(
+                    reconcile(&mut f, 10, None, Some(&absent)),
+                    Err(ApplicationError::Conflict)
+                ));
+            }
+            continue;
+        }
+        for journal in [Some(&absent), None] {
+            assert!(matches!(
+                reconcile(&mut f, 10, None, journal).unwrap(),
+                Reconciliation::Reconciled { .. }
+            ));
+        }
+        assert_eq!(native_entries(&f)[0].5.as_deref(), Some("retirement-kept"));
+        assert_eq!(entry_update(&f, &entry.delivery_id), entry.update);
+    }
+}
+
+/// A seed the relay refused and nothing applied is abandoned once, whatever
+/// the refusal. Its captured state stays for the owner's recovery.
+#[test]
+fn a_refused_seed_nothing_applied_is_abandoned_once() {
+    let (mut f, seed, full) = seeded();
+    refuse_head(&mut f, &seed, "delivery-conflict");
+    assert_eq!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::SeedQuarantined(vec![seed.clone()])
+    );
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![seed.clone()],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    assert_eq!(
+        native_entries(&f),
+        vec![(
+            seed.clone(),
+            false,
+            None,
+            None,
+            None,
+            Some("activation-released".into())
+        )]
+    );
+    let kept: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                [hex_sha256(&full)],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(kept, "the captured seed stays");
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)),
+        Ok(Reconciliation::Reconciled { .. })
+    ));
+}
+
+/// A refused seed with work applied after it may still have reached a
+/// collaborator, so retirement holds without abandoning it or failing.
+#[test]
+fn a_refused_seed_with_later_applied_work_holds_its_retirement() {
+    let (mut f, seed, _) = device_seeded();
+    refuse_head(&mut f, &seed, "delivery-conflict");
+    let event = remote_event(&mut f, 1);
+    assert!(matches!(
+        apply_event(&mut f, event).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let before = (native_entries(&f), pending_bytes(&f));
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: vec![seed.clone()],
+    };
+    assert_eq!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::SeedQuarantined(vec![seed])
+    );
+    assert_eq!((native_entries(&f), pending_bytes(&f)), before);
+}
+
+/// Opus F3: the relay accepted a Try again, but its acknowledgement was lost
+/// and its grant ended. The journal's receipt still acknowledges it on the
+/// quarantined outbox.
+#[test]
+fn a_journal_receipt_acknowledges_a_lost_try_again_on_a_quarantined_outbox() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "# Retried\n", 11);
+    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
+    owner_outbox::retry(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxRetryInput {
+            outbox_id: outbox.clone(),
+            binding: f.binding.clone(),
+        },
+    )
+    .unwrap();
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox,
+            reason: "capacity-refused".into(),
+            observed_binding: None,
+        },
+        6,
+    )
+    .unwrap();
+    let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, 3);
+    let evidence = JournalEvidence {
+        receipts: vec![receipt.clone()],
+        absent: vec![],
+    };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&evidence)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    assert_eq!(
+        native_entries(&f)[0],
+        (
+            entry.delivery_id,
+            false,
+            Some(serde_json::to_string(&receipt).unwrap()),
+            None,
+            None,
+            None
+        )
+    );
+}
+
 /// Phase A ends one activation in its owner: only registrations tagged with
 /// it, and only its document's cache entry. Its binding row stays, and it
 /// never registers under this owner again.
@@ -1032,7 +1300,15 @@ fn host_document(f: &mut Fixture, departed: bool, parked: bool) {
 
 fn release_through(f: &mut Fixture, through: i64) -> Result<Release, ApplicationError> {
     let key = retirement_key(f, through);
-    release_activation(&mut f.store, &retirement_scope(), &key, &retirement_host(), 30, &NoFaults)
+    release_activation(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &retirement_scope(),
+        &key,
+        &retirement_host(),
+        30,
+        &NoFaults,
+    )
 }
 
 /// The retirement form of settlement, projecting the accepted prefix when
@@ -1146,7 +1422,7 @@ fn record_text(
         )
         .map_err(write_sql)?;
         let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, vector, 30)?;
-        Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
+        Ok(audit.result(Some(id), moment.into(), written.snapshot.blob_sha256, false))
     })?;
     let TxnOutcome::Committed(result) = result else {
         return Err(ApplicationError::Interrupted);
@@ -2243,4 +2519,189 @@ fn observe(f: &mut Fixture) -> Result<(), owner_outbox::OwnerOutboxError> {
         TxnOutcome::Committed(()) => Ok(()),
         TxnOutcome::Crashed { .. } => panic!("observed binding crash"),
     }
+}
+
+fn preparation_key(f: &Fixture) -> PreparationKey {
+    PreparationKey {
+        object_id: "object".into(),
+        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+        activation_id: f.cut.adoption_id.clone(),
+        restore_fence_generation: 0,
+    }
+}
+
+fn prepare(
+    f: &Fixture,
+    preparations: &RetirementPreparations,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<PreparationPending>, ApplicationError> {
+    prepare_retirement(&f.store, &retirement_scope(), &preparation_key(f), preparations, owner)
+}
+
+fn owner() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+}
+
+/// A native edit appended on the writer `preparations` belongs to, as
+/// [`native_tail_edit`] appends one.
+fn prepared_append(
+    f: &mut Fixture,
+    update: &[u8],
+    now: i64,
+    preparations: &RetirementPreparations,
+) -> Result<owner_outbox::OwnerOutboxEntry, crate::CollabError> {
+    let key = f.key.clone();
+    let path = f.binding.current_path.clone();
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+        run: None,
+    };
+    crate::record_local_update(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.key,
+        update,
+        crate::LocalAppend {
+            actor_origin_id: Some("native-agent"),
+            attribution: Some(&attribution),
+            ..Default::default()
+        },
+        &NoFaults,
+        now,
+        |tx, outcome, _| {
+            owner_outbox::append_adopted_local_update_in_tx(tx, &key, &path, outcome.seq, update, preparations, now)
+        },
+    )?;
+    let delivery = native_entries(f).last().unwrap().0.clone();
+    let outbox = outbox_of(f, &delivery);
+    Ok(owner_outbox::read_pending(&f.store, "workspace", &outbox).unwrap().entries.last().unwrap().clone())
+}
+
+/// What a refused append could have changed: the document, its update log,
+/// and its native entries.
+fn appended(f: &Fixture) -> (Vec<u8>, i64, Vec<EntryState>) {
+    (full_state(f), f.store.table_row_count("ydoc_updates").unwrap(), native_entries(f))
+}
+
+/// Codex's P2 on round 5: Stop checked that nothing of the activation waited
+/// for delivery, then fenced it at the relay. A local edit appended between
+/// the two reached neither the relay nor any receipt, and retirement refused
+/// the activation forever. A preparation and an append run on one writer, so
+/// one commits first: an append first leaves the preparation pending, and a
+/// preparation first refuses the append until the retirement's intent, which
+/// refuses it from there.
+#[test]
+fn a_local_append_and_a_stop_preparation_never_interleave() {
+    // The gap without a block: the check passed, the edit landed, and the
+    // journal never accepted it.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    let late = native_tail_edit(&mut f, "# Late\n", 11);
+    let absent = JournalEvidence { receipts: vec![], absent: vec![late.delivery_id] };
+    assert!(matches!(reconcile(&mut f, 10, None, Some(&absent)), Err(ApplicationError::Conflict)));
+
+    // The append first: the preparation waits for its delivery and blocks nothing.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let first = native_tail_edit(&mut f, "# First\n", 11);
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::NativePending));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Second\n").unwrap();
+    let second = prepared_append(&mut f, &update, 12, &preparations).unwrap();
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::NativePending));
+    acknowledge_entry(&mut f, &receipt_of(&first.delivery_id, &first.update_digest, 3));
+    acknowledge_entry(&mut f, &receipt_of(&second.delivery_id, &second.update_digest, 4));
+
+    // The preparation first: it refuses the next append, and preparing again answers the same.
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    let before = appended(&f);
+    let third = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Third\n").unwrap();
+    assert!(matches!(prepared_append(&mut f, &third, 13, &preparations), Err(crate::CollabError::OwnerOutboxFrozen)));
+    assert_eq!(appended(&f), before);
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+
+    // The fence's retirement meets no edit it cannot answer for.
+    begin(&mut f, 10).unwrap();
+    preparations.end(&f.cut.adoption_id);
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    assert!(matches!(
+        prepared_append(&mut f, &third, 13, &preparations),
+        Err(crate::CollabError::OwnerOutboxFrozen)
+    ), "the intent refuses it from here");
+    assert_eq!(appended(&f), before);
+    assert!(matches!(prepare(&f, &preparations, &owner), Err(ApplicationError::Conflict)));
+    assert!(matches!(reconcile(&mut f, 10, None, None).unwrap(), Reconciliation::Reconciled { .. }));
+}
+
+/// A refused append fails as one on a frozen queue does: its whole
+/// transaction rolls back and the caller keeps its bytes. Released, the
+/// same bytes append whole.
+#[test]
+fn a_refused_append_loses_nothing() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    let before = appended(&f);
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Kept\n").unwrap();
+    assert!(matches!(prepared_append(&mut f, &update, 11, &preparations), Err(crate::CollabError::OwnerOutboxFrozen)));
+    assert_eq!(appended(&f), before);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    assert!(!preparations.release(&preparation_key(&f), &owner), "a release is idempotent");
+    let entry = prepared_append(&mut f, &update, 11, &preparations).unwrap();
+    assert_eq!(entry.update, update);
+    assert_eq!(entry_update(&f, &entry.delivery_id), update);
+    let after = appended(&f);
+    assert_eq!((after.1, after.2.len()), (before.1 + 1, before.2.len() + 1));
+    assert_ne!(after.0, before.0);
+}
+
+/// A preparation lasts only while the owner that made it does. Another
+/// owner neither releases it nor inherits it, and the owner's end reopens
+/// appends.
+#[test]
+fn a_preparation_lasts_only_while_its_owner_does() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, first, other) = (RetirementPreparations::default(), owner(), owner());
+    assert_eq!(prepare(&f, &preparations, &first).unwrap(), None);
+    assert!(!preparations.release(&preparation_key(&f), &other));
+    let mut later = preparation_key(&f);
+    later.restore_fence_generation = 1;
+    assert!(!preparations.release(&later, &first), "a release names its exact generation");
+    assert!(!preparations.blocks(&f.cut.adoption_id, 1));
+    assert!(preparations.blocks(&f.cut.adoption_id, 0));
+    first.store(false, std::sync::atomic::Ordering::Release);
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Reopened\n").unwrap();
+    prepared_append(&mut f, &update, 11, &preparations).unwrap();
+    assert!(!preparations.release(&preparation_key(&f), &first), "an ended owner's preparation was not in force");
+    assert_eq!(prepare(&f, &preparations, &other).unwrap(), Some(PreparationPending::NativePending));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
+}
+
+/// A refused queue with no Try again retires with its kept bytes, so it
+/// prepares. An outstanding Try again may still deliver, so it waits.
+#[test]
+fn an_outstanding_try_again_holds_a_preparation() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let (preparations, owner) = (RetirementPreparations::default(), owner());
+    let entry = native_tail_edit(&mut f, "# Refused\n", 11);
+    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
+    assert!(preparations.release(&preparation_key(&f), &owner));
+    owner_outbox::retry(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxRetryInput { outbox_id: outbox, binding: f.binding.clone() },
+    )
+    .unwrap();
+    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::RetryOutstanding));
+    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
 }

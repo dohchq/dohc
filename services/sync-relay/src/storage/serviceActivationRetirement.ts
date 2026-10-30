@@ -101,22 +101,43 @@ export function listServiceActivationRetirements(storage: StorageContext, worksp
     .all(workspaceId).map(retirement);
 }
 
-/**
- * Records, inside the caller's transaction, the retirement of the prepared
- * activation of the document's current lineage, at its restore generation and
- * the lineage's last accepted journal cursor. An open obligation stays as it
- * was, whatever lineage is current now. Null when the document has no
- * prepared activation under the workspace's current identity.
- */
-export function openServiceActivationRetirement(storage: StorageContext, document: {workspaceId: string; objectId: string}, nowMs: number): ServiceActivationRetirement | null {
-  const open = readServiceActivationRetirement(storage, document);
-  if (open) return open;
-  const activation = storage.db.prepare(`SELECT a.relay_database_namespace,a.activation_id,a.lineage_claim_id,d.restore_fence_generation
+/** The prepared activation of a document's current lineage that a new retirement would name. */
+export interface RetirableServiceActivation {
+  readonly activationId: string;
+  readonly lineageClaimId: string;
+  readonly restoreFenceGeneration: number;
+}
+const retirable = (storage: StorageContext, document: {workspaceId: string; objectId: string}) =>
+  storage.db.prepare(`SELECT a.relay_database_namespace,a.activation_id,a.lineage_claim_id,d.restore_fence_generation
     FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
     WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND a.retire_requested_at_ms IS NULL AND d.lineage_state='current'
       AND ${currentIdentity("a")}`)
     .get(document.workspaceId, document.objectId);
+const retirableActivation = (value: Record<string, unknown>): RetirableServiceActivation => Object.freeze({activationId: String(value.activation_id),
+  lineageClaimId: String(value.lineage_claim_id), restoreFenceGeneration: integer(value.restore_fence_generation)});
+
+/** What Stop would retire now. Null once a retirement is open, or when the document has no prepared activation. */
+export function retirableServiceActivation(storage: StorageContext, document: {workspaceId: string; objectId: string}): RetirableServiceActivation | null {
+  if (readServiceActivationRetirement(storage, document)) return null;
+  const activation = retirable(storage, document);
+  return activation ? retirableActivation(activation) : null;
+}
+
+/**
+ * Records, inside the caller's transaction, the retirement of the prepared
+ * activation of the document's current lineage, at its restore generation and
+ * the lineage's last accepted journal cursor. `prepare` runs first and can
+ * refuse that activation. An open obligation stays as it was, whatever
+ * lineage is current now. Null when the document has no prepared activation
+ * under the workspace's current identity.
+ */
+export function openServiceActivationRetirement(storage: StorageContext, document: {workspaceId: string; objectId: string}, nowMs: number,
+  prepare?: (activation: RetirableServiceActivation) => void): ServiceActivationRetirement | null {
+  const open = readServiceActivationRetirement(storage, document);
+  if (open) return open;
+  const activation = retirable(storage, document);
   if (!activation) return null;
+  prepare?.(retirableActivation(activation));
   const accepted = storage.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM ${LIVE_JOURNAL_TABLE}
     WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`)
     .get(document.workspaceId, document.objectId, activation.lineage_claim_id)!;

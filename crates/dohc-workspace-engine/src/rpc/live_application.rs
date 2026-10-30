@@ -24,6 +24,30 @@ use std::time::Instant;
 pub(crate) mod restore;
 pub(crate) mod sync;
 
+fn forwarded_owner_consent(
+    sessions: &Mutex<HashMap<String, super::ydoc::YdocSession>>,
+    workspace: Option<&WorkspaceHandle>,
+    binding: &LiveObjectBinding,
+    session_id: Option<&str>,
+) -> Option<Arc<dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent>> {
+    lock(sessions)
+        .get(session_id?)
+        .filter(|session| {
+            workspace == Some(&session.workspace)
+                && session.key.workspace_id == binding.workspace_id
+                && session.key.version_id == binding.main_version_id
+                && session.key.object_id == binding.object_id
+                && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
+                && session.restore_generation.unwrap_or(0) == binding.restore_fence_generation
+        })
+        .and_then(|session| session.conversion_consent.clone())
+        .filter(|consent| !consent.is_consumed())
+}
+
+#[cfg(test)]
+#[path = "markdown_owner_consent_tests.rs"]
+mod markdown_owner_consent_tests;
+
 /// Explicit host provisioning for the private admitted-update path.
 #[doc(hidden)]
 pub struct LiveApplicationHostConfig {
@@ -593,6 +617,8 @@ impl EngineService {
             retirement: Option<dohc_engine_collab::live_update_application::RetirementKey>,
             terminal_receipt:
                 Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+            #[serde(default)]
+            owner_session_id: Option<String>,
         }
         let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement");
         if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
@@ -653,6 +679,12 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
+        let conversion_consent = forwarded_owner_consent(
+            &self.sessions,
+            request.workspace.as_ref(),
+            &registration.binding,
+            params.owner_session_id.as_deref(),
+        );
         let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
@@ -664,11 +696,14 @@ impl EngineService {
             reservation: Mutex::new(Some(reconstruction.reservation.clone())),
         });
         let mut retirement = RetireOnCancellation(Some(host));
+        let sessions = self.sessions.clone();
+        let events = self.events.clone();
+        let workspace = request.workspace.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            registration
+            let result = registration
                 .handle
-                .settle(
+                .settle_with_consent(
                     params.terminal_receipt,
                     max_applications,
                     registration.host.open.root.clone(),
@@ -676,8 +711,28 @@ impl EngineService {
                     Arc::new(NoFaults),
                     token,
                     reconstruction,
+                    conversion_consent,
                 )
-                .await
+                .await;
+            if result.is_ok() {
+                let binding = &registration.binding;
+                for (id, session) in lock(&sessions).iter() {
+                    if workspace.as_ref() == Some(&session.workspace)
+                        && session.key.workspace_id == binding.workspace_id
+                        && session.key.version_id == binding.main_version_id
+                        && session.key.object_id == binding.object_id
+                        && session.path == binding.current_path
+                        && session.lineage_claim_id.as_deref()
+                            == Some(binding.lineage_claim_id.as_str())
+                    {
+                        events.emit(
+                            "ydoc.remoteUpdate",
+                            json!({"sessionId":id,"resyncRequired":true}),
+                        );
+                    }
+                }
+            }
+            result
         });
         let outcome = operation.await;
         retirement.0 = None;
@@ -1440,6 +1495,76 @@ impl EngineService {
         })
     }
 
+    /// `liveApplication.prepareRetirement`: before the relay fences an
+    /// activation, check that none of its native edits waits for delivery,
+    /// then refuse its local appends until its release, its retirement's
+    /// intent, or the end of this connection. A pending answer blocks nothing.
+    pub(super) async fn live_application_prepare_retirement(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{PreparationKey, PreparationPending};
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let scope = self.configured_retirement_scope(ctx, 1)?;
+        let pending = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .prepare_retirement(scope, key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match pending {
+            None => json!({"status":"prepared"}),
+            Some(reason) => json!({"status":"pending","reason":match reason {
+                PreparationPending::NativePending => "native-pending",
+                PreparationPending::RetryOutstanding => "retry-outstanding",
+            }}),
+        })
+    }
+
+    /// `liveApplication.releaseRetirementPreparation`: reopen the local
+    /// appends this connection's preparation refused. Idempotent.
+    pub(super) async fn live_application_release_retirement_preparation(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::PreparationKey;
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let released = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .release_retirement_preparation(key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({"released":released}))
+    }
+
+    /// The workspace's host, when this connection owns it. Its owner's
+    /// lifetime bounds every preparation it makes.
+    fn preparing_host(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+    ) -> Result<Arc<Host>, WireError> {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .filter(|host| host.current(connection))
+            .cloned()
+            .ok_or_else(workspace_unavailable)
+    }
+
     /// The retirement form of `liveApplication.settle`: settle the activation
     /// a retirement names through its durable binding. It needs no live
     /// registration and opens no session.
@@ -1781,6 +1906,7 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let claim_events = self.events.clone();
         let claim_workspace = host.open.workspace_id.clone();
+        let max_applications = self.configured_settlement_limit();
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
@@ -1796,6 +1922,7 @@ impl EngineService {
                         Arc::new(NoFaults),
                         Some(input.reservation),
                         input.working_reserve_bytes,
+                        max_applications,
                     )
                     .await
                     .map(|result| match result {

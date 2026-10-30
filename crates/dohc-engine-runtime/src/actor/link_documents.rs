@@ -130,6 +130,9 @@ pub(super) fn append(
         &edit.update,
         actor.as_deref(),
         attribution.as_ref(),
+        // `record_update_in_tx` already refused an adopted owner, whose
+        // activation alone a preparation blocks.
+        &Default::default(),
         &mut outcome,
         now,
     )?;
@@ -224,10 +227,18 @@ pub(super) fn baseline(
         None,
         super::ydoc::SettlementKind::Document,
         false,
+        None,
     );
     match outcome.and_then(super::ydoc::YdocSettleOutcome::into_settlement_for_internal_caller) {
         Ok(_) => {}
         Err(error) if error.code() == "file-locked" => return Err(StorageError::FileLocked.into()),
+        Err(
+            error @ RuntimeError::Collab(
+                dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { .. }
+                | dohc_engine_collab::CollabError::MarkdownReaderPending(_),
+            ),
+        ) => return Err(error),
+        Err(RuntimeError::MarkdownWriteHeld { .. }) => return Ok(false),
         Err(RuntimeError::Collab(_)) => return Ok(false),
         Err(RuntimeError::Domain(DomainError::InvalidInput {
             reason: "ydoc-remote-updates-pending",

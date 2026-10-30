@@ -1748,6 +1748,65 @@ describe("notices sent to you", () => {
     );
   }
 
+  it("keeps a held Notice dismissed after the Notice list updates", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const shown: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held",
+      body: "A note needs review before saving" };
+    const notices = sentNotices([shown]);
+    const view = renderWithNotices(bridge, { sentNotices: notices });
+    await screen.findByTestId("workspace-shell-notice");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("notice-held-dismiss"));
+    expect(notices.dismiss).toHaveBeenCalledExactlyOnceWith(shown);
+    view.rerender(<>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}}
+        sentNotices={{ ...notices, notices: [] }} />
+    </>);
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-notice")).toBeNull());
+    expect(screen.queryByTestId("notice-held")).toBeNull();
+    expect(notices.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  const HELD: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held", senderKind: null,
+    title: "Held a change to b.md", body: "Saving it would also change parts dohc can't show." };
+
+  it("keeps a held change's row unread when its toast closes", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([HELD]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(notices.read).not.toHaveBeenCalled();
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 1 unread");
+  });
+
+  it("reads a held change's row on Open note", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([HELD]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    await user.click(within(toast).getByRole("button", { name: "Open note" }));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledExactlyOnceWith([HELD]);
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  it("keeps a read held change read, with no toast, when dohc starts again", async () => {
+    const user = userEvent.setup();
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([{ ...HELD, readAtMs: 6_000 }]) });
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    await user.click(toggle);
+    await screen.findByTestId("notice-held");
+    expect(screen.queryByTestId("notice-held-unread")).toBeNull();
+    expect(toggle.getAttribute("aria-label")).toBe("Notices");
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+  });
+
   it("keeps a newer refusal after an older shell dismissal finishes", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -2674,6 +2733,32 @@ describe("file transfers", () => {
 });
 
 describe("owner live documents", () => {
+  it("reports an edits-pending Stop after the dialog closes, retries from toast or Notices, and clears both on success", async () => {
+    const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockReturnValueOnce(stopping.promise).mockResolvedValue({keptEdits: "none"});
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`}));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await act(async () => stopping.reject(new Error("Live editing didn't stop. Recent edits haven't reached the server yet.")));
+    const title = `Live editing didn't stop for ${LIVE_ROW.path}`;
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(title)).toBeTruthy();
+    expect(within(toast).getByText("Recent edits haven't reached the server yet.")).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const notice = within(notices).getByText(title).closest("li")!;
+    expect(within(notice).getByText("Recent edits haven't reached the server yet.")).toBeTruthy();
+    expect(within(notice).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    await user.click(within(notice).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(title)).toBeNull());
+  });
   const LIVE_ROW = {
     path: "notes/today.md",
     objectId: "object-today",

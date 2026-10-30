@@ -85,3 +85,31 @@ it("retries an unenrolled offline Stop by document key and acknowledges retireme
   expect(ack).toHaveBeenCalledTimes(1);
   expect(client.ownerYDocRelease).not.toHaveBeenCalled();
 });
+
+it("finishes both Stops when the first release is held and only the safe peer materializes", async () => {
+  const rows = ["held", "safe"].map(objectId => withDocument({
+    binding: {workspaceId: "workspace", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
+      currentPath: `${objectId}.md`, selectorPaths: [`${objectId}.md`], restoreFenceGeneration: 0},
+    relayDatabaseNamespace: "relay", state: "requested",
+  }));
+  const retired: string[] = [];
+  const released: Array<{objectId: string; materialized: boolean}> = [];
+  const client = {
+    ownerYDocStopList: vi.fn(async () => rows),
+    ownerYDocStopRequest: vi.fn(async (_request, target) => rows.find(row => row.document.objectId === target.objectId)!),
+    ownerYDocRelease: vi.fn(async (_request, target) => {
+      const result = {objectId: target.objectId, materialized: target.objectId === "safe"};
+      released.push(result);
+      return {...rows.find(row => row.document.objectId === target.objectId)!, state: "released", ...result};
+    }),
+  } as unknown as EngineClient;
+  const complete = vi.fn();
+  await expect(reconcileOwnerLiveStops({client, workspaceHandle: "handle", workspaceId: "workspace",
+    signal: new AbortController().signal, assertCurrent() {}, onComplete: complete,
+    retire: async target => {retired.push(target.objectId); return 2;},
+  })).resolves.toBeUndefined();
+
+  expect(retired).toEqual(["held", "safe"]);
+  expect(released).toEqual([{objectId: "held", materialized: false}, {objectId: "safe", materialized: true}]);
+  expect(complete.mock.calls.map(([row]) => row.document.objectId)).toEqual(["held", "safe"]);
+});

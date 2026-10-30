@@ -1805,6 +1805,31 @@ describe("failed run notices", () => {
   });
 });
 
+describe("a held change from another workspace", () => {
+  it("shows as a warning whose Next is Open note, on the toast and the row", async () => {
+    const held = sentRow("h", {
+      kind: "markdown-write-held",
+      senderKind: null,
+      title: "Held a change to packing.md",
+      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.",
+      target: { path: "Trip/packing.md" },
+    });
+    renderNotices({ sentNotices: [held], sentNoticeToast: held, onOpenSentNotice: vi.fn(async () => null) });
+    const toast = screen.getByTestId("sent-notice-toast");
+    expect(toast.getAttribute("role")).toBe("status");
+    expect(toast.querySelector(".text-warning")).toBeTruthy();
+    expect(toast.querySelector("[data-sender-shape]")).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(screen.getByTestId("sent-notice-toast-open").textContent).toBe("Open note");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("sent-notice-h");
+    expect(row.querySelector(".text-warning")).toBeTruthy();
+    expect(row.querySelector("[data-sender-shape]")).toBeNull();
+    expect(within(row).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(screen.getByTestId("sent-notice-h-open").textContent).toBe("Open note");
+  });
+});
+
 describe("failed runs of the owner's server", () => {
   it("offers Try again on the row and the toast of a run the server can run again", async () => {
     const failed = { ...sentRow("f", { kind: "automation-failed", senderKind: "automation", title: 'Automation "Stamp" failed' }), retryable: true };
@@ -1856,6 +1881,35 @@ describe("notices sent to you", () => {
   it("names the toggle without a count when nothing is unread", () => {
     renderNotices({ sentNotices: [sentRow("read", { readAtMs: 1 })] });
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  it("keeps a held row read when its store mark arrives and after remount", () => {
+    const held = { id: "held-save", tone: "warning" as const, title: "Held a change to note.md",
+      message: "Saving it would also change parts dohc can't show.", details: "note.md", atMs: 1,
+      canRetry: false, actionLabel: "Open note", seen: false };
+    const props = (seen: boolean, read = seen) => ({ workspaceErrors: [{ ...held, seen, read }], onWorkspaceErrorAction: vi.fn() });
+    const first = renderNotices(props(false));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-held-save-unread")).toBeTruthy();
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+    // Closing the toast keeps the row unread.
+    first.rerender(noticeElement(props(true, false)));
+    expect(screen.getByTestId("notice-held-save-unread")).toBeTruthy();
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+    first.rerender(noticeElement(props(true)));
+    const expectRead = () => {
+      expect(screen.getByTestId("notice-held-save")).toBeTruthy();
+      expect(screen.queryByTestId("notice-held-save-unread")).toBeNull();
+      expect(screen.queryByTestId("notice-center-count")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+    };
+    expectRead();
+    first.unmount();
+    renderNotices(props(true));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expectRead();
   });
 
   describe("reading a row", () => {

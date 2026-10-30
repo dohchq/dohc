@@ -221,6 +221,7 @@ impl ApplicationOwner {
                 first: owner.is_none() && prior.is_none() && last_settled.is_none(),
                 restore: Some(Box::new(RestoreAudit { source, reader_resolver: resolver.cloned(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
                 replay_anchor: None,
+                empty: false,
             };
             if let Some(restore) = &audit.restore {restore.verify_saved_anchor(tx,&audit)?;}
             Ok(audit)

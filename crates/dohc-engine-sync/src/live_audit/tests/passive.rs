@@ -1410,6 +1410,7 @@ fn a_successors_cancelled_restore_exports_and_imports_with_its_origin() {
         );
         let released = release_activation(
             &mut f.store,
+            &mut WriterDocCache::new(),
             &RetirementScope {
                 namespace: "relay",
                 workspace_id: "ws",

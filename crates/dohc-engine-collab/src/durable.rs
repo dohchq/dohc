@@ -1286,62 +1286,77 @@ pub fn maybe_compact(
     let up_to = persisted.up_to_seq;
 
     store.write_with(faults, |tx| {
-        let snapshot_sha = put_binary_blob(tx, &snapshot_bytes)?;
-        let sv_sha = put_binary_blob(tx, &sv_bytes)?;
-        tx.execute(
-            "INSERT INTO ydoc_snapshots \
-             (workspace_id, version_id, object_id, up_to_seq, \
-              snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(workspace_id, version_id, object_id, up_to_seq) DO UPDATE SET \
-               snapshot_blob_sha256 = excluded.snapshot_blob_sha256, \
-               state_vector_blob_sha256 = excluded.state_vector_blob_sha256, \
-               recorded_at_ms = excluded.recorded_at_ms",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                up_to,
-                snapshot_sha,
-                sv_sha,
-                now_ms,
-            ],
-        )
-        .map_err(map_sql)?;
-        crate::author_coverage::fold_in(tx, key, up_to)?;
-        // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
-        // the exact base identity and state vector during successor replay.
-        let pruned = tx
-            .execute(
-                "DELETE FROM ydoc_updates \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND seq <= ?4",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
-            )
-            .map_err(map_sql)?;
-        tx.execute(
-            "DELETE FROM ydoc_snapshots \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-               AND up_to_seq > 0 AND up_to_seq < ?4",
+        write_head_snapshot_in_tx(tx, key, up_to, &snapshot_bytes, &sv_bytes, now_ms)
+    })
+}
+
+/// Write `snapshot_bytes` as the full-state snapshot at `up_to`, the marker's
+/// head, fold the authors through it, and prune the updates and nonzero
+/// snapshots it supersedes. Compaction writes the replayed log. A release
+/// that returns the Y.Doc to its accepted state writes that state.
+pub(crate) fn write_head_snapshot_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    up_to: i64,
+    snapshot_bytes: &[u8],
+    sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<CompactOutcome, CollabError> {
+    let snapshot_sha = put_binary_blob(tx, snapshot_bytes)?;
+    let sv_sha = put_binary_blob(tx, sv_bytes)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots \
+         (workspace_id, version_id, object_id, up_to_seq, \
+          snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(workspace_id, version_id, object_id, up_to_seq) DO UPDATE SET \
+           snapshot_blob_sha256 = excluded.snapshot_blob_sha256, \
+           state_vector_blob_sha256 = excluded.state_vector_blob_sha256, \
+           recorded_at_ms = excluded.recorded_at_ms",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            up_to,
+            snapshot_sha,
+            sv_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    crate::author_coverage::fold_in(tx, key, up_to)?;
+    // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
+    // the exact base identity and state vector during successor replay.
+    let pruned = tx
+        .execute(
+            "DELETE FROM ydoc_updates \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND seq <= ?4",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
         )
         .map_err(map_sql)?;
-        tx.execute(
-            "UPDATE ydoc_docs SET head_snapshot_seq = ?4, updated_at_ms = ?5 \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                up_to,
-                now_ms
-            ],
-        )
-        .map_err(map_sql)?;
-        Ok(CompactOutcome::Compacted {
-            up_to_seq: up_to,
-            snapshot_sha,
-            pruned_updates: pruned,
-        })
+    tx.execute(
+        "DELETE FROM ydoc_snapshots \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+           AND up_to_seq > 0 AND up_to_seq < ?4",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET head_snapshot_seq = ?4, updated_at_ms = ?5 \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            up_to,
+            now_ms
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(CompactOutcome::Compacted {
+        up_to_seq: up_to,
+        snapshot_sha,
+        pruned_updates: pruned,
     })
 }
 

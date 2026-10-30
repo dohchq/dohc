@@ -351,7 +351,7 @@ function checkHeldInspection(inspected: HeldDocumentInspection): void {
 }
 
 /** One valid tail's covered work, as the contribution artifact lists it. */
-export type HeldCoveredContributions = { namespace: string; contributions: RetainedContribution[] };
+type HeldCoveredContributions = { namespace: string; contributions: RetainedContribution[] };
 
 /** The binding of a current inspection, every contribution it covers, and what merging added. */
 export type HeldContributions = {

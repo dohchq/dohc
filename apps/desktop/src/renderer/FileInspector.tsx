@@ -4,6 +4,7 @@ import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
@@ -311,6 +312,8 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
+  // The engine holds a change to this lossy note until someone chooses Edit anyway.
+  changeHeld?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -364,6 +367,8 @@ export const FileInspector = memo(function FileInspector(
     props.path,
     props.engineVersionKey,
   );
+  const currentDocument = useRef(key);
+  currentDocument.current = key;
   const localBuffer = useRetainedLocalDocument(key);
   const fileKind = fileKindForPath(props.path);
   const kind = fileKind.displayKind;
@@ -513,7 +518,7 @@ export const FileInspector = memo(function FileInspector(
   // as its source. A session that records another source, as when another
   // pane reloads a change made outside dohc into the shared session, needs
   // its own check and consent.
-  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null; headSha256: string | null | undefined } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
   // A session that binds a different note from the one checked, as when the
@@ -534,13 +539,15 @@ export const FileInspector = memo(function FileInspector(
       (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
+    allowLossySourceSha256: consented && editAnyway?.source ? editAnyway.source : undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
   useEffect(() => setBound(engine.available), [engine.available]);
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
-  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
+    && (!engine.available || engine.headSha256 === editAnyway.headSha256);
   useEffect(() => {
     if (consented && !editingAnyway) {
       setEditAnyway(null);
@@ -553,7 +560,7 @@ export const FileInspector = memo(function FileInspector(
     open: lossyOpen,
     // Edit anyway already accepted what saving does.
     doc: checksLossyNote && !editingAnyway ? engine.doc : null,
-    checkedHash: checked.checkedHash,
+    headSha256: engine.headSha256,
   });
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
@@ -869,7 +876,17 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            changeHeld={props.changeHeld}
+            onEditAnyway={() => {
+              const source = typeof boundSource === "string" ? boundSource : contentHash;
+              setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash });
+              if (engine.available && source) {
+                void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
+                  allowLossySourceSha256: source }).catch((error: unknown) => {
+                  if (currentDocument.current === key) props.onButtonError?.(lossyNoteRefusal(props.path), error, retryEngineOpen);
+                });
+              }
+            }}
             onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}

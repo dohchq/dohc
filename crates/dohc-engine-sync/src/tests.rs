@@ -1055,6 +1055,7 @@ fn version_create_with_shipped_snapshots(
 mod chat;
 mod file_export_lane;
 mod hosted_replica;
+mod markdown_write_hold;
 mod ordinary_pull_progress;
 mod outbound_authors;
 pub(crate) mod owner_publication;

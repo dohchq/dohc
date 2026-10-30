@@ -586,9 +586,11 @@ export interface WorkspaceEngineCapture {
   // with the version binding, so a switch cannot land between them.
   openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
+    allowLossySourceSha256?: string;
     path: string;
     assertRecordWritable?: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
@@ -2354,6 +2356,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function openRestartSafeRustYDocSession(input: {
+    allowLossySourceSha256?: string;
     versionId: string;
     path: string;
     contentKind?: YdocContentKind;
@@ -2362,6 +2365,7 @@ export function createWorkspaceEngineCapture(
     onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
+    onHeadChanged?: (headSha256: string | null) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
@@ -2750,6 +2754,8 @@ export function createWorkspaceEngineCapture(
             });
           };
           const providerOpened = await openProvider({
+            ...(generation === 1 && input.allowLossySourceSha256
+              ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -2780,6 +2786,9 @@ export function createWorkspaceEngineCapture(
               recordedStateVector = Y.encodeStateVector(recordedDoc);
               updatesCounted += 1;
               input.onRemoteUpdate(update);
+            },
+            onHeadChanged: head => {
+              if (!closed && current === opened) input.onHeadChanged?.(head);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
               const editorVisible = refusedEditorVisible;
@@ -3514,6 +3523,10 @@ export function createWorkspaceEngineCapture(
             assertCurrent();
             return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
           },
+          onSettlementWanted: (handler: () => void) => {
+            assertCurrent();
+            return owner.onSettlementWanted(() => {if (current === captured && !closed) handler();});
+          },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
           resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },
@@ -3536,6 +3549,7 @@ export function createWorkspaceEngineCapture(
         // operation's next line records it here.
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
+      get headSha256() { return current?.headSha256; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -4841,6 +4855,7 @@ export function createWorkspaceEngineCapture(
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
+          ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -4876,6 +4891,7 @@ export function createWorkspaceEngineCapture(
             if (!localAcknowledgement) noteUpdate();
             input.onRemoteUpdate(update);
           },
+          onHeadChanged: input.onHeadChanged,
           onLineageReplaced: (update, recoveredPaths) => {
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);
@@ -5991,6 +6007,7 @@ export function createWorkspaceEngineCapture(
             return session.artifactAssets ?? [];
           },
           path: session.path,
+          get headSha256() { return session.headSha256; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,

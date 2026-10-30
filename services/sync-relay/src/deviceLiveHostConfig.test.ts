@@ -14,6 +14,22 @@ const limits = { maxConnections: 2, maxHeaderBytes: 8192, maxCredentialBytes: 40
   maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8, handshakeTimeoutMs: 1000,
   heartbeatIntervalMs: 1000, heartbeatTimeoutMs: 1000, closeTimeoutMs: 100 };
 
+it("accepts only explicit canonical reader files from the device delivery configuration", () => {
+  const run = fixture();
+  const reader = { node: resolve(process.execPath), bundle: join(run.value.workspaces[0]!.root, "reader.cjs"),
+    manifest: join(run.value.workspaces[0]!.root, "manifest.json") };
+  writeFileSync(reader.bundle, "reader");
+  writeFileSync(reader.manifest, "{}");
+  expect(readDeviceLiveHostConfig(run.write(run.value), limits).reader).toBeUndefined();
+  expect(readDeviceLiveHostConfig(run.write({ ...run.value, reader }), limits).reader).toEqual(reader);
+  for (const bad of [null, {}, JSON.stringify(reader), { ...reader, extra: true },
+    { ...reader, node: "relative-node" }, { ...reader, bundle: "relative-reader.cjs" },
+    { ...reader, manifest: join(run.value.workspaces[0]!.root, "missing.json") },
+    { ...reader, bundle: run.value.workspaces[0]!.root }]) {
+    expect(() => readDeviceLiveHostConfig(run.write({ ...run.value, reader: bad }), limits)).toThrow();
+  }
+});
+
 it("requires explicit native sync bounds and reserves their complete read/output budget", () => {
   const run = fixture(), sync = {policy: {maxClientVectorBytes: 1024, maxHostVectorBytes: 4096,
     maxOutputBytes: 1_000_000, maxReadBytes: 10_000_000}, workingReserveBytes: 16_777_216};

@@ -465,7 +465,7 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
         .resume_restore(
             &mut f.store,
             None,
-            NativeRestoreResume { application: input, settlement_id: settlement.settlement_id },
+            NativeRestoreResume { application: input, settlement_id: settlement.settlement_id.expect("restore settlement") },
             coordinate,
             2_000_000,
             100,
@@ -551,7 +551,7 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
             .resume_restore(
                 &mut f.store,
                 None,
-                NativeRestoreResume { application: input, settlement_id: restored.settlement_id.clone() },
+                NativeRestoreResume { application: input, settlement_id: restored.settlement_id.clone().expect("restore settlement") },
                 coordinate.clone(),
                 2_000_000,
                 100,
@@ -597,7 +597,7 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
             },
         )
         .unwrap();
-        assert_eq!(replayed, restored.settlement_id, "{cancellations}: the restore's own settlement");
+        assert_eq!(Some(replayed), restored.settlement_id, "{cancellations}: the restore's own settlement");
         let event = remote_event(&mut f, 80);
         let terminal = event.metadata.accepted.receipt.clone();
         assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));

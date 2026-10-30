@@ -161,7 +161,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     try {expect(db.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications").all()).toEqual([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]);}
     finally {db.close();}
     expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **agent**."}});
-    expect((await active.settle(document)).materialized).toBe(true);
+    expect(await active.settle(document)).toMatchObject({materialized: true});
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.");
     // Ordinary file replication is separate from live settlement in this fixture.
     expect(await call(view.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});

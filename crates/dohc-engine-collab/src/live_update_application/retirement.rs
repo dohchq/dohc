@@ -15,6 +15,8 @@ use crate::owner_outbox::{
     ACTIVATION_RELEASED, MAX_TERMINAL_REASON_BYTES,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The activation Stop retires, as the relay fenced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,135 @@ pub fn begin_retirement(
         TxnOutcome::Committed(target) => Ok(target),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
+}
+
+/// The activation a Stop prepares to fence. No fence exists yet, so it names no F.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparationKey {
+    pub object_id: String,
+    pub lineage_claim_id: String,
+    pub activation_id: String,
+    pub restore_fence_generation: i64,
+}
+
+/// Why a Stop cannot fence its activation yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationPending {
+    /// A native edit of the activation waits for delivery.
+    NativePending,
+    /// A Try again of one of its queues is outstanding.
+    RetryOutstanding,
+}
+
+/// The activations a Stop prepared to fence, on one store's writer. Each
+/// refuses local appends while the owner that prepared it lasts, until its
+/// release or its retirement's intent. Memory only: a restarted engine
+/// holds none.
+#[derive(Clone, Default)]
+pub struct RetirementPreparations(Arc<Mutex<HashMap<String, Prepared>>>);
+
+/// A preparation's generation, and the owner whose lifetime bounds it.
+type Prepared = (i64, Arc<AtomicBool>);
+
+impl RetirementPreparations {
+    fn held(&self) -> MutexGuard<'_, HashMap<String, Prepared>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a preparation refuses appends to the activation at `generation`.
+    pub fn blocks(&self, activation_id: &str, generation: i64) -> bool {
+        self.held()
+            .get(activation_id)
+            .is_some_and(|(prepared, owner)| {
+                *prepared == generation && owner.load(Ordering::Acquire)
+            })
+    }
+
+    /// End `owner`'s preparation of the key. True when it was in force.
+    pub fn release(&self, key: &PreparationKey, owner: &Arc<AtomicBool>) -> bool {
+        let mut held = self.held();
+        let Some((generation, prepared)) = held.get(&key.activation_id) else {
+            return false;
+        };
+        if *generation != key.restore_fence_generation || !Arc::ptr_eq(prepared, owner) {
+            return false;
+        }
+        let live = prepared.load(Ordering::Acquire);
+        held.remove(&key.activation_id);
+        live
+    }
+
+    /// A retirement's durable intent refuses the activation's appends from here.
+    pub fn end(&self, activation_id: &str) {
+        self.held().remove(activation_id);
+    }
+}
+
+/// Check that nothing of the activation waits for delivery, then refuse its
+/// local appends while `owner` lasts. The check and the block run on the
+/// store's writer, so no append lands between them. A pending answer blocks
+/// nothing. A released or retiring activation is not prepared again.
+pub fn prepare_retirement(
+    store: &EngineStore,
+    scope: &RetirementScope<'_>,
+    key: &PreparationKey,
+    preparations: &RetirementPreparations,
+    owner: &Arc<AtomicBool>,
+) -> Result<Option<PreparationPending>, ApplicationError> {
+    let pending = store.read_with(|conn| {
+        let retiring = validate_retirement(
+            conn,
+            scope,
+            &RetirementKey {
+                object_id: key.object_id.clone(),
+                lineage_claim_id: key.lineage_claim_id.clone(),
+                activation_id: key.activation_id.clone(),
+                restore_fence_generation: key.restore_fence_generation,
+                accepted_through: 0,
+            },
+        )?;
+        if retiring.released_through.is_some() {
+            return Err(ApplicationError::Conflict);
+        }
+        require_not_retiring(conn, scope.namespace, &key.activation_id)?;
+        let doc = &retiring.doc;
+        let (retrying, pending): (bool, bool) = conn
+            .query_row(
+                "SELECT
+                   EXISTS(SELECT 1 FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id
+                     WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
+                       AND o.state='quarantined' AND o.retry_delivery_id IS NOT NULL
+                       AND e.pending=1 AND json_extract(e.native_source_json,'$.adoptionId')=?5),
+                   EXISTS(SELECT 1 FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id
+                     WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
+                       AND o.state!='quarantined' AND e.pending=1
+                       AND json_extract(e.native_source_json,'$.adoptionId')=?5)",
+                params![
+                    doc.workspace_id,
+                    doc.version_id,
+                    doc.object_id,
+                    key.lineage_claim_id,
+                    key.activation_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(read_sql)?;
+        Ok::<_, ApplicationError>(if retrying {
+            Some(PreparationPending::RetryOutstanding)
+        } else if pending {
+            Some(PreparationPending::NativePending)
+        } else {
+            None
+        })
+    })?;
+    if pending.is_none() {
+        preparations.held().insert(
+            key.activation_id.clone(),
+            (key.restore_fence_generation, Arc::clone(owner)),
+        );
+    }
+    Ok(pending)
 }
 
 /// Record that the retirement of this exact activation and generation began.
@@ -1433,6 +1564,53 @@ fn undelivered_seed(
     Ok(!delivered)
 }
 
+/// The head of a kept relay refusal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeptHead {
+    Seed,
+    Edit,
+}
+
+/// The refused head `entry` waits at or behind, when the relay refused it and
+/// nothing can deliver `entry`: its outbox is quarantined without a Try again,
+/// the head is pending or kept by an earlier pass, and nothing accepted or
+/// applied `entry`'s delivery.
+fn kept_refusal(
+    conn: &Connection,
+    namespace: &str,
+    entry: &RetainedEntry,
+) -> Result<Option<KeptHead>, ApplicationError> {
+    conn.query_row(
+        "SELECT json_extract(h.native_source_json,'$.origin.kind')='adoptionSeed'
+         FROM owner_ydoc_outboxes o
+         JOIN owner_ydoc_outbox_refusals r ON r.outbox_id=o.outbox_id
+         JOIN owner_ydoc_outbox_entries h ON h.outbox_id=o.outbox_id AND h.delivery_id=r.delivery_id
+         WHERE o.outbox_id=?1 AND o.state='quarantined' AND o.retry_delivery_id IS NULL AND h.sequence<=?2
+           AND (h.pending=1 OR h.terminal_reason=?5)
+           AND NOT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries p WHERE p.outbox_id=o.outbox_id
+             AND p.sequence<h.sequence AND p.pending=1)
+           AND NOT EXISTS(SELECT 1 FROM live_accepted_updates WHERE relay_database_namespace=?3 AND delivery_id=?4)
+           AND NOT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?3 AND delivery_id=?4)
+         LIMIT 1",
+        params![
+            entry.outbox_id,
+            entry.sequence,
+            namespace,
+            entry.delivery_id,
+            crate::owner_outbox::RETIREMENT_KEPT
+        ],
+        |row| row.get::<_, Option<bool>>(0),
+    )
+    .optional()
+    .map_err(read_sql)
+    .map(|head| {
+        head.map(|seed| match seed {
+            Some(true) => KeptHead::Seed,
+            _ => KeptHead::Edit,
+        })
+    })
+}
+
 /// The one representation of a seed its activation never delivered, while
 /// current and after release. The terminal reason alone proves nothing.
 pub(crate) fn is_abandoned_seed(
@@ -1561,6 +1739,9 @@ fn reconcile_in_tx(
     let mut unresolved = Vec::new();
     let mut accepted: Vec<(String, Vec<OwnerDeliveryReceipt>)> = Vec::new();
     let mut abandoned = Vec::new();
+    let mut kept = Vec::new();
+    // Outboxes a refused seed holds: none of their entries changes.
+    let mut held = BTreeSet::new();
     // Outboxes whose next pending entry stays unproven or was never
     // delivered: nothing after it can be acknowledged.
     let mut stalled = BTreeSet::new();
@@ -1599,15 +1780,33 @@ fn reconcile_in_tx(
                     }
                 }
                 Some(Answer::Absent) => {
-                    // Only a seed its activation never delivered may go undelivered.
-                    if entry.update_blob.is_none()
-                        || entry.terminal_reason.is_some()
-                        || !undelivered_seed(tx, scope.namespace, &retiring, &entry)?
-                    {
+                    if entry.update_blob.is_none() || entry.terminal_reason.is_some() {
                         return Err(ApplicationError::Conflict);
                     }
-                    stalled.insert(entry.outbox_id.clone());
-                    abandoned.push((entry.outbox_id, entry.sequence));
+                    let seed = matches!(entry.source.origin, OwnerOutboxNativeOrigin::AdoptionSeed);
+                    // A seed its activation never delivered goes undelivered.
+                    if seed && undelivered_seed(tx, scope.namespace, &retiring, &entry)? {
+                        stalled.insert(entry.outbox_id.clone());
+                        abandoned.push((entry.outbox_id, entry.sequence));
+                        continue;
+                    }
+                    let refused = kept_refusal(tx, scope.namespace, &entry)?;
+                    if !seed && refused == Some(KeptHead::Edit) {
+                        // The relay refused an edit at the head and no Try
+                        // again can deliver it: it and what waits behind it
+                        // are kept, with their bytes.
+                        stalled.insert(entry.outbox_id.clone());
+                        kept.push((entry.outbox_id, entry.sequence));
+                    } else if entry.quarantined && (seed || refused == Some(KeptHead::Seed)) {
+                        // A refused seed no settlement may pass, or an edit
+                        // behind one, holds the retirement without failing it.
+                        seed_quarantined = true;
+                        held.insert(entry.outbox_id.clone());
+                        stalled.insert(entry.outbox_id);
+                        unresolved.push(entry.delivery_id);
+                    } else {
+                        return Err(ApplicationError::Conflict);
+                    }
                 }
                 None => {
                     seed_quarantined |= entry.quarantined
@@ -1646,8 +1845,14 @@ fn reconcile_in_tx(
             }
         }
     }
-    for (outbox, sequence) in &abandoned {
+    for (outbox, sequence) in abandoned
+        .iter()
+        .filter(|(outbox, _)| !held.contains(outbox))
+    {
         crate::owner_outbox::abandon_seed_in_tx(tx, outbox, *sequence).map_err(outbox_error)?;
+    }
+    for (outbox, sequence) in &kept {
+        crate::owner_outbox::keep_refused_in_tx(tx, outbox, *sequence).map_err(outbox_error)?;
     }
     for (outbox, receipts) in &accepted {
         crate::owner_outbox::acknowledge_in_tx(tx, outbox, receipts).map_err(outbox_error)?;
@@ -1921,6 +2126,7 @@ pub enum ReleasePending {
 /// answers from its stored release and writes nothing.
 pub fn release_activation(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     scope: &RetirementScope<'_>,
     key: &RetirementKey,
     host: &ApplicationHostCoordinate,
@@ -1928,17 +2134,22 @@ pub fn release_activation(
     faults: &dyn FaultInjector,
 ) -> Result<Release, ApplicationError> {
     integer(now_ms, 0, SAFE)?;
-    let replayed = store.read_with(|conn| {
+    let (doc, replayed) = store.read_with(|conn| {
         let retiring = validate_retirement(conn, scope, key)?;
-        match retiring.released_through {
-            Some(_) => released(conn, scope.namespace, &retiring).map(Some),
-            None => Ok(None),
-        }
+        let replayed = match retiring.released_through {
+            Some(_) => Some(released(conn, scope.namespace, &retiring)?),
+            None => None,
+        };
+        Ok::<_, ApplicationError>((retiring.doc, replayed))
     })?;
     if let Some(replayed) = replayed {
         return Ok(replayed);
     }
-    match store.write_with(faults, |tx| release_in_tx(tx, scope, key, host, now_ms))? {
+    let outcome = store.write_with(faults, |tx| release_in_tx(tx, scope, key, host, now_ms));
+    // Its release may return the Y.Doc to accepted state at the head the
+    // cache already holds.
+    cache.remove(&doc);
+    match outcome? {
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
@@ -2034,11 +2245,106 @@ fn release_in_tx(
     if changed != 1 || delete_own_binding(tx, scope.namespace, &retiring, key)? != 1 {
         return Err(ApplicationError::Corrupt);
     }
+    drop_kept_edits(tx, scope.namespace, &retiring, host, &boundary, now_ms)?;
     clear_intent(tx, scope.namespace, &key.activation_id)?;
     Ok(Release::Released {
         replayed: false,
         boundary: Some(boundary),
     })
+}
+
+/// Return the local Y.Doc to what the release explains, once the retirement
+/// kept refused edits: accepted state at `boundary` and the Carried
+/// deliveries, as a successor's capture replays them. The kept edits reached
+/// no one, so no successor delivers them again. Their bytes stay in their
+/// entries and in the owner's recovery copy. Only a Y.Doc that is exactly
+/// that state and the kept edits changes. Any other, or one whose accepted
+/// state this budget cannot rebuild, stays as it is.
+fn drop_kept_edits(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    retiring: &Retiring,
+    host: &ApplicationHostCoordinate,
+    boundary: &RetainedPrefixBody,
+    now_ms: i64,
+) -> Result<(), ApplicationError> {
+    let (doc, lineage) = (&retiring.doc, retiring.lineage_claim_id.as_str());
+    let kept = native_entries(
+        tx,
+        doc,
+        lineage,
+        "json_extract(e.native_source_json,'$.adoptionId')=?5 AND e.terminal_reason=?6",
+        params![retiring.activation_id, crate::owner_outbox::RETIREMENT_KEPT],
+    )?;
+    let Some(activation) = retiring.activation.as_ref().filter(|_| !kept.is_empty()) else {
+        return Ok(());
+    };
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&activation.binding_json).map_err(|_| ApplicationError::Corrupt)?;
+    let through = boundary
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |receipt| receipt.journal_cursor);
+    let mut budget = super::restore_content::Budget {
+        remaining: super::settled_base::RELEASED_CAPTURE_PROOF_BYTES,
+    };
+    let state = match super::accepted_history::read_state_by_identity(
+        tx,
+        namespace,
+        binding,
+        host.clone(),
+        through,
+        &mut budget,
+    ) {
+        Ok(state) => state,
+        Err(
+            ApplicationError::ConfiguredByteBudgetExceeded
+            | ApplicationError::AcceptedStateIncomplete,
+        ) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for inherited in inherited_entries(
+        tx,
+        namespace,
+        doc,
+        lineage,
+        Some(retiring.activation_id.as_str()),
+    )? {
+        let Some(bytes) = get_binary_blob(tx, &inherited.entry.update_digest)? else {
+            return Ok(());
+        };
+        state.apply(&bytes)?;
+    }
+    let explained = state.encode_full_state();
+    let proof = crate::Ydoc::wire();
+    proof.apply(&explained)?;
+    for entry in &kept {
+        let digest = entry
+            .terminal_blob
+            .as_deref()
+            .ok_or(ApplicationError::Corrupt)?;
+        proof.apply(&get_binary_blob(tx, digest)?.ok_or(ApplicationError::Corrupt)?)?;
+    }
+    let local = durable::load_doc_in(tx, doc)?;
+    if state.has_missing_updates()
+        || proof.has_missing_updates()
+        || local.has_missing_updates()
+        || !crate::replay_parity::structurally_equal_v2(&proof, &local)?
+    {
+        return Ok(());
+    }
+    let head = durable::read_marker_in(tx, doc)?
+        .ok_or(ApplicationError::Corrupt)?
+        .head_update_seq;
+    durable::write_head_snapshot_in_tx(
+        tx,
+        doc,
+        head,
+        &explained,
+        &state.encode_state_vector(),
+        now_ms,
+    )?;
+    Ok(())
 }
 
 /// Delete only the binding the retirement names: its activation, lineage

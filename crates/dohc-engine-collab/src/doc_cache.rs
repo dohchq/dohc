@@ -271,9 +271,18 @@ pub struct WriterDocCache {
     max_total_bytes: Option<usize>,
     /// Kept by the store's own generations, so [`Self::clear`] leaves it.
     released_tails: crate::live_update_application::ReleasedTails,
+    /// Not cached state: [`Self::clear`] leaves it too.
+    retirement_preparations: crate::live_update_application::RetirementPreparations,
 }
 
 impl WriterDocCache {
+    /// The Stop preparations whose activations refuse local appends on this writer.
+    pub fn retirement_preparations(
+        &self,
+    ) -> crate::live_update_application::RetirementPreparations {
+        self.retirement_preparations.clone()
+    }
+
     /// The protected tails the actor validated on `store`, shared with every
     /// synced row it decides there.
     pub fn released_tails(

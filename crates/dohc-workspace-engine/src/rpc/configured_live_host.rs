@@ -1232,6 +1232,17 @@ impl EngineService {
         })
     }
 
+    pub(super) fn configured_settlement_limit(&self) -> Option<usize> {
+        self.ordinary_live_host
+            .get()
+            .map(|host| host.settlement.0)
+            .or_else(|| {
+                self.configured_live_host
+                    .get()
+                    .and_then(|host| host.settlement.as_ref().map(|row| row.0))
+            })
+    }
+
     pub(super) fn configured_settlement_admission(
         &self,
         ctx: &RequestContext,

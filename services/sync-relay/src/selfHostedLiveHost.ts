@@ -12,7 +12,7 @@ import * as Queue from "effect/Queue";
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor} from "./storage/serviceHostEnrollment";
+import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor, ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import {deriveServiceHostBearer} from "./serviceHostCredential";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
@@ -334,6 +334,11 @@ export async function startSelfHostedLiveHost(options: {
       const unblocked = current?.unblock(document) ?? false;
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
+    },
+    /** Stop through the running daemon, which delivers the document's edits first. With none running, `fence` runs unprepared. */
+    async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
+      callerSignal?: AbortSignal): Promise<T | "waiting"> {
+      return current && !current.invalidated.aborted ? current.stop(document, fence, callerSignal) : fence();
     },
     /**
      * The running daemon's page reads and Try again of refused queues it keeps

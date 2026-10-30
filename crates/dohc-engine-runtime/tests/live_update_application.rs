@@ -916,6 +916,7 @@ async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disp
         Arc::new(NoFaults),
         Some(reservation),
         100_000_000,
+        None,
     ));
     assert!(
         std::future::poll_fn(|context| std::task::Poll::Ready(
@@ -947,6 +948,654 @@ impl FaultInjector for PanicCommit {
             "injected worker panic"
         );
         FaultAction::Continue
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_hold_accepted_prefix_survives_restart_without_publishing_a_private_owner_tail() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dohc_engine_collab::live_update_application::*;
+    use dohc_engine_collab::markdown_write_obligations::{self as obligations, Kind};
+    use dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent;
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let source = data["source"].as_str().unwrap();
+    let wire = yrs::Doc::new();
+    wire.transact_mut()
+        .apply_update(
+            yrs::Update::decode_v1(
+                &STANDARD
+                    .decode(data["checkpoint"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for name in ["dohcLineageEpoch", "dohcMarkdownSourceReader"] {
+        wire.get_or_insert_map("meta")
+            .remove(&mut wire.transact_mut(), name);
+    }
+    let doc = Ydoc::wire();
+    doc.apply(
+        &wire
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default()),
+    )
+    .unwrap();
+    let key = DocKey::new("workspace", "main", "one").unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "one".into(),
+                path: "one.md".into(),
+                text: source.into(),
+                moment_id: "source".into(),
+                request_id: None,
+                metadata_origin: "test".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &key,
+        ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        3,
+    )
+    .unwrap();
+    let claim = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap()
+        .lineage_claim_id
+        .unwrap();
+    let binding = LiveObjectBinding {
+        lineage_claim_id: claim.clone(),
+        restore_fence_generation: 0,
+        ..binding("one")
+    };
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET path='one.md' WHERE object_id='one'", [])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO ydoc_owner_base_sources(workspace_id,version_id,object_id,lineage_claim_id,\
+            path,source_moment_id,source_blob_sha256,source_byte_length) VALUES('workspace','main','one',\
+            ?1,'one.md','source',?2,?3)", rusqlite::params![claim,hex_sha256(source.as_bytes()),source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,\
+            main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,\
+            baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
+            covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
+            max_pending_bytes,max_pending_age_ms) VALUES('relay-A','adoption','workspace','main','one',?1,?2,\
+            'source',?3,?4,0,0,?3,?3,0,0,0,'null','{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
+            rusqlite::params![claim,serde_json::to_string(&binding).unwrap(),hex_sha256(source.as_bytes()),source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                    rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
+        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+            .map_err(StorageError::persist_public)
+    }).unwrap();
+    drop(store);
+    std::fs::write(root.path().join("one.md"), source).unwrap();
+    let modified = std::fs::metadata(root.path().join("one.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let mut actor = supervisor.open(&db, 4).unwrap().actor;
+    let mut terminal = None;
+    let mut accepted_sequence = 0;
+    let mut event_to_replay = None;
+    for restart in [false, true] {
+        actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(markdown_witness_reader(&root))),
+                )),
+            ))
+            .await
+            .unwrap();
+        let owner = actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        let handle = owner
+            .register("relay-A".into(), coordinate("connection"), binding.clone())
+            .await
+            .unwrap();
+        if !restart {
+            let bytes = doc.richdoc_append_paragraph("Accepted visitor prefix");
+            let mut admitted = event("visitor", 1, "one", bytes);
+            admitted.metadata.accepted.binding = binding.clone();
+            let applied = ack(handle
+                .apply(admitted.clone(), Arc::new(NoFaults), 100_000_000)
+                .await
+                .unwrap());
+            accepted_sequence = applied.local_ydoc_sequence;
+            terminal = Some(admitted.metadata.accepted.receipt.clone());
+            event_to_replay = Some(admitted);
+            actor
+                .ydoc_record_update(
+                    key.clone(),
+                    "one.md".into(),
+                    ContentKind::Richdoc,
+                    Regime::Replicated,
+                    doc.richdoc_append_paragraph("Private owner tail"),
+                    None,
+                    None,
+                    Some(claim.clone()),
+                    false,
+                    None,
+                    Some("private-tail".into()),
+                    5,
+                    Arc::new(NoFaults),
+                    tokio_util::sync::CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let pending = handle
+            .settle(
+                terminal.clone(),
+                100,
+                root.path().to_owned(),
+                10,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                AdmittedNativeHistoryReconstruction {
+                    policy: NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024,
+                    },
+                    reservation: Arc::new(()),
+                },
+            )
+            .await;
+        assert!(matches!(
+            pending,
+            Err(RuntimeError::MarkdownWriteHeld { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("one.md")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join("one.md"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        let replay = ack(handle
+            .apply(
+                event_to_replay.clone().unwrap(),
+                Arc::new(NoFaults),
+                100_000_000,
+            )
+            .await
+            .unwrap());
+        assert!(replay.application_replayed);
+        assert_eq!(replay.local_ydoc_sequence, accepted_sequence);
+        {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("moments").unwrap(), 1);
+            assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+            assert_eq!(
+                store
+                    .table_row_count("live_device_update_applications")
+                    .unwrap(),
+                1
+            );
+            let head: String = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT blob_sha256 FROM snapshots WHERE object_id='one'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(head, hex_sha256(source.as_bytes()));
+            let persisted = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            assert!(persisted.marker.head_update_seq > accepted_sequence);
+            let body = persisted.doc.project(ContentKind::Richdoc).unwrap().content;
+            assert!(
+                body.contains("Accepted visitor prefix") && body.contains("Private owner tail")
+            );
+            let owed = store
+                .read_with(|conn| obligations::pending_in(conn, "workspace"))
+                .unwrap();
+            assert_eq!(owed.len(), 1);
+            assert_eq!(owed[0].kind, Kind::AuditedSettle);
+        }
+        if restart {
+            let grant = Arc::new(MarkdownConversionConsent::new(
+                key.clone(),
+                "owner-session".into(),
+                Some(claim.clone()),
+                None,
+                hex_sha256(source.as_bytes()),
+                Some(hex_sha256(source.as_bytes())),
+            ));
+            let saved = handle
+                .settle_with_consent(
+                    terminal.clone(),
+                    100,
+                    root.path().to_owned(),
+                    11,
+                    Arc::new(NoFaults),
+                    tokio_util::sync::CancellationToken::new(),
+                    AdmittedNativeHistoryReconstruction {
+                        policy: NativeHistoryReconstruction {
+                            working_reserve_bytes: 8 * 1024 * 1024,
+                        },
+                        reservation: Arc::new(()),
+                    },
+                    Some(grant.clone()),
+                )
+                .await
+                .unwrap();
+            assert!(grant.is_consumed() && saved.materialized);
+            assert_eq!(saved.terminal_cursor, 1);
+            let file = std::fs::read_to_string(root.path().join("one.md")).unwrap();
+            assert!(file.contains("Accepted visitor prefix"));
+            assert!(!file.contains("Private owner tail"));
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 1);
+            let body = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .project(ContentKind::Richdoc)
+                .unwrap()
+                .content;
+            assert!(body.contains("Private owner tail"));
+            let covered_sequence: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT local_ydoc_sequence FROM live_device_settlements",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(covered_sequence, accepted_sequence);
+            let owed = store
+                .read_with(|conn| obligations::pending_in(conn, "workspace"))
+                .unwrap();
+            assert_eq!(
+                owed.iter()
+                    .filter(|row| row.kind == Kind::WitnessRefresh)
+                    .count(),
+                1
+            );
+            let held = owed
+                .iter()
+                .find(|row| row.kind == Kind::AuditedSettle)
+                .unwrap();
+            let retry: obligations::AuditedRetry =
+                serde_json::from_value(held.retry_inputs.clone()).unwrap();
+            assert!(
+                !store.read_with(|conn| retry.covered_in(conn)).unwrap(),
+                "the accepted prefix cannot acknowledge the held private tail"
+            );
+        }
+        owner.retire();
+        supervisor.close(&db).unwrap();
+        if !restart {
+            actor = supervisor.open(&db, 20).unwrap().actor;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_hold_accepted_prefix_settles_full_intervals_with_interleaved_private_owner_edits()
+{
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dohc_engine_collab::live_update_application::*;
+    use dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent;
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
+
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let source = data["source"].as_str().unwrap();
+    let wire = yrs::Doc::new();
+    wire.transact_mut()
+        .apply_update(
+            yrs::Update::decode_v1(
+                &STANDARD
+                    .decode(data["checkpoint"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for name in ["dohcLineageEpoch", "dohcMarkdownSourceReader"] {
+        wire.get_or_insert_map("meta")
+            .remove(&mut wire.transact_mut(), name);
+    }
+    let doc = Ydoc::wire();
+    doc.apply(
+        &wire
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default()),
+    )
+    .unwrap();
+    let key = DocKey::new("workspace", "main", "one").unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "one".into(),
+                path: "one.md".into(),
+                text: source.into(),
+                moment_id: "source".into(),
+                request_id: None,
+                metadata_origin: "test".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &key,
+        ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        3,
+    )
+    .unwrap();
+    let claim = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap()
+        .lineage_claim_id
+        .unwrap();
+    let binding = LiveObjectBinding {
+        lineage_claim_id: claim.clone(),
+        restore_fence_generation: 0,
+        ..binding("one")
+    };
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET path='one.md' WHERE object_id='one'", [])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO ydoc_owner_base_sources(workspace_id,version_id,object_id,lineage_claim_id,\
+            path,source_moment_id,source_blob_sha256,source_byte_length) VALUES('workspace','main','one',\
+            ?1,'one.md','source',?2,?3)", rusqlite::params![claim,hex_sha256(source.as_bytes()),source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,\
+            main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,\
+            baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,\
+            covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,\
+            max_pending_bytes,max_pending_age_ms) VALUES('relay-A','adoption','workspace','main','one',?1,?2,\
+            'source',?3,?4,0,0,?3,?3,0,0,0,'null','{\"hostId\":\"host\",\"hostEpoch\":2,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1000000,1000000)",
+            rusqlite::params![claim,serde_json::to_string(&binding).unwrap(),hex_sha256(source.as_bytes()),source.len() as i64])
+            .map_err(StorageError::persist_public)?;
+        tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                    rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
+        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+            .map_err(StorageError::persist_public)
+    }).unwrap();
+    drop(store);
+    std::fs::write(root.path().join("one.md"), source).unwrap();
+
+    const LIMIT: usize = 2;
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 4).unwrap().actor;
+    actor
+        .configure_reader_resolver(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                dohc_engine_reader::Reader::new(Some(markdown_witness_reader(&root))),
+            )),
+        ))
+        .await
+        .unwrap();
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register("relay-A".into(), coordinate("connection"), binding.clone())
+        .await
+        .unwrap();
+    let reconstruction = || AdmittedNativeHistoryReconstruction {
+        policy: NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        reservation: Arc::new(()),
+    };
+    let mut terminal = None;
+    for cursor in 1..=2 {
+        let mut accepted = event(
+            &format!("accepted-{cursor}"),
+            cursor,
+            "one",
+            doc.richdoc_append_paragraph(&format!("Accepted visitor {cursor}")),
+        );
+        accepted.metadata.accepted.binding = binding.clone();
+        let applied = ack(handle
+            .apply_with_reservation(
+                accepted.clone(),
+                Arc::new(NoFaults),
+                None,
+                100_000_000,
+                Some(LIMIT),
+            )
+            .await
+            .unwrap());
+        assert_eq!(applied.local_ydoc_sequence, if cursor == 1 { 1 } else { 3 });
+        terminal = Some(accepted.metadata.accepted.receipt);
+        if cursor == 1 {
+            let private = Ydoc::wire();
+            private.apply(&doc.encode_full_state()).unwrap();
+            actor
+                .ydoc_record_update(
+                    key.clone(),
+                    "one.md".into(),
+                    ContentKind::Richdoc,
+                    Regime::Replicated,
+                    private.richdoc_append_paragraph("Private owner boundary"),
+                    None,
+                    None,
+                    Some(claim.clone()),
+                    false,
+                    None,
+                    Some("private-boundary".into()),
+                    5,
+                    Arc::new(NoFaults),
+                    tokio_util::sync::CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let held = handle
+        .settle(
+            terminal.clone(),
+            LIMIT,
+            root.path().to_owned(),
+            10,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            reconstruction(),
+        )
+        .await;
+    assert!(
+        matches!(held, Err(RuntimeError::MarkdownWriteHeld { .. })),
+        "{held:?}"
+    );
+    let consent = Arc::new(MarkdownConversionConsent::new(
+        key.clone(),
+        "owner-session".into(),
+        Some(claim.clone()),
+        None,
+        hex_sha256(source.as_bytes()),
+        Some(hex_sha256(source.as_bytes())),
+    ));
+    let first = handle
+        .settle_with_consent(
+            terminal.clone(),
+            LIMIT,
+            root.path().to_owned(),
+            11,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            reconstruction(),
+            Some(consent),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.terminal_cursor, 2);
+    assert_eq!(first.local_ydoc_sequence, 1);
+
+    for round in 0..3 {
+        let first_cursor = 3 + round * LIMIT as i64;
+        for cursor in first_cursor..first_cursor + LIMIT as i64 {
+            let mut accepted = event(
+                &format!("accepted-{cursor}"),
+                cursor,
+                "one",
+                doc.richdoc_append_paragraph(&format!("Accepted visitor {cursor}")),
+            );
+            accepted.metadata.accepted.binding = binding.clone();
+            ack(handle
+                .apply_with_reservation(
+                    accepted.clone(),
+                    Arc::new(NoFaults),
+                    None,
+                    100_000_000,
+                    Some(LIMIT),
+                )
+                .await
+                .unwrap());
+            terminal = Some(accepted.metadata.accepted.receipt);
+        }
+        let mut blocked = event(
+            &format!("blocked-{round}"),
+            first_cursor + LIMIT as i64,
+            "one",
+            Ydoc::wire().encode_full_state(),
+        );
+        blocked.metadata.accepted.binding = binding.clone();
+        assert!(matches!(
+            handle
+                .apply_with_reservation(blocked, Arc::new(NoFaults), None, 100_000_000, Some(LIMIT))
+                .await
+                .unwrap(),
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired)
+        ));
+        let saved = handle
+            .settle(
+                terminal.clone(),
+                LIMIT,
+                root.path().to_owned(),
+                20 + round,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("full interval {round}: {error:?}"));
+        assert_eq!(saved.application_count, LIMIT);
+        assert_eq!(saved.terminal_cursor, first_cursor + LIMIT as i64 - 1);
+        assert_eq!(
+            saved.local_ydoc_sequence, 1,
+            "the pending owner sequence stays uncovered"
+        );
+        assert!(saved.materialized);
+        let file = std::fs::read_to_string(root.path().join("one.md")).unwrap();
+        assert!(file.contains(&format!("Accepted visitor {}", saved.terminal_cursor)));
+        assert!(!file.contains("Private owner boundary"));
+        let store = EngineStore::open_read_only(&db).unwrap();
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert!(
+            persisted
+                .doc
+                .project(ContentKind::Richdoc)
+                .unwrap()
+                .content
+                .contains("Private owner boundary")
+        );
+        let covered: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT MAX(local_ydoc_sequence) FROM live_device_settlements",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(covered, 1);
+    }
+    owner.retire();
+    supervisor.close(&db).unwrap();
+}
+
+fn markdown_witness_reader(root: &ScratchDir) -> dohc_engine_reader::Config {
+    let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+    let output = std::process::Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+    assert!(output.status.success());
+    let mut runtime: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let node = PathBuf::from(
+        runtime
+            .as_object_mut()
+            .unwrap()
+            .remove("path")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
+    runtime["sha256"] = hex_sha256(&std::fs::read(&node).unwrap()).into();
+    let mut manifest = serde_json::json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
+    let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
+        .replace("MANIFEST", &manifest.to_string())
+        .replace("MODE", "\"witness-unsafe\"");
+    let bundle = root.path().join("reader.cjs");
+    std::fs::write(&bundle, &script).unwrap();
+    manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
+    manifest["sources"] = serde_json::json!([]);
+    let manifest_path = root.path().join("reader-manifest.json");
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    dohc_engine_reader::Config {
+        node,
+        bundle,
+        manifest: manifest_path,
     }
 }
 

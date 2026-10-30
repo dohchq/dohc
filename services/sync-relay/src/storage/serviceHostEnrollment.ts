@@ -10,7 +10,8 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
-import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
+import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, serviceActivationRetirementOpen,
+  type RetirableServiceActivation} from "./serviceActivationRetirement";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {badRequest, notFound, relayError} from "../errors";
 
@@ -120,8 +121,15 @@ export interface ServiceHostHeldActivation {
   /** Throws unless the host still holds the document for an unadmitted live edit. Runs inside the enrollment transaction. */
   assertHeld(): void;
 }
+/** The activation whose new local edits the service host's engine blocked for Stop. */
+export interface ServiceHostRetirementPreparation extends RetirableServiceActivation {
+  /** Throws unless the host connection that prepared it still stands. Runs inside the enrollment transaction. */
+  assertCurrent(): void;
+}
 export interface SetServiceHostEnrollmentEnabledInput {
-  workspaceId: string; path: string; objectId?: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number; nowMs: number; guard(): void;
+  workspaceId: string; path: string; objectId?: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number;
+  /** Stop of a prepared activation retires only the activation the host prepared. */
+  prepared?: ServiceHostRetirementPreparation; nowMs: number; guard(): void;
 }
 export interface ServiceHostCandidateCursor {workspaceId: string; shareId: string}
 export interface ServiceHostCandidatePage {shares: readonly SyncRelayShareRow[]; nextCursor: ServiceHostCandidateCursor | null}
@@ -455,7 +463,13 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       if (typeof generation !== "number" || !Number.isSafeInteger(generation)) throw new Error("Invalid document restore generation.");
       if (input.restoreFenceGeneration !== undefined && generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
       // The prepared activation's obligation keeps the fence of the first Stop.
-      const retirement = openServiceActivationRetirement(storage, {workspaceId, objectId: current.objectId}, nowMs);
+      // A new one needs the host to have delivered its edits and blocked new ones.
+      const retirement = openServiceActivationRetirement(storage, {workspaceId, objectId: current.objectId}, nowMs, activation => {
+        const prepared = input.prepared;
+        if (prepared?.activationId !== activation.activationId || prepared.lineageClaimId !== activation.lineageClaimId) throw relayError("edits-pending");
+        if (prepared.restoreFenceGeneration !== activation.restoreFenceGeneration) throw new ServiceHostRetirementConflict(activation.restoreFenceGeneration);
+        prepared.assertCurrent();
+      });
       const high = retirement ? {cursor: retirement.acceptedThrough} : storage.db.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')")
         .get(workspaceId,current.objectId,workspaceId,current.objectId);
       acceptedCursor = timestamp(high?.cursor ?? 0);

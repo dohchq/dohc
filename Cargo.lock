@@ -528,6 +528,7 @@ dependencies = [
  "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-files",
+ "dohc-engine-reader",
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "dohc-linux-files",
@@ -539,6 +540,7 @@ dependencies = [
  "sha2",
  "syn 2.0.119",
  "thiserror",
+ "tokio",
  "yrs",
 ]
 

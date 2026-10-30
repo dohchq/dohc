@@ -924,13 +924,16 @@ fn retain_fenced_in_tx(
 }
 
 /// Called only by the ordinary local append transaction. Remote applications
-/// use their own receipt ledger and never enter this path.
+/// use their own receipt ledger and never enter this path. An activation
+/// whose Stop prepared, or whose retirement began, refuses the append as a
+/// frozen queue does, and the whole transaction rolls back.
 pub fn append_adopted_local_update_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &crate::DocKey,
     path: &str,
     sequence: i64,
     update: &[u8],
+    preparations: &crate::live_update_application::RetirementPreparations,
     now_ms: i64,
 ) -> Result<(), crate::CollabError> {
     use crate::CollabError;
@@ -948,17 +951,18 @@ pub fn append_adopted_local_update_in_tx(
         }
         return Ok(());
     };
-    let saved: Option<(String, i64, i64, String)> = tx
+    let saved: Option<(String, i64, i64, String, String)> = tx
         .query_row(
-            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id FROM {CURRENT_ACTIVATIONS}
+            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id,relay_database_namespace FROM {CURRENT_ACTIVATIONS}
          WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
             params![key.workspace_id, key.version_id, key.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()
         .map_err(read_sql)
         .map_err(map)?;
-    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
+    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id, namespace)) = saved
+    else {
         if has_adopted_owner_in(tx, key)? {
             return Err(CollabError::OwnerOutboxFrozen);
         }
@@ -976,6 +980,19 @@ pub fn append_adopted_local_update_in_tx(
         || marker.path.as_deref() != Some(path)
     {
         return Err(map(OwnerOutboxError::ParentMismatch));
+    }
+    // After the relay's fence, an edit could reach neither the relay nor
+    // the retirement that answers for this activation.
+    let retiring: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_retirements WHERE relay_database_namespace=?1 AND activation_id=?2)",
+            params![namespace, adoption_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)
+        .map_err(map)?;
+    if retiring || preparations.blocks(&adoption_id, binding.restore_fence_generation) {
+        return Err(CollabError::OwnerOutboxFrozen);
     }
     // Adoption authenticated these immutable bytes. Each keystroke needs only
     // their retained metadata; loading and hashing the full base scales with
@@ -1803,7 +1820,10 @@ fn validate_receipt(receipt: &OwnerDeliveryReceipt) -> Result<(), OwnerOutboxErr
 
 /// Acknowledge the pending prefix of `outbox_id` that `receipts` name, in
 /// order, keeping each receipt. Every receipt must name its entry's exact
-/// delivery and digest.
+/// delivery and digest. Only a retirement calls this, with receipts the
+/// relay's journal proved, so a quarantined outbox accepts them too: its
+/// freeze stops delivery, and a Try again whose grant ended may have been
+/// accepted before its acknowledgement was lost.
 pub(crate) fn acknowledge_in_tx(
     tx: &rusqlite::Transaction<'_>,
     outbox_id: &str,
@@ -1811,7 +1831,6 @@ pub(crate) fn acknowledge_in_tx(
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     validate_receipts(receipts)?;
     let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-    require_unfrozen(&parent, receipts)?;
     acknowledge_prefix_in(tx, &parent, receipts)
 }
 
@@ -1895,6 +1914,33 @@ pub(crate) fn abandon_seed_in_tx(
     .map_err(write_sql)?;
     refresh_pending_in_tx(tx, outbox_id)?;
     delete_binary_blob_if_unreferenced(tx, &digest)
+}
+
+/// The terminal reason of a refused entry a retirement kept: the relay's
+/// journal proved it absent, and nothing can deliver it again.
+pub(crate) const RETIREMENT_KEPT: &str = "retirement-kept";
+
+/// Retire a pending entry of a quarantined outbox the relay refused, which
+/// the caller proved was never accepted. Like a host refusal, it keeps the
+/// entry's bytes, and the outbox stays quarantined with its refusals and
+/// checkpoints.
+pub(crate) fn keep_refused_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(), OwnerOutboxError> {
+    let kept = tx
+        .execute(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,\
+             terminal_reason=?3 WHERE outbox_id=?1 AND sequence=?2 AND pending=1 AND accepted_receipt_json IS NULL \
+             AND update_blob_digest=update_digest",
+            params![outbox_id, sequence, RETIREMENT_KEPT],
+        )
+        .map_err(write_sql)?;
+    if kept != 1 {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    refresh_pending_in_tx(tx, outbox_id)
 }
 
 fn acknowledge_prefix_in(

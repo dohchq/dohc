@@ -2,7 +2,8 @@ import {afterEach, expect, it} from "vitest";
 import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
-import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES} from "./serviceHostEnrollment";
+import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
+  type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion} from "./accountDeletion";
 import type {StorageContext} from "./context";
@@ -645,4 +646,40 @@ it("candidate scanning advances past a full page of noncanonical shares", async 
   const second = f.storage.scanServiceHostCandidateShares(first.nextCursor!);
   expect(second.shares.map(share => share.shareId)).toEqual(["candidate-64", scope.shareId]);
   expect(second.nextCursor).toBeNull();
+});
+
+// Proves: Stop opens a new retirement only with the host's preparation of
+// exactly that activation and restore generation, checked while the
+// connection that prepared it still stands. A refused Stop fences nothing.
+// Replaying the open retirement needs no preparation and keeps its fence.
+it("retires a prepared activation only with its host's preparation and replays that retirement", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  const activationId = retainServiceActivation(f.raw, key.namespace, true);
+  const candidate = f.storage.retirableServiceActivation(enrolled)!;
+  expect(candidate).toEqual({activationId, lineageClaimId: binding.lineageClaimId, restoreFenceGeneration: binding.restoreFenceGeneration});
+  const retire = (prepared?: ServiceHostRetirementPreparation) =>
+    f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 20, ...(prepared ? {prepared} : {})});
+  const unchanged = () => {
+    expect(f.storage.serviceActivationRetirement(enrolled)).toBeNull();
+    expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+    expect(f.storage.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  };
+  expect(() => retire()).toThrow(expect.objectContaining({code: "edits-pending"}));
+  unchanged();
+  expect(() => retire({...candidate, activationId: "another-activation", assertCurrent() {}})).toThrow(expect.objectContaining({code: "edits-pending"}));
+  expect(() => retire({...candidate, lineageClaimId: "c".repeat(64), assertCurrent() {}})).toThrow(expect.objectContaining({code: "edits-pending"}));
+  // The generation changed after the host prepared.
+  expect(() => retire({...candidate, restoreFenceGeneration: 6, assertCurrent() {}})).toThrow(ServiceHostRetirementConflict);
+  // The connection that prepared it was replaced.
+  expect(() => retire({...candidate, assertCurrent() {throw new Error("Service host registration was retired.");}})).toThrow("registration was retired");
+  unchanged();
+  let checked = 0;
+  expect(retire({...candidate, assertCurrent() {checked++;}})).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(checked).toBe(1);
+  const fence = f.storage.serviceActivationRetirement(enrolled)!;
+  expect(fence).toMatchObject({activationId, restoreFenceGeneration: binding.restoreFenceGeneration});
+  expect(f.storage.retirableServiceActivation(enrolled)).toBeNull();
+  // A repeated Stop, as after a lost reply, replays the open retirement without a preparation.
+  expect(retire()).toMatchObject({retired: true, acceptedCursor: fence.acceptedThrough});
+  expect(f.storage.serviceActivationRetirement(enrolled)).toEqual(fence);
 });

@@ -26,9 +26,11 @@ import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveComm
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
+import {settlementPending} from "./liveSettlement.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
+import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
@@ -84,6 +86,8 @@ export interface ServiceHostedSet {
   readonly documents: readonly ServiceHostedDocument[];
   readonly departing: readonly ServiceHostedDocument[];
 }
+// The lineages whose kept queue stays frozen at its owner's refused adoption seed, and those whose queue holds another refused edit.
+interface KeptHeads {readonly seeded: ReadonlySet<string>; readonly refused: ReadonlySet<string>}
 interface ServiceHostedDocument {readonly workspaceId: string; readonly objectId: string; readonly path: string; readonly shareId: string}
 function parseServiceWorkspace(item: unknown) {
   const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["hostedReplication"]);
@@ -519,7 +523,7 @@ export async function startServiceLiveHost(options: {
     const forget = (key: string) => {activation!.removeTarget(hosted.get(key)!.target); unhost(key);};
     const unhost = (key: string) => {
       hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key); keeping.delete(key);
-      grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
+      grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     // The unload names the activation the relay retains, so it cannot end another one's state.
@@ -556,10 +560,10 @@ export async function startServiceLiveHost(options: {
     // departing document or delivers its queues, so each of these scans runs
     // once until the document returns: the documents whose departure ended
     // every grant, and the lineages each one's first scan in its document's
-    // work found frozen at the seed. Once a departing document unloaded,
-    // nothing applies to it either: `observed` holds the documents whose
+    // work found frozen at the seed or holding a refused edit. Once a departing
+    // document unloaded, nothing applies to it either: `observed` holds the documents whose
     // departure recorded the checkpoints their copies must hold.
-    const grantsEnded = new Set<string>(), seededOf = new Map<string, ReadonlySet<string>>(), observed = new Set<string>();
+    const grantsEnded = new Set<string>(), heldOf = new Map<string, KeptHeads>(), observed = new Set<string>();
     // Whether one of the document's refusals in its attached store has no recovery copy.
     const uncopied = (row: {target: ServiceActivationTarget; objectId: string}) => {
       const attached = attachments.get(row.target.workspaceId);
@@ -587,28 +591,32 @@ export async function startServiceLiveHost(options: {
     // that attempt. The queue keeps its bytes. A refusal whose quarantine never
     // reached the engine is quarantined now, and a row whose queue delivered
     // again, or that the engine no longer holds, is forgotten. Resolves to
-    // the engine's answer whether the queue stays frozen at its owner's
+    // "seed" when the engine answers that the queue stays frozen at its owner's
     // adoption seed at its document's current restore generation, which no
-    // settlement may pass. The row of a queue holding a refused seed, at any
-    // generation, records the checkpoint a recovery copy reads now, which its
-    // copy must hold.
-    const endKeptRetry = async (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => {
+    // settlement may pass, and to "edits" while it holds another refused edit.
+    // The row of a queue holding a refused seed, at any generation, records the
+    // checkpoint a recovery copy reads now, which its copy must hold.
+    const endKeptRetry = async (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox): Promise<"seed" | "edits" | undefined> => {
       let head;
       try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
       catch (error) {
         if (!(error instanceof Error && error.message === "owner-outbox-not-found")) throw error;
         storage.forgetServiceKeptEdits(kept);
-        return false;
+        return undefined;
       }
       const quarantined = head.state === "quarantined";
       if (quarantined ? head.retryDeliveryId !== null : !kept.retrying && head.entry?.deliveryId === kept.headDeliveryId) {
-        await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});
+        // An ended grant keeps the refusal its queue recorded. One that never
+        // reached the engine records it now, so retirement can keep the edit.
+        await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason, ...(quarantined ? {} :
+          {refusal: {deliveryId: kept.headDeliveryId, key: `quarantined:${kept.headDeliveryId}`}})});
         // An ended grant can freeze the queue at its seed; only the engine can say.
         head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);
-      } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return false;}
+      } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return undefined;}
       if (kept.retrying) storage.endServiceKeptEditsRetry(kept);
       storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
-      return head.frozenAtRefusedSeed;
+      // A seed at an earlier restore generation no longer blocks settlement.
+      return head.frozenAtRefusedSeed ? "seed" : head.entry && !head.entry.appendKey.startsWith("owner-adoption:") ? "edits" : undefined;
     };
     // Runs `work` on every queue of the document in its attached store, page
     // by page, so each gets its turn. Takes no turn of its document's work
@@ -641,13 +649,15 @@ export async function startServiceLiveHost(options: {
         storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
       });
     // Runs `endKeptRetry` on every queue of the document. Resolves to the lineages whose queue stays frozen
-    // at the seed at the current restore generation; an earlier generation's seed freezes nothing.
-    const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean) => {
-      const seeded = new Set<string>();
+    // at the seed at the current restore generation, where an earlier generation's seed freezes nothing, and
+    // those whose queue holds another refused edit.
+    const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean): Promise<KeptHeads> => {
+      const heads = {seeded: new Set<string>(), refused: new Set<string>()};
       await eachKeptOutbox(row, joined, inTurn, async (kept, outbox) => {
-        if (await endKeptRetry(kept, outbox)) seeded.add(kept.binding.lineageClaimId);
+        const head = await endKeptRetry(kept, outbox);
+        if (head) (head === "seed" ? heads.seeded : heads.refused).add(kept.binding.lineageClaimId);
       });
-      return seeded;
+      return heads;
     };
     // The engine refused the document as not ready, as once it parked. Only a pull that starts after
     // this can tell: a parked document is no longer departed, and one its scope still held becomes so.
@@ -657,33 +667,46 @@ export async function startServiceLiveHost(options: {
       activation!.removeTarget(row.target);
       return PARKING;
     };
+    // Whether a refusal on the lineage's queue in the document's attached store has no recovery copy.
+    const uncopiedOn = (row: {target: ServiceActivationTarget; objectId: string}, lineageClaimId: string) => {
+      const attached = attachments.get(row.target.workspaceId);
+      if (!attached) return false;
+      for (let after: number | null = 0; after !== null;) {
+        const page = storage.serviceKeptEditsOf({workspaceId: row.target.workspaceId, objectId: row.objectId}, after);
+        if (page.keptEdits.some(kept => !kept.copied && kept.binding.lineageClaimId === lineageClaimId && sameKeptEditsIdentity(kept.identity, attached.identity))) return true;
+        after = page.nextCursor;
+      }
+      return false;
+    };
     // A document whose activation retires leaves through its retirement alone,
     // whatever this daemon loaded, so it never waits on an ordinary unload. Once
     // it retired, its successor activates when its document is hosted again.
-    // Null while no retirement is open.
+    // Null while no retirement is open, or while it departs as an ordinary unload instead.
     const retire = async (key: string, joined: AbortSignal): Promise<string | undefined | null> => {
       const row = hosted.get(key);
       if (!row) return null;
-      // A retirement must settle, which no settlement can do past a queue frozen at its owner's adoption seed.
-      // Such a document departs as an ordinary unload instead, with its accepted work kept for its owner's recovery copy.
       const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
       const open = storage.serviceActivationRetirement(document);
       if (!open) return null;
-      // An unfinished restore continues through the document's target, so the document neither retires nor departs until it ends.
-      // Its end can move the document's restore generation, which decides whose seed stays frozen, so the seeds are read after it.
+      // An unfinished restore can change the generation whose held heads retirement reads.
       if (storage.serviceRestoreInProgress(document)) {
         if (!grantsEnded.has(key)) {await endKeptRetries(row, joined, false); grantsEnded.add(key);}
-        seededOf.delete(key);
+        heldOf.delete(key);
         return "Waiting for its restore to finish.";
       }
-      let seeded = seededOf.get(key);
-      if (!seeded) {seeded = await endKeptRetries(row, joined, false); seededOf.set(key, seeded); grantsEnded.add(key);}
-      if (seeded.has(open.lineageClaimId)) return null;
+      let heads = heldOf.get(key);
+      if (!heads) {heads = await endKeptRetries(row, joined, false); heldOf.set(key, heads); grantsEnded.add(key);}
+      // Retirement keeps a refused edit out of the queue its recovery copy reads, so until a copy holds it the
+      // document departs as an ordinary unload. A queue frozen at its owner's adoption seed waits for nothing:
+      // the engine abandons a seed nothing applied, and holds the retirement on any other.
+      if (heads.refused.has(open.lineageClaimId) && uncopiedOn(row, open.lineageClaimId)) return null;
       const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
       const step = await activation!.retire(row.target, row.objectId, joined, {
         departed: () => required !== undefined && reachedSince(attached!, row.objectId, required),
         parked: () => required !== undefined && goneSince(attached!, row.objectId, required)});
-      if (!step) return null;
+      // A seed the engine cannot abandon holds the retirement. No settlement may pass it, so the document
+      // departs as an ordinary unload, with its accepted work kept for its owner's recovery copy.
+      if (!step || step.kind === "held") return null;
       if (step.kind === "pending") return step.reason;
       // A retired document whose refusals this host kept stays, with its workspace attached, until no Try again
       // of them stays granted and its owner saved a recovery copy of each. Its rows go then.
@@ -728,9 +751,9 @@ export async function startServiceLiveHost(options: {
           // unsettled: settling would drop the owner's pre-adoption head from
           // the file. It unloads with its queue's bytes kept and nothing published.
           const waiting = await runDocument(document, joined, async operation => {
-            let seeded = seededOf.get(key);
-            if (!seeded) {seeded = await endKeptRetries(row, operation, true); seededOf.set(key, seeded);}
-            if (settleTarget && !seeded.has(document.lineageClaimId)) {
+            let heads = heldOf.get(key);
+            if (!heads) {heads = await endKeptRetries(row, operation, true); heldOf.set(key, heads);}
+            if (settleTarget && !heads.seeded.has(document.lineageClaimId)) {
               const settled = await activation!.settleDeparted(row.target, document, operation);
               if (settled?.kind === "unready") return awaitParking(key, row);
               if (settled?.kind === "pending") return settled.reason;
@@ -767,7 +790,11 @@ export async function startServiceLiveHost(options: {
           if (document) {
             if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
             const {consumer} = activation!.consumer(document);
-            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            if (settleTarget) {
+              const settled = await consumer.settle(document, operation);
+              if (settlementPending(settled)) return settled.reason;
+              if (!settled.materialized) return "Settlement has not reached the file.";
+            }
             const more = await publish(operation);
             if (more) return more;
           }
@@ -812,7 +839,11 @@ export async function startServiceLiveHost(options: {
           if (!lost) {
             if (!quiet()) return undefined;
             const {consumer} = activation!.consumer(document);
-            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            if (settleTarget) {
+              const settled = await consumer.settle(document, operation);
+              if (settlementPending(settled)) return settled.reason;
+              if (!settled.materialized) return "Settlement has not reached the file.";
+            }
             // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
             if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
             if (!quiet()) return undefined;
@@ -1089,7 +1120,7 @@ export async function startServiceLiveHost(options: {
       for (const [key, document] of hosted) {
         if (isDeepStrictEqual(wanted.get(key), document)) {
           if (leaving.delete(key)) {
-            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
+            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
             activation.addTarget(document.target, document.objectId);
           }
         } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
@@ -1411,6 +1442,68 @@ export async function startServiceLiveHost(options: {
         });
         if (outcome === "granted") await wake(kept.binding, callerSignal);
         return outcome;
+      },
+      /**
+       * Runs `fence`, the relay's Stop of a hosted document, once the engine
+       * holds nothing of it that waits for delivery or a Try again, and refuses
+       * new local edits of the activation Stop retires. In the document's work
+       * it drains the document within its budgets, then prepares that
+       * activation for this connection. `waiting` while edits or a Try again
+       * remain, with nothing blocked or fenced. With no activation to retire, as
+       * after a first Stop, or none this host holds, `fence` runs unprepared,
+       * and the relay refuses an activation that needs a preparation. The block
+       * ends unless the fence recorded that activation's retirement.
+       */
+      async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
+        callerSignal?: AbortSignal): Promise<T | "waiting"> {
+        check();
+        const candidate = storage.retirableServiceActivation(document), attached = checked(document.workspaceId), driver = activation;
+        if (!candidate || hostedKey(document) === undefined || !attached || !driver) return fence();
+        // A dormant document reloads, so its queues can drain.
+        try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
+        const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});
+        const current = () => {check(); if (checked(document.workspaceId) !== attached) throw new Error("Service host workspace attachment changed.");};
+        // A release that fails ends this connection, which ends the block.
+        const release = () => driver.releaseRetirementPreparation(attached.handle, document.objectId, candidate, signal).catch(abort);
+        const fenced = () => {
+          try {return storage.serviceActivationRetirement(document)?.activationId === candidate.activationId;}
+          catch {abort(); return true;}
+        };
+        try {
+          return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(value), joined, async () => {
+            current();
+            // The engine's preparation, not this drain, decides whether edits remain.
+            try {await driver.consumer(value).consumer.drain(value, joined);}
+            catch {joined.throwIfAborted(); current();}
+            // Until the engine answers, a preparation may stand.
+            let blocked = true, reconnect = false;
+            try {
+              try {blocked = await driver.prepareRetirement(attached.handle, document.objectId, candidate, joined);}
+              catch (error) {
+                joined.throwIfAborted(); current();
+                if (!(error instanceof EngineRequestError)) throw error;
+                const wire = error.wireError;
+                if (wire?.code === "CONFLICT") {
+                  // Only the relay's durable fence proves Stop committed.
+                  if (storage.serviceActivationRetirement(document)?.activationId === candidate.activationId) return fence();
+                  throw relayError("restore-in-progress");
+                }
+                if (wire?.code === "SESSION_EXPIRED" || wire?.code === "WORKSPACE_UNAVAILABLE" ||
+                  (wire?.code === "INVALID_PARAMS" && wire.message === "invalid-retirement-preparation")) {
+                  reconnect = true;
+                  console.error("Live editing Stop preparation is unavailable.", error);
+                  throw relayError("restore-in-progress");
+                }
+                throw error;
+              }
+              if (!blocked) return "waiting" as const;
+              return fence({...candidate, assertCurrent() {joined.throwIfAborted(); current();}});
+            } finally {
+              if (blocked && !fenced()) await release();
+              if (reconnect) abort();
+            }
+          }));
+        } finally {changes?.notify(value);}
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {

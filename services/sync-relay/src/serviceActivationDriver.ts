@@ -11,7 +11,7 @@ import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents"
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
-import {settlementResult,type CommittedSettlement} from "./liveSettlement";
+import {settlementResponse,settlementPending,type CommittedSettlement} from "./liveSettlement";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
@@ -24,6 +24,7 @@ import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {ServiceHostedHold,ServiceHostedPullPage} from "./serviceHostedReplication";
 import type {ServiceKeptEditsIdentity} from "./storage/serviceKeptEdits";
+import type {RetirableServiceActivation} from "./storage/serviceActivationRetirement";
 
 const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
@@ -78,8 +79,11 @@ export interface RetirementScope {
   /** A pull confirmed it parked: it is no longer departed. */
   parked():boolean;
 }
-/** How one retirement pass ended. */
-export type RetirementStep={kind:"retired"}|{kind:"pending";reason:string};
+/**
+ * How one retirement pass ended. Held: the journal proved what the engine asked, and a refused
+ * adoption seed it cannot abandon still holds the retirement, which no later pass changes by itself.
+ */
+export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
 const RETIREMENT_ROUNDS=4;
 const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
 // The engine's answer for its `status`, with exactly that status's keys.
@@ -340,10 +344,11 @@ export class ServiceActivationDriver {
     const reconciled=await this.#reconcile(target,value,signal,false);
     if(reconciled?.kind!=="reconciled")return reconciled;
     const o=this.options,{registrationId,tip}=reconciled;
-    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
-      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal);
+    const settled=await settlementResponse(o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal),tip);
     signal.throwIfAborted();o.assertCurrent();
-    return {kind:"settled",settlement:settlementResult(response.result,tip)};
+    if(settlementPending(settled))return settled;
+    return {kind:"settled",settlement:settled};
   }
   /**
    * Records what the engine applied of a document whose owner lost live
@@ -401,6 +406,28 @@ export class ServiceActivationDriver {
     return {kind:"reconciled",registrationId,tip:delivery.tip};
   }
   /**
+   * Asks the engine, through the workspace `handle`, to refuse new local edits
+   * of the activation once nothing of it waits for delivery or holds a Try
+   * again. False while something does; nothing is blocked then. The block
+   * ends at its release, once the engine begins the activation's retirement,
+   * or with this connection.
+   */
+  async prepareRetirement(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal):Promise<boolean>{
+    const o=this.options;
+    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.prepareRetirement",params:{objectId,...activation}},signal);
+    const reply=answer(response.result,{prepared:[],pending:["reason"]});
+    if(reply.status==="pending" && reply.reason!=="native-pending" && reply.reason!=="retry-outstanding")throw new Error("Invalid live retirement response.");
+    return reply.status==="prepared";
+  }
+  /** Ends the block `prepareRetirement` set, if it stands. */
+  async releaseRetirementPreparation(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal){
+    const o=this.options;
+    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.releaseRetirementPreparation",params:{objectId,...activation}},signal);
+    if(typeof configRecord(response.result,["released"]).released!=="boolean")throw new Error("Invalid live retirement response.");
+  }
+  /**
    * Moves the document's open retirement as far as it can. The engine proves
    * what the retiring activation delivered and applied, and the relay records
    * it; what it applied settles and publishes. Once a pull confirms the
@@ -442,8 +469,10 @@ export class ServiceActivationDriver {
       const tip=owned?.tip ?? null;
       const reply=answer(await send("liveApplication.reconcileActivation",{...key,afterReceipt:tip && {...tip},maxApplications,...(journal?{journal}:{})}),
         {pending:["reason","deliveries"],reconciled:["adoption","applications","hasMoreApplications","settle"]});
+      const proved=journal!==undefined;
       journal=undefined;
       if(reply.status==="pending"){
+        if(proved && reply.reason==="seed-quarantined")return {kind:"held"};
         if(!Array.isArray(reply.deliveries) || !reply.deliveries.every(id=>typeof id==="string"))throw new Error("Invalid live retirement response.");
         const evidence=o.storage.retirementJournalEvidence(open,reply.deliveries);
         journal={receipts:evidence.receipts.map(receipt=>({...receipt})),absent:evidence.absent};
@@ -464,8 +493,10 @@ export class ServiceActivationDriver {
       if(!reply.hasMoreApplications)break;
     }
     const owned=this.#delivery.departedOwnerDelivery(input),tip=owned?.tip ?? null;
-    if(settle && !settlementResult(await send("liveApplication.settle",{retirement:key,terminalReceipt:tip && {...tip}}),tip).materialized){
-      return {kind:"pending",reason:"Settlement has not reached the file."};
+    if(settle){
+      const settled=await settlementResponse(send("liveApplication.settle",{retirement:key,terminalReceipt:tip && {...tip}}).then(result=>({result})),tip);
+      if(settlementPending(settled))return settled;
+      if(!settled.materialized)return {kind:"pending",reason:"Settlement has not reached the file."};
     }
     // Retained output publishes whether or not this pass settled any.
     if((await workspace.replica.publish(signal)).hasMore){check();return {kind:"pending",reason:"Hosted publication has more pages."};}
@@ -596,6 +627,7 @@ export class ServiceActivationDriver {
     // another binding reactivates on a later pass.
     if(!held.activationPending && this.#invalidated(held,document!))return fenced;
     try{
+      // The consumer materializes any retained handover cut before draining edits.
       const outcome=await held.consumer.drain(document!,signal);check();
       if(outcome.kind!=="done")return outcome;
       if(held.activationPending){
