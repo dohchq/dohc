@@ -154,6 +154,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         throw new Error("This Collection action is unavailable.");
       }
       if (agent && agent.depth > 0 && (input.action === "approve" || input.action === "approveMigration")) throw new Error("Automations cannot approve Collection rules.");
+      if (agent && agent.depth > 0 && input.action === "setGrant" && input.moveToServer) throw new Error("Automations cannot move a Collection to the server.");
       const approvalAgent = agent ? agent.approvalAgent ?? {kind:"agent" as const,label:null,labelSource:"agent-declared" as const} : undefined;
       // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
       let opened: Promise<LocalDatasetHost> | undefined;

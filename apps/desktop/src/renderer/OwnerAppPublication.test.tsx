@@ -32,8 +32,11 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
   if (request.action === "withdraw") return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
   return { kind: "cancelled" };
 }
+// A Collection already on the server, so Publish moves nothing.
+const datasetAnswer = async (input?: unknown): Promise<unknown> => (input as { action?: string } | undefined)?.action === "permissions"
+  ? { kind: "permissions", permissions: [], nextCursor: null, place: { kind: "server", host: "sync.example.test" } } : { kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null };
 const api = {
-  dataset: vi.fn(async (_input?: unknown): Promise<unknown> => ({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null })),
+  dataset: vi.fn(datasetAnswer),
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
   publishOwnerApp: vi.fn(answer),
   openExternalUrl: vi.fn(async () => undefined),
@@ -58,7 +61,7 @@ describe("owner app publication", () => {
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.listRelayShareLinks.mockResolvedValue(page);
     api.publishOwnerApp.mockImplementation(answer);
     api.cloudStatus.mockResolvedValue({ connected: true, workspaceSynced: true });
-    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null });
+    api.dataset.mockImplementation(datasetAnswer);
   });
 
 
@@ -300,6 +303,23 @@ describe("owner app publication", () => {
     expect((await screen.findByTestId("collection-move-note")).textContent).toBe("Publishing moves this Collection to sync.example.test. Even on this computer, it then works only while "
       + "sync.example.test is reachable. dohc can't move it back. Its schedules and Group messages stop until you choose sync.example.test under Schedules run on in Settings.");
     expect(api.dataset).toHaveBeenCalledWith({ action: "permissions", workspaceId: "ws-trip", datasetPath: "data/dataset.json", expectedDatasetId: datasetCapability.datasetId, limit: 1 });
+  });
+
+  it("keeps Publish off until dohc knows where the Collection is, including after a failed check", async () => {
+    const place = deferred<unknown>();
+    api.dataset.mockImplementation(async (input?: unknown) => (input as { action: string }).action === "permissions" ? place.promise : datasetAnswer(input));
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, capabilities: [datasetCapability] } : answer(request));
+    const reportError = vi.fn();
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await review();
+    const publish = screen.getByRole("button", { name: "Publish this revision" }) as HTMLButtonElement;
+    expect(publish.disabled).toBe(true);
+    place.reject(Error("Engine connection lost"));
+    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not check where this Collection is.", expect.any(Error), expect.any(Function)));
+    expect(publish.disabled).toBe(true);
+    api.dataset.mockImplementation(datasetAnswer);
+    act(() => reportError.mock.calls[0]![2]());
+    await waitFor(() => expect(publish.disabled).toBe(false));
   });
 
   it("reviews exact source and network consequences before approval", async () => {
@@ -880,7 +900,7 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
   expect(api.publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", linkReads: [{ operationId: read.operationId, fieldIds: read.fields.map(field => field.fieldId) }] }));
   cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer);
-    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null }); api.listRelayShareLinks.mockResolvedValue(page);
+    api.dataset.mockImplementation(datasetAnswer); api.listRelayShareLinks.mockResolvedValue(page);
 });
 
 it.each([false, true])("shows an operator takedown reason and removes republishing, with current link %s", async linkCurrent => {
