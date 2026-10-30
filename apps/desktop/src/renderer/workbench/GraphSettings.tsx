@@ -7,7 +7,7 @@ import { DEFAULT_FORCES, type GraphForces } from "./graphLayout";
 
 export type GraphKind = "page" | "drawing" | "file" | "chat" | "heading";
 export const GRAPH_KINDS: readonly { kind: GraphKind; name: string; shape: GraphShape }[] = [
-  { kind: "page", name: "Document", shape: "circle" },
+  { kind: "page", name: "Page", shape: "circle" },
   { kind: "drawing", name: "Drawing", shape: "diamond" },
   { kind: "file", name: "File", shape: "ring" },
   { kind: "chat", name: "Chat", shape: "bubble" },

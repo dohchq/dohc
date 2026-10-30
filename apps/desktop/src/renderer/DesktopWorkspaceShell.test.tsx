@@ -21,7 +21,7 @@ import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
-import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
@@ -655,7 +655,7 @@ describe("collection folders", () => {
     expect(within(palette).queryByText("New folder")).toBeNull();
   });
 
-  const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+  const DOCUMENT = "Page";
   const DRAWING = FILE_KIND_RECORDS.drawing.name;
   it.each<[string, Workspace, string[]]>([
     ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
@@ -684,7 +684,7 @@ describe("start surface", () => {
 
   it("opens a new page from the document tile", async () => {
     const start = await startSurface();
-    fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
+    fireEvent.click(start.getByRole("button", { name: "Page" }));
     expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
@@ -1880,6 +1880,23 @@ describe("customize", () => {
     const appRow = await screen.findByTestId("sites-row");
     await waitFor(() => expect(document.activeElement).toBe(appRow));
     expect(screen.queryByTestId("activity-sites")).toBeNull();
+  });
+
+  it("keeps a listed app's files out of Home's Pages before its folder is read", async () => {
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: [{ path: "notes.md", kind: "file" }, { path: "trip/README.md", kind: "file" }, { path: "trip/index.html", kind: "file" }],
+      folders: ["trip"],
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("sites-row");
+    const pages = screen.getByTestId("explorer-pages");
+    expect(pages.querySelector('[data-path="notes.md"]')).not.toBeNull();
+    expect(pages.querySelector('[data-path="trip"]')).toBeNull();
+    expect(pages.querySelector('[data-path="trip/README.md"]')).toBeNull();
   });
 
   it("offers Add an app here… only while the workspace has an app", async () => {
