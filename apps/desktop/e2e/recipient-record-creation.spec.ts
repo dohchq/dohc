@@ -74,7 +74,8 @@ async function expectOnlyRecipientChanged(page: Page, path: string) {
     expect(changes.some(moment => moment.afterText?.includes("Status: Ready"))).toBe(true);
     expect(changes.filter(moment => !moment.authors?.length || !moment.authors.every(author => author.kind === "named"
       ? author.userId === "e2e-recipient"
-      : author.kind === "human" && author.humanId === "e2e-recipient" && "relayConfirmed" in author && author.relayConfirmed === true))).toEqual([]);
+      : author.kind === "human" && author.humanId === "e2e-recipient" && "relayConfirmed" in author && author.relayConfirmed === true)),
+    "versions that don't name the recipient; one with no authors is #2942").toEqual([]);
   }).toPass({ timeout: 120_000 });
 }
 
