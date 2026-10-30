@@ -405,6 +405,52 @@ fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
     }
 }
 
+fn resumed_at_a_renamed_binding() -> (Fixture, String) {
+    let mut f = released_unregistered();
+    let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+    let predecessor = f.doc.preserved_markdown_source(&projection).unwrap_or(projection);
+    offline_edit(&mut f, "Private edit while stopped", "offline");
+    rename(&mut f, "notes/renamed.md", "renamed");
+    successor(&mut f);
+    assert_eq!(f.adopt().unwrap().terminal_cursor, 3);
+    (f, hex_sha256(predecessor.as_bytes()))
+}
+
+#[test]
+fn a_resumed_owner_proves_its_accepted_predecessor_after_a_rename() {
+    let (f, predecessor) = resumed_at_a_renamed_binding();
+    f.store.read_with(|conn| {
+        let binding = serde_json::to_string(&f.binding).unwrap();
+        let retained: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_device_bootstraps WHERE binding_json=?1 AND projected_markdown_digest=?2)
+             OR EXISTS(SELECT 1 FROM live_owner_activations WHERE binding_json=?1 AND source_digest=?2 AND evidence_digest IS NOT NULL)
+             OR EXISTS(SELECT 1 FROM live_device_settlements WHERE binding_json=?1 AND markdown_digest=?2)",
+            params![binding, predecessor], |r| r.get(0),
+        ).map_err(read_sql)?;
+        assert!(!retained, "no retained projection proves the predecessor at the renamed binding");
+        let mut remaining = 8 * 1024 * 1024;
+        assert!(adoption_contains_predecessor_in(
+            conn, &f.key, "namespace", &f.binding, &predecessor, &mut remaining,
+        )?, "the resumed activation proves its accepted predecessor");
+        assert!(!adoption_contains_predecessor_in(
+            conn, &f.key, "namespace", &f.binding, &f.cut.source_digest, &mut remaining,
+        )?, "the private captured source is not the accepted predecessor");
+        Ok::<_, ApplicationError>(())
+    }).unwrap();
+}
+
+#[test]
+fn a_resumed_owners_markdown_retry_uses_its_renamed_binding() {
+    let (f, _) = resumed_at_a_renamed_binding();
+    let retry = f.store.read_with(|conn| {
+        crate::markdown_write_obligations::AuditedRetry::adopted_owner_in(conn, &f.key, 1)
+    }).unwrap().unwrap();
+    assert_eq!(retry.binding, f.binding, "retry reads the resumed activation's binding");
+    assert_eq!(retry.namespace, "namespace");
+    assert_eq!(retry.terminal_cursor, 3);
+    assert_eq!(retry.head_update_seq, 1);
+}
+
 /// A damage a succession must refuse.
 type SuccessionDamage = (&'static str, fn(&mut Fixture));
 

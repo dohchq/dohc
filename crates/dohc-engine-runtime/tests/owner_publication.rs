@@ -2785,19 +2785,6 @@ async fn unavailable_publication_after_handover(
             .unwrap();
         assert_eq!(retry.binding, f.binding, "retry uses the successor binding");
         assert_eq!(retry.terminal_cursor, 7);
-        let mut renamed_binding = f.binding.clone();
-        renamed_binding.selector_paths = vec!["notes".into()];
-        f.store.read_with(|conn| {
-            let tx = conn.unchecked_transaction().unwrap();
-            tx.execute("UPDATE live_owner_activations SET binding_json=?1 WHERE released_at_ms IS NULL",
-                [serde_json::to_string(&renamed_binding).unwrap()]).unwrap();
-            let retry = dohc_engine_collab::markdown_write_obligations::AuditedRetry::adopted_owner_in(
-                &tx, &DocKey::new("workspace", "main", "object").unwrap(), 1,
-            ).unwrap().unwrap();
-            assert_eq!(retry.binding, renamed_binding, "retry reads the successor's binding");
-            tx.rollback().unwrap();
-            Ok::<_, dohc_engine_storage::StorageError>(())
-        }).unwrap();
     }
     assert_eq!(
         recorded_settlements(&f.store),

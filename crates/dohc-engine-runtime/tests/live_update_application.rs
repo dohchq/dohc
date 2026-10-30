@@ -1049,7 +1049,7 @@ async fn markdown_hold_accepted_prefix_survives_restart_without_publishing_a_pri
             .map_err(StorageError::persist_public)?;
         tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
                     rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
-                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
             .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);
@@ -1366,7 +1366,7 @@ async fn markdown_hold_accepted_prefix_settles_full_intervals_with_interleaved_p
             .map_err(StorageError::persist_public)?;
         tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION,
                     rusqlite::params!["relay-A", "adoption", None::<String>]).map_err(StorageError::persist_public)?;
-                dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
+        dohc_engine_collab::live_update_application::initialize_adopted_history_for_test(tx, "relay-A", &binding)
             .map_err(StorageError::persist_public)
     }).unwrap();
     drop(store);
