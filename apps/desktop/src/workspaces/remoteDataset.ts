@@ -443,7 +443,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     },
     setGrant: async value => {
       const authority = await target(value.datasetId);
-      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("Publish this Collection before managing shared access.");
+      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("This Collection is only on this computer. Move it to your server to give a person access.");
       await authority.setGrant(value);
     },
   };

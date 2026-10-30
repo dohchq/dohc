@@ -233,13 +233,13 @@ it("reports the saved recovery file through the shell notice callback", async ()
 });
 
 it("keeps archived offline Collections read-only until refresh reaches the host", async () => {
-  backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true } })
+  backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true, host: "sync.example.test" } })
     .mockResolvedValue({ kind: "description", dataset: { ...dataset, archived: true } });
   render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
   const restore = await screen.findByRole("button", { name: "Restore Collection" });
   expect(restore.hasAttribute("disabled")).toBe(true);
   fireEvent.click(restore); expect(backend.dataset.mock.calls.some(([input]) => input.action === "restore")).toBe(false);
-  expect(screen.getByRole("status").textContent).toContain("Offline copy");
+  expect(screen.getByRole("status").textContent).toBe("Offline copy · Restoring needs sync.example.test");
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Restore Collection" }).hasAttribute("disabled")).toBe(false));
 });
@@ -554,6 +554,19 @@ describe("a Collection this computer cannot use", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     await screen.findByLabelText("Collection view state");
+  });
+
+  it("names the server it needs in place, without a toast, when there is no saved copy, and reads again on Try again", async () => {
+    const words = "This Collection needs sync.example.test, which dohc can't reach.";
+    backend.dataset.mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:dataset': CollectionServerUnreachableError: ${words}`));
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection {...props} onError={onError} />);
+    expect(await screen.findByText(words)).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByText(words)).toBeNull();
   });
 
   it("stops showing records once a later read is refused", async () => {

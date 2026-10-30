@@ -55,6 +55,22 @@ export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discrimi
   z.object({ kind: z.literal("app"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: z.unknown().transform(value => parseDatasetBindingReference(value)) }).strict(),
 ])).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
 export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
+const host = z.string().min(1).max(260);
+/**
+ * Where a Collection is. `here`: only on this computer. Giving a person
+ * access or publishing an app on a link moves it to `server`, the
+ * workspace's server, for good; null when the workspace has none. `runs` is
+ * what that server runs, null when dohc could not ask or had no automations
+ * to ask about. The counts are of the Collection's automations and of those a
+ * schedule or Group message starts. `server`: on that server, which it needs
+ * from then on.
+ */
+export const DatasetPlace = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("here"), server: z.object({ host, runs: z.enum(["all", "no-schedules", "off"]).nullable(),
+    automations: z.number().int().min(0), scheduledAutomations: z.number().int().min(0) }).strict().nullable() }).strict(),
+  z.object({ kind: z.literal("server"), host }).strict(),
+]);
+export type DatasetPlace = z.infer<typeof DatasetPlace>;
 export const DatasetSchemaChange = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("renameCollection"), name: z.string().trim().min(1).max(128) }).strict(),
   z.object({ kind: z.literal("renameTable"), tableId: identity, name: z.string().trim().min(1).max(128) }).strict(),
@@ -106,7 +122,8 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("reconcileAttempt"), reference: sha256, acknowledge: z.literal(true) }).strict(),
   z.object({ ...selection, action: z.literal("cancelAttempt"), reference: sha256, acknowledge: z.literal(true) }).strict(),
   z.object({ ...selection, action: z.literal("permissions"), after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
-  z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant }).strict(),
+  z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant,
+    moveToServer: z.literal(true).describe("Agree to move a Collection that is only on this computer to the workspace's server for good.").optional() }).strict(),
   z.object({ ...selection, action: z.literal("removeGrant"), principalKey: z.string().min(1).max(256) }).strict(),
   z.object({ ...selection, action: z.literal("export"), savePath: z.string().min(1).max(4096).optional(), overwrite: z.boolean().optional() }).strict(),
   z.object({ ...pinned, action: z.literal("upload"), fieldId: identity, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
@@ -139,7 +156,9 @@ export const DatasetMigrationPreparation = z.object({ preparationId: identity, p
   sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
   migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
-export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative(), coverage: z.literal("saved-pages").optional() }).strict();
+export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative(), coverage: z.literal("saved-pages").optional(),
+  /** The server that holds an owner's Collection, which it needs to change. */
+  host: z.string().min(1).max(260).optional() }).strict();
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;
 export const DatasetInvocationResult = z.object({
   result: z.unknown().transform((value, context) => {
@@ -196,7 +215,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
-  DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
+  DatasetPermissionsPage.extend({ kind: z.literal("permissions"), place: DatasetPlace.optional() }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
   z.object({ kind: z.literal("exported"), savedPath: z.string().min(1).max(4096).nullable() }).strict(),
   CreationPartial,
