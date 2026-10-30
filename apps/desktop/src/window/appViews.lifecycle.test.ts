@@ -200,8 +200,11 @@ it("gives the app's frame dohc's theme before it starts, follows each change, an
     .toBeLessThan(calls.findIndex(call => call[0] === "Runtime.runIfWaitingForDebugger" && call[2] === "app"));
   expect(calls).toContainEqual(["Emulation.setEmulatedMedia", scheme("dark"), "app"]);
   expect(calls.some(call => call[0] === "Emulation.setEmulatedMedia" && call[2] === "worker")).toBe(false);
-  // A change reaches the guest's page and the app's frame, and not a frame that has gone.
+  // A frame's session clears the theme in its process as it detaches, so the frames still attached get it again.
+  debug.sendCommand.mockClear();
   debug.emit("message", {}, "Target.detachedFromTarget", { sessionId: "gone" }, "");
+  await expect.poll(() => debug.sendCommand.mock.calls).toContainEqual(["Emulation.setEmulatedMedia", scheme("dark"), "app"]);
+  // A change reaches the guest's page and the app's frame, and not a frame that has gone.
   debug.sendCommand.mockClear();
   await f.invoke({ action: "colorScheme", workspaceId: "w", colorScheme: "light" });
   expect(debug.sendCommand.mock.calls.filter(([method]) => method === "Emulation.setEmulatedMedia"))

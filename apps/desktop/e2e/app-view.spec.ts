@@ -279,13 +279,15 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await shown(page.getByTestId("quick-open"));
     await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
-    // Reload reloads the same guest, so the app starts over.
+    // Reload reloads the same guest, so the app starts over, in a new frame that starts in dark and stays there.
     await page.getByTestId("app-view-reload").click();
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count')?.textContent").catch(() => null)).toBe("0");
     await ready(page);
     expect(await guestIds(electronApp)).toEqual([guestId]);
+    await expect.poll(() => inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches")).toBe(true);
     await clickApp(electronApp, guestId, "#counter");
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("1");
+    expect(await inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches")).toBe(true);
     expect(await readdir(downloads)).toEqual([]);
   } finally {
     if (desktop) {
