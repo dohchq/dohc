@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
 import {stopWithoutSessionHost} from "./sessionHostStop";
+import type {SessionHostStopRefusal} from "./errors";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
@@ -79,6 +80,7 @@ export async function startSelfHostedLiveHost(options: {
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;
+  const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentHasEditGrant(row);
   const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
   const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
@@ -94,7 +96,7 @@ export async function startSelfHostedLiveHost(options: {
     const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
     const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
     for (const row of page.documents) {
-      if (departs(row, storage.serviceHostEnrollmentHasEditGrant(row))) (matching(row) ? departing : obsolete).push(row);
+      if (departs(row, covered(row))) (matching(row) ? departing : obsolete).push(row);
       else if (matching(row)) (atPath(row) ? targets : away).push(row);
     }
     // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
@@ -113,6 +115,20 @@ export async function startSelfHostedLiveHost(options: {
   const marker = (name: string) => divergedMarker(root, name);
   const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`;
   const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
+  const storeDiverged = (row: WorkspaceIdentity) => diverged.has(storeName(row));
+  const stopRefusal = (document: {workspaceId: string; objectId: string}): SessionHostStopRefusal => {
+    const row = storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId);
+    if (row) {
+      if (storeDiverged(row)) return {code: "host-diverged", sessionHost: "running without this document (server copy diverged)"};
+      if (row.ownerStop === "pause") return {code: "host-paused", sessionHost: "running without this document (paused)"};
+      if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
+      if (!atPath(row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
+    }
+    if (!current) return lastError !== undefined
+      ? {code: "host-start-failed", sessionHost: "couldn't start"}
+      : {code: "host-not-loaded", sessionHost: "starting"};
+    return {code: "host-not-loaded", sessionHost: current.invalidated.aborted ? "restarting" : "running, document not loaded yet"};
+  };
   for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`));
   // Diverged stores whose marker is not yet durable, with whether its failure was reported.
   // Each reconciliation tries again; until one succeeds, a restart attaches the store again.
@@ -177,7 +193,7 @@ export async function startSelfHostedLiveHost(options: {
   }
   // The selection, without diverged stores.
   const selection = () => {
-    const selected = select(), kept = (row: ServiceHostEnrollment) => !diverged.has(storeName(row));
+    const selected = select(), kept = (row: ServiceHostEnrollment) => !storeDiverged(row);
     return {...selected, targets: selected.targets.filter(kept), departing: selected.departing.filter(kept)};
   };
   async function reconcile() {
@@ -324,7 +340,7 @@ export async function startSelfHostedLiveHost(options: {
     /** Why the running daemon's hosted pass left this document held. */
     holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
-    diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return diverged.has(storeName(row));},
+    diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return storeDiverged(row);},
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */
     stopped(document: {workspaceId: string; objectId: string}) {
       const identity = storage.getWorkspaceIdentity(document.workspaceId);
@@ -339,9 +355,9 @@ export async function startSelfHostedLiveHost(options: {
     /** Stop through the running daemon, which delivers the document's edits first. With none running, `fence` runs unprepared. */
     async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
       callerSignal?: AbortSignal): Promise<T | "waiting"> {
-      if (!current) return stopWithoutSessionHost(document, "not running", fence);
-      if (current.invalidated.aborted) return stopWithoutSessionHost(document, "stopped", fence);
-      return current.stop(document, fence, callerSignal);
+      const refusal = stopRefusal(document);
+      if (refusal.code !== "host-not-loaded" || !current || current.invalidated.aborted) return stopWithoutSessionHost(document, refusal, fence);
+      return current.stop(document, prepared => prepared ? fence(prepared) : stopWithoutSessionHost(document, stopRefusal(document), fence), callerSignal);
     },
     /**
      * The running daemon's page reads and Try again of refused queues it keeps

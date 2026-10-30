@@ -1449,8 +1449,9 @@ export async function startServiceLiveHost(options: {
         check();
         const candidate = storage.retirableServiceActivation(document), attached = checked(document.workspaceId), driver = activation;
         if (!candidate) return fence();
-        if (!attached) return stopWithoutSessionHost(document, "running without this workspace", fence);
-        if (hostedKey(document) === undefined || !driver) return stopWithoutSessionHost(document, "running without this document", fence);
+        if (!attached || hostedKey(document) === undefined || !driver) {
+          return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence);
+        }
         // A dormant document reloads, so its queues can drain.
         try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
         const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});

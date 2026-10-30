@@ -55,7 +55,7 @@ async function fixture() {
     pending, prepared, running: true,
     async stop<T>(document: {workspaceId: string; objectId: string}, fence: (preparation?: ServiceHostRetirementPreparation) => T): Promise<T | "waiting"> {
       if (pending.has(document.objectId)) return "waiting";
-      if (!host.running) return stopWithoutSessionHost(document, "not running", fence);
+      if (!host.running) return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "starting"}, fence);
       const candidate = f.storage.retirableServiceActivation(document);
       if (candidate) prepared.push(candidate);
       return fence(candidate ? {...candidate, assertCurrent() {}} : undefined);
@@ -911,7 +911,7 @@ it("waits to stop a retained activation that no running host can prepare", async
   retainServiceActivation(f.raw, namespace, true);
   const waiting = await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true}));
   expect(waiting.status).toBe(409);
-  expect(await waiting.json()).toEqual({ok: false, code: "host-offline", sessionHost: "not running", error: "Live editing didn't stop. The server's session host is offline and may hold recent edits. Try again once it's back, or contact the server's operator."});
+  expect(await waiting.json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "starting", error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
 });

@@ -4534,11 +4534,11 @@ it.each(["running without this workspace", "running without this document"] as c
     const response = await hostStop(o).catch(errorResponse);
     expect(response).toBeInstanceOf(Response);
     expect((response as Response).status).toBe(409);
-    expect(await (response as Response).json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: state,
+    expect(await (response as Response).json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "running, document not loaded yet",
       error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
     stillLive(o);
     expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([]);
     expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
-      [`Live editing Stop for workspace workspace, object object. Session host: ${state}`],
+      ["Live editing Stop for workspace workspace, object object. Session host: running, document not loaded yet"],
     ]);
   });

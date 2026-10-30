@@ -252,6 +252,13 @@ export function readServiceHostEnrollment(storage: StorageContext, workspaceId: 
   storage.captureStanding();
   return read(storage, parseWorkspaceId(workspaceId), canonicalPath(path));
 }
+/** Includes drained and retired enrollments, whose stores can still hold edits. */
+export function readServiceHostEnrollmentByObjectId(storage: StorageContext, workspaceId: string, objectId: string): ServiceHostEnrollment | null {
+  storage.captureStanding();
+  const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
+    .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
+  return value ? row(value) : null;
+}
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
 const reclaimable = (enrollment: ServiceHostEnrollment) => enrollment.retired && enrollment.ownerStop === null;
 /** Whether a new Edit share leaves the path's enrollment as it is: it is active, or its owner paused or stopped it. */
@@ -466,7 +473,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       // A new one needs the host to have delivered its edits and blocked new ones.
       const retirement = openServiceActivationRetirement(storage, {workspaceId, objectId: current.objectId}, nowMs, activation => {
         const prepared = input.prepared;
-        if (!prepared) throw relayError("host-offline");
+        if (!prepared) throw relayError("host-not-loaded");
         if (prepared.activationId !== activation.activationId || prepared.lineageClaimId !== activation.lineageClaimId) throw relayError("conflict");
         if (prepared.restoreFenceGeneration !== activation.restoreFenceGeneration) throw new ServiceHostRetirementConflict(activation.restoreFenceGeneration);
         prepared.assertCurrent();

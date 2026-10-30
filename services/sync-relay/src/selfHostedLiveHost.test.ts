@@ -5,6 +5,7 @@ import {basename, dirname, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
+import {stopWithoutSessionHost} from "./sessionHostStop";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import type {ServiceHostedSet} from "./serviceLiveHost";
@@ -132,6 +133,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     const readKeptEditsPage = async (kept: ServiceKeptEdits, _cursor: unknown, store: string) => {keptReads.push({outboxId: kept.outboxId, store}); return {kind: "page"};};
     return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined,
+      stop: async <T>(document: Document, fence: () => T) => stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence),
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       holdReason: (document: Document) => holds(document) ? holdReasons.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
@@ -233,30 +235,63 @@ it("stays unavailable until retained documents have a running native host", asyn
   expect(f.host.unavailable).toBe(true);
 });
 
-it.each(["not running", "stopped"] as const)("answers Stop with the session host state %s without fencing", async state => {
+it.each([
+  {name: "diverged", code: "host-diverged", state: "running without this document (server copy diverged)", error: "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator."},
+  {name: "paused", code: "host-paused", state: "running without this document (paused)", error: "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it."},
+  {name: "no Edit grant", code: "host-no-edit-grant", state: "running without this document (no Edit grant)", error: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again."},
+  {name: "moved", code: "host-moved", state: `running without this document (moved from ${binding.currentPath})`, error: `Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from ${binding.currentPath}. Move it back there, then try again.`},
+  {name: "start failed", code: "host-start-failed", state: "couldn't start", error: "Live editing didn't stop. The server's session host couldn't start and may hold recent edits. Contact the server's operator, then try again."},
+  {name: "starting", code: "host-not-loaded", state: "starting"},
+  {name: "restarting", code: "host-not-loaded", state: "restarting"},
+  {name: "not loaded", code: "host-not-loaded", state: "running, document not loaded yet"},
+  {name: "paused after relay restart", code: "host-paused", state: "running without this document (paused)", error: "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it."},
+  {name: "paused without Edit grant", code: "host-paused", state: "running without this document (paused)", error: "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it."},
+  {name: "paused and diverged", code: "host-diverged", state: "running without this document (server copy diverged)", error: "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator."},
+])("answers Stop for $name without fencing", async test => {
   const entered = deferred(), finish = deferred();
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  const f = await fixture(state === "not running" ? {beforeStart: async () => {entered.resolve(); await finish.promise;}} : {});
+  const failure = new Error("private engine start failure detail");
+  const heldStart = test.name === "starting";
+  const f = await fixture({beforeStart: async () => {
+    entered.resolve();
+    if (test.name === "start failed") throw failure;
+    if (heldStart) await finish.promise;
+  }, seed: async (data, relay) => {
+    if (test.name.includes("paused")) {
+      relay.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId: "owner-1", enabled: false, nowMs: 20, guard() {}});
+      if (test.name === "paused after relay restart") relay.storage.releaseServiceHostEnrollment({...binding, nowMs: 21});
+    }
+    if (test.name.includes("diverged")) await writeFile(join(data, `${storeName(scope.workspaceId)}.diverged`), "{}");
+    if (test.name.includes("Edit grant")) relay.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=20").run();
+    if (test.name === "moved") relay.raw.prepare("UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id=?").run(binding.objectId);
+  }});
   try {
-    if (state === "not running") await entered.promise;
-    else {await f.waitStarted(1); f.starts[0]!.controller.abort();}
+    if (test.name === "start failed") await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure));
+    else if (test.name === "restarting") {await f.waitStarted(1); f.starts[0]!.controller.abort();}
+    else if (test.name === "not loaded") await f.waitStarted(1);
+    else if (test.name === "starting") await entered.promise;
+    else await f.waitPasses();
+    if (test.name === "paused after relay restart") expect(f.host.current()).toBeUndefined();
     retainServiceActivation(f.raw, namespace, true);
+    const before = f.enrollment(), admission = serviceHostDocumentEnabled(f.storage as StorageContext, binding);
     const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: f.host,
       resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
     const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {method: "DELETE",
       headers: {"content-type": "application/json", authorization: "Bearer account-token"}, body: JSON.stringify({path: binding.currentPath, retire: true})}));
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ok: false, code: state === "not running" ? "host-offline" : "host-not-loaded", sessionHost: state,
-      error: state === "not running"
-        ? "Live editing didn't stop. The server's session host is offline and may hold recent edits. Try again once it's back, or contact the server's operator."
-        : "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
-    expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    const body = await response.json();
+    expect(body).toEqual({ok: false, code: test.code, sessionHost: test.state,
+      error: test.error ?? "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
+      ...(test.name === "moved" ? {path: binding.currentPath} : {})});
+    expect(JSON.stringify(body)).not.toContain(failure.message);
+    expect(f.enrollment()).toEqual(before);
     expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
-    expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+    expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(admission);
     expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
-      [`Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${state}`],
+      [`Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${test.state}`],
     ]);
-  } finally {finish.resolve(); if (state === "not running") await f.waitStarted(1);}
+    expect(log.mock.calls.flat().join(" ")).not.toContain(failure.message);
+  } finally {finish.resolve();}
 });
 
 it("restarts only a daemon that failed and gives the replacement the whole hosted set", async () => {
