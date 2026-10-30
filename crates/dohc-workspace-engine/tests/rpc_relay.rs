@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "rpc_relay/artifact_recovery.rs"]
+mod artifact_recovery;
+
 use common::*;
 use std::collections::HashMap;
 use std::io::{Read, Write};

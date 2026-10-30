@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
-import type { EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, SitePackageInfo } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
@@ -1843,9 +1843,30 @@ describe("settings entry points", () => {
   });
 });
 
+const SITE: SitePackageInfo = {
+  root: "app",
+  title: "App",
+  kind: "static",
+  confidence: "high",
+  entryPath: "app/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["app/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
 describe("customize", () => {
-  it("opens the sidebar's settings from its menu, and Add an app here… opens Apps", async () => {
+  it("opens the sidebar's settings from its menu, and Add an app here… opens the Explorer's apps", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1856,10 +1877,25 @@ describe("customize", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
     await user.click(screen.getByLabelText("Close settings"));
 
+    // From another view, the menu opens the Explorer on its first app.
+    await user.click(screen.getByTestId("activity-search"));
     await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
-    // The rail marks Apps at once; its view loads on its own clock.
-    expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
+    await user.click(await screen.findByRole("menuitem", { name: "Add an app here…" }));
+    expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page");
+    const appRow = await screen.findByTestId("sites-row");
+    await waitFor(() => expect(document.activeElement).toBe(appRow));
+    expect(screen.queryByTestId("activity-sites")).toBeNull();
+  });
+
+  it("offers Add an app here… only while the workspace has an app", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
+    expect(screen.getByRole("menuitem", { name: "Customize…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
   });
 });
 
