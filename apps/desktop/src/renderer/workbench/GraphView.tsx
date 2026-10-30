@@ -520,7 +520,7 @@ export function GraphView(props: {
     ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
       mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
 
-  const settingsKey = `${props.workspaceId} ${variant}`;
+  const settingsKey = `${props.workspaceId}\0${variant}`;
   const [savedSettings, setSettingsState] = useState({ key: settingsKey, value: sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS });
   const settings = savedSettings.key === settingsKey ? savedSettings.value : sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS;
   const setSettings = useCallback((next: GraphSettingsValue) => {
