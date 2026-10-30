@@ -387,7 +387,7 @@ fn a_second_native_update_at_one_sequence_is_corrupt() {
     };
     *recorded_at_ms += 1;
     let (key, json) = (native_append_key(&copy), serde_json::to_string(&copy).unwrap());
-    audit_is_corrupt(&mut f, |f| write_unchecked(f, &format!(
+    audit_is_corrupt(&mut f, None, |f| write_unchecked(f, &format!(
         "CREATE TEMP TABLE copied AS SELECT * FROM owner_ydoc_outbox_entries WHERE sequence=1;
          UPDATE copied SET sequence=2,delivery_id='copied',append_key='{key}',native_source_json='{json}';
          INSERT INTO owner_ydoc_outbox_entries SELECT * FROM copied;

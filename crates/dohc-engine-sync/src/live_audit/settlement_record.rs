@@ -714,10 +714,10 @@ mod tests {
         }
     }
 
-    /// The first settlement after an adoption starts at that activation's own
-    /// source, released or current. A cut two sources adopted names neither.
+    /// A positive cut keeps the settlement moment's recorded before-image,
+    /// regardless of released, current, or competing activation sources.
     #[test]
-    fn a_settlement_starts_at_the_source_of_the_activation_whose_cut_it_follows() {
+    fn a_positive_cut_keeps_the_settlement_moments_recorded_before_image() {
         let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
         let mut text = VersionedTextStore::new(&mut store);
         text.ensure_main_version("ws", "main", 1, &NoFaults)
@@ -807,22 +807,22 @@ mod tests {
         };
         activate(&mut store, "first", None, 0, 5);
         activate(&mut store, "second", Some("first"), 1, 9);
-        let digest = |source: usize| Some(hex_sha256(SOURCES[source].1.as_bytes()));
         assert_eq!(
             before(&mut store, &binding, 5).unwrap(),
-            digest(0),
-            "the released predecessor still proves its source"
+            None,
+            "the released predecessor does not override the before-image"
         );
         assert_eq!(
             before(&mut store, &binding, 9).unwrap(),
-            digest(1),
-            "the successor proves its own source"
+            None,
+            "the current activation does not override the before-image"
         );
         assert_eq!(before(&mut store, &binding, 7).unwrap(), None);
         activate(&mut store, "third", Some("second"), 2, 9);
-        assert!(
-            before(&mut store, &binding, 9).is_err(),
-            "two sources adopted at one cut name no before-image"
+        assert_eq!(
+            before(&mut store, &binding, 9).unwrap(),
+            None,
+            "competing activation sources do not override the before-image"
         );
     }
 }

@@ -110,14 +110,16 @@ fn decided(
 }
 
 /// One hosted pass fed from [`ELSEWHERE`], run to its end.
-fn pass_elsewhere(
+async fn pass_elsewhere(
+    root: &ScratchDir,
     store: &mut EngineStore,
     client: &dohc_engine_sync::RelaySyncClient<HostedFeed>,
 ) -> dohc_engine_sync::HostedPassOutcome {
+    let mut cache = witness_cache(root).await;
     loop {
         match client.pull_hosted_workspace(
             store,
-            &mut dohc_engine_collab::WriterDocCache::new(),
+            &mut cache,
             "workspace",
             ELSEWHERE,
             &NoFaults,
@@ -218,7 +220,7 @@ async fn input_fed_from_a_released_namespace_never_replaces_a_current_activation
         feed.serve(op, bytes);
         let client = dohc_engine_sync::RelaySyncClient::new(feed);
         let (native, before) = (w.native(), snapshot(&w.store));
-        let pass = pass_elsewhere(&mut w.store, &client);
+        let pass = pass_elsewhere(&w.root, &mut w.store, &client).await;
         let outcome = format!(
             "applied {} refused {} skipped {} conflicts {} changed {:?} refusals {:?} held {:?}",
             pass.applied,

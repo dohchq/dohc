@@ -587,9 +587,9 @@ fn changed_provenance_invalidates_kept_tails() {
 /// and an unrelated blob keeps them.
 #[test]
 fn a_refusals_terminal_blob_invalidates_kept_tails() {
-    let mut f = refused_root(false);
+    let (mut f, covered) = refused_root_with_accepted_prefix();
     host_document(&mut f, true, true);
-    retirement_settle(&mut f, 10, None).unwrap();
+    retirement_settle(&mut f, 10, Some(covered)).unwrap();
     release_and_return(&mut f);
     let tails = ReleasedTails::default();
     let before = kept_matches_fresh(&f, &tails);
