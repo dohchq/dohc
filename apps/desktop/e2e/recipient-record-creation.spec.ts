@@ -12,7 +12,7 @@ import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials,
-  seedWorkspaceManifest, seedWorkspaceRegistry, writeWorkspaceFiles } from "./helpers/workspace";
+  seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -28,6 +28,7 @@ async function log(relay: SyncRelayHandle): Promise<Op[]> {
   return (JSON.parse(result.body) as { ops: Op[] }).ops;
 }
 async function openCollection(page: Page) {
+  await showExplorerFiles(page);
   for (const path of ["trip", COLLECTION]) {
     const row = page.locator(`[data-testid="tree-row"][data-path="${path}"]`);
     await expect(row).toBeVisible({ timeout: 120_000 });
