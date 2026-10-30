@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
+import { ShellErrorReporter } from "./shell/useShellError";
+import { deferred } from "../testing/deferred";
 const api = vi.hoisted(() => ({ dataset: vi.fn(), listRelayShares: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => api }));
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
@@ -42,4 +44,76 @@ it("says what moving to the server means before saving access to a Collection on
   await screen.findByText("This Collection is on sync.example.test.");
   expect(screen.queryByTestId("collection-move-note")).toBeNull();
   expect(screen.getByRole("button", { name: "Save access" })).toBeTruthy();
+});
+const stopped = Error("CollectionMoveUnfinishedError: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
+const friend = { workspaceId: "w", grantId: "grant", recipientUserId: "person", recipientEmail: "friend@example.test", revokedAtMs: null };
+const choose = async () => {
+  await screen.findByRole("option", { name: /friend@example.test/ });
+  fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Read orders/ }));
+};
+it("says in place that the access wasn't saved, keeps the choices and focus, files nothing while open, and saves again from its button", async () => {
+  let fail = true;
+  api.dataset.mockImplementation(async input => {
+    if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null };
+    if (fail) throw stopped;
+    return { kind: "grant-updated" };
+  });
+  api.listRelayShares.mockResolvedValue({ granted: [friend] });
+  const onError = vi.fn(), onSaved = vi.fn(), report = vi.fn();
+  render(<ShellErrorReporter.Provider value={report}><CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={onError} onSaved={onSaved} /></ShellErrorReporter.Provider>);
+  await choose();
+  const save = screen.getByRole("button", { name: "Save access" });
+  save.focus();
+  fireEvent.click(save);
+  const line = await screen.findByText("Access wasn't saved. This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  expect(line.getAttribute("role")).toBe("status");
+  expect(document.activeElement).toBe(save);
+  expect((screen.getByLabelText("Collection access person") as HTMLSelectElement).value).toBe("grant");
+  expect((screen.getByRole("checkbox", { name: /Read orders/ }) as HTMLInputElement).checked).toBe(true);
+  expect(onError).not.toHaveBeenCalled();
+  expect(report).not.toHaveBeenCalled();
+  fail = false;
+  fireEvent.click(save);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(screen.queryByText(/Access wasn't saved/)).toBeNull();
+  await waitFor(() => expect((screen.getByLabelText("Collection access person") as HTMLSelectElement).value).toBe(""));
+  expect(onError).not.toHaveBeenCalled();
+});
+it("says in place that access wasn't removed, with the reason it failed", async () => {
+  api.dataset.mockImplementation(async input => {
+    if (input.action === "permissions") return { kind: "permissions", nextCursor: null,
+      permissions: [{ kind: "data", principal: "person-key", current: true, metadata: { operationIds: [id(2)] } }] };
+    throw Error("Sharing failed (502).");
+  });
+  api.listRelayShares.mockResolvedValue({ granted: [] });
+  const onError = vi.fn();
+  render(<CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={onError} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Remove access" }));
+  await screen.findByText("Access wasn't removed. Sharing failed (502).");
+  expect(onError).not.toHaveBeenCalled();
+});
+it("reports a save that answers after the dialog closed with a toast naming the person and the Collection, whose Try again saves again", async () => {
+  const answer = deferred<never>();
+  let fail = true;
+  api.dataset.mockImplementation(async input => {
+    if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null };
+    if (fail) return answer.promise;
+    return { kind: "grant-updated" };
+  });
+  api.listRelayShares.mockResolvedValue({ granted: [friend] });
+  const report = vi.fn(), onSaved = vi.fn();
+  const { unmount } = render(<ShellErrorReporter.Provider value={report}><CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} onSaved={onSaved} /></ShellErrorReporter.Provider>);
+  await choose();
+  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
+  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "setGrant" })));
+  unmount();
+  await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
+  await waitFor(() => expect(report).toHaveBeenCalledWith({ title: "Access wasn't saved for friend@example.test",
+    message: "Orders didn't finish moving to sync.example.test. Its records are kept on this computer.", cause: stopped, retry: expect.any(Function) }));
+  fail = false;
+  act(() => { (report.mock.calls[0]![0] as { retry: () => void }).retry(); });
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(api.dataset.mock.calls.filter(([input]) => input.action === "setGrant")).toHaveLength(2);
+  expect(report).toHaveBeenCalledTimes(1);
 });
