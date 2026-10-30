@@ -15,9 +15,9 @@ function automationsMove(server: CollectionServer): string | null {
  * Said before the action that moves a Collection on this computer to the
  * workspace's server: saving a person's access, or publishing an app on a link.
  */
-export function CollectionMoveNote({ action, server }: { action: "Saving" | "Publishing"; server: CollectionServer }) {
+export function CollectionMoveNote({ action, server, className = "m-0 text-[12px] text-muted" }: { action: "Saving" | "Publishing"; server: CollectionServer; className?: string }) {
   const automations = automationsMove(server);
-  return <p data-testid="collection-move-note" className="m-0 text-[12px] text-muted">
+  return <p data-testid="collection-move-note" className={className}>
     {action} moves this Collection to {server.host}. Even on this computer, it then works only while {server.host} is reachable. dohc can't move it back.
     {automations ? ` ${automations}` : null}
   </p>;

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { OwnerDatasetData } from "./remoteDataset";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
+import { CollectionServerUnreachableError } from "../ipc/errorWords";
 
 /** An owner-bound copy retains committed reads only. It never becomes a second writer. */
 export async function createOwnerDatasetCopy(options: Parameters<typeof createDatasetReplica>[0]) {
@@ -21,7 +22,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   };
   // The server that holds this Collection, which it needs to change.
   const host = new URL(options.origin).host;
-  const unreachable = () => Error(`This Collection needs ${host}, which dohc can't reach.`);
+  const unreachable = () => new CollectionServerUnreachableError(`This Collection needs ${host}, which dohc can't reach.`);
   const markerPath = join(options.directory, "archived.json");
   const binding = createHash("sha256").update(JSON.stringify([options.scope,options.ownerKey,new URL(options.origin).origin])).digest("hex");
   const markerSchema = z.object({ binding: z.literal(binding), dataset: z.unknown().transform(value => parseDatasetDescription(value)), savedAtMs: z.number().int().nonnegative() }).strict();

@@ -17,7 +17,7 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionServerUnreachable, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -71,6 +71,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   const [loading, setLoading] = useState(true);
   // Why this computer cannot use the workspace's Collections; the page says so in place.
   const [refusal, setRefusal] = useState<{ kind: CollectionsRefusalKind; words: string } | null>(null);
+  // Why the page shows no records: its server is out of reach and this computer has no saved copy.
+  const [unreachable, setUnreachable] = useState<string | null>(null);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [historyRestore, setHistoryRestore] = useState<DatasetMigrationPreparation | undefined>();
@@ -110,16 +112,18 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
       setRefusal(null);
+      setUnreachable(null);
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
     } catch (error) {
       if (sequence !== request.current) return;
       setRecordsVersion(value => value + 1);
-      const refused = readCollectionsRefusal(error);
+      const refused = readCollectionsRefusal(error), away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
-      // Collections this computer cannot use any more stop showing, in place.
-      if (refused) setDataset(null);
+      setUnreachable(away);
+      // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
+      if (refused || away) setDataset(null);
       else onError("Could not open this Collection.", error, () => { void refresh(); });
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetPath, onError, owner]);
@@ -198,7 +202,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     </EmptyState>;
   }
   if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-    <span className="text-sm text-muted">Open this collection to see its records.</span>
+    <span className="text-sm text-muted">{unreachable ?? "Open this Collection to see its records."}</span>
     <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>
   </div>;
   async function restore() {

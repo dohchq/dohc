@@ -303,6 +303,8 @@ describe("owner app publication", () => {
     expect((await screen.findByTestId("collection-move-note")).textContent).toBe("Publishing moves this Collection to sync.example.test. Even on this computer, it then works only while "
       + "sync.example.test is reachable. dohc can't move it back. Its schedules and Group messages stop until you choose sync.example.test under Schedules run on in Settings.");
     expect(api.dataset).toHaveBeenCalledWith({ action: "permissions", workspaceId: "ws-trip", datasetPath: "data/dataset.json", expectedDatasetId: datasetCapability.datasetId, limit: 1 });
+    // The first of what publishing does, right above Publish.
+    expect(screen.getByTestId("collection-move-note").nextElementSibling?.textContent).toBe("The app can use external services and send them data it receives.");
   });
 
   it("keeps Publish off until dohc knows where the Collection is, including after a failed check", async () => {

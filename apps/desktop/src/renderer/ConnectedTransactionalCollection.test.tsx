@@ -556,6 +556,19 @@ describe("a Collection this computer cannot use", () => {
     await screen.findByLabelText("Collection view state");
   });
 
+  it("names the server it needs in place, without a toast, when there is no saved copy, and reads again on Try again", async () => {
+    const words = "This Collection needs sync.example.test, which dohc can't reach.";
+    backend.dataset.mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:dataset': CollectionServerUnreachableError: ${words}`));
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection {...props} onError={onError} />);
+    expect(await screen.findByText(words)).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByText(words)).toBeNull();
+  });
+
   it("stops showing records once a later read is refused", async () => {
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
     render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} />);
