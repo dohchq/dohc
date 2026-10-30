@@ -540,13 +540,19 @@ function ContentMark(props: { moment: EngineMomentRecord }) {
     : null;
 }
 
+// Origins whose label already says what happened, such as "Local file edit".
+const ACTION_ORIGINS = new Set<EngineMomentRecord["origin"]>(["local-file", "ydoc", "restore", "capture-recovery", "capture-recovery-cleared"]);
+
 // What changed, under the name. In the workspace's History it names the
 // file first, unless its summary already does; an edit with no summary
-// says where the file is instead.
+// says where the file is instead. In one file's History, a bare "Edited"
+// goes unsaid after a name that already says it.
 function MomentWhat(props: { moment: EngineMomentRecord; context: "workspace" | "file"; fileOnly?: boolean }) {
   const { moment } = props;
   if (props.context === "file") {
-    return <span className="min-w-0 truncate">{fileMomentSummary(moment)}</span>;
+    const saysIt = !moment.summary && moment.operation === "write" && ACTION_ORIGINS.has(moment.origin)
+      && momentAuthorLabel(moment) === engineOriginLabel(moment.origin);
+    return saysIt ? null : <span className="min-w-0 truncate">{fileMomentSummary(moment)}</span>;
   }
   const name = basenameOf(moment.path);
   const summary = props.fileOnly || (!moment.summary && moment.operation === "write") ? null : engineMomentSummary(moment);

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
 import type { EngineMomentRecord, TimelineEntry } from "../../ipc/bridgeContract";
-import { EngineHistoryView, type HistoryCollections } from "./EngineHistory";
+import { EngineHistoryView, HistoryRow, type HistoryCollections } from "./EngineHistory";
 
 // This suite checks what each row says and offers, not viewport measurement.
 // The real virtualizer is covered by history-virtualization.spec.ts.
@@ -286,6 +286,23 @@ describe("History timeline changes", () => {
     expect(earlier).toMatch(/^Updated plan\.md, Agent Nova, /);
     expect(earlier).not.toBe(newest);
     expect(person).toMatch(/^Edited plan\.md, Sam Rivera, /);
+  });
+
+  it("in one file's History, leaves a bare Edited unsaid after a name that already says it", () => {
+    const row = (overrides: Partial<EngineMomentRecord>) => {
+      cleanup();
+      const moment = (file("m-1", overrides) as Extract<TimelineEntry, { kind: "file" }>).moment;
+      render(<HistoryRow moment={moment} context="file" onOpen={() => {}} />);
+      return screen.getByTestId("engine-moment-open").textContent;
+    };
+    expect(row({})).toMatch(/Local file edit$/);
+    expect(row({ origin: "ydoc" })).toMatch(/Live edit$/);
+    // A real summary, another operation, a source that is not an action, and
+    // a person's name all keep their words.
+    expect(row({ summary: "Added the Sintra day trip" })).toMatch(/Local file editAdded the Sintra day trip$/);
+    expect(row({ operation: "delete" })).toMatch(/Local file editDeleted$/);
+    expect(row({ origin: "sync" })).toMatch(/SyncEdited$/);
+    expect(row({ origin: "ydoc", liveAuthorName: "Jun Park" })).toMatch(/Jun ParkEdited$/);
   });
 });
 
