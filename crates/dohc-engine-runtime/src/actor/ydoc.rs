@@ -1361,7 +1361,13 @@ impl ActorHandle {
                     }
                 }
                 outcome => {
-                    if !super::wait_for_reader(&outcome, reader_attempt).await {
+                    if !super::wait_for_reader(
+                        &outcome,
+                        reader_attempt,
+                        self.markdown_recovery.clone(),
+                    )
+                    .await
+                    {
                         return outcome;
                     }
                     reader_attempt += 1;
