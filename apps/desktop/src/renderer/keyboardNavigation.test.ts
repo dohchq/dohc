@@ -57,6 +57,15 @@ describe("keyboard navigation", () => {
     expect(marked()).toBe(false);
   });
 
+  it("marks the root it is given", () => {
+    stop();
+    const root = document.createElement("div");
+    stop = initKeyboardNavigation(root);
+    key("Tab");
+    expect(root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(true);
+    expect(marked()).toBe(false);
+  });
+
   it("stops listening when stopped", () => {
     stop();
     key("Tab");
@@ -74,8 +83,8 @@ it("draws focus only under the keyboard's mark", () => {
   expect(selectors.length).toBeGreaterThan(5);
   for (const selector of selectors) {
     const parts = selector.replace(/\{$/, "").split(",").filter((part) => part.includes(":focus-visible"));
-    for (const part of parts) expect(part, selector).toContain(`:root[${KEYBOARD_NAV_ATTRIBUTE}]`);
+    for (const part of parts) expect(part, selector).toContain(`[${KEYBOARD_NAV_ATTRIBUTE}] `);
   }
   expect(css).toMatch(/@layer base \{\s*:focus-visible \{\s*outline: none;\s*\}/);
-  expect(css).toContain(`@custom-variant keyboard (:root[${KEYBOARD_NAV_ATTRIBUTE}] &);`);
+  expect(css).toContain(`@custom-variant keyboard ([${KEYBOARD_NAV_ATTRIBUTE}] &);`);
 });

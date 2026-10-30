@@ -8,7 +8,7 @@
 
 @custom-variant dark ([data-theme='dark'] &);
 /* While the person moves with the keyboard (keyboardNavigation.ts). */
-@custom-variant keyboard (:root[data-keyboard-nav] &);
+@custom-variant keyboard ([data-keyboard-nav] &);
 
 /* Warm paper + graphite palette (brand bible / packages/brand, supersedes the
  * zinc D-E5 draft). Every pair is contrast-solved — see tokens.test.ts.
@@ -157,7 +157,7 @@ body {
     outline: none;
   }
 
-  :root[data-keyboard-nav] :focus-visible {
+  [data-keyboard-nav] :focus-visible {
     outline: 2px solid color-mix(in srgb, var(--dohc-accent) 35%, transparent);
     outline-offset: 0;
   }
@@ -172,7 +172,7 @@ body {
  * inside its edge, where a scroller cannot clip it. A selected row keeps its
  * fill, because utilities outrank this layer. */
 @layer components {
-  :root[data-keyboard-nav] .dohc-focus-row:focus-visible {
+  [data-keyboard-nav] .dohc-focus-row:focus-visible {
     outline: 1px solid var(--dohc-accent);
     outline-offset: -1px;
     background-color: var(--dohc-hover);
@@ -1100,22 +1100,22 @@ body {
     font-weight 70ms linear;
 }
 
-:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) {
+:is(.dohc-graph-node:hover, [data-keyboard-nav] .dohc-graph-node:focus-visible) {
   transform: scale(1.16);
 }
 
-:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-halo {
+:is(.dohc-graph-node:hover, [data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-halo {
   opacity: 0.34;
   stroke-width: 2.5;
 }
 
-:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-dot {
+:is(.dohc-graph-node:hover, [data-keyboard-nav] .dohc-graph-node:focus-visible) .dohc-graph-node-dot {
   fill: var(--dohc-match);
   stroke: var(--dohc-ink);
   stroke-width: 2.25;
 }
 
-:is(.dohc-graph-node:hover, :root[data-keyboard-nav] .dohc-graph-node:focus-visible) text {
+:is(.dohc-graph-node:hover, [data-keyboard-nav] .dohc-graph-node:focus-visible) text {
   fill: var(--dohc-match);
   font-weight: 650;
 }
@@ -1693,9 +1693,9 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-:root[data-keyboard-nav] .dohc-table-grip:focus-visible,
-:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
-:root[data-keyboard-nav] .dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1729,13 +1729,13 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-:root[data-keyboard-nav] .dohc-table-grip:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible {
   pointer-events: auto;
   opacity: 1;
 }
 
 .dohc-table-grip:hover,
-:root[data-keyboard-nav] .dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
 .dohc-table-grip.is-open {
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1921,7 +1921,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active,
-:root[data-keyboard-nav] .dohc-table-row-resize:focus-visible,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible,
 .dohc-table-row-resize.is-resizing {
   opacity: 1;
   pointer-events: auto;
@@ -1932,7 +1932,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active:hover::after,
-:root[data-keyboard-nav] .dohc-table-row-resize:focus-visible::after,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible::after,
 .dohc-table-row-resize.is-resizing::after {
   opacity: 1;
 }
@@ -1965,8 +1965,8 @@ body {
 /* The table menu (⋯) and the append strips reveal on table hover. */
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
-:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
-:root[data-keyboard-nav] .dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1990,7 +1990,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-:root[data-keyboard-nav] .dohc-table-menu-btn:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -2017,7 +2017,7 @@ body {
 }
 
 .dohc-table-append:hover,
-:root[data-keyboard-nav] .dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   @apply bg-hover;
   color: var(--dohc-ink);
 }
@@ -2749,7 +2749,7 @@ body {
   outline: none;
 }
 
-:root[data-keyboard-nav] .dohc-callout-type-option:focus-visible,
+[data-keyboard-nav] .dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
   @apply bg-selected;
   outline: none;

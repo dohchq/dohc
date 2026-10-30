@@ -1,5 +1,6 @@
 // Focus shows only while the person moves with the keyboard. These keys set
-// data-keyboard-nav on the root, and styles.css draws focus only under it.
+// data-keyboard-nav on the root, and styles.css draws focus only inside it.
+// The site's demo passes its own root, because it renders in a shadow root.
 // A pointer press or any other key clears it, so a click, a shortcut such as
 // Ctrl+P, or Enter opening a dialog leaves the focus dohc moves unmarked.
 // Escape keeps the mark as it was, so closing a menu opened from the
@@ -11,8 +12,7 @@ const UNCHANGED_KEYS = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "
 
 export const KEYBOARD_NAV_ATTRIBUTE = "data-keyboard-nav";
 
-export function initKeyboardNavigation(): () => void {
-  const root = document.documentElement;
+export function initKeyboardNavigation(root: Element = document.documentElement): () => void {
   const mark = (on: boolean) => {
     // An unchanged write would still restyle every element the rule matches.
     if (root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE) !== on) root.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, on);
