@@ -331,7 +331,7 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             .markdown_settlement_fault_for_harness(
                 move |conn| {
                     assert_eq!(
-                        conn.query_row("SELECT count(*) FROM live_device_settlements", [], |row| {
+                        conn.query_row("SELECT count(*) FROM live_empty_settlements", [], |row| {
                             row.get::<_, i64>(0)
                         })
                         .unwrap(),
@@ -437,7 +437,7 @@ async fn markdown_owner_consent_session_retains_the_checked_grant_after_audited_
             let store = EngineStore::open_read_only(&db).unwrap();
             assert_eq!(store.table_row_count("moments").unwrap(), 2);
             assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 1);
-            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 1);
+            assert_eq!(store.table_row_count("live_empty_settlements").unwrap(), 1);
             let debt = store
                 .read_with(|conn| markdown_write_obligations::pending_in(conn, "w"))
                 .unwrap();

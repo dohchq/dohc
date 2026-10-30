@@ -2469,6 +2469,8 @@ fn record_file_holds_head(
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)
         })?;
     }
+    // An empty settlement publishes nothing, so it records nothing here.
+    let live_audit = live_audit.filter(|audit| !audit.is_empty());
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
             "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
@@ -3025,7 +3027,10 @@ fn ydoc_settle_attempt_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
+    // A settlement covering no accepted edit still projects, but publishes
+    // nothing. Only its projection is kept locally, for a restore.
+    let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
+    let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
     let mut projection = if use_reader {
         project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
     } else {
@@ -3557,7 +3562,7 @@ fn ydoc_settle_attempt_on_store(
         if live_audit.is_none() {
             write_obligations::complete_in(tx, &obligation, now_ms)?;
         }
-        if let Some(audit) = live_audit {
+        if let Some(audit) = recorded_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
@@ -3585,6 +3590,10 @@ fn ydoc_settle_attempt_on_store(
                 now_ms,
             )
             .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        } else if let Some(audit) = live_audit {
+            audit
+                .record_empty_in_tx(tx, &result.moment.moment_id, &result.snapshot.blob_sha256)
+                .map_err(settlement_audit_error)?;
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.
@@ -3603,7 +3612,7 @@ fn ydoc_settle_attempt_on_store(
             content_kind == ContentKind::Richdoc,
         )?;
         #[cfg(any(test, feature = "fault-injection"))]
-        if live_audit.is_none() { markdown_settlement_test_fault(tx)?; }
+        if recorded_audit.is_none() { markdown_settlement_test_fault(tx)?; }
         Ok((Some((result, reconcile_required)), uses_consent))
     })?;
     let (settlement, uses_consent) = match outcome {

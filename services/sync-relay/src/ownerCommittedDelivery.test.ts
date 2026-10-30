@@ -1,4 +1,5 @@
 import {beforeEach, expect, it, vi} from "vitest";
+import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
@@ -14,8 +15,9 @@ const binding = {...document,currentPath: "a.md",selectorPaths: ["a.md"],restore
 const receipt = (cursor: number) => ({deliveryId: `delivery-${cursor}`,updateDigest: "b".repeat(64),journalCursor: cursor,acceptingHostEpoch: 1}) as LiveUpdateReceipt;
 const ackFor = (value: LiveUpdateReceipt): LiveUpdateHostApplicationAck => ({...value,localYDocSequence: value.journalCursor,applicationReplayed: false});
 
-function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
-  let terminal: LiveUpdateReceipt | null = null, requestId = 0, current = true;
+function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0, adoptionCursor = 0} = {}) {
+  let terminal: LiveUpdateReceipt | null = adoptionCursor ? receipt(adoptionCursor) : null, requestId = 0, current = true;
+  let nativeTerminal = terminal;
   const journal = Array.from({length: prefix}, (_, index) => receipt(index + 1));
   const ownerEntries = Array.from({length: owners}, (_, index) => receipt(prefix + index + 1));
   const retained = [...ownerEntries], outboxAcks: LiveUpdateReceipt[] = [];
@@ -26,7 +28,8 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
     existingOwnerDelivery: vi.fn(capture),
     openOwnerDelivery: vi.fn(capture),
     // The tip sequence moves with delivery; the adoption's own sequence never does.
-    ownerDeliveryProgress: vi.fn(() => ({terminal,sequence: terminal?.journalCursor ?? 0,adoptionId: "adoption",adoptionSequence: 7})),
+    ownerDeliveryProgress: vi.fn(() => ({terminal,sequence: terminal?.journalCursor ?? 0,adoptionId: "adoption",adoptionSequence: 7,
+      adoptionTerminal: adoptionCursor ? receipt(adoptionCursor) : null})),
     nextOwnerApplication: vi.fn((value: ReturnType<typeof capture>) => {
       const next = journal.find(row => row.journalCursor > (terminal?.journalCursor ?? 0) && row.journalCursor <= value.high);
       return next ? {metadata: {accepted: {receipt: next}}} : undefined;
@@ -40,6 +43,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
   const storage = {createLiveCommittedDeliveryStore: () => store,
     getShare: () => ({workspaceId: document.workspaceId,shareId: "share",granterUserId: "owner"})};
   const persist = (value: LiveUpdateReceipt) => {
+    if (value.journalCursor > (nativeTerminal?.journalCursor ?? 0)) nativeTerminal = value;
     const ack = ackFor(value); durable.set(value.deliveryId,ack); return ack;
   };
   const client = {
@@ -73,13 +77,14 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
     }
     return {admittedEntries,hasMore: false};
   });
-  const consumer = new OwnerCommittedDelivery(storage as never,{} as never,{
+  const reconnect = () => new OwnerCommittedDelivery(storage as never,{} as never,{
     client: client as unknown as EngineClient,workspace: "handle",deadlineMs: 1_000,nextRequestId: () => ++requestId,
     host: {mode: "device",hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"} as never,
     bounds: {maxBytes: 10_000,maxEvents},
     ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,refusals: new OwnerKnownRefusals(),validate: () => ({} as never)},
   });
-  return {consumer,client,store,retained,outboxAcks,ownerEntries,persist,invalidate: () => {current = false;}};
+  return {consumer: reconnect(),reconnect,client,store,retained,outboxAcks,ownerEntries,persist,nativeTerminal: () => nativeTerminal,
+    invalidate: () => {current = false;}};
 }
 
 it("holds the local owner entry until native application completes", async () => {
@@ -131,8 +136,11 @@ function settlementRequired(f: ReturnType<typeof fixture>, refusals: (call: numb
     const terminal = (input.params as {terminalReceipt: LiveUpdateReceipt | null}).terminalReceipt;
     settled.push(terminal);
     if (failure) throw failure;
-    return {id: input.id,result: {status: "settled",settlement: {settlementId: `settlement-${settled.length}`,previousCursor: 0,
-      terminalCursor: terminal?.journalCursor ?? 0,applicationCount: terminal ? 1 : 0,localYDocSequence: 1,momentId: "moment-1",
+    if (!isDeepStrictEqual(terminal,f.nativeTerminal())) throw new Error("settlement terminal is not current");
+    const previous = f.store.ownerDeliveryProgress().adoptionTerminal?.journalCursor ?? 0;
+    const empty = (terminal?.journalCursor ?? 0) === previous;
+    return {id: input.id,result: {status: "settled",settlement: {settlementId: empty ? null : `settlement-${settled.length}`,previousCursor: previous,
+      terminalCursor: terminal?.journalCursor ?? 0,applicationCount: empty ? 0 : 1,localYDocSequence: 1,momentId: "moment-1",
       markdownDigest: "c".repeat(64),materialized,collectionReconcileRequired: false}}};
   });
   const apply = f.client.sendLiveApplication.getMockImplementation()!;
@@ -143,6 +151,123 @@ function settlementRequired(f: ReturnType<typeof fixture>, refusals: (call: numb
 }
 const offered = (f: ReturnType<typeof fixture>) => f.client.sendLiveApplication.mock.calls.map(([,event]) => event);
 const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor)},authorSnapshot: [{kind: "agent", agentId: declaration.agentId, depth: declaration.depth}]}});
+
+it("materializes a retained handover before draining or applying its next edit", async () => {
+  const f = fixture({prefix: 7, adoptionCursor: 7}), settled = settlementRequired(f, () => false);
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  f.client.sendLiveApplication.mockImplementation(async (input,event) => {
+    expect(settled).toEqual([receipt(7)]);
+    return apply(input,event);
+  });
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(f.outboxAcks).toEqual([receipt(8)]);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(settled).toEqual([receipt(7)]);
+});
+
+it("keeps a handover's edits queued until its empty settle reaches the file", async () => {
+  const f = fixture({prefix: 7, adoptionCursor: 7}), settled = settlementRequired(f, () => false, {materialized: false});
+  expect(await f.consumer.drain(document)).toEqual({kind: "pending",reason: "Owner settlement has not reached the file.",continueDrain: false});
+  expect(settled).toEqual([receipt(7)]);
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+  expect(f.client.sendLiveApplication).not.toHaveBeenCalled();
+  expect(f.outboxAcks).toEqual([]);
+});
+
+// Proves: a held handover settle applies nothing and asks for no further pass,
+// stays held across a new consumer, and finishes once its owner wants the
+// settlement, as after consenting to the held write.
+it("keeps a handover's edits queued while its empty settle is held, then settles it once its owner wants it", async () => {
+  const f = fixture({prefix: 7, adoptionCursor: 7});
+  settlementRequired(f, () => false, {failure: new EngineRequestError(7,
+    {code: "CONFLICT", message: "markdown-write-held", retry: "no"})});
+  expect(await f.consumer.drain(document)).toEqual({kind: "pending",reason: "markdown-write-held",continueDrain: false});
+  expect(await f.consumer.settle(document)).toEqual({kind: "pending", reason: "markdown-write-held"});
+  const restarted = f.reconnect();
+  expect(await restarted.drain(document)).toEqual({kind: "pending",reason: "markdown-write-held",continueDrain: false});
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+  expect(f.client.sendLiveApplication).not.toHaveBeenCalled();
+  expect(f.retained).toEqual(f.ownerEntries);
+  const settled = settlementRequired(f, () => false);
+  expect(await restarted.settleWanted(document)).toMatchObject({terminalCursor: 8, materialized: true});
+  expect(settled).toEqual([receipt(7), receipt(8)]);
+  expect(f.outboxAcks).toEqual([receipt(8)]);
+  expect(f.retained).toEqual([]);
+});
+
+it("retries the handover settle after a lost response before draining any edits", async () => {
+  const f = fixture({prefix: 7, adoptionCursor: 7});
+  settlementRequired(f, () => false, {failure: new Error("response lost")});
+  await expect(f.consumer.drain(document)).rejects.toThrow("response lost");
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+  const settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(settled).toEqual([receipt(7)]);
+  expect(f.outboxAcks).toEqual([receipt(8)]);
+});
+
+it.each([
+  {source: "owner outbox", prefix: 7, owners: 1},
+  {source: "collaborator", prefix: 8, owners: 0},
+])("resumes a handover after losing the $source application reply and recovery ACK", async ({prefix, owners}) => {
+  const f = fixture({prefix, owners, adoptionCursor: 7}), settled = settlementRequired(f, () => false);
+  let recoveryLost = false;
+  f.client.sendLiveApplication.mockImplementationOnce(async (_input, event) => {
+    f.persist(event.metadata.accepted.receipt);
+    recoveryLost = true;
+    throw new Error("application response lost");
+  });
+  const readAck = f.client.readLiveApplicationAck.getMockImplementation()!;
+  f.client.readLiveApplicationAck.mockImplementation(async (input, identity, signal) => {
+    if (recoveryLost) {
+      recoveryLost = false;
+      throw new Error("recovery ACK unavailable");
+    }
+    return readAck(input, identity, signal);
+  });
+  await expect(f.consumer.drain(document)).rejects.toThrow("application response lost");
+  expect(settled).toEqual([receipt(7)]);
+  expect(f.nativeTerminal()).toEqual(receipt(8));
+  expect(f.store.ownerDeliveryProgress().terminal).toEqual(receipt(7));
+  expect(f.outboxAcks).toEqual([]);
+
+  // The relay reconnects or restarts with no cached handover settlement.
+  const resumed = f.reconnect();
+  expect(resumed.adoptionSeedApplied(document)).toBe(false);
+  expect(await resumed.drain(document)).toMatchObject({kind: "done", terminalReceipt: receipt(8)});
+  expect(f.store.ownerDeliveryProgress().terminal).toEqual(receipt(8));
+  expect(drainOwnerOutbox).toHaveBeenCalledTimes(2);
+  expect(resumed.adoptionSeedApplied(document)).toBe(true);
+  expect(f.outboxAcks).toEqual(f.ownerEntries);
+  expect(f.client.sendLiveApplication).toHaveBeenCalledTimes(1);
+  expect(settled).toEqual([receipt(7)]);
+  expect(await resumed.settle(document)).toMatchObject({terminalCursor: 8});
+  expect(settled).toEqual([receipt(7), receipt(8)]);
+});
+
+it("does not settle the handover cut while its recovery ACK is unavailable", async () => {
+  const f = fixture({prefix: 8, owners: 0, adoptionCursor: 7}), settled = settlementRequired(f, () => false);
+  f.persist(receipt(8));
+  f.client.readLiveApplicationAck.mockRejectedValueOnce(new Error("recovery ACK unavailable"));
+  await expect(f.consumer.drain(document)).rejects.toThrow("recovery ACK unavailable");
+  expect(settled).toEqual([]);
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+  expect(f.store.ownerDeliveryProgress().terminal).toEqual(receipt(7));
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done", terminalReceipt: receipt(8)});
+});
+
+it("does not record a recovered handover application after owner standing changes", async () => {
+  const f = fixture({prefix: 8, owners: 0, adoptionCursor: 7}), settled = settlementRequired(f, () => false);
+  const ack = f.persist(receipt(8));
+  f.client.readLiveApplicationAck.mockImplementationOnce(async () => {
+    f.invalidate();
+    return ack;
+  });
+  await expect(f.consumer.drain(document)).rejects.toThrow("Owner standing changed");
+  expect(settled).toEqual([]);
+  expect(f.store.acknowledgeOwnerDeliveryApplication).not.toHaveBeenCalled();
+  expect(drainOwnerOutbox).not.toHaveBeenCalled();
+});
 
 it("settles the applied interval when the host requires it and offers the identical owner event again", async () => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call === 2);

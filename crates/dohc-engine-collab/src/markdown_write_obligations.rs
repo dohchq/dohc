@@ -113,11 +113,16 @@ impl AuditedRetry {
 
     pub fn covered_in(&self, conn: &Connection) -> Result<bool, CollabError> {
         let b = &self.binding;
+        // An empty settlement writes the file but keeps only its projection, in its own table.
         conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements \
             WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 \
             AND object_id=?4 AND lineage_claim_id=?5 AND local_ydoc_sequence>=?6 \
             AND (json_extract(binding_json,'$.restoreFenceGeneration')>?7 \
-              OR (json_extract(binding_json,'$.restoreFenceGeneration')=?7 AND terminal_cursor>=?8)))",
+              OR (json_extract(binding_json,'$.restoreFenceGeneration')=?7 AND terminal_cursor>=?8))) \
+            OR EXISTS(SELECT 1 FROM live_empty_settlements \
+            WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 \
+            AND object_id=?4 AND lineage_claim_id=?5 AND local_ydoc_sequence>=?6 \
+            AND json_extract(binding_json,'$.restoreFenceGeneration')>=?7)",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
                 self.head_update_seq,b.restore_fence_generation,self.terminal_cursor],
             |row| row.get(0)).map_err(crate::durable::map_sql)
@@ -331,7 +336,10 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE live_device_settlements(relay_database_namespace TEXT,workspace_id TEXT,\
             main_version_id TEXT,object_id TEXT,lineage_claim_id TEXT,terminal_cursor INTEGER,\
-            local_ydoc_sequence INTEGER,binding_json TEXT)",
+            local_ydoc_sequence INTEGER,binding_json TEXT);
+            CREATE TABLE live_empty_settlements(relay_database_namespace TEXT,workspace_id TEXT,\
+            main_version_id TEXT,object_id TEXT,lineage_claim_id TEXT,local_ydoc_sequence INTEGER,\
+            binding_json TEXT)",
         )
         .unwrap();
         let retry = AuditedRetry {
@@ -376,6 +384,21 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let held: AuditedRetry = serde_json::from_value(rows[0].retry_inputs.clone()).unwrap();
         assert_eq!((held.terminal_cursor, held.head_update_seq), (9, 14));
+        // An empty settlement covers the hold only once it reaches the held native head.
+        conn.execute(
+            "INSERT INTO live_empty_settlements VALUES ('relay','w','main','note','claim',13,?1)",
+            [serde_json::to_string(&retry.binding).unwrap()],
+        )
+        .unwrap();
+        assert!(!held.covered_in(&conn).unwrap());
+        conn.execute(
+            "UPDATE live_empty_settlements SET local_ydoc_sequence=14",
+            [],
+        )
+        .unwrap();
+        assert!(held.covered_in(&conn).unwrap());
+        conn.execute("DELETE FROM live_empty_settlements", [])
+            .unwrap();
         conn.execute("INSERT INTO live_device_settlements VALUES ('relay','w','main','note','claim',9,12,?1)",
             [serde_json::to_string(&retry.binding).unwrap()]).unwrap();
         assert!(!held.covered_in(&conn).unwrap());

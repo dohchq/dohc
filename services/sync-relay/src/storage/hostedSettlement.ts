@@ -47,15 +47,20 @@ const where =
   "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
-class SettlementProofRefusal extends Error {}
-function require(value: unknown): asserts value {
-  if (!value) throw new SettlementProofRefusal("authorship-mismatch");
+/** A failed proof check. `check` names it in the relay's log; the admission keeps one reason. */
+class SettlementProofRefusal extends Error {
+  constructor(readonly check: string) {
+    super(`Settlement proof check ${check} failed.`);
+  }
+}
+function require(value: unknown, check: string): asserts value {
+  if (!value) throw new SettlementProofRefusal(check);
 }
 function digest(value: unknown) {
   try {
     return parseLiveUpdateDigest(value);
   } catch {
-    throw new SettlementProofRefusal();
+    throw new SettlementProofRefusal("state-blob-digest");
   }
 }
 export function settlementResponseIdentifier(value: unknown) {
@@ -65,14 +70,15 @@ export function settlementResponseIdentifier(value: unknown) {
     return "unavailable";
   }
 }
-const integer = (value: unknown) => {
+const integer = (value: unknown, check: string) => {
   require(
     typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+    check,
   );
   return value;
 };
-const bag = (value: unknown) => {
-  require(value && typeof value === "object" && !Array.isArray(value));
+const bag = (value: unknown, check: string) => {
+  require(value && typeof value === "object" && !Array.isArray(value), check);
   return value as Record<string, unknown>;
 };
 export type SettlementAdmission =
@@ -83,6 +89,7 @@ export function parseSettlementAuthors(value: unknown): LiveAuthorSnapshot {
     Array.isArray(value) &&
       value.length <= MAX_LIVE_AUTHOR_IDENTITIES &&
       Buffer.byteLength(JSON.stringify(value)) <= MAX_LIVE_AUTHOR_BYTES,
+    "author-snapshot-bounds",
   );
   return value.map((author) => parseLiveAuthorSnapshot([author])[0]!);
 }
@@ -110,12 +117,17 @@ type Prepared = {
 };
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
 function withoutClientAuthors(payloadJson: string): string {
-  const payload = bag(JSON.parse(payloadJson));
+  const payload = bag(JSON.parse(payloadJson), "payload-object");
   if (!Object.hasOwn(payload, "authors")) return payloadJson;
   delete payload.authors;
   return stableJsonStringify(payload);
 }
-function refuseSettlement(op: SyncRelayLogInput, settlementId: string) {
+function refuseSettlement(
+  op: SyncRelayLogInput,
+  refusal: { workspaceId: string; settlementId: string; check: string; stage: "prepare" | "commit" },
+) {
+  const { workspaceId, settlementId, check, stage } = refusal;
+  console.error(`[sync-relay] live settlement refused at ${stage}: workspace ${workspaceId}, settlement ${settlementId}, check ${check}.`);
   prepared.delete(op);
   op.payloadJson = withoutClientAuthors(op.payloadJson);
   op.admittedAuthorSnapshot = undefined;
@@ -138,9 +150,9 @@ function endpoint(
       `SELECT accepted_event_count,accepted_evidence_digest,relay_database_namespace,delivery_id,update_digest,accepting_host_epoch FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor=?`,
     )
     .get(...documentParams(document), cursor);
-  require(row && row.relay_database_namespace === namespace);
+  require(row && row.relay_database_namespace === namespace, "journal-endpoint");
   return {
-    eventCount: integer(row.accepted_event_count),
+    eventCount: integer(row.accepted_event_count, "journal-event-count"),
     evidenceDigest: parseLiveUpdateDigest(row.accepted_evidence_digest),
     terminal: {
       journalCursor: cursor,
@@ -161,7 +173,7 @@ function restoreChecks(
   const restores: RestoreCheck[] = [];
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]!;
-    require(isDeepStrictEqual(event.metadata.accepted.binding, expected));
+    require(isDeepStrictEqual(event.metadata.accepted.binding, expected), "accepted-event-binding");
     if (event.restoreOperationId === null) continue;
     let admission;
     try {
@@ -177,16 +189,17 @@ function restoreChecks(
         error instanceof Error &&
         error.message === "Retained restore evidence is damaged."
       )
-        throw new SettlementProofRefusal();
+        throw new SettlementProofRefusal("restore-evidence");
       throw error;
     }
-    require(isDeepStrictEqual(admission.admitted, event.metadata));
+    require(isDeepStrictEqual(admission.admitted, event.metadata), "restore-admission");
     const operation = admission.preparation.fence.operation;
     require(
       isDeepStrictEqual(
         { ...operation.oldBinding, restoreFenceGeneration: operation.newFence },
         expected,
       ),
+      "restore-binding",
     );
     restores.push({
       operationId: event.restoreOperationId,
@@ -211,7 +224,7 @@ function prepareBindingBase(
   budget: RestoreHistoryBudget,
 ) {
   const selected = endpoint(storage, p.binding, p.namespace, p.previous);
-  require(selected.terminal);
+  require(selected.terminal, "base-terminal");
   const metadata = readAcceptedHistoryDeliveryMetadata(
     storage,
     {
@@ -223,7 +236,7 @@ function prepareBindingBase(
     },
     budget,
   );
-  require(metadata);
+  require(metadata, "base-metadata");
   const row = storage.db
     .prepare(`SELECT restore_operation_id FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor=?`)
     .get(...documentParams(p.binding), p.previous)!;
@@ -238,12 +251,13 @@ function prepareBindingBase(
     require(
       isDeepStrictEqual(admission.admitted, metadata) &&
       isDeepStrictEqual(metadata.accepted.binding, p.initialBinding),
+      "base-restore-admission",
     );
     const operation = admission.preparation.fence.operation;
     require(isDeepStrictEqual(
       {...operation.oldBinding, restoreFenceGeneration: operation.newFence},
       p.initialBinding,
-    ));
+    ), "base-restore-binding");
     p.restores.push({
       operationId: String(row.restore_operation_id),
       terminal: p.previous,
@@ -256,6 +270,7 @@ function prepareBindingBase(
     require(
       metadata.accepted.binding.restoreFenceGeneration === p.initialBinding.restoreFenceGeneration &&
       !isDeepStrictEqual(metadata.accepted.binding, p.initialBinding),
+      "base-binding-change",
     );
   }
   p.baseBindingJson = stableJsonStringify(metadata.accepted.binding);
@@ -265,7 +280,9 @@ function requirePublicationPredecessor(
   p: Prepared,
   prior: { terminal: number; markdown: string; namespace: string },
 ) {
-  require(prior.terminal <= p.previous && prior.markdown === p.before && prior.namespace === p.namespace);
+  require(prior.terminal <= p.previous, "predecessor-published-past");
+  require(prior.markdown === p.before, "predecessor-markdown");
+  require(prior.namespace === p.namespace, "predecessor-namespace");
   if (prior.terminal === p.previous) return;
   const b = p.initialBinding;
   // No-change settlements consume their interval without another moment.
@@ -284,7 +301,8 @@ function requirePublicationPredecessor(
     ...documentParams(b), p.previous);
   require(cut && !cut.changed_binding && cut.relay_database_namespace === p.namespace &&
     cut.current_path === b.currentPath && cut.restore_fence_generation === b.restoreFenceGeneration &&
-    isDeepStrictEqual(JSON.parse(String(cut.selector_paths_json)), b.selectorPaths) && cut.markdown_sha256 === prior.markdown);
+    isDeepStrictEqual(JSON.parse(String(cut.selector_paths_json)), b.selectorPaths) && cut.markdown_sha256 === prior.markdown,
+    "predecessor-unchanged-gap");
 }
 function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBudget) {
   const prior = storage.db
@@ -292,7 +310,8 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     .get(...documentParams(p.binding));
   if (prior && prior.binding_json === stableJsonStringify(p.initialBinding)) {
     requirePublicationPredecessor(storage, p, {
-      terminal: integer(prior.terminal_cursor), markdown: String(prior.markdown_sha256), namespace: String(prior.namespace),
+      terminal: integer(prior.terminal_cursor, "published-terminal-cursor"),
+      markdown: String(prior.markdown_sha256), namespace: String(prior.namespace),
     });
     return;
   }
@@ -300,7 +319,9 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     const baseline = storage.db
       .prepare(`SELECT * FROM sync_relay_live_documents WHERE ${where}`)
       .get(...documentParams(p.binding));
-    require(!prior && baseline && baseline.baseline_projected_sha256 === p.before);
+    require(!prior, "first-already-published");
+    require(baseline, "first-live-document");
+    require(baseline.baseline_projected_sha256 === p.before, "first-baseline-markdown");
     return;
   }
   if (budget) prepareBindingBase(storage, p, budget);
@@ -309,17 +330,18 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
       FROM sync_relay_live_update_journal j JOIN ${SETTLEMENT_CUTS} c USING(journal_cursor)
       WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`)
     .get(...documentParams(p.binding), p.previous);
+  require(p.baseBindingJson && base, "base-cut");
+  require(base.relay_database_namespace === p.namespace, "base-namespace");
+  require(base.markdown_sha256 === p.before, "base-markdown");
+  require(!prior || integer(prior.terminal_cursor, "published-terminal-cursor") <= p.previous, "base-published-past");
   require(
-    p.baseBindingJson && base &&
-    base.relay_database_namespace === p.namespace &&
-    base.markdown_sha256 === p.before &&
-    (!prior || integer(prior.terminal_cursor) <= p.previous) &&
     stableJsonStringify({
       ...p.binding,
       currentPath: base.current_path,
       selectorPaths: JSON.parse(String(base.selector_paths_json)),
       restoreFenceGeneration: base.restore_fence_generation,
     }) === p.baseBindingJson,
+    "base-binding",
   );
 }
 export async function prepareHostedSettlements(
@@ -334,10 +356,11 @@ export async function prepareHostedSettlements(
   const provisional = new Map<string, Prepared>();
   for (const op of input.ops) {
     if (op.opKind !== "moment.append") continue;
-    const payload = bag(JSON.parse(op.payloadJson));
+    const payload = bag(JSON.parse(op.payloadJson), "payload-object");
     if (!Object.hasOwn(payload, "settlementReference")) {
       if (clientMomentAuthorsRefused(payload.authors))
-        refuseSettlement(op, "unavailable");
+        refuseSettlement(op, {workspaceId: input.workspaceId, settlementId: "unavailable",
+          check: "client-moment-authors", stage: "prepare"});
       continue;
     }
     const existing = storage.fetchLogCoordinate({
@@ -359,27 +382,26 @@ export async function prepareHostedSettlements(
     }
     let settlementId = "unavailable";
     try {
-      require(!Object.hasOwn(payload, "authors"));
-      const ref = bag(payload.settlementReference),
-        record = bag(ref.record);
+      require(!Object.hasOwn(payload, "authors"), "client-authors");
+      const ref = bag(payload.settlementReference, "settlement-reference"),
+        record = bag(ref.record, "settlement-record");
       settlementId = settlementResponseIdentifier(record.settlementId);
       require(
         settlementId !== "unavailable" &&
           ref.formatVersion === 1 &&
           ref.recordDigest === hash(stableJsonStringify(record)),
+        "record-digest",
       );
       let binding: LiveObjectBinding;
       try {
         binding = parseLiveObjectBinding(record.binding);
       } catch {
-        throw new SettlementProofRefusal();
+        throw new SettlementProofRefusal("record-binding");
       }
       const document = binding;
       const namespace = String(record.relayDatabaseNamespace);
-      require(
-        binding.workspaceId === input.workspaceId &&
-          namespace === liveJournalHistoryNamespace(storage),
-      );
+      require(binding.workspaceId === input.workspaceId, "record-workspace");
+      require(namespace === liveJournalHistoryNamespace(storage), "record-namespace");
       require(
         payload.momentId === record.momentId &&
           payload.objectId === binding.objectId &&
@@ -391,24 +413,25 @@ export async function prepareHostedSettlements(
           payload.payloadAfterContentKind === "text" &&
           payload.payloadBeforeContentKind === "text" &&
           payload.payloadAfterBlobSha256 === record.markdownDigest,
+        "moment-payload",
       );
-      const previous = integer(record.previousCursor),
-        terminal = integer(record.terminalCursor);
-      require(terminal > previous);
+      const previous = integer(record.previousCursor, "record-previous-cursor"),
+        terminal = integer(record.terminalCursor, "record-terminal-cursor");
+      require(terminal > previous, "record-interval");
       const selected = endpoint(storage, document, namespace, previous),
         accepted = endpoint(storage, document, namespace, terminal);
+      require(record.acceptedEventCount === accepted.eventCount - selected.eventCount, "accepted-event-count");
       require(
-        record.acceptedEventCount ===
-          accepted.eventCount - selected.eventCount &&
-          record.acceptedIntervalDigest ===
-            hash(
-              JSON.stringify([
-                "live-settlement-accepted-interval-v1",
-                [namespace, ...documentParams(document)],
-                [selected.eventCount, previous, selected.evidenceDigest],
-                [accepted.eventCount, terminal, accepted.evidenceDigest],
-              ]),
-            ),
+        record.acceptedIntervalDigest ===
+          hash(
+            JSON.stringify([
+              "live-settlement-accepted-interval-v1",
+              [namespace, ...documentParams(document)],
+              [selected.eventCount, previous, selected.evidenceDigest],
+              [accepted.eventCount, terminal, accepted.evidenceDigest],
+            ]),
+          ),
+        "accepted-interval-digest",
       );
       let events: ReturnType<typeof readAcceptedHistoryInterval>;
       try {
@@ -423,7 +446,7 @@ export async function prepareHostedSettlements(
           (error.message === "Accepted journal history is damaged." ||
             error.message === "Retained restore evidence is damaged.")
         )
-          throw new SettlementProofRefusal();
+          throw new SettlementProofRefusal("accepted-history");
         throw error;
       }
       const transitions = restoreChecks(
@@ -436,7 +459,7 @@ export async function prepareHostedSettlements(
       const cut = storage.db
         .prepare(`SELECT * FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`)
         .get(terminal);
-      require(cut);
+      require(cut, "terminal-cut");
       const stateBlob = digest(record.acceptedStateBlobSha256);
       const header = storage.db
         .prepare(
@@ -444,10 +467,11 @@ export async function prepareHostedSettlements(
         )
         .get(input.workspaceId, stateBlob);
       if (!header) throw relayError("blob_missing");
-      require(integer(header.byte_length) <= 20_971_520);
-      budget.chargeBytes(integer(header.byte_length));
+      const stateBytes = integer(header.byte_length, "state-blob-length");
+      require(stateBytes <= 20_971_520, "state-blob-size");
+      budget.chargeBytes(stateBytes);
       const bytes = storage.getBlob(input.workspaceId, stateBlob);
-      require(bytes && hash(bytes) === stateBlob);
+      require(bytes && hash(bytes) === stateBlob, "state-blob-bytes");
       const normalized = await liveValidation.normalizeSettlement(
         {
           document: {
@@ -464,15 +488,13 @@ export async function prepareHostedSettlements(
       if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
       if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
         if (input.ops.length > 1) throw relayError("settlement_proof_budget");
-        throw new SettlementProofRefusal();
+        throw new SettlementProofRefusal("state-capacity");
       }
-      require(
-        normalized.kind === "accepted" &&
-          normalized.evidence.stateUpdateSha256 === cut.state_sha256 &&
-          normalized.evidence.projectedMarkdownSha256 === cut.markdown_sha256 &&
-          record.markdownDigest === cut.markdown_sha256 &&
-          payload.payloadAfterByteLength === cut.markdown_byte_length,
-      );
+      require(normalized.kind === "accepted", "state-normalized");
+      require(normalized.evidence.stateUpdateSha256 === cut.state_sha256, "state-digest");
+      require(normalized.evidence.projectedMarkdownSha256 === cut.markdown_sha256, "state-markdown");
+      require(record.markdownDigest === cut.markdown_sha256, "record-markdown");
+      require(payload.payloadAfterByteLength === cut.markdown_byte_length, "markdown-length");
       const p: Prepared = {
         ...transitions,
         binding,
@@ -539,7 +561,9 @@ export async function prepareHostedSettlements(
           "Retained restore evidence is damaged.",
         ].includes(error.message))
       ) throw error;
-      refuseSettlement(op, settlementId);
+      refuseSettlement(op, {workspaceId: input.workspaceId, settlementId, stage: "prepare",
+        check: error instanceof SettlementProofRefusal ? error.check
+          : error instanceof RestoreHistoryBudgetExceeded ? "proof-budget" : "history-damaged"});
     }
   }
 }
@@ -551,17 +575,17 @@ function commitPreparedHostedSettlement(
 ) {
   if (op.opKind !== "moment.append") return;
   if (op.settlementAdmission?.status !== "accepted") {
-    const payload = bag(JSON.parse(op.payloadJson));
+    const payload = bag(JSON.parse(op.payloadJson), "payload-object");
     if (
       op.opKind === "moment.append" &&
       Object.hasOwn(payload, "settlementReference") &&
       op.settlementAdmission === undefined
     )
-      throw new SettlementProofRefusal();
+      throw new SettlementProofRefusal("unprepared");
     return;
   }
   const p = prepared.get(op);
-  require(p && p.binding.workspaceId === workspaceId);
+  require(p && p.binding.workspaceId === workspaceId, "prepared-proof");
   const current = storage.db
     .prepare(
       `SELECT d.restore_fence_generation,d.lineage_state,d.admission_state,d.current_path,j.selector_paths_json FROM sync_relay_live_documents d
@@ -569,15 +593,15 @@ function commitPreparedHostedSettlement(
  WHERE d.workspace_id=? AND d.main_version_id=? AND d.object_id=? AND d.lineage_claim_id=?`,
     )
     .get(p.terminal, ...documentParams(p.binding));
+  require(current && current.lineage_state === "current", "lineage-current");
+  require(current.restore_fence_generation === p.binding.restoreFenceGeneration, "restore-fence");
+  require(current.current_path === p.binding.currentPath, "current-path");
   require(
-    current &&
-      current.lineage_state === "current" &&
-      current.restore_fence_generation === p.binding.restoreFenceGeneration &&
-      current.current_path === p.binding.currentPath &&
-      isDeepStrictEqual(
-        JSON.parse(String(current.selector_paths_json)),
-        p.binding.selectorPaths,
-      ),
+    isDeepStrictEqual(
+      JSON.parse(String(current.selector_paths_json)),
+      p.binding.selectorPaths,
+    ),
+    "selector-paths",
   );
   for (const restore of p.restores) {
     const retained = storage.db
@@ -596,6 +620,7 @@ function commitPreparedHostedSettlement(
         ["relay-admitted", "native-applied", "settled", "resumed"].includes(
           String(retained.phase),
         ),
+      "restore-retained",
     );
   }
   if (current.admission_state !== "open") {
@@ -613,17 +638,16 @@ function commitPreparedHostedSettlement(
       current.admission_state === "closed" &&
         terminalRestore &&
         active?.operation_id === terminalRestore.operationId,
+      "admission-closed",
     );
   }
   const end = endpoint(storage, p.binding, p.namespace, p.terminal);
-  require(
-    end.evidenceDigest === p.terminalDigest &&
-      liveJournalHistoryNamespace(storage) === p.namespace,
-  );
+  require(end.evidenceDigest === p.terminalDigest, "terminal-evidence");
+  require(liveJournalHistoryNamespace(storage) === p.namespace, "namespace-current");
   anchor(storage, p);
   const conflict = storage.db
     .prepare(
-      `SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND (settlement_id=? OR moment_id=? OR (main_version_id=? AND object_id=? AND lineage_claim_id=? AND previous_cursor<? AND terminal_cursor>?))`,
+      `SELECT settlement_id,moment_id FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND (settlement_id=? OR moment_id=? OR (main_version_id=? AND object_id=? AND lineage_claim_id=? AND previous_cursor<? AND terminal_cursor>?))`,
     )
     .get(
       workspaceId,
@@ -635,7 +659,9 @@ function commitPreparedHostedSettlement(
       p.terminal,
       p.previous,
     );
-  require(!conflict);
+  require(conflict?.settlement_id !== p.settlementId, "settlement-published");
+  require(conflict?.moment_id !== p.momentId, "moment-published");
+  require(!conflict, "settlement-overlap");
   const values = [
     ...documentParams(p.binding),
     p.namespace,
@@ -670,7 +696,8 @@ export function commitHostedSettlement(
     commitPreparedHostedSettlement(storage, op, workspaceId, originId);
   } catch (error) {
     if (!(error instanceof SettlementProofRefusal)) throw error;
-    refuseSettlement(op, op.settlementAdmission?.settlementId ?? "unavailable");
+    refuseSettlement(op, {workspaceId, settlementId: op.settlementAdmission?.settlementId ?? "unavailable",
+      check: error.check, stage: "commit"});
   }
   if (op.settlementAdmission?.status === "refused") op.payloadJson = withoutClientAuthors(op.payloadJson);
 }
