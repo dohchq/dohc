@@ -271,6 +271,7 @@ import {
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   isViewId,
+  makeRoomForTabs,
   MAX_OPEN_TABS,
   moveTab,
   moveTabToGroup,
@@ -1539,16 +1540,18 @@ export function DesktopWorkspaceShell(props: {
   );
   // The saved layout replaces the defaults, and tabs opened since stay open
   // beside the saved ones, the one in view still in view. A file open in both
-  // keeps its saved place. Saving starts, with what's shown when nothing was
-  // saved.
+  // keeps its saved place. Past the tab limit, saved tabs make room. Saving
+  // starts, with what's shown when nothing was saved.
   const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
     const shown = wbRef.current;
     if (stored) {
       const saved = parseUiState(stored);
       const holder = (state: WorkbenchState, path: string) =>
         state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
-      let next = saved;
-      for (const { path } of allTabs(shown)) {
+      const shownPaths = new Set(allTabs(shown).map((tab) => tab.path));
+      const adding = [...shownPaths].filter((path) => !holder(saved, path)).length;
+      let next = makeRoomForTabs(saved, adding, shownPaths);
+      for (const path of shownPaths) {
         if (!holder(next, path)) next = openTab(next, path);
       }
       const active = activeTabPath(shown);

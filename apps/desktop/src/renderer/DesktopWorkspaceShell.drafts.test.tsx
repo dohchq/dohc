@@ -16,6 +16,8 @@ import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collecti
 import { deferred, type Deferred } from "../testing/deferred";
 import { LAYOUT_READ_WAIT_LIMIT_MS, SAVED_TABS_RESTORE, SAVED_TABS_RESTORE_AFTER_WAIT, SAVED_TABS_TITLE, SAVED_TABS_WAITED } from "./shell/useSavedTabsReread";
 import { COVER_WAIT_LINES_MS } from "./DesktopWorkspaceShell";
+import { settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { MAX_OPEN_TABS } from "./workbench/workbenchState";
 import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 async function openDirtyMarkdown(
@@ -322,6 +324,39 @@ describe("workspace switch admission", () => {
         editorGroups: [{ id: "primary", tabs: ["b.md"] }, { id: "right", tabs: ["a.md"], activeTab: "a.md" }],
         activeEditorGroup: "right",
       }));
+    });
+
+    it("keeps the tabs open now, and what a new page holds, when the saved tabs fill the limit", async () => {
+      const saved = Array.from({ length: MAX_OPEN_TABS - 2 }, (_, index) => `saved-${index}.md`);
+      const bridge = makeBridge(Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+          { id: "right", tabs: [...saved, "b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "primary",
+      }));
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+      const user = userEvent.setup();
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+      await screen.findAllByTestId("tree-row");
+      for (const title of ["Itinerary", "Lisbon"]) {
+        await user.click(screen.getByLabelText("New file"));
+        await user.keyboard(title);
+      }
+      await openFile(user, "a.md");
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
+
+      await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
+
+      await screen.findAllByTestId("tab-b.md");
+      await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+      expect(bridge.createWorkspaceFile.mock.calls.map(([payload]) => payload.relativePath).sort())
+        .toEqual(["Itinerary.md", "Lisbon.md"]);
+      expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
     });
 
     it.each([

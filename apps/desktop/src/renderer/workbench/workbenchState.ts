@@ -561,6 +561,26 @@ function evictFirstInactiveTab(state: WorkbenchState): WorkbenchState | null {
   return null;
 }
 
+// Closes inactive tabs, first group first, until `count` more fit under the
+// cap. Tabs at a path in `keep` stay open.
+export function makeRoomForTabs(
+  state: WorkbenchState,
+  count: number,
+  keep: ReadonlySet<string>,
+): WorkbenchState {
+  let excess = allTabs(state).length + count - MAX_OPEN_TABS;
+  if (excess <= 0) return state;
+  const editorGroups = state.editorGroups.map((group) => {
+    const tabs = group.tabs.filter((tab) => {
+      if (excess === 0 || tab.path === group.activeTab || keep.has(tab.path)) return true;
+      excess -= 1;
+      return false;
+    });
+    return tabs.length === group.tabs.length ? group : { ...group, tabs };
+  });
+  return { ...state, editorGroups };
+}
+
 export function focusEditorGroup(
   state: WorkbenchState,
   groupId: string,
