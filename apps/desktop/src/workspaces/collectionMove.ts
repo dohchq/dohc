@@ -1,4 +1,5 @@
 import type { DatasetPlace } from "@dohc/cli/dataset";
+import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { LocalDatasetHost } from "./localDatasetHost";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
@@ -27,10 +28,11 @@ export async function collectionPlace(input: {
 /**
  * Moves a Collection that is only on this computer to the workspace's server,
  * which then holds it for good. Publishing a Collection app on a link and
- * giving a person access both move it there.
+ * giving a person access both move it there. A move that stops after this
+ * computer stopped changing the Collection names the server it didn't reach.
  */
 export async function moveCollectionToServer(input: {
-  local: Pick<LocalDatasetHost, "transferToShared">;
+  local: Pick<LocalDatasetHost, "transferToShared" | "transferStatus">;
   workspaceId: string; datasetId: string;
   credentials: CloudCredentials; credentialGeneration: number; currentCredentialGeneration(): number;
   relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
@@ -41,7 +43,10 @@ export async function moveCollectionToServer(input: {
   const target = createRemoteDatasetTransferTarget({ workspaceId: input.workspaceId, datasetId: input.datasetId, origin: targetOrigin,
     credentials: input.credentials, credentialGeneration: input.credentialGeneration, currentCredentialGeneration: input.currentCredentialGeneration,
     signal: input.signal, assertCurrent: () => input.signal.throwIfAborted(), relayStream: input.relayStream });
-  await input.local.transferToShared({ datasetId: input.datasetId, targetOrigin, target, signal: input.signal });
+  await input.local.transferToShared({ datasetId: input.datasetId, targetOrigin, target, signal: input.signal }).catch((error: unknown) => {
+    if (input.signal.aborted || input.local.transferStatus(input.datasetId)?.state !== "ready") throw error;
+    throw new CollectionMoveUnfinishedError(new URL(targetOrigin).host, { cause: error });
+  });
 }
 
 /**
@@ -64,8 +69,8 @@ export async function finishedTransfer(input: {
   input.signal.throwIfAborted();
   const transfer = input.local.transferStatus(input.datasetId);
   if (!transfer || transfer.state === "imported") return transfer as FinishedTransfer | null;
-  if (moving) throw failure ?? new Error("This Collection's move didn't finish. Try again.");
   const host = new URL(transfer.targetOrigin).host;
+  if (moving) throw new CollectionMoveUnfinishedError(host, { cause: failure, waited: true });
   const needsHost = (cause?: unknown) => new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`, { cause });
   const { credentials, credentialGeneration } = await input.server().catch((error: unknown) => { throw needsHost(error); });
   input.signal.throwIfAborted();
@@ -75,7 +80,7 @@ export async function finishedTransfer(input: {
   await moveCollectionToServer({ ...input, credentials, credentialGeneration });
   input.signal.throwIfAborted();
   const finished = input.local.transferStatus(input.datasetId);
-  if (finished?.state !== "imported") throw new Error("This Collection's move didn't finish. Try again.");
+  if (finished?.state !== "imported") throw new CollectionMoveUnfinishedError(host, { cause: null });
   return finished as FinishedTransfer;
 }
 

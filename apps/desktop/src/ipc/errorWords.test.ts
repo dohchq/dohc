@@ -21,6 +21,7 @@ import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
+  CollectionMoveUnfinishedError,
   ERROR_WORDS,
   ipcWireError,
   isChatMentionPageChanged,
@@ -28,6 +29,7 @@ import {
   isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
+  namingCollectionMove,
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
@@ -37,6 +39,7 @@ import {
   shouldRecheckShareAccess,
   versionNameRefusal,
   VOLUME_SHARES_NEW_FILES_WORDS,
+  waitedForCollectionMove,
   withErrorWords,
 } from "./errorWords";
 
@@ -585,4 +588,12 @@ describe("error words", () => {
     expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
       .toBe("Could not share. Sync this workspace before sharing.");
   });
+});
+
+it("names the Collection in a stopped move's words, as written, and leaves any other error as it is", () => {
+  const stopped = acrossIpc(new CollectionMoveUnfinishedError("sync.example.test", { cause: null, waited: true }), "dohc:dataset");
+  expect(readError(namingCollectionMove(stopped, "Q&A $& notes")).words).toBe("Q&A $& notes didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  expect(waitedForCollectionMove(namingCollectionMove(stopped, "Orders"))).toBe(true);
+  const other = acrossIpc(new Error("Sharing failed (502)."), "dohc:dataset");
+  expect(namingCollectionMove(other, "Orders")).toBe(other);
 });

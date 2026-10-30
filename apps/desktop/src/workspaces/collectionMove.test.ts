@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
-import { collectionPlace, finishedTransfer, type FinishedTransfer } from "./collectionMove";
+import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
+import { collectionPlace, finishedTransfer, moveCollectionToServer, type FinishedTransfer } from "./collectionMove";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
 
 const transfer = <State extends DatasetTransferStatus["state"]>(state: State) =>
@@ -84,9 +85,38 @@ it("stops waiting when the read is cancelled, and leaves the move running", asyn
   await expect(move).resolves.toMatchObject({ state: "imported" });
 });
 
-it("fails a read with the move's own error when the move this app is running fails", async () => {
-  const { finish } = moving(transfer("ready"), { inFlight: Promise.reject(Error("The server stopped answering.")) });
-  await expect(finish()).rejects.toThrow("The server stopped answering.");
+const unfinished = "This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.";
+
+it("fails a read that waited for the move this app is running with the server's name, marked as waited, when the move stops", async () => {
+  const stopped = Error("The server stopped answering.");
+  const { finish } = moving(transfer("ready"), { inFlight: Promise.reject(stopped) });
+  const failure = await finish().catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(CollectionMoveUnfinishedError);
+  expect(failure).toMatchObject({ message: unfinished, code: "waited", cause: stopped });
+});
+
+it("names the server, unmarked, when a move that a read resumed stops again", async () => {
+  const stopped = Error("Sharing failed (502).");
+  const { local, finish } = moving(transfer("ready"));
+  local.transferToShared.mockRejectedValueOnce(stopped);
+  const failure = await finish().catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(CollectionMoveUnfinishedError);
+  expect(failure).toMatchObject({ message: unfinished, cause: stopped });
+  expect((failure as CollectionMoveUnfinishedError).code).toBeUndefined();
+});
+
+it("names the server when a move stops after its transfer record exists, and keeps the move's own error before that", async () => {
+  const stopped = Error("Sharing failed (502).");
+  let status: DatasetTransferStatus | null = null;
+  const local = { transferStatus: () => status, transferToShared: vi.fn(async () => { throw stopped; }) };
+  const move = () => moveCollectionToServer({ local, workspaceId: "w", datasetId: "d", credentialGeneration: 1, currentCredentialGeneration: () => 1,
+    credentials: { serverUrl: "https://account.example.test", relayUrl: "https://sync.example.test", token: "t", userId: "u", email: "u@example.test" },
+    relayStream: async () => { throw Error("Nothing streams in this test."); }, signal: new AbortController().signal });
+  await expect(move()).rejects.toBe(stopped);
+  status = transfer("ready");
+  const failure = await move().catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(CollectionMoveUnfinishedError);
+  expect(failure).toMatchObject({ message: unfinished, cause: stopped });
 });
 
 it("resumes a move that stopped partway to the same server", async () => {
@@ -131,7 +161,8 @@ it("waits for the move another read resumed while this one asked for the session
   expect(local.transferToShared).toHaveBeenCalledTimes(1);
   const stopped = Error("The server stopped answering.");
   stop(stopped);
-  await expect(first).rejects.toBe(stopped);
-  await expect(second).rejects.toBe(stopped);
+  // The read that ran the move reports its stop. The read that only waited says so.
+  await expect(first).rejects.toMatchObject({ name: "CollectionMoveUnfinishedError", code: undefined, cause: stopped });
+  await expect(second).rejects.toMatchObject({ name: "CollectionMoveUnfinishedError", code: "waited", cause: stopped });
   expect(local.transferToShared).toHaveBeenCalledTimes(1);
 });
