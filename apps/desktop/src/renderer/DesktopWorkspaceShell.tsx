@@ -214,6 +214,7 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
+import { countInput } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -244,6 +245,7 @@ import {
 } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
+  ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
@@ -2787,6 +2789,17 @@ export function DesktopWorkspaceShell(props: {
     },
     [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
+  // The chat list lives in the left side panel's Chats view.
+  const openChatsNavigator = useCallback(() => {
+    mutateWb((state) => showView(state, "chats"));
+  }, [mutateWb]);
+  // A notice's Open shows Chats at the invitation it names.
+  const [revealedInvitation, setRevealedInvitation] = useState<ChatsInvitation | null>(null);
+  const openChatsInvitation = useCallback((invitation: ChatsInvitation) => {
+    setRevealedInvitation(invitation);
+    openChatsNavigator();
+  }, [openChatsNavigator]);
+  const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -2798,6 +2811,10 @@ export function DesktopWorkspaceShell(props: {
       openFile(open);
       return;
     }
+    if ("chatsInvitation" in open) {
+      openChatsInvitation(open.chatsInvitation);
+      return;
+    }
     const openSwitch = () => {
       void openAutomationControls(open.automationControls, { sharedFile: open.sharedFile }).then(
         (note) => {
@@ -2807,7 +2824,7 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openFile, reportShellError, workbenchRestored]);
+  }, [openAutomationControls, openChatsInvitation, openFile, reportShellError, workbenchRestored]);
   // Files the OS opened with dohc. Main sends each once this window has opened
   // this workspace, and they open in order when the workspace is ready.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
@@ -2898,10 +2915,6 @@ export function DesktopWorkspaceShell(props: {
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
-  // The chat list lives in the left side panel's Chats view.
-  const openChatsNavigator = useCallback(() => {
-    mutateWb((state) => showView(state, "chats"));
-  }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
@@ -4533,6 +4546,7 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
+      countInput();
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
@@ -4953,9 +4967,11 @@ export function DesktopWorkspaceShell(props: {
     openAutomation: openNoticeAutomation,
     openAutomationControls,
     openChat: openChatsNavInTab,
+    openChatsInvitation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
+    clearShellError: clearIdentity,
   });
   const shareChangeNotices = useMemo(
     () =>
@@ -5204,6 +5220,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceFiles: files,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
+    ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,
@@ -6924,6 +6941,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceReady={props.onSwitchWorkspace}
             onBack={() => props.onDismissShareHandoff?.()}
             onOpened={() => props.onShareHandoffOpened?.()}
+            ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}

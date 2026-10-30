@@ -56,6 +56,7 @@ import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
+import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   AtSign,
   Bot,
@@ -188,6 +189,10 @@ type OverviewState =
 // readers write them, each authoritative for a different subset, so each part
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
+
+// An invitation a notice's Open asks Chats to show, with the input count from
+// when the person pressed Open.
+export type ChatsInvitation = { shareId: string; inputs: number };
 
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
@@ -577,6 +582,12 @@ export function ChatsView(props: {
   // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
+  // An invitation to show: once its row is listed, the row scrolls into view
+  // and is marked, and its first action, Join or Accept, takes focus. If the
+  // person did something since Open, nothing moves. Either way
+  // onInvitationRevealed then reports it handled.
+  revealInvitation?: ChatsInvitation;
+  onInvitationRevealed?: () => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -2793,6 +2804,8 @@ export function ChatsView(props: {
     }
     return map;
   }, [channelShares]);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const { revealInvitation, onInvitationRevealed } = props;
   const receivedNotJoined = useMemo(() => {
     if (!channelShares) return [];
     // An ended row is a durable leave tombstone, not an active join. Keep its
@@ -2811,6 +2824,35 @@ export function ChatsView(props: {
     }
     return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
   }, [channelShares]);
+  const [markedInvitation, setMarkedInvitation] = useState<ChatsInvitation | null>(null);
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    // A person who clicked, typed or left the window after pressing Open has
+    // moved on, so focus stays where they put it.
+    if (inputCount() !== revealInvitation.inputs) {
+      onInvitationRevealed?.();
+      return;
+    }
+    const action = viewRef.current?.querySelector<HTMLElement>(`[data-invitation="${CSS.escape(revealInvitation.shareId)}"]`);
+    if (!action) return;
+    action.scrollIntoView({ block: "nearest" });
+    action.focus();
+    // Every Join is disabled while another join is in flight. The reveal
+    // waits until its action can take focus.
+    if (document.activeElement !== action) return;
+    setMarkedInvitation({ shareId: revealInvitation.shareId, inputs: inputCount() });
+    onInvitationRevealed?.();
+  }, [joiningShareId, onInvitationRevealed, pendingDmRequests, receivedNotJoined, revealInvitation]);
+  // The revealed row stays marked until the person's next click or key press,
+  // which joins it or acts elsewhere.
+  useEffect(() => {
+    if (markedInvitation === null) return;
+    if (inputCount() !== markedInvitation.inputs) {
+      setMarkedInvitation(null);
+      return;
+    }
+    return onNextInput(() => setMarkedInvitation(null));
+  }, [markedInvitation]);
   const joinedFor = useCallback(
     (channel: ChatChannelRecord) =>
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
@@ -3131,6 +3173,14 @@ export function ChatsView(props: {
     // stale response there.
     commitShareListing(ticket, session, shares);
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
+  // A notice's Open can name an invitation that arrived after Chats last
+  // listed it. Each reveal reads the shares again and pulls message requests,
+  // whose poll stops while a conversation tab is open.
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    void refreshShares();
+    void refreshDms("open");
+  }, [refreshDms, refreshShares, revealInvitation]);
 
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic
@@ -4900,6 +4950,7 @@ export function ChatsView(props: {
 
   return (
     <div
+      ref={viewRef}
       data-testid="chats-view"
       data-variant={variant}
       className="flex min-h-0 flex-1 flex-col"
@@ -4993,7 +5044,11 @@ export function ChatsView(props: {
               ) : null}
               <ul className="m-0 list-none p-0">
                 {receivedNotJoined.map((row) => (
-                  <li key={row.shareId} className="mx-1 flex min-h-8 items-center gap-2 px-2 py-1">
+                  <li
+                    key={row.shareId}
+                    aria-current={markedInvitation?.shareId === row.shareId ? "true" : undefined}
+                    className={`mx-1 flex min-h-8 items-center gap-2 rounded-md px-2 py-1${markedInvitation?.shareId === row.shareId ? " bg-selected" : ""}`}
+                  >
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
@@ -5003,6 +5058,7 @@ export function ChatsView(props: {
                     <button
                       type="button"
                       data-testid="chats-join-shared"
+                      data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
                       className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
@@ -5093,6 +5149,7 @@ export function ChatsView(props: {
                     key={request.shareId}
                     request={request}
                     state="pending"
+                    marked={markedInvitation?.shareId === request.shareId}
                     busy={dmRequestBusy !== null}
                     onAccept={() => setAcceptingDmRequest(request)}
                     onDecline={() => void setDmRequestDeclined(request, true)}

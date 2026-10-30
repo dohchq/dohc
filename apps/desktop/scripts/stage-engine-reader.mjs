@@ -106,7 +106,7 @@ export async function stageEngineReader(options = {}) {
     if (config) {
       await chmod(dirname(config.bundle), 0o755);
       const generation = basename(dirname(config.bundle));
-      if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o444 });
+      if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o644 });
       await prune(base, generation, options.selfHost);
       return { supported: true, generation, ...config };
     }
@@ -128,7 +128,7 @@ export async function stageEngineReader(options = {}) {
     manifest.buildSha256 = hash(JSON.stringify(built));
     await writeFile(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
     for (const file of platform === "win32" || options.selfHost ? ["reader.cjs", "manifest.json"] : ["node", "reader.cjs", "manifest.json"]) {
-      await chmod(join(staging, file), file === "node" ? 0o555 : 0o444);
+      await chmod(join(staging, file), file === "node" ? 0o755 : 0o644);
     }
     await chmod(staging, 0o755);
     const generation = manifest.buildSha256, destination = join(base, generation);
@@ -141,9 +141,9 @@ export async function stageEngineReader(options = {}) {
     const config = await verifyGeneration(resources, platform, arch, generation, hostNode);
     const selected = join(base, "selection.json");
     const temporary = join(base, `.selection-${process.pid}.json`);
-    await writeFile(temporary, JSON.stringify({ generation }) + "\n", { mode: 0o600 });
+    await writeFile(temporary, JSON.stringify({ generation }) + "\n", { mode: 0o644 });
     await rename(temporary, selected);
-    if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o444 });
+    if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o644 });
     await prune(base, generation, options.selfHost);
     return { supported: true, generation, ...config };
   } finally {
