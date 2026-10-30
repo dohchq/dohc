@@ -181,7 +181,7 @@ export function OpenSharedView(props: {
     if (lookup === undefined) {
       lookup = bridge()
         .getRelayReceivedShare({ shareId: accessShareId })
-        .then((result) => result.found ? result.share : null)
+        .then((result) => "share" in result ? result.share : null)
         .catch(() => null);
       accessLookups.current.set(accessShareId, lookup);
     }

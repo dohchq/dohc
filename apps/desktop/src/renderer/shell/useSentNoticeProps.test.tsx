@@ -12,8 +12,11 @@ import type {
 import { deferred } from "../../testing/deferred";
 import {
   ACCESS_ENDED_NOTE,
+  AUTOMATION_LOOKUP_FAILED_NOTE,
   AUTOMATION_NOT_HERE_NOTE,
+  NO_OWN_WORKSPACE_NOTE,
   NOT_HERE_NOTE,
+  RUN_THREAD_LOOKUP_FAILED_NOTE,
   RUN_THREAD_NOT_HERE_NOTE,
   SHARE_LOOKUP_FAILED_NOTE,
   useSentNoticeProps,
@@ -102,6 +105,7 @@ function setup(
     openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
     openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
     openChat: vi.fn((_nav: ChatsNav) => undefined),
+    openChatsNavigator: vi.fn(),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -185,12 +189,66 @@ describe("opening a sent notice", () => {
     expect(onOpenShare).not.toHaveBeenCalled();
   });
 
-  it("says on the row when the share lookup fails, rather than a separate error", async () => {
-    getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
+  it("reports a failed share lookup with its cause, and Try again opens the share", async () => {
+    const cause = new Error("relay unreachable");
+    getRelayReceivedShare.mockRejectedValueOnce(cause);
     const { result, onOpenShare, reportShellError } = setup([notice()], [workspace("notes")]);
-    await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(SHARE_LOOKUP_FAILED_NOTE);
+    await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(onOpenShare).not.toHaveBeenCalled();
+    expect(reportShellError).toHaveBeenCalledWith(SHARE_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
+    await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
+    await waitFor(() => expect(onOpenShare).toHaveBeenCalledTimes(1));
+    // A Try again that finds the access ended reports that instead.
+    getRelayReceivedShare.mockRejectedValueOnce(cause);
+    await result.current.onOpenSentNotice(notice(), live());
+    getRelayReceivedShare.mockResolvedValueOnce({ found: false });
+    await act(async () => vi.mocked(reportShellError).mock.calls[1]?.[2]?.());
+    await waitFor(() => expect(reportShellError).toHaveBeenLastCalledWith(ACCESS_ENDED_NOTE, expect.any(Error)));
+  });
+
+  it("reports nothing when the share lookup fails after Open was cancelled", async () => {
+    const lookup = deferred<typeof RECEIVED>();
+    getRelayReceivedShare.mockReturnValueOnce(lookup.promise);
+    const { result, reportShellError } = setup([notice()], [workspace("notes")]);
+    const controller = new AbortController();
+    const opened = result.current.onOpenSentNotice(notice(), controller.signal);
+    controller.abort();
+    lookup.reject(new Error("relay unreachable"));
+    await expect(opened).resolves.toBeNull();
     expect(reportShellError).not.toHaveBeenCalled();
+  });
+
+  describe("a Group invitation or message request", () => {
+    const INVITATION = { found: true as const, chats: true as const };
+    const view = workspace("trip-view", { shareView: { shareId: "trip-share", granterEmail: null }, lastOpenedAt: 9 });
+
+    it("opens Chats in this workspace, where it waits with Join", async () => {
+      getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
+      const { result, openChatsNavigator, onOpenShare, onSwitchWorkspace } = setup([notice()], [workspace("notes")]);
+      await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
+      expect(openChatsNavigator).toHaveBeenCalledTimes(1);
+      expect(onOpenShare).not.toHaveBeenCalled();
+      expect(onSwitchWorkspace).not.toHaveBeenCalled();
+    });
+
+    it("switches from a shared view to Chats in the workspace of their own opened last", async () => {
+      getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
+      const older = workspace("notes", { lastOpenedAt: 1 });
+      const latest = workspace("trip", { lastOpenedAt: 5 });
+      const { result, openChatsNavigator, onSwitchWorkspace } = setup([notice()], [older, latest, view], "trip-view");
+      await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
+      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { chats: true });
+      expect(openChatsNavigator).not.toHaveBeenCalled();
+    });
+
+    it("says on the row to create a workspace when they have none of their own", async () => {
+      getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
+      const { result, openChatsNavigator, onSwitchWorkspace } = setup([notice()], [view], "trip-view");
+      await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(NO_OWN_WORKSPACE_NOTE);
+      expect(onSwitchWorkspace).not.toHaveBeenCalled();
+      expect(openChatsNavigator).not.toHaveBeenCalled();
+    });
   });
 
   it("says access ended when the target was cleared or the share is gone", async () => {
@@ -254,18 +312,25 @@ describe("a failed run's notice", () => {
       store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
       title: "Your agent finished", target: { thread: "thread-scout", run: "run-1" },
     });
-    const { result, openChat, openFile } = setup([run], [workspace("notes")]);
+    const { result, openChat, openFile, reportShellError } = setup([run], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.openable).toBe(true);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
     expect(openChat).toHaveBeenCalledWith({ level: "thread", channel: chat("chat-scout", "scout"), thread: thread("thread-scout", "chat-scout") });
     expect(openFile).not.toHaveBeenCalled();
 
-    // A thread that is gone, or a read that fails, says so on the row.
+    // A thread that is gone says so on the row. A read that fails goes to
+    // the shell's errors, whose Try again opens the thread.
     openChat.mockClear();
     const gone = { ...run, target: { thread: "thread-gone", run: "run-2" } };
     await expect(result.current.onOpenSentNotice(gone, live())).resolves.toBe(RUN_THREAD_NOT_HERE_NOTE);
-    listChatChannels.mockRejectedValueOnce(new Error("The workspace engine is not running."));
-    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBe("dohc could not open this run's thread.");
+    const cause = new Error("The workspace engine is not running.");
+    listChatChannels.mockRejectedValueOnce(cause);
+    await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
+    expect(reportShellError).toHaveBeenCalledWith(RUN_THREAD_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    expect(openChat).not.toHaveBeenCalled();
+    await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    openChat.mockClear();
     // Nothing opens once Open was cancelled.
     const cancelled = new AbortController();
     const opening = result.current.onOpenSentNotice(run, cancelled.signal);
@@ -299,11 +364,17 @@ describe("a failed run's notice", () => {
   });
 
   it("says so on its row when this computer no longer has the automation's Collection", async () => {
-    const { result, openAutomation, openFile } = setup([failed], [workspace("notes")]);
+    const { result, openAutomation, openFile, reportShellError } = setup([failed], [workspace("notes")]);
     openAutomation.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
     await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe(AUTOMATION_NOT_HERE_NOTE);
-    openAutomation.mockRejectedValueOnce(new Error("The workspace engine is not running."));
-    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe("dohc could not open this automation.");
+    // A lookup that fails goes to the shell's errors, whose Try again opens it.
+    const cause = new Error("The workspace engine is not running.");
+    openAutomation.mockRejectedValueOnce(cause);
+    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
+    expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_LOOKUP_FAILED_NOTE, cause, expect.any(Function));
+    openAutomation.mockClear();
+    await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
+    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", expect.any(AbortSignal)));
     expect(openFile).not.toHaveBeenCalled();
   });
 

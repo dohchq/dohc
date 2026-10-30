@@ -19,12 +19,15 @@ const BUSY_COPY =
   "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
+// A Group invitation or message request is joined from Chats.
+const CHATS_COPY = "This opens in Chats. Open a workspace of your own, then open Chats.";
 
 type ReceivedShareState =
   | { kind: "idle" }
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
+  | { kind: "chats"; shareId: string }
   | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
 
 function HandoffCard(props: {
@@ -88,9 +91,11 @@ export function ShareHandoffSurface(props: {
       .then((result) => {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
-          result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) }
-            : { kind: "missing", shareId },
+          !result.found
+            ? { kind: "missing", shareId }
+            : "chats" in result
+              ? { kind: "chats", shareId }
+              : { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) },
         );
       })
       .catch(() => {
@@ -234,6 +239,19 @@ export function ShareHandoffSurface(props: {
         >
           Check again
         </SecondaryButton>
+      </HandoffCard>
+    );
+  }
+
+  if (
+    receivedShare.kind === "chats" &&
+    receivedShare.shareId === shareId
+  ) {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="status" data-testid="handoff-opens-in-chats" className="m-0 text-xs leading-relaxed text-muted">
+          {CHATS_COPY}
+        </p>
       </HandoffCard>
     );
   }

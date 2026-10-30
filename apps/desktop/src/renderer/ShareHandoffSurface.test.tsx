@@ -556,6 +556,30 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
+  it("says a Group invitation or message request opens in Chats, and opens nothing", async () => {
+    bridgeMock.getRelayReceivedShare.mockResolvedValueOnce({ found: true, chats: true });
+
+    render(
+      <ShareHandoffSurface
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-group",
+        }}
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        onOpened={() => {}}
+      />,
+    );
+
+    expect((await screen.findByTestId("handoff-opens-in-chats")).textContent)
+      .toBe("This opens in Chats. Open a workspace of your own, then open Chats.");
+    expect(screen.queryByTestId("open-shared-view")).toBeNull();
+    expect(screen.queryByText(MISSING_COPY)).toBeNull();
+    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
   it("does not let a stale exact lookup repaint a newer share id or a settled failure", async () => {
     const first = deferred<ExactReceivedShareResult>();
     const second = deferred<ExactReceivedShareResult>();

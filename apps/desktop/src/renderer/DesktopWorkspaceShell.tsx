@@ -2787,6 +2787,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
+  // The chat list lives in the left side panel's Chats view.
+  const openChatsNavigator = useCallback(() => {
+    mutateWb((state) => showView(state, "chats"));
+  }, [mutateWb]);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -2798,6 +2802,10 @@ export function DesktopWorkspaceShell(props: {
       openFile(open);
       return;
     }
+    if ("chats" in open) {
+      openChatsNavigator();
+      return;
+    }
     const openSwitch = () => {
       void openAutomationControls(open.automationControls, { sharedFile: open.sharedFile }).then(
         (note) => {
@@ -2807,7 +2815,7 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openFile, reportShellError, workbenchRestored]);
+  }, [openAutomationControls, openChatsNavigator, openFile, reportShellError, workbenchRestored]);
   // Files the OS opened with dohc. Main sends each once this window has opened
   // this workspace, and they open in order when the workspace is ready.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
@@ -2898,10 +2906,6 @@ export function DesktopWorkspaceShell(props: {
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
-  // The chat list lives in the left side panel's Chats view.
-  const openChatsNavigator = useCallback(() => {
-    mutateWb((state) => showView(state, "chats"));
-  }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
@@ -4953,6 +4957,7 @@ export function DesktopWorkspaceShell(props: {
     openAutomation: openNoticeAutomation,
     openAutomationControls,
     openChat: openChatsNavInTab,
+    openChatsNavigator,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,

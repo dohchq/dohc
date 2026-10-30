@@ -1918,6 +1918,11 @@ describe("notices sent to you", () => {
     await screen.findByTestId("tab-b.md");
   });
 
+  it("opens Chats, where a Group invitation waits, once the workspace it switched to is ready", async () => {
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { chats: true } });
+    await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+  });
+
   it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderWithNotices(bridge, {});

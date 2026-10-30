@@ -16,21 +16,22 @@ export const ACCESS_ENDED_NOTE =
   "Your access to this ended. Ask the person who shared it to share it again.";
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
-// Open beside it is the way to try again.
+export const NO_OWN_WORKSPACE_NOTE =
+  "This opens in Chats, in a workspace of your own. Create one from Manage workspaces, then choose Open again.";
+// The lookup failures below go to the shell's errors with their cause and Try again.
 export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
 export const AUTOMATION_NOT_HERE_NOTE = "dohc cannot find this automation's Collection on this computer.";
-// Open beside it is the way to try again.
-const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
+export const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
 export const RUN_THREAD_NOT_HERE_NOTE = "dohc cannot find this run's thread.";
-// Open beside it is the way to try again.
-const RUN_THREAD_LOOKUP_FAILED_NOTE = "dohc could not open this run's thread.";
+export const RUN_THREAD_LOOKUP_FAILED_NOTE = "dohc could not open this run's thread.";
 
 /**
  * What a notice's Open asks the workspace it switches to to open once it is
- * ready: a file, or an automation's switch in the ⚡ panel. `sharedFile` is
- * the automations.yaml a share holds there.
+ * ready: a file, an automation's switch in the ⚡ panel, or Chats, where a
+ * Group invitation waits with Join. `sharedFile` is the automations.yaml a
+ * share holds there.
  */
-export type OpenOnSwitch = string | { automationControls: string; sharedFile?: string };
+export type OpenOnSwitch = string | { automationControls: string; sharedFile?: string } | { chats: true };
 
 // Main dismisses a failed run's notice once its run is queued again.
 const nothingToReread = () => undefined;
@@ -83,29 +84,28 @@ export function useSentNoticeProps(input: {
   openAutomationControls: (automationId: string, options: { sharedFile?: string; signal: AbortSignal }) => Promise<string | null>;
   /** Opens a conversation in a chat tab. */
   openChat: (nav: ChatsNav) => void;
+  /** Shows the Chats panel, where Group invitations and message requests wait. */
+  openChatsNavigator: () => void;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: OpenOnSwitch) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 }) {
   const {
-    sentNotices, workspaceId, workspaces, openFile, openAutomation, openAutomationControls, openChat, onSwitchWorkspace, onOpenShare, reportShellError,
+    sentNotices, workspaceId, workspaces, openFile, openAutomation, openAutomationControls, openChat, openChatsNavigator, onSwitchWorkspace,
+    onOpenShare, reportShellError,
   } = input;
 
   // A run's thread is in an agent's chat, whichever agent ran it, or in a
-  // group's posts where a message named the agent.
+  // group's posts where a message named the agent. A failed lookup throws.
   const openRunThread = useCallback(
     async (threadId: string, signal: AbortSignal): Promise<string | null> => {
       let nav: ChatsNav | null = null;
-      try {
-        const { channels } = await bridge().listChatChannels({ workspaceId });
-        const places = await Promise.all(channels.filter((channel) => channel.kind !== "dm").map(async (channel) =>
-          ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
-        for (const { channel, threads } of places) {
-          const thread = threads.find((candidate) => candidate.id === threadId);
-          if (thread) nav = { level: "thread", channel, thread };
-        }
-      } catch {
-        return signal.aborted ? null : RUN_THREAD_LOOKUP_FAILED_NOTE;
+      const { channels } = await bridge().listChatChannels({ workspaceId });
+      const places = await Promise.all(channels.filter((channel) => channel.kind !== "dm").map(async (channel) =>
+        ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
+      for (const { channel, threads } of places) {
+        const thread = threads.find((candidate) => candidate.id === threadId);
+        if (thread) nav = { level: "thread", channel, thread };
       }
       if (signal.aborted) return null;
       if (!nav) return RUN_THREAD_NOT_HERE_NOTE;
@@ -225,19 +225,35 @@ export function useSentNoticeProps(input: {
 
   // Where Open goes: the notice's file here, the workspace that holds it,
   // or the share it came through. An automation's notice here goes to the
-  // ⚡ panel, on its switch with `controls`, else on its runs.
+  // ⚡ panel, on its switch with `controls`, else on its runs. A Group
+  // invitation or message request goes to Chats in a workspace of this
+  // person's own, where it waits with Join. A failed lookup goes to the
+  // shell's errors, whose Try again goes where Open goes again.
+  const workspace = useRequestSequence([workspaceId]);
   const go = useCallback(
-    async (notice: NoticeRow, signal: AbortSignal, controls: boolean): Promise<string | null> => {
-      const place = sentNoticePlace(notice, workspaces, workspaceId);
-      const noteOf = async (opening: Promise<string | null>): Promise<string | null> => {
+    async function go(notice: NoticeRow, signal: AbortSignal, controls: boolean): Promise<string | null> {
+      const failed = (note: string, error: unknown): null => {
+        if (signal.aborted) return null;
+        const epoch = workspace.current();
+        const retry = () => {
+          if (!workspace.isCurrent(epoch)) return;
+          void go(notice, new AbortController().signal, controls).then((again) => {
+            if (again !== null && workspace.isCurrent(epoch)) reportShellError(again, new Error(again));
+          });
+        };
+        reportShellError(note, error, retry);
+        return null;
+      };
+      const noteOf = async (opening: Promise<string | null>, failure: string): Promise<string | null> => {
         let note: string | null;
         try {
           note = await opening;
-        } catch {
-          note = AUTOMATION_LOOKUP_FAILED_NOTE;
+        } catch (error) {
+          return failed(failure, error);
         }
         return signal.aborted ? null : note;
       };
+      const place = sentNoticePlace(notice, workspaces, workspaceId);
       switch (place.kind) {
         case "none":
           return null;
@@ -257,12 +273,15 @@ export function useSentNoticeProps(input: {
               ? { automationControls: toSwitch, ...(sharedFile === undefined ? {} : { sharedFile }) }
               : place.path ?? undefined);
           } else if (notice.kind === "agent-run" && notice.target?.thread !== undefined) {
-            return await openRunThread(notice.target.thread, signal);
+            return await noteOf(openRunThread(notice.target.thread, signal), RUN_THREAD_LOOKUP_FAILED_NOTE);
           } else if (toSwitch !== null) {
-            return await noteOf(openAutomationControls(toSwitch, { sharedFile, signal }));
+            return await noteOf(openAutomationControls(toSwitch, { sharedFile, signal }), AUTOMATION_LOOKUP_FAILED_NOTE);
           } else if (automation !== undefined && place.mount === null && !controls) {
             // Only the computer that ran a run holds it.
-            return await noteOf(openAutomation(automation, notice.postedHere ? notice.target?.run ?? null : null, signal));
+            return await noteOf(
+              openAutomation(automation, notice.postedHere ? notice.target?.run ?? null : null, signal),
+              AUTOMATION_LOOKUP_FAILED_NOTE,
+            );
           } else if (place.path !== null) {
             openFile(place.path);
           }
@@ -272,11 +291,28 @@ export function useSentNoticeProps(input: {
           let found: GetRelayReceivedShareResult;
           try {
             found = await bridge().getRelayReceivedShare({ shareId: place.shareId });
-          } catch {
-            return SHARE_LOOKUP_FAILED_NOTE;
+          } catch (error) {
+            return failed(SHARE_LOOKUP_FAILED_NOTE, error);
           }
           if (signal.aborted) return null;
           if (!found.found) return ACCESS_ENDED_NOTE;
+          if ("chats" in found) {
+            // A shared view holds no Chats, so Open goes to the workspace of
+            // this person's own they opened last.
+            if (workspaces.some((candidate) => candidate.workspaceId === workspaceId && candidate.shareView === undefined)) {
+              openChatsNavigator();
+              return null;
+            }
+            const own = workspaces
+              .filter((candidate) => candidate.shareView === undefined)
+              .reduce<WorkspaceSummary | null>(
+                (latest, candidate) => (latest === null || (candidate.lastOpenedAt ?? 0) > (latest.lastOpenedAt ?? 0) ? candidate : latest),
+                null,
+              );
+            if (own === null) return NO_OWN_WORKSPACE_NOTE;
+            onSwitchWorkspace(own, { chats: true });
+            return null;
+          }
           const automation = controls && AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;
           onOpenShare({
             resolvedShare: { shareId: found.share.shareId, shareCode: found.share.shareCode },
@@ -288,7 +324,10 @@ export function useSentNoticeProps(input: {
         }
       }
     },
-    [onOpenShare, onSwitchWorkspace, openAutomation, openAutomationControls, openFile, openRunThread, workspaceId, workspaces],
+    [
+      onOpenShare, onSwitchWorkspace, openAutomation, openAutomationControls, openChatsNavigator, openFile, openRunThread,
+      reportShellError, workspace, workspaceId, workspaces,
+    ],
   );
 
   // Resolves to null once the notice opened, or to a sentence for its row.
@@ -305,7 +344,6 @@ export function useSentNoticeProps(input: {
 
   // Try again on a switched-off automation queues nothing and goes where
   // its Open goes, on the switch that turns it on.
-  const workspace = useRequestSequence([workspaceId]);
   const onSwitchedOff = useCallback(
     (_controls: AutomationControlsTarget, notice: NoticeRow) => {
       const epoch = workspace.current();
