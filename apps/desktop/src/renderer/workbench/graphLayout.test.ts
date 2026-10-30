@@ -71,6 +71,14 @@ describe("graphLayout", () => {
     for (let i = 0; i < 5; i++) expect(Number.isFinite(layout.x[i])).toBe(true);
   });
 
+  it("separates two nodes that start on one point, whatever their indexes", () => {
+    // Files whose path hashes collide start on one point.
+    const layout = layoutOf(144, [], (i) => (i === 0 || i === 143 ? { x: 0, y: 0 } : { x: i * 50, y: 2000 }));
+    reheat(layout, 1);
+    for (let i = 0; i < 20; i++) tick(layout, DEFAULT_FORCES);
+    expect(Math.hypot(layout.x[0]! - layout.x[143]!, layout.y[0]! - layout.y[143]!)).toBeGreaterThan(1);
+  });
+
   it("keeps a pinned node where it was put", () => {
     const layout = layoutOf(10, ring(10));
     layout.pinned[3] = 1;

@@ -289,9 +289,11 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
           if (j === i) continue;
           let jx = x[j]! - xi, jy = y[j]! - yi, jd2 = jx * jx + jy * jy;
           if (jd2 < 1e-6) {
-            // Nudge coincident points apart along a direction from their indexes.
-            jx = ((i * 7 + j * 13) % 11) / 11 - 0.5;
-            jy = ((i * 11 + j * 7) % 13) / 13 - 0.5;
+            // Nudge coincident points apart: one direction per pair, taken
+            // from its indexes, with opposite signs for its two points.
+            const lo = Math.min(i, j), hi = Math.max(i, j), sign = i < j ? 1 : -1;
+            jx = sign * (((lo * 7 + hi * 13) % 11) / 11 - 0.5);
+            jy = sign * (((lo * 11 + hi * 7) % 13) / 13 - 0.5);
             jd2 = jx * jx + jy * jy;
           }
           if (jd2 < 1) jd2 = Math.sqrt(jd2);
