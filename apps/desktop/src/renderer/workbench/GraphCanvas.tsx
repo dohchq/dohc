@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
-import { DEFAULT_FORCES, pathHash, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
+import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
 
 export type GraphShape = "circle" | "ring" | "diamond" | "square" | "bubble" | "pill";
 
@@ -233,15 +233,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       adjacency[fill[t]!++] = s;
     }
     const seeded = new Set<number>();
-    const placed = placeNodes(
-      count,
-      (i) => {
-        const previous = remembered.get(next.nodes[i]!.path);
-        if (previous) seeded.add(i);
-        return previous;
-      },
-      (i) => pathHash(next.nodes[i]!.path),
-    );
+    const placed = placeNodes(count, (i) => {
+      const previous = remembered.get(next.nodes[i]!.path);
+      if (previous) seeded.add(i);
+      return previous;
+    });
     // A new node with a known neighbour starts beside it, not at the disc's edge.
     if (seeded.size > 0) {
       for (let i = 0; i < count; i++) {
