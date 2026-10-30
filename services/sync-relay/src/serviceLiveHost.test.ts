@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import {errorResponse} from "./errors.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests.js";
@@ -622,7 +623,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // until its release, its retirement's reconciliation, or the end of the connection; `releaseFailure` fails each release.
   const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; reconciledThrough?: number; unproven: string[]; journals: unknown[];
     unpushed: number; releasePending?: string; capture: NativeOwnerActivation; adoption: {activationId: string; throughCursor: number | null};
-    generation?: number; abandonableSeed?: boolean; prepared?: Record<string, unknown>; releaseFailure?: Error} =
+    generation?: number; abandonableSeed?: boolean; prepared?: Record<string, unknown>; prepareFailure?: Error; releaseFailure?: Error} =
     {capture, unproven: [], journals: [], unpushed: 0, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
   // The activation's own native queue, which delivery reads through its owner state once `outboxId` names it. Its entries
   // wait in order. A refused head quarantines it until a Try again names that head in `retryDeliveryId`, and acknowledging
@@ -786,18 +787,19 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           outboxState: native.state, retryDeliveryId: native.retryDeliveryId});
         // As the engine's, a preparation needs every queue of the activation to hold nothing deliverable and no Try again.
         case "liveApplication.prepareRetirement": {
-          if (Object.keys(request.params).join() !== "objectId,activationId,lineageClaimId,restoreFenceGeneration") throw new Error("INVALID_PARAMS: invalid-retirement-preparation");
+          if (engine.prepareFailure) throw engine.prepareFailure;
+          if (Object.keys(request.params).sort().join() !== Object.keys(preparationWire.params).sort().join()) throw new Error("INVALID_PARAMS: invalid-retirement-preparation");
           const deliverable = native.entries.length > 0 && (native.state === "active" || native.retryDeliveryId !== null);
           const granted = native.retryDeliveryId !== null || [keptOutbox, ...keptOutboxes.values()].some(queue => queue && queue.retryDeliveryId !== null);
-          if (deliverable || granted) return reply({status: "pending", reason: deliverable ? "native-pending" : "retry-outstanding"});
+          if (deliverable || granted) return reply(granted ? preparationWire.retryOutstanding : preparationWire.nativePending);
           engine.prepared = {...request.params};
-          return reply({status: "prepared"});
+          return reply(preparationWire.prepared);
         }
         case "liveApplication.releaseRetirementPreparation": {
           if (engine.releaseFailure) throw engine.releaseFailure;
           const released = JSON.stringify(engine.prepared) === JSON.stringify(request.params);
           if (released) engine.prepared = undefined;
-          return reply({released});
+          return reply(released ? preparationWire.released : preparationWire.notReleased);
         }
         case "liveApplication.reconcileActivation": {
           // Its retirement began, which ends the block.
@@ -1442,6 +1444,11 @@ async function enrolledServiceHost({freshRegistrations = false, frameChanges = f
     depart: (host = o.host) => host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]})};
 }
 
+const preparationWire = JSON.parse(readFileSync(new URL("../../../crates/dohc-workspace-engine/tests/retirement-preparation.json", import.meta.url), "utf8")) as {
+  params: Record<string, string | number>; prepared: {status: "prepared"}; nativePending: {status: "pending"; reason: "native-pending"};
+  retryOutstanding: {status: "pending"; reason: "retry-outstanding"}; released: {released: true}; notReleased: {released: false};
+  errors: Record<string, NonNullable<EngineRequestError["wireError"]>>;
+};
 const ACTIVATION = `ordinary-activation-${"a".repeat(64)}`, SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
 // The engine requests of a retirement, and of a departure with none, as after a share's deletion,
 // without the membership a restarted daemon starts with.
@@ -4261,9 +4268,11 @@ it("waits to stop while a granted edit's acknowledgement is lost, then retires t
   o.native.loseAcks.add("edit-d");
   await expect(o.host.drain(o.document)).rejects.toThrow("Acknowledgement lost.");
   expect(journaled(o, "edit-d")).toHaveLength(1);
+  const preparationRequest = {id: 900, workspace: "attached-handle", method: "liveApplication.prepareRetirement", params: prepared(o)};
+  expect((await o.client().sendRequest(preparationRequest)).result).toEqual(preparationWire.retryOutstanding);
   await expect(hostStop(o)).resolves.toBe("waiting");
   expect(o.native.entries.map(entry => entry.deliveryId)).toEqual(["edit-d", "edit-e"]);
-  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o), prepared(o)]);
   expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
   expect(o.engine.prepared).toBeUndefined();
   stillLive(o);
@@ -4278,10 +4287,10 @@ it("waits to stop while a granted edit's acknowledgement is lost, then retires t
   expect(e).toBeGreaterThan(d!);
   await expect(hostStop(o)).resolves.toMatchObject({enabled: false, retired: true, acceptedCursor: e});
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, acceptedThrough: e});
-  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o), prepared(o)]);
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o), prepared(o), prepared(o)]);
   expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
   await expect(hostStop(o)).resolves.toMatchObject({retired: true, acceptedCursor: e});
-  expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(2);
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(3);
 });
 
 // Proves: a drain budget that ends between a granted edit and the edit behind
@@ -4418,4 +4427,50 @@ it("fails the fence and ends the block when the restore generation changes durin
   expect(o.engine.prepared).toBeUndefined();
   expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
   stillLive(o);
+});
+
+// A known preparation refusal cannot fence or strand editing. Its release
+// also finishes before a queued Try again can recheck authority and grant.
+it.each(Object.entries(preparationWire.errors))("answers a %s preparation refusal without a server error or a held block", async (_name, wire) => {
+  const o = await enrolledServiceHost(), n = refusedNative(o);
+  o.engine.prepareFailure = new EngineRequestError(900, wire);
+  // A reply may have been lost after the engine installed the block.
+  o.engine.prepared = prepared(o);
+  const parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o).catch(errorResponse);
+  await parked.entered.promise;
+  const granting = o.host.retryKeptEdits(n.row()!, () => {
+    expect(o.engine.prepared).toBeUndefined();
+    expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  });
+  void granting.catch(() => {});
+  expect(engineParams(o, "ydoc.ownerOutbox.retry")).toEqual([]);
+  parked.release.resolve();
+  const response = await stopping;
+  expect(response).toBeInstanceOf(Response);
+  expect((response as Response).status).toBe(409);
+  expect(await (response as Response).json()).toEqual({ok: false, code: "restore-in-progress", error: "Stop live editing is waiting. You can keep editing."});
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+  if (wire.code === "CONFLICT") await expect(granting).resolves.toBe("granted");
+  else {await granting.catch(() => {}); expect(o.host.invalidated.aborted).toBe(true);}
+});
+
+it("replays a committed Stop on a preparation Conflict and refuses the Try again queued behind it", async () => {
+  const o = await enrolledServiceHost(), n = refusedNative(o);
+  o.engine.prepareFailure = new EngineRequestError(900, preparationWire.errors.conflict);
+  const parked = o.park("liveApplication.prepareRetirement"), stopping = hostStop(o);
+  void stopping.catch(() => {});
+  await parked.entered.promise;
+  const granting = o.host.retryKeptEdits(n.row()!, () => {});
+  void granting.catch(() => {});
+  expect(engineParams(o, "ydoc.ownerOutbox.retry")).toEqual([]);
+  const retired = preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+    enabled: false, retire: true, nowMs: 20, guard() {}});
+  parked.release.resolve();
+  await expect(stopping).resolves.toMatchObject({retired: true, acceptedCursor: retired!.acceptedCursor});
+  await expect(granting).resolves.toBe("unavailable");
+  expect(engineParams(o, "ydoc.ownerOutbox.retry")).toEqual([]);
+  expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
+  expect(n.row()).toMatchObject({retrying: false});
 });

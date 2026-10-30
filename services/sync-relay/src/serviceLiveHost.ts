@@ -1456,13 +1456,31 @@ export async function startServiceLiveHost(options: {
             try {await driver.consumer(value).consumer.drain(value, joined);}
             catch {joined.throwIfAborted(); current();}
             // Until the engine answers, a preparation may stand.
-            let blocked = true;
+            let blocked = true, reconnect = false;
             try {
-              blocked = await driver.prepareRetirement(attached.handle, document.objectId, candidate, joined);
+              try {blocked = await driver.prepareRetirement(attached.handle, document.objectId, candidate, joined);}
+              catch (error) {
+                joined.throwIfAborted(); current();
+                if (!(error instanceof EngineRequestError)) throw error;
+                const wire = error.wireError;
+                if (wire?.code === "CONFLICT") {
+                  // Only the relay's durable fence proves Stop committed.
+                  if (storage.serviceActivationRetirement(document)?.activationId === candidate.activationId) return fence();
+                  throw relayError("restore-in-progress");
+                }
+                if (wire?.code === "SESSION_EXPIRED" || wire?.code === "WORKSPACE_UNAVAILABLE" ||
+                  (wire?.code === "INVALID_PARAMS" && wire.message === "invalid-retirement-preparation")) {
+                  reconnect = true;
+                  console.error("Live editing Stop preparation is unavailable.", error);
+                  throw relayError("restore-in-progress");
+                }
+                throw error;
+              }
               if (!blocked) return "waiting" as const;
               return fence({...candidate, assertCurrent() {joined.throwIfAborted(); current();}});
             } finally {
               if (blocked && !fenced()) await release();
+              if (reconnect) abort();
             }
           }));
         } finally {changes?.notify(value);}

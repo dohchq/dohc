@@ -930,7 +930,7 @@ mod tests {
             run: None,
         };
         let actor = format!("agent-{index}");
-        let authors = if index % 2 == 0 {
+        let authors = if index.is_multiple_of(2) {
             RetainedAuthors::credited(Some(actor.as_str()), Some(&agent))
         } else {
             RetainedAuthors::credited(None, None)

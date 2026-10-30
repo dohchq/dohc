@@ -637,6 +637,8 @@ mod tests {
         use dohc_engine_protocol::transport::{
             ConnectionHandle, ConnectionOwner, EngineService as _,
         };
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/retirement-preparation.json")).unwrap();
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
         let configuration = json!({
             "version": 1, "relayNamespace": "prepare-test",
@@ -646,7 +648,10 @@ mod tests {
             "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
             "settlement": {"maxApplicationsPerSettlement":4}
         });
-        let lineage = dohc_engine_storage::hex_sha256(b"lineage");
+        let lineage = wire["params"]["lineageClaimId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let source = ImportedOwnerSource {
             version: 1,
             reader_source: false,
@@ -670,8 +675,7 @@ mod tests {
             full_state_byte_length: 0,
             predecessor_activation_id: None,
         };
-        let key = json!({"objectId":"document","lineageClaimId":lineage,"activationId":"retiring",
-            "restoreFenceGeneration":0});
+        let key = wire["params"].clone();
         for restarted in [false, true] {
             let (service, owner, _ingress) = EngineService::configured_live_host(
                 serde_json::from_value(configuration.clone()).unwrap(),
@@ -718,7 +722,7 @@ mod tests {
                 let request = call(owner.handle(), method, key.clone());
                 async move { request.await.map(|answer| answer.response.result) }
             };
-            let prepared = json!({"status":"prepared"});
+            let prepared = wire["prepared"].clone();
             if !restarted {
                 assert_eq!(
                     answer("liveApplication.prepareRetirement").await.unwrap(),
@@ -736,9 +740,49 @@ mod tests {
                     let refused = call(stranger.handle(), method, key.clone())
                         .await
                         .unwrap_err();
-                    assert_eq!(refused.code, ErrorCode::SessionExpired, "{method}");
+                    assert_eq!(
+                        serde_json::to_value(refused).unwrap(),
+                        wire["errors"]["sessionExpired"],
+                        "{method}"
+                    );
                 }
-                let released = |value: bool| json!({ "released": value });
+                for method in [
+                    "liveApplication.prepareRetirement",
+                    "liveApplication.releaseRetirementPreparation",
+                ] {
+                    let mut invalid = key.clone();
+                    invalid["acceptedThrough"] = json!(0);
+                    let error = call(owner.handle(), method, invalid).await.unwrap_err();
+                    assert_eq!(
+                        serde_json::to_value(error).unwrap(),
+                        wire["errors"]["invalidParams"]
+                    );
+                    let mut ctx = RequestContext::unbounded();
+                    ctx.connection = Some(owner.handle());
+                    let error = service
+                        .call(
+                            ctx,
+                            Request {
+                                id: 9,
+                                method: method.into(),
+                                workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(
+                                    "missing".into(),
+                                )),
+                                deadline_ms: None,
+                                idempotency_key: None,
+                                progress: false,
+                                params: key.clone(),
+                            },
+                        )
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        serde_json::to_value(error).unwrap(),
+                        wire["errors"]["workspaceUnavailable"]
+                    );
+                }
+                let released =
+                    |value: bool| wire[if value { "released" } else { "notReleased" }].clone();
                 assert_eq!(
                     answer("liveApplication.releaseRetirementPreparation")
                         .await
@@ -752,6 +796,48 @@ mod tests {
                         .unwrap(),
                     released(false)
                 );
+                // These rows exercise the exact pending replies without a second
+                // configured-host activation harness. No other RPC reads them.
+                let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
+                conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                conn.execute(
+                    "INSERT INTO owner_ydoc_outboxes
+                     (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,
+                      restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms)
+                     VALUES ('preparation-queue','workspace','main','document',?1,'document.md','[]',0,?1,?1,1,'active',1,0,2,0)",
+                    [&lineage],
+                ).unwrap();
+                conn.execute(
+                    "INSERT INTO owner_ydoc_outbox_entries
+                     (outbox_id,sequence,append_key,delivery_id,update_digest,native_source_json,update_blob_digest,byte_length,created_at_ms,pending,
+                      result_pending_bytes,result_oldest_entry_at_ms,result_state)
+                     VALUES ('preparation-queue',1,'preparation-append','preparation-delivery',?1,'{\"adoptionId\":\"retiring\"}',?1,1,0,1,1,0,'active')",
+                    [&lineage],
+                ).unwrap();
+                for state in ["active", "sealed", "quarantined"] {
+                    conn.execute("UPDATE owner_ydoc_outboxes SET state=?1,quarantine_reason=CASE WHEN ?1='quarantined' THEN 'invalid-update' END,
+                        retry_delivery_id=CASE WHEN ?1='quarantined' THEN 'preparation-delivery' END", [state]).unwrap();
+                    let expected = if state == "quarantined" {
+                        "retryOutstanding"
+                    } else {
+                        "nativePending"
+                    };
+                    assert_eq!(
+                        answer("liveApplication.prepareRetirement").await.unwrap(),
+                        wire[expected]
+                    );
+                    assert_eq!(
+                        answer("liveApplication.releaseRetirementPreparation")
+                            .await
+                            .unwrap(),
+                        wire["notReleased"]
+                    );
+                }
+                conn.execute_batch(
+                    "DELETE FROM owner_ydoc_outbox_entries; DELETE FROM owner_ydoc_outboxes;",
+                )
+                .unwrap();
+                drop(conn);
                 assert_eq!(
                     answer("liveApplication.prepareRetirement").await.unwrap(),
                     prepared
@@ -780,7 +866,7 @@ mod tests {
                     answer("liveApplication.releaseRetirementPreparation")
                         .await
                         .unwrap(),
-                    json!({"released": false}),
+                    wire["notReleased"],
                     "a restarted engine holds no preparation"
                 );
                 let edit = call(owner.handle(), "ydoc.recordUpdate", json!({}))
@@ -789,11 +875,13 @@ mod tests {
                 assert_eq!(edit.code, ErrorCode::Forbidden);
             }
             assert_eq!(
-                answer("liveApplication.prepareRetirement")
-                    .await
-                    .unwrap_err()
-                    .code,
-                ErrorCode::Conflict,
+                serde_json::to_value(
+                    answer("liveApplication.prepareRetirement")
+                        .await
+                        .unwrap_err()
+                )
+                .unwrap(),
+                wire["errors"]["conflict"],
                 "a retiring activation prepares no more, restarted={restarted}"
             );
             service.workspace_close(Some(workspace)).await.unwrap();
