@@ -258,6 +258,62 @@ describe("workspace switch admission", () => {
       }
     });
 
+    // Main's read can give up on an open attempt before the limit, so no one
+    // read need reach it.
+    it("says so once the reads have waited 4 minutes in all", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        bridge.getWorkspaceUiState
+          .mockImplementationOnce(() => {
+            vi.setSystemTime(Date.now() + LAYOUT_READ_WAIT_LIMIT_MS / 2 + 10_000);
+            return Promise.reject(refused());
+          })
+          .mockRejectedValueOnce(refused());
+        renderShell(bridge);
+        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS / 2 - 11_000));
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+
+        await act(() => vi.advanceTimersByTimeAsync(2_000));
+
+        expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(SAVED_TABS_WAITED);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the Restore tabs row until it is picked, while the 4-minute row keeps Dismiss", async () => {
+      const second = deferred<WorkspaceUiState | null>();
+      const bridge = makeBridge(second.promise);
+      waitOutTheOpen(bridge);
+      const user = userEvent.setup();
+      try {
+        renderShell(bridge);
+        const toast = await screen.findByTestId("workspace-shell-notice");
+        await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+        await openFile(user, "a.md");
+        await user.click(screen.getByTestId("notice-center-toggle"));
+        const center = await screen.findByTestId("notice-center");
+        const waited = within(center).getByText(SAVED_TABS_WAITED).closest("li")!;
+        expect(within(waited).getByRole("button", { name: "Dismiss notice" })).toBeTruthy();
+
+        await act(async () => {
+          second.resolve(STORED_STATE);
+          await second.promise;
+        });
+
+        const row = (await within(center).findByText(SAVED_TABS_RESTORE_AFTER_WAIT)).closest("li")!;
+        expect(within(row).queryByRole("button", { name: "Dismiss notice" }), "only Restore tabs ends the row").toBeNull();
+        expect(within(row).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+        await user.click(within(center).getByRole("button", { name: "Mark all read" }));
+        expect(notices()).toBe("Notices");
+        expect(within(center).getByText(SAVED_TABS_RESTORE_AFTER_WAIT)).toBeTruthy();
+      } finally {
+        vi.mocked(Date.now).mockRestore();
+      }
+    });
+
     it("offers Restore tabs once a tab is open, unread again without a toast, and keeps that tab", async () => {
       const second = deferred<WorkspaceUiState | null>();
       const bridge = makeBridge(second.promise);

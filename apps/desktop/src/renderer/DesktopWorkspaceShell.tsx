@@ -123,7 +123,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
-import { LAYOUT_READ_WAIT_LIMIT_MS, useSavedTabsReread } from "./shell/useSavedTabsReread";
+import { useSavedTabsReread } from "./shell/useSavedTabsReread";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -1484,7 +1484,7 @@ export function DesktopWorkspaceShell(props: {
   const layoutReadStartedAt = useRef(0);
   const [layoutReadFailure, setLayoutReadFailure] = useState<{
     admission: typeof workspaceAdmission;
-    waitedOut: boolean;
+    startedAt: number;
   } | null>(null);
   useAsyncResponseEffect(
     async () => {
@@ -1532,7 +1532,7 @@ export function DesktopWorkspaceShell(props: {
         });
         setLayoutReadFailure({
           admission: workspaceAdmission,
-          waitedOut: Date.now() - layoutReadStartedAt.current >= LAYOUT_READ_WAIT_LIMIT_MS,
+          startedAt: layoutReadStartedAt.current,
         });
       },
     },
@@ -5355,6 +5355,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
+        ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
     [shellErrors, reportFacts],
   );
