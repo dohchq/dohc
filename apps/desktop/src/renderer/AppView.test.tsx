@@ -356,6 +356,19 @@ describe("an owner app in its tab", () => {
     expect(guest.focus).not.toHaveBeenCalled();
   });
 
+  it("leaves focus in a dialog that opened before the app did", async () => {
+    const slow = deferred<AppViewResult>();
+    appView.mockImplementationOnce(() => slow.promise);
+    render(<Page focused />);
+    await waitFor(() => expect(opens()).toBe(1));
+    const dialog = document.body.appendChild(document.createElement("div"));
+    dialog.dataset.dohcModal = "true";
+    await act(async () => slow.resolve(opened(appView.mock.calls[0]![0] as OpenRequest)));
+    await openedView();
+    expect(guest.focus).not.toHaveBeenCalled();
+    dialog.remove();
+  });
+
   it("passes dohc's theme to the app and follows it", async () => {
     document.documentElement.dataset.theme = "dark";
     render(<Page />);

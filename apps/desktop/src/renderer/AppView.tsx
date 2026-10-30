@@ -4,6 +4,7 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
 import { openLinkExternally } from "./linkActivation";
+import { hasBlockingModal } from "./modalFocus";
 import { localLaunchUrl, openLocalApp } from "./OwnerAppPublication";
 import { PrimaryButton, RetryRow } from "./ui/controls";
 
@@ -100,7 +101,8 @@ export function useAppView(options: {
     const { holdFocus, focused, visible } = latest.current;
     if (!wantsFocus.current || holdFocus || !focused || !visible || !webview.current) return;
     wantsFocus.current = false;
-    webview.current.focus();
+    // A dialog that opened while the app was opening keeps focus.
+    if (!hasBlockingModal()) webview.current.focus();
   }, []);
 
   const fail = useCallback((message: string, cause: unknown) => {
