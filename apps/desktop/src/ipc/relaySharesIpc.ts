@@ -1,5 +1,5 @@
 import type { relayShareOperations } from "./shareOperations";
-import { readLiveStopRefusal, liveStopHostCopy, liveStopError, LIVE_STOP_EDITS_PENDING, LIVE_STOP_EDITS_PENDING_RESUME, liveStopNeedsResume } from "./liveEditingStop";
+import { readLiveStopRefusal, liveStopHostCopy, liveStopError, liveStopRefusalForRow, type LiveStopRefusal } from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
 import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
@@ -185,16 +185,16 @@ export function createOwnerLiveDocumentActions<
     return result;
   };
   const pendingStopError = async (operation: Operation, objectId: string): Promise<Error> => {
-    let needsResume = false;
+    let refusal: LiveStopRefusal = {code: "edits-pending"};
     try {
       const page = activeLiveDocuments.parse(await liveHost(operation, "GET"));
       const row = page.documents.find(row => row.objectId === objectId);
-      needsResume = liveStopNeedsResume(row && {canResume: ownerLiveDocumentCanResume(row)});
+      refusal = liveStopRefusalForRow(refusal, row && {...row, canResume: ownerLiveDocumentCanResume(row)});
     } catch {
       // An unproven list adds no explanation of why edits could not reach the server.
     }
     operation.assertCurrent();
-    return new Error(needsResume ? LIVE_STOP_EDITS_PENDING_RESUME : LIVE_STOP_EDITS_PENDING);
+    return liveStopError(refusal);
   };
   // The server's document that this computer no longer has: only the server
   // stops live editing for it. Edits kept here stay for Save recovery copy.
@@ -208,7 +208,7 @@ export function createOwnerLiveDocumentActions<
         operation.assertCurrent();
         const refusal = readLiveStopRefusal(error);
         if (refusal) {
-          if (refusal.code === "edits-pending") throw new Error(LIVE_STOP_EDITS_PENDING);
+          if (refusal.code === "edits-pending") throw liveStopError({code: "edits-pending"});
           const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
           console.warn(`[desktop] ${copy}`);
           throw liveStopError(refusal);
@@ -272,7 +272,7 @@ export function createOwnerLiveDocumentActions<
         if (refusal) {
           await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
           operation.assertCurrent();
-          if (refusal.code === "edits-pending") throw new Error(LIVE_STOP_EDITS_PENDING);
+          if (refusal.code === "edits-pending") throw liveStopError({code: "edits-pending"});
           const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
           console.warn(`[desktop] ${copy}`);
           throw liveStopError(refusal);
@@ -360,6 +360,7 @@ export function createRelaySharesIpcHandlers<
   saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
+  sendRendererActivity(scope: {workspaceId: string; liveDocumentStopped: string}): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
   reconcileReceivedShares(listing: unknown): Promise<void>;
@@ -1238,7 +1239,14 @@ export function createRelaySharesIpcHandlers<
     listOwnerLiveDocuments,
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
-    stopOwnerLiveDocument: (input, { operation }) => ownerLiveDocuments.stop(input, operation),
+    stopOwnerLiveDocument: async (input, { operation }) => {
+      const objectId = input.again?.objectId ?? input.objectId ??
+        (await dependencies.liveDocument(operation.workspace, {path: input.path}))?.objectId;
+      operation.assertCurrent();
+      const result = await ownerLiveDocuments.stop({...input, ...(objectId !== undefined ? {objectId} : {})}, operation);
+      if (objectId !== undefined) dependencies.sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: objectId});
+      return result;
+    },
     resumeOwnerLiveDocument: (input, { operation }) => ownerLiveDocuments.resume(input, operation),
     retryOwnerLiveQuarantine: async (input, { operation }) => {
       operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);

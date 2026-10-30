@@ -1,3 +1,4 @@
+import { liveStopError } from "../ipc/liveEditingStop";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
@@ -1655,7 +1656,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
-  it("returns the edits-pending Stop's two sentences with nothing left to release", async () => {
+  it("returns the edits-pending Stop's server answer with nothing left to release", async () => {
     const f = await keptEditsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
     const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
@@ -1665,8 +1666,8 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
       return {keptEdits: "kept"};
     });
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
-      reason: door === "cli" ? "dohc: Live editing didn't stop. Recent edits haven't reached the server yet.\n"
-        : "Live editing didn't stop. Recent edits haven't reached the server yet."});
+      reason: door === "cli" ? "dohc: Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.\n"
+        : "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."});
     expect(h.recorded()).toBeUndefined();
     expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
   });
@@ -1675,7 +1676,7 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
     const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
     h.relay.mockImplementation(async (_credentials, _path, init) => {
-      if (init?.method === "DELETE") throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet.");
+      if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
       return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: state === "paused" ? "paused" : "unavailable",
         ...(state === "paused" ? {} : {reason: state})}]};
     });
@@ -1686,6 +1687,28 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     });
     const words = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false, reason: door === "cli" ? `dohc: ${words}\n` : words});
+    expect(h.recorded()).toBeUndefined();
+  });
+  it.each(["conflict-parent-withheld", "quarantine"] as const)("returns the %s pending Stop answer", async reason => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", reason === "quarantine" ? {
+      ownerLiveQuarantines: () => [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "paused")]} : {});
+    h.relay.mockImplementation(async (_credentials, _path, init) => {
+      if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: "unavailable",
+        reason: reason === "quarantine" ? "workspace-changed" : reason}]};
+    });
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    const words = reason === "quarantine"
+      ? "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."
+      : "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
+      reason: door === "cli" ? `dohc: ${words}\n` : words});
     expect(h.recorded()).toBeUndefined();
   });
   it.each(HOST_STOP_CASES)("returns the %s Stop answer and %s detail with no Stop request left", async (code, sessionHost, words) => {

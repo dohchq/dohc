@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readLiveStopRefusal, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -412,7 +412,7 @@ export function LiveDocumentsDialog({
           if (!isCurrent()) {
             const row = state.kind === "ready" ? state.rows.find(row => !row.saveOnly && row.objectId === work.objectId) : undefined;
             onStopPending?.(workspaceId, work.path, work.objectId,
-              {...refusal, ...(liveStopOffersResume(refusal, row) ? {resume: true} : {})});
+              liveStopRefusalForRow(refusal, row));
             return;
           }
           focusStopRetry.current = work.objectId;
@@ -717,7 +717,7 @@ export function LiveDocumentsDialog({
                   </SecondaryButton>
                 ) : null}
                 {/* Save needs the queue head dohc could not read. */}
-                {row.quarantine !== undefined && saveRecoveryCopy && (!pendingStops.has(row.objectId) || row.saveOnly) ? (
+                {row.quarantine !== undefined && saveRecoveryCopy && (!pendingStops.has(row.objectId) || row.saveOnly || (!row.canResume && pendingStops.get(row.objectId)?.code === "edits-pending")) ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
@@ -750,9 +750,10 @@ export function LiveDocumentsDialog({
                     The server hasn't applied an edit to this document. Resume live editing to try again.
                   </p>
                 ) : null}
-                {row.reason === "conflict-parent-withheld" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
-                  <p className="m-0 basis-full text-[12px] text-muted">
-                    A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version.{" "}
+                {row.reason === "conflict-parent-withheld" && (!pendingStops.has(row.objectId) || pendingStops.get(row.objectId)?.code === "edits-pending") ? (
+                  <p tabIndex={-1} data-live-document-pending-action={pendingStops.has(row.objectId) ? "" : undefined}
+                    className="m-0 basis-full text-[12px] text-muted">
+                    {pendingStops.has(row.objectId) ? "Live editing didn't stop. " : ""}A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version.{" "}
                     {row.status === "retired"
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
@@ -766,21 +767,23 @@ export function LiveDocumentsDialog({
                 ) : null}
                 {busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly ? (
                   <p className="m-0 basis-full text-[12px] text-muted">Stopping live editing…</p>
-                ) : pendingStops.has(row.objectId) && !row.saveOnly ? (
+                ) : pendingStops.has(row.objectId) && !row.saveOnly && !(row.reason === "conflict-parent-withheld" && pendingStops.get(row.objectId)?.code === "edits-pending") ? (
                   <div className="flex basis-full items-start gap-2">
                     <p tabIndex={-1} data-live-document-pending-action={liveStopAction(pendingStops.get(row.objectId)!, row) === "none" ? "" : undefined}
                       className="m-0 flex-1 text-[12px] text-muted">{liveStopOffersResume(pendingStops.get(row.objectId)!, row)
-                      ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!)}</p>
+                      ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!, row)}</p>
                     {pendingStops.get(row.objectId)?.sessionHost ? (
                       <CopyButton iconOnly label="Copy error details" getText={() => errorDetails([
-                        ["Live editing", liveStopOffersResume(pendingStops.get(row.objectId)!, row) ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!)],
+                        ["Live editing", liveStopOffersResume(pendingStops.get(row.objectId)!, row) ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!, row)],
                         ["File", row.path], ["Session host", pendingStops.get(row.objectId)?.sessionHost],
                       ])} />
                     ) : null}
                   </div>
-                ) : quarantineNote(row) !== null ? (
+                ) : null}
+                {quarantineNote(row) !== null && (!(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) &&
+                  (!pendingStops.has(row.objectId) || (!row.canResume && pendingStops.get(row.objectId)?.code === "edits-pending"))) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">{quarantineNote(row)}</p>
-                ) : row.deferredStop ? (
+                ) : !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) && row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     {deferredStopNote(row, row.deferredStop)}
                   </p>

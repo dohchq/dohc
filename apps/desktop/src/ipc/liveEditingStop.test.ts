@@ -1,3 +1,4 @@
+import {liveStopError} from "./liveEditingStop";
 import {describe, expect, it} from "vitest";
 import {RELAY_ERROR_MESSAGES} from "../../../../services/sync-relay/src/errors";
 import {liveStopHostCopy, readLiveStopRefusal, liveStopRelayError, liveStopAction} from "./liveEditingStop";
@@ -36,4 +37,25 @@ it("drops a moved sessionHost whose path disagrees with the answer", () => {
 
 it("does not offer Resume for an ineligible row, even with a Resume hint", () => {
   expect(liveStopAction({code: "edits-pending", resume: true}, {canResume: false})).toBe("retry");
+});
+
+
+it.each([false, true])("reads edits-pending and Resume by code when resume=%s, regardless of words", resume => {
+  const refusal = {code: "edits-pending" as const, ...(resume ? {resume: true as const} : {})};
+  const error = liveStopError(refusal);
+  error.message = "unrelated words";
+  expect(readLiveStopRefusal(new Error(`Error invoking remote method: ${error}`))).toEqual(refusal);
+});
+it("does not read a host refusal's shared prefix as edits-pending", () => {
+  expect(readLiveStopRefusal(new Error("Live editing didn't stop."))).toBeNull();
+  expect(readLiveStopRefusal(new Error("Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it."))).toBeNull();
+  const error = liveStopRelayError({code: "host-not-loaded", sessionHost: "starting"})!;
+  expect(error.message.startsWith("Live editing didn't stop.")).toBe(true);
+  expect(readLiveStopRefusal(error)?.code).toBe("host-not-loaded");
+  expect(readLiveStopRefusal(new Error(HOST_STOP_CASES[5][2]))).toBeNull();
+});
+it("reads the relay's edits-pending code without trusting words or a Resume hint", () => {
+  const error = liveStopRelayError({code: "edits-pending", error: "untrusted", resume: true});
+  expect(error).toBeInstanceOf(Error);
+  expect(readLiveStopRefusal(error)).toEqual({code: "edits-pending", resume: true});
 });

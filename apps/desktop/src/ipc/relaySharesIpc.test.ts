@@ -1,3 +1,4 @@
+import { liveStopError } from "./liveEditingStop";
 import { HOST_STOP_CASES } from "../testing/liveStopHost.test-helper";
 import { liveStopHostCopy } from "./liveEditingStop";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
@@ -89,6 +90,7 @@ function harness() {
     if (event.sender.id < 0) throw new Error("untrusted sender");
   });
   const warm = vi.fn(async () => undefined);
+  const sendRendererActivity = vi.fn();
   const sharesChanged = vi.fn<(workspaceId: string | null) => void>();
   const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   let enrolled=true;
@@ -130,6 +132,7 @@ function harness() {
     retryOwnerLiveRelease,
     saveOwnerLiveRecoveryCopy,
     sharesChanged,
+    sendRendererActivity,
     reconcileReceivedShares,
   };
   const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>(ownerHandlersDependencies);
@@ -150,7 +153,7 @@ function harness() {
     return handler({ sender: { id: senderId } }, payload);
   };
   return {
-    workspace, workspaceOperations, credentials, remote, request, accountRequest, polls, handlers, warm, invoke, sharesChanged,
+    workspace, workspaceOperations, credentials, remote, request, accountRequest, polls, handlers, warm, invoke, sharesChanged, sendRendererActivity,
     reconcileReceivedShares,
     unenrolled:() => {enrolled=false;},
     localStops,
@@ -1603,7 +1606,7 @@ it("relayShareErrorCopy maps edits-pending to the agreed sentence", () => {
   const start = source.indexOf("function relayShareErrorCopy(");
   const end = source.indexOf("\ntype RelayShareRetainedDependentSetResult", start);
   const js = stripTypeScriptTypes(source.slice(start, end));
-  const words = "Live editing didn't stop. Recent edits haven't reached the server yet.";
+  const words = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
   const copy = new Function("LIVE_STOP_EDITS_PENDING", `${js}; return relayShareErrorCopy;`)(words) as
     (status: number, data: {code: string; error?: string}) => string;
   expect(copy(409, {code: "edits-pending", error: "arbitrary server wording"})).toBe(words);
@@ -1633,7 +1636,7 @@ it("relayShareErrorCopy safely handles host-moved without path", () => {
 it("does not read the live list for a dialog's pending Stop", async () => {
   const h = pendingStopHarness("workspace", "live.md", "object");
   await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
-    .rejects.toThrow("Live editing didn't stop. Recent edits haven't reached the server yet.");
+    .rejects.toThrow("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
   expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
 });
 
@@ -1645,7 +1648,7 @@ it("reads the agent's live list only after its editors reopen", async () => {
     try { return await change(); } finally { closed = false; }
   }});
   h.relay.mockImplementation(async (_credentials, _path, init) => {
-    if (init?.method === "DELETE") throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet.");
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
     readsWhileClosed.push(closed);
     return {ok: true, documents: [{path: "live.md", objectId: "object", status: "paused"}]};
   });
@@ -1656,16 +1659,16 @@ it("reads the agent's live list only after its editors reopen", async () => {
   expect(closed).toBe(false);
 });
 
-it.each(["workspace-changed", "document-unavailable", "conflict-parent-withheld", "session-host-diverged"])(
-  "keeps the agent's two-sentence pending Stop answer when %s cannot Resume", async reason => {
+it.each(["workspace-changed", "document-unavailable", "session-host-diverged"])(
+  "keeps the agent's server pending Stop answer when %s cannot Resume", async reason => {
   const h = pendingStopHarness("workspace", "live.md", "object");
   h.relay.mockImplementation(async (_credentials, _path, init) => {
-    if (init?.method === "DELETE") throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet.");
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
     return {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable", reason}]};
   });
   await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"},
     {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
-    .rejects.toThrow(/^Live editing didn't stop\. Recent edits haven't reached the server yet\.$/);
+    .rejects.toThrow("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
 });
 
 it("main names the document in an agent Stop success notification", async () => {
@@ -1684,4 +1687,31 @@ it("main names the document in an agent Stop success notification", async () => 
   stop.mockRejectedValueOnce(new Error("refused"));
   await expect(agentStop({workspace: {workspaceId: "workspace"}}, kept)).rejects.toThrow("refused");
   expect(send).toHaveBeenCalledTimes(1);
+});
+
+
+it.each(["conflict-parent-withheld", "quarantine"] as const)("gives the agent the %s pending Stop answer", async reason => {
+  const h = pendingStopHarness("workspace", "live.md", "object", reason === "quarantine" ? {ownerLiveQuarantines: () => [
+    {objectId: "object", path: "live.md", reason: "invalid-update", storedOn: "this-computer", incident: "kept", recovery: "paused"}]} : {});
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable",
+      reason: reason === "quarantine" ? "workspace-changed" : reason}]};
+  });
+  const words = reason === "quarantine"
+    ? "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."
+    : "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"},
+    {workspace: {workspaceId: "workspace"}, assertCurrent() {}})).rejects.toThrow(words);
+});
+it.each(["objectId", "again", "path"] as const)("broadcasts a dialog Stop success by %s, and never a refusal", async target => {
+  const h = harness();
+  h.request.mockResolvedValue({ok: true, objectId: "object", path: "live.md", status: "retired", acceptedCursor: 1});
+  const input = {workspaceId, path: "live.md", ...(target === "objectId" ? {objectId: "object"}
+    : target === "again" ? {again: {objectId: "object", recovery: "stopping"}} : {})};
+  await h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, input);
+  expect(h.sendRendererActivity).toHaveBeenCalledExactlyOnceWith({workspaceId, liveDocumentStopped: "object"});
+  h.request.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+  await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, input)).rejects.toThrow("Live editing didn't stop.");
+  expect(h.sendRendererActivity).toHaveBeenCalledTimes(1);
 });

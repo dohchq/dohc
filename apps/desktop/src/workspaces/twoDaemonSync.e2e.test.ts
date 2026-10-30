@@ -1086,6 +1086,7 @@ it.skipIf(engine.missing).each([
           const [file] = resolved.results;
           return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
         }, pushRecorded: async () => {}, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+        sendRendererActivity: () => {},
         sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({

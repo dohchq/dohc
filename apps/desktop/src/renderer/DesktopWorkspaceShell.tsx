@@ -184,7 +184,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
-import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, LIVE_STOP_EDITS_PENDING_RESUME, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -1004,12 +1004,15 @@ export function DesktopWorkspaceShell(props: {
     const report = () => {
       if (!current()) return;
       const needsResume = liveStopOffersResume(refusal);
-      reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
-        message: refusal.code === "edits-pending"
-          ? needsResume ? LIVE_STOP_EDITS_PENDING_RESUME.slice("Live editing didn't stop. ".length) : "Recent edits haven't reached the server yet."
+      const withheld = refusal.code === "edits-pending" && refusal.pending === "conflict-parent-withheld";
+      reportShellFailure({identity,
+        ...(!withheld ? {title: `Live editing didn't stop for ${path}${refusal.code === "edits-pending" ? "." : ""}`} : {}),
+        message: withheld ? `Live editing didn't stop for ${path}.`
           : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
         ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
-        ...(needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
+        ...(withheld
+          ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, path);}}}
+          : needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
     };
     const resume = () => {
       if (!current()) return;
@@ -1034,7 +1037,7 @@ export function DesktopWorkspaceShell(props: {
       });
     };
     report();
-  }, [workspaceAdmission, stopLiveDocument, resumeLiveDocument, reportShellFailure, reportShellError, clearIdentity, liveDocumentStopped]);
+  }, [workspaceAdmission, stopLiveDocument, resumeLiveDocument, reportShellFailure, reportShellError, clearIdentity, liveDocumentStopped, openLiveDocuments]);
   // The dialog maps refusal codes to app-owned copy and filters diagnostics.
   const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
     const page = await bridge().listOwnerLiveRefusals({
@@ -1940,7 +1943,7 @@ export function DesktopWorkspaceShell(props: {
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
       // Its editors close wherever the document is now, since a record keeps the path it had.
       const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
-      const stopAgain=() => {
+      const stopAgain=(): false => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
         void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
           .then(() => {
@@ -1952,10 +1955,11 @@ export function DesktopWorkspaceShell(props: {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
               const refusal=readLiveStopRefusal(error);
               if (refusal) {
-                clearIdentity(identity);
                 reportPendingLiveStop(workspaceId,row.path,row.objectId,refusal);
               } else reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
             });
+        // The snapshot keeps the recovery row until the engine releases these edits.
+        return false;
       };
       // An earlier Stop's edits: the document may be live again, so the row names only the edits.
       if (row.recovery==="not-written") {

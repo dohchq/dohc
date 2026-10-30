@@ -1,3 +1,4 @@
+import { liveStopError } from "../../ipc/liveEditingStop";
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -119,7 +120,7 @@ beforeEach(() => {
 });
 
 it.each([
-  ["edits-pending", new Error("Live editing didn't stop. Recent edits haven't reached the server yet."), "Live editing didn't stop. Recent edits haven't reached the server yet."],
+  ["edits-pending", liveStopError({code: "edits-pending"}), "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."],
   ...HOST_STOP_CASES.map(([code, sessionHost, words]) => [code, hostStopWireError(code, sessionHost, "untrusted relay text"), words] as const),
 ] as const)("reopens editors and clears the recorded Stop after %s", async (_code, refusal, words) => {
   retainDocument();

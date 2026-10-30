@@ -1,5 +1,5 @@
-export const LIVE_STOP_EDITS_PENDING = "Live editing didn't stop. Recent edits haven't reached the server yet.";
-export const LIVE_STOP_EDITS_PENDING_RESUME = `${LIVE_STOP_EDITS_PENDING} Resume live editing to send them, then stop it.`;
+export const LIVE_STOP_EDITS_PENDING = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
+export const LIVE_STOP_EDITS_PENDING_RESUME = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
 
 export const HOST_STOP_REFUSALS = {
   "host-paused": {message: LIVE_STOP_EDITS_PENDING_RESUME, action: "resume"},
@@ -16,28 +16,39 @@ export type LiveStopRefusal = {
   sessionHost?: string;
   path?: string;
   resume?: true;
+  pending?: "conflict-parent-withheld";
 };
-type LiveStopRow = {canResume: boolean};
+type LiveStopRow = {canResume: boolean; reason?: string};
+
+export function liveStopRefusalForRow(refusal: LiveStopRefusal, row?: LiveStopRow): LiveStopRefusal {
+  if (refusal.code !== "edits-pending" || row === undefined) return refusal;
+  const {resume: _resume, pending: _pending, ...base} = refusal;
+  return {...base, ...(row.canResume ? {resume: true as const}
+    : row.reason === "conflict-parent-withheld" ? {pending: "conflict-parent-withheld" as const}
+    : {})};
+}
 
 function isHostStopCode(code: unknown): code is HostStopCode {
   return typeof code === "string" && Object.hasOwn(HOST_STOP_REFUSALS, code);
 }
 
-export function liveStopNeedsResume(row: LiveStopRow | undefined): boolean {
-  return row?.canResume === true;
-}
-
 export function liveStopAction(refusal: LiveStopRefusal, row?: LiveStopRow): "resume" | "retry" | "none" {
   if (refusal.code !== "edits-pending") return HOST_STOP_REFUSALS[refusal.code].action;
-  return (row === undefined ? refusal.resume === true : liveStopNeedsResume(row)) ? "resume" : "retry";
+  const pending = liveStopRefusalForRow(refusal, row);
+  return pending.resume ? "resume" : pending.pending === "conflict-parent-withheld" ? "none" : "retry";
 }
 
 export function liveStopOffersResume(refusal: LiveStopRefusal, row?: LiveStopRow): boolean {
   return liveStopAction(refusal, row) === "resume";
 }
 
-export function liveStopMessage(refusal: LiveStopRefusal): string {
-  if (refusal.code === "edits-pending") return refusal.resume ? LIVE_STOP_EDITS_PENDING_RESUME : LIVE_STOP_EDITS_PENDING;
+export function liveStopMessage(refusal: LiveStopRefusal, row?: LiveStopRow): string {
+  refusal = liveStopRefusalForRow(refusal, row);
+  if (refusal.code === "edits-pending") {
+    if (refusal.resume) return LIVE_STOP_EDITS_PENDING_RESUME;
+    if (refusal.pending === "conflict-parent-withheld") return "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+    return LIVE_STOP_EDITS_PENDING;
+  }
   const message = HOST_STOP_REFUSALS[refusal.code].message;
   if (refusal.code !== "host-moved") return message;
   if (!refusal.path) return "The server sent an answer dohc could not read. Try again later.";
@@ -63,10 +74,15 @@ export function liveStopError(refusal: LiveStopRefusal): Error {
   return error;
 }
 
-function hostRefusal(data: unknown): LiveStopRefusal | null {
+function stopRefusal(data: unknown): LiveStopRefusal | null {
   if (data === null || typeof data !== "object") return null;
   const code: unknown = Reflect.get(data, "code"), sessionHost: unknown = Reflect.get(data, "sessionHost");
   const path: unknown = Reflect.get(data, "path");
+  if (code === "edits-pending") {
+    const pending: unknown = Reflect.get(data, "pending");
+    return {code, ...(Reflect.get(data, "resume") === true ? {resume: true} : {}),
+      ...(pending === "conflict-parent-withheld" ? {pending} : {})};
+  }
   if (!isHostStopCode(code)) return null;
   if (code === "host-moved" && (typeof path !== "string" || path.length === 0)) return null;
   return {code, ...(knownSessionHost(sessionHost, path) ? {sessionHost} : {}),
@@ -74,7 +90,7 @@ function hostRefusal(data: unknown): LiveStopRefusal | null {
 }
 
 export function liveStopRelayError(data: unknown): Error | null {
-  const refusal = hostRefusal(data);
+  const refusal = stopRefusal(data);
   return refusal ? liveStopError(refusal) : null;
 }
 
@@ -82,12 +98,10 @@ export function readLiveStopRefusal(error: unknown): LiveStopRefusal | null {
   if (!(error instanceof Error)) return null;
   const wire = /LiveStopRefusal \[([^\]]+)\]/.exec(`${error.name}: ${error.message}`);
   if (wire) {
-    try {return hostRefusal(JSON.parse(decodeURIComponent(wire[1]!)));}
+    try {return stopRefusal(JSON.parse(decodeURIComponent(wire[1]!)));}
     catch {return null;}
   }
-  // The existing pending-edit refusal also travels as a plain message.
-  if (!error.message.includes(LIVE_STOP_EDITS_PENDING)) return null;
-  return {code: "edits-pending", ...(error.message.includes(LIVE_STOP_EDITS_PENDING_RESUME) ? {resume: true} : {})};
+  return null;
 }
 
 export const SAFE_REFUSAL_MESSAGES = new Set([
