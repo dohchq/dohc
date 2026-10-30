@@ -1251,6 +1251,15 @@ export function AboutAccess(props: {
     void load({ refresh });
     return cancel;
   }, [cancel, connection, load, props.expanded]);
+  // A share made in the dialog changes who has access, so Access reads again
+  // when it closes. An "Only you" head has no toggle to ask again with.
+  const sharing = props.context.sharing === true;
+  const wasSharing = useRef(sharing);
+  useEffect(() => {
+    const closed = wasSharing.current && !sharing;
+    wasSharing.current = sharing;
+    if (closed && props.expanded) void load({ refresh: true });
+  }, [load, props.expanded, sharing]);
 
   const setup = useMemo<AccessSetup>(() => ({ reason, server, openSyncSettings, connect }), [connect, openSyncSettings, reason, server]);
   return (

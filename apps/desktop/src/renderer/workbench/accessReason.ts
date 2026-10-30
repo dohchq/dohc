@@ -17,6 +17,8 @@ export type AccessContext = {
   connect: () => void;
   // Opens the Share dialog for a file this workspace owns.
   share?: (path: string) => void;
+  // The Share dialog is open. Access reads again when it closes.
+  sharing?: boolean;
 };
 
 // A server by its host, as a person reads its address: sync.example.org.

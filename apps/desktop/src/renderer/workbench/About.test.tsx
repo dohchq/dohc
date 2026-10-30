@@ -102,7 +102,7 @@ function contextFor(facts: AccessFacts) {
   return context;
 }
 
-function Access(props: { workspaceId?: string; path?: string; open?: boolean; facts?: AccessFacts }) {
+function Access(props: { workspaceId?: string; path?: string; open?: boolean; facts?: AccessFacts; sharing?: boolean }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
     <AboutAccess
@@ -111,7 +111,7 @@ function Access(props: { workspaceId?: string; path?: string; open?: boolean; fa
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       notices={notices}
-      context={contextFor(props.facts ?? SYNCED)}
+      context={{ ...contextFor(props.facts ?? SYNCED), sharing: props.sharing ?? false }}
     />
   );
 }
@@ -219,6 +219,17 @@ describe("About Access", () => {
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
     // Two grants give access now; the two ended ones stay listed.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
+  });
+
+  it("reads again when the Share dialog closes, so Only you follows a new share", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValueOnce(answer()).mockResolvedValue(answer({ rows: [share()] }));
+    const view = render(<Access sharing />);
+    await screen.findByTestId("about-access-empty");
+    bridgeMock.requestAccessRefresh.mockClear();
+    view.rerender(<Access sharing={false} />);
+    await waitFor(() => expect(screen.getAllByTestId("about-access-row")).toHaveLength(1));
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
   });
 
   it("shows Only you when a complete answer finds no share from this workspace", async () => {

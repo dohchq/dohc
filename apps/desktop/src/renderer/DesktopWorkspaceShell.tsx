@@ -1181,6 +1181,7 @@ export function DesktopWorkspaceShell(props: {
   const onSharePath = useCallback((path: string) => {
     setShareTarget({ kind: "paths", paths: [path] });
   }, []);
+  const sharing = shareTarget !== null;
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
@@ -1195,8 +1196,9 @@ export function DesktopWorkspaceShell(props: {
       openSyncSettings: () => openSettings("cloud"),
       connect: openCloud,
       share: onSharePath,
+      sharing,
     }),
-    [cloudConnected, cloudServerUrl, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, onSharePath, openCloud, openSettings],
+    [cloudConnected, cloudServerUrl, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, onSharePath, openCloud, openSettings, sharing],
   );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
