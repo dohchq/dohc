@@ -72,7 +72,7 @@ export function createDeviceLiveDelivery(options: {
       deadlineMs: config.client.requestDeadlineMs, signal: invalidated.signal,
       retire() {invalidated.abort(new Error("Native request completion is unknown.")); options.stop();}});
     stopOwnerEvents = client.onEvent(event => {
-      if (event.name !== "liveApplication.ownerOutboxChanged") return;
+      if (event.name !== "liveApplication.ownerOutboxChanged" && event.name !== "liveApplication.settlementWanted") return;
       try {
         check();
         const value = configRecord(event.payload, ["registrationId", "binding"]), binding = parseLiveObjectBinding(value.binding);
@@ -83,7 +83,7 @@ export function createDeviceLiveDelivery(options: {
         try {registration = consumer.captureRegistration(binding);} catch {return;}
         // The notice identifies the native registration, never a browser ticket selector.
         if (registration.id !== value.registrationId || !isDeepStrictEqual(registration.binding, binding)) return;
-        ownerWake.wake(registration);
+        ownerWake.wake(registration, event.name === "liveApplication.settlementWanted" ? "settle" : "change");
       } catch {options.stop();}
     });
     await client.ready();
@@ -143,7 +143,13 @@ export function createDeviceLiveDelivery(options: {
   };
   const ownerWake = new OwnerOutboxWake({
     canRun: registration => ready && !closed && active < config.maxActiveDrains && !documentWork.busy(JSON.stringify(documentFor(registration.binding))),
-    async run(registration) {
+    async run(registration, kind) {
+      if (kind === "settle") {
+        const document = documentFor(registration.binding), consumer = consumers.get(document.workspaceId);
+        if (!(consumer instanceof OwnerCommittedDelivery)) return false;
+        await runDocument(document, registration.invalidated, joined => consumer.settleWanted(document, joined));
+        return false;
+      }
       const outcome = await drain(documentFor(registration.binding), registration.invalidated);
       return "continueDrain" in outcome && outcome.continueDrain === true;
     },

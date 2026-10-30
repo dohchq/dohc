@@ -1,3 +1,5 @@
+mod support;
+
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
@@ -245,7 +247,7 @@ async fn restore_settlement_materializes_selected_point_and_preserves_old_anchor
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(retained, old.settlement_id);
+        assert_eq!(Some(retained), old.settlement_id);
         let kind: String = db
             .query_row(
                 "SELECT settlement_kind FROM live_device_settlements WHERE terminal_cursor=71",
@@ -345,9 +347,15 @@ async fn restore_settlement_keeps_pending_artifact_and_rejects_damaged_anchor_be
 async fn restore_settlement_checks_old_anchor_and_records_its_own_same_content_moment() {
     for damage in [false, true] {
         let f = Fixture::new().await;
-        let original = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+        // A projection-neutral accepted edit leaves a stored anchor holding B.
+        let terminal = f.apply(1, vec![0, 0]).await;
+        let original = f
+            .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        let counts = f.counts();
         let before = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
-        let input = applied_restore(&f, None, 0).await;
+        let input = applied_restore(&f, Some(terminal), original.local_ydoc_sequence).await;
         if damage {
             rusqlite::Connection::open(&f.db)
                 .unwrap()
@@ -360,14 +368,14 @@ async fn restore_settlement_checks_old_anchor_and_records_its_own_same_content_m
         let result = settle_restore(&f, input.clone(), Arc::new(NoFaults)).await;
         if damage {
             assert!(result.is_err());
-            assert_eq!(f.counts(), (1, 2));
+            assert_eq!(f.counts(), counts);
         } else {
             let result = result.unwrap();
             assert!(result.materialized);
             // Restoring B over B still records the restore transition from the
             // accepted head, never the older moment that produced B.
             assert_ne!(result.moment_id, original.moment_id);
-            assert_eq!(f.counts(), (2, 3));
+            assert_eq!(f.counts(), (counts.0 + 1, counts.1 + 1));
             let (before_moment, before_digest, after_digest): (String, String, String) = f.read(|db| {
                 db.query_row(
                     "SELECT before_latest_moment_id,before_blob_sha256,after_blob_sha256 FROM moments WHERE moment_id=?1",
@@ -391,7 +399,7 @@ async fn restore_settlement_checks_old_anchor_and_records_its_own_same_content_m
                 (retried.settlement_id, retried.moment_id),
                 (result.settlement_id, result.moment_id)
             );
-            assert_eq!(f.counts(), (2, 3));
+            assert_eq!(f.counts(), (counts.0 + 1, counts.1 + 1));
         }
         assert_eq!(
             std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
@@ -692,6 +700,7 @@ impl Fixture {
         drop(store);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).unwrap().actor;
+        support::configure_witness_reader(&actor, &root).await;
         let owner = actor
             .live_application_owner("workspace".into())
             .await
@@ -1311,6 +1320,8 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     use yrs::updates::decoder::Decode;
     let f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    // The first baseline covers no accepted edit, so it journals nothing.
+    assert_eq!(first.settlement_id, None);
     let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
     let before = yrs::StateVector::decode_v1(&f.doc.encode_state_vector()).unwrap();
     let update = f
@@ -1483,17 +1494,13 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         .filter(|op| op.op_kind == "live.audit.settlement")
         .cloned()
         .collect();
-    assert_eq!(settlements.len(), 3);
+    assert_eq!(settlements.len(), 2);
     assert_eq!(
         settlements[0].payload["record"]["settlementId"],
-        first.settlement_id
+        serde_json::json!(second.settlement_id)
     );
     assert_eq!(
-        settlements[1].payload["record"]["settlementId"],
-        second.settlement_id
-    );
-    assert_eq!(
-        settlements[2].payload["record"]["restoreOperationId"],
+        settlements[1].payload["record"]["restoreOperationId"],
         "restore-settlement"
     );
     let binary: Vec<(String, Vec<u8>)> = source
@@ -1546,7 +1553,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             result.primary
         );
         if op.op_kind == "live.audit.base" {
-            let mut missing = settlements[1].clone();
+            let mut missing = settlements[0].clone();
             missing.origin_id = "early-settlement".into();
             missing.origin_seq = 0;
             missing.relay_seq = Some(100);
@@ -1585,7 +1592,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
                 conn.query_row("SELECT count(*) FROM live_audit_settlements", [], |row| {
                     row.get(0)
                 })?;
-            assert_eq!(count, 3);
+            assert_eq!(count, 2);
             let restore:(String,String)=conn.query_row("SELECT restore_operation_id,restore_markdown_digest FROM live_audit_events WHERE restore_operation_id IS NOT NULL",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
             assert_eq!(restore,("restore-settlement".into(),hex_sha256(&expected)));
             let chunks:Vec<Vec<u8>>=conn.prepare("SELECT b.bytes FROM live_audit_events e JOIN live_audit_record_chunks c ON c.record_digest=e.record_digest JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE e.restore_operation_id IS NOT NULL ORDER BY c.ordinal")?.query_map([],|r|r.get(0))?.collect::<Result<_,_>>()?;
@@ -1625,7 +1632,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             Ok(())
         })
         .unwrap();
-    let mut forged_restore = settlements[2].clone();
+    let mut forged_restore = settlements[1].clone();
     forged_restore.origin_id = "forged-restore-linkage".into();
     forged_restore.origin_seq = 0;
     forged_restore.relay_seq = Some(199);
@@ -1671,7 +1678,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         .unwrap();
     let malformed = retained.replace("\"acceptedEventCount\":1", "\"acceptedEventCount\":2");
     assert_ne!(malformed, retained);
-    let mut forged = settlements[1].clone();
+    let mut forged = settlements[0].clone();
     forged.origin_id = "forged-interval".into();
     forged.origin_seq = 0;
     forged.relay_seq = Some(200);
@@ -1860,7 +1867,7 @@ async fn resolve_imported_history_successor(
                 .collect::<Result<_, rusqlite::Error>>()
         })
         .unwrap();
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 2);
     assert!(records.iter().any(|record| record == settlement_record));
     let ops =
         dohc_engine_sync::list_replication_ops(&store, "workspace", "receiver-origin", -1, 500)
@@ -2540,8 +2547,11 @@ async fn configured_settlement_projects_baseline_updates_and_unchanged_coverage(
     let baseline = f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
     assert!(baseline.materialized);
     assert_eq!(baseline.application_count, 0);
+    // The first baseline covers no accepted edit, so nothing is recorded.
+    assert_eq!(baseline.settlement_id, None);
     f.assert_projection();
     let counts = f.counts();
+    assert_eq!(counts.0, 0);
     assert_eq!(
         f.settle(None, 4, Arc::new(NoFaults))
             .await
@@ -2581,6 +2591,81 @@ async fn configured_settlement_projects_baseline_updates_and_unchanged_coverage(
     assert_eq!(f.counts(), (counts.0 + 1, counts.1));
     f.owner.retire();
     assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
+}
+
+#[tokio::test]
+async fn a_stored_settlement_that_starts_where_it_ends_still_opens_and_reads() {
+    let mut f = Fixture::with_relay(true).await;
+    f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
+    // Earlier builds recorded the first baseline as an interval from 0 to 0.
+    f.supervisor.close(&f.db).unwrap();
+    let (moment, markdown, sequence): (String, String, i64) = f.read(|db| {
+        db.query_row(
+            "SELECT s.latest_moment_id,s.blob_sha256,d.head_update_seq FROM snapshots s JOIN ydoc_docs d ON d.object_id=s.object_id WHERE s.object_id='object'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    });
+    let state_vector = hex_sha256(&f.doc.encode_state_vector());
+    let interval = hex_sha256(b"[]");
+    let identity = serde_json::to_vec(&(
+        "relay",
+        &f.binding,
+        0,
+        0,
+        0,
+        sequence,
+        &interval,
+        &moment,
+        &markdown,
+        &state_vector,
+    ))
+    .unwrap();
+    let id = format!("live-settlement-{}", hex_sha256(&identity));
+    let state = f.doc.encode_full_state();
+    let mut store = EngineStore::open(&f.db, 1).unwrap();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO live_device_settlements VALUES (?1,'relay','workspace','main','object',?2,0,0,0,?3,0,?4,?5,?6,?7,?8,?9,1,'ordinary',NULL)",
+            rusqlite::params![id, f.binding.lineage_claim_id, sequence, interval, moment, markdown, state_vector,
+                serde_json::to_string(&f.binding).unwrap(), serde_json::to_string(&restore_coordinate()).unwrap()],
+        ).map_err(dohc_engine_storage::StorageError::persist_public)?;
+        let digest = dohc_engine_storage::put_binary_blob(tx, &state)?;
+        tx.execute(
+            "INSERT INTO live_settlement_publication_states(settlement_id,state_blob_sha256) VALUES (?1,?2)",
+            rusqlite::params![id, digest],
+        ).map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_, dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    drop(store);
+    (f.owner, f.handle) = open_owner(&f.supervisor, &f.db, &f.binding).await;
+
+    let replayed = f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(replayed.settlement_id.as_deref(), Some(id.as_str()));
+    assert_eq!((replayed.previous_cursor, replayed.terminal_cursor), (0, 0));
+    let journaled: (i64, i64) = f.read(|db| {
+        db.query_row(
+            "SELECT json_extract(payload_json,'$.record.previousCursor'),json_extract(payload_json,'$.record.terminalCursor') FROM replication_log WHERE op_kind='live.audit.settlement' AND json_extract(payload_json,'$.record.settlementId')=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    });
+    assert_eq!(journaled, (0, 0));
+
+    let update = f.apply(1, vector("ordinary-frontmatter-order")).await;
+    let next = f.settle(Some(update), 4, Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(
+        (
+            next.previous_cursor,
+            next.terminal_cursor,
+            next.application_count
+        ),
+        (0, 1, 1)
+    );
+    assert_ne!(next.settlement_id.as_deref(), Some(id.as_str()));
+    f.assert_projection();
 }
 
 struct Crash(FaultPoint);
@@ -2673,7 +2758,7 @@ async fn configured_settlement_recovers_compensated_conflict_after_operator_rest
             .await
             .unwrap();
         assert!(recovered.materialized);
-        assert_eq!(recovered.settlement_id, id);
+        assert_eq!(recovered.settlement_id, Some(id));
         assert_eq!(f.counts(), counts);
         f.assert_projection();
     }
@@ -2861,7 +2946,7 @@ async fn configured_settlement_recovers_committed_projection_and_pending_materia
             .settle(Some(terminal), 4, Arc::new(NoFaults))
             .await
             .unwrap();
-        assert_eq!(repaired.settlement_id, original);
+        assert_eq!(repaired.settlement_id, Some(original));
         assert_eq!(f.counts(), counts);
         assert!(repaired.materialized);
         f.assert_projection();
@@ -2897,7 +2982,8 @@ async fn configured_settlement_retains_pending_projection_when_parent_is_unusabl
     assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
     f.assert_pending_absent_projection();
     let counts = f.counts();
-    assert_eq!(counts.0, 1);
+    // The first baseline covers no accepted edit, so it records no settlement.
+    assert_eq!(counts.0, 0);
     assert_eq!(
         std::fs::read_to_string(f.root.path().join("notes")).unwrap(),
         "owned file"
@@ -2944,7 +3030,8 @@ async fn unload_waits_for_a_committed_settlement_whose_file_write_failed() {
             assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
             None
         };
-        assert_eq!(f.counts().0, 1, "crash={crash}");
+        // Only the accepted edit records a settlement; the first baseline does not.
+        assert_eq!(f.counts().0, i64::from(crash), "crash={crash}");
         assert_eq!(
             unload(&f).await,
             Some(UnloadPending::Materialization),
@@ -4071,7 +4158,7 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
             op.relay_seq = Some(op.origin_seq + 1);
             if op.op_kind == "moment.append" && op.payload["momentId"] == restored.moment_id {
                 op.settlement_admission = Some(dohc_engine_sync::SettlementAdmission::Refused {
-                    settlement_id: restored.settlement_id.clone(),
+                    settlement_id: restored.settlement_id.clone().unwrap(),
                     reason: "authorship-mismatch".into(),
                 });
             }
@@ -4096,7 +4183,7 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
         .resume_restore(
             NativeRestoreResume {
                 application: input.clone(),
-                settlement_id: restored.settlement_id.clone(),
+                settlement_id: restored.settlement_id.clone().unwrap(),
             },
             restore_coordinate(),
             2_000_000,
@@ -4174,7 +4261,7 @@ async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
         .resume_restore(
             NativeRestoreResume {
                 application: input,
-                settlement_id: restored.settlement_id,
+                settlement_id: restored.settlement_id.unwrap(),
             },
             restore_coordinate(),
             2_000_000,
@@ -4339,7 +4426,7 @@ async fn reader_restore_dispatches_outside_the_actor_at_every_phase() {
         .resume_restore(
             NativeRestoreResume {
                 application: input,
-                settlement_id: settlement.settlement_id,
+                settlement_id: settlement.settlement_id.unwrap(),
             },
             restore_coordinate(),
             2_000_000,

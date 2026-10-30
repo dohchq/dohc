@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as ydocProjection from "@dohc/ydoc-projection";
+import commonmark from "../../../ydoc-projection/src/fixtures/commonmark-edit-meaning.json";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -376,6 +377,123 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await reopened.close();
 });
 
+it("forwards settlement requests only to their open native session", async () => {
+  const engine = seedPlaintextEngine("seed"), adapter = new YdocLiveAdapter(engine);
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const wanted = vi.fn(), changed = vi.fn();
+  session.onSettlementWanted(wanted); session.onDurableLocalChange(changed);
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1,
+    payload: {sessionId: "another-session", settlementWanted: true}});
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 101, sessionGeneration: 1,
+    payload: {sessionId: session.sessionId, settlementWanted: true}});
+  expect(wanted).toHaveBeenCalledOnce(); expect(changed).not.toHaveBeenCalled();
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
+  await session.evict(); adapter.dispose();
+});
+
+it("wakes the owner after a held consent settle and keeps its native session usable", async () => {
+  const engine = new YdocLoopbackEngine();
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path: "held.md", content: "# Note", contentKind: "richdoc"});
+  const attempts: Array<{sessionId: string; allowLossySourceSha256?: string}> = [];
+  const held = new DaemonRefusalError({code: "CONFLICT", message: "markdown-write-held", retry: "no"}, undefined);
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          attempts.push(request.params as {sessionId: string; allowLossySourceSha256?: string});
+          if (attempts.length === 1) throw held;
+        }
+        return engine.sendRequest(request);
+      }},
+    workspace: WORKSPACE, versionId: VERSION, path: "held.md", contentKind: "richdoc",
+    onRemoteUpdate() {}, scheduleSettle: () => () => {},
+  });
+  const owner = provider.nativeOwner!;
+  const wanted = vi.fn(), changed = vi.fn();
+  owner.onSettlementWanted(wanted);
+  owner.onDurableLocalChange(changed);
+  await provider.applyLocalUpdate(richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "Accepted edit"), {armSettle: false});
+  await expect(provider.settleNow({allowLossySourceSha256: "a".repeat(64)})).rejects.toBe(held);
+  expect(wanted).toHaveBeenCalledOnce();
+  expect(changed).toHaveBeenCalledOnce();
+  expect(engine.activeSessionIds()).toContain(owner.sessionId);
+  expect(ydocProjection.yDocToMarkdown(provider.doc)).toContain("Accepted edit");
+
+  await provider.settleNow();
+  expect(attempts).toEqual([
+    {sessionId: owner.sessionId, allowLossySourceSha256: "a".repeat(64)},
+    {sessionId: owner.sessionId},
+  ]);
+  expect(wanted).toHaveBeenCalledOnce();
+  expect(changed).toHaveBeenCalledOnce();
+  await provider.evict();
+});
+
+it.each([false, true])("only requests owner settlement for a consented hold after resync=%s", async afterResync => {
+  const engine = seedPlaintextEngine("seed");
+  const held = new DaemonRefusalError({code: "CONFLICT", message: "markdown-write-held", retry: "no"}, undefined);
+  const pending = new DaemonRefusalError({code: "INVALID_PARAMS", message: "ydoc-remote-updates-pending", retry: "no"}, undefined);
+  let attempt = 0;
+  const adapter = new YdocLiveAdapter({
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.settle) {
+        if (afterResync && attempt++ % 2 === 0) throw pending;
+        throw held;
+      }
+      return engine.sendRequest(request);
+    },
+  });
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const wanted = vi.fn();
+  session.onSettlementWanted(wanted);
+  await expect(session.settle()).rejects.toBe(held);
+  expect(wanted).not.toHaveBeenCalled();
+  await expect(session.settle({allowLossySourceSha256: "a".repeat(64)})).rejects.toBe(held);
+  expect(wanted).toHaveBeenCalledOnce();
+  await session.evict();
+  adapter.dispose();
+});
+
+it.each([148, 161, 192, 193, 572, 575, 577])("retains CommonMark %i source and an edited paragraph through client reopen and reconnect", async number => {
+  const example = commonmark.examples.find(row => row.example === number)!;
+  const source = example.markdown + "\n\nEditable paragraph.\n";
+  const sourceSha256 = createHash("sha256").update(source).digest("hex");
+  const engine = new YdocLoopbackEngine();
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path: "commonmark.md", content: source, contentKind: "richdoc"});
+  const open = () => openEngineYdocProviderSession({
+    transport: engine, workspace: WORKSPACE, versionId: VERSION, path: "commonmark.md", contentKind: "richdoc",
+    onRemoteUpdate() {}, scheduleSettle: () => () => {},
+  });
+  const first = await open();
+  const projectionSha256 = first.doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256");
+  const assertSource = (doc: Y.Doc) => {
+    expect(doc.getMap("meta").get("dohcMarkdownSource")).toBe(source);
+    expect(doc.getMap("meta").get("dohcMarkdownSourceSha256")).toBe(sourceSha256);
+    expect(doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256")).toBe(projectionSha256);
+    expect(ydocProjection.yDocToMarkdown(doc)).toContain("Changed paragraph.");
+    expect(ydocProjection.yDocToMarkdown(doc)).not.toContain("Editable paragraph.");
+  };
+  await first.applyLocalUpdate(ydocProjection.documentEditUpdate(Y.encodeStateAsUpdate(first.doc),
+    {find: "Editable paragraph.", replacement: "Changed paragraph."}, {keepBlocks: true})!, {armSettle: false});
+  assertSource(first.doc);
+  const sessionId = first.nativeOwner!.sessionId;
+  engine.markSessionReplicated(sessionId);
+  await first.evict();
+
+  const reopened = await open();
+  expect(reopened.lineage).toBe("existing");
+  expect(reopened.headSha256).toBe(sourceSha256);
+  assertSource(reopened.doc);
+  await reopened.nativeOwner!.resyncIfNeeded();
+  await reopened.evict();
+
+  const reconnected = await open();
+  assertSource(reconnected.doc);
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(0);
+  await reconnected.evict();
+});
+
 it("resyncs a native invalidation into an open provider without losing its durable local edit", async () => {
   const engine = seedPlaintextEngine("seed");
   const adapter = new YdocLiveAdapter({
@@ -402,6 +520,89 @@ it("resyncs a native invalidation into an open provider without losing its durab
   engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1, payload: {sessionId: "closed-other-session", resyncRequired: true}});
   expect(engine.requests).toHaveLength(before);
   peer.destroy(); await session.close(); adapter.dispose();
+});
+
+it.each(["old-source", "converted"])("delivers a witness clear and authoritative head to an open %s peer without losing its tail", async peerHead => {
+  const source = "# Note\n\n<details>Hidden.</details>\n\nEditable.";
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  const convertedHead = sha("converted file");
+  const engine = new YdocLoopbackEngine();
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path: "note.md", content: source, contentKind: "richdoc"});
+  const heads = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+        ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event)),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.open && request.method !== YDOC_METHOD.resync) return response;
+        return {...response, result: {...response.result as Record<string, JsonValue>,
+          headSha256: request.method === YDOC_METHOD.resync || peerHead === "converted" ? convertedHead : sha(source)}};
+      },
+    },
+    workspace: WORKSPACE, versionId: VERSION, path: "note.md", contentKind: "richdoc",
+    onRemoteUpdate() {}, onHeadChanged: heads, scheduleSettle: () => () => {},
+  });
+  const witnessKeys = ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256", "dohcMarkdownSourceReader"];
+  const peer = new Y.Doc();
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(provider.doc));
+  let before = Y.encodeStateVector(peer);
+  const meta = peer.getMap("meta");
+  meta.set(witnessKeys[0]!, source);
+  meta.set(witnessKeys[1]!, sha(source));
+  meta.set(witnessKeys[2]!, sha(ydocProjection.yDocToMarkdown(peer)));
+  meta.set(witnessKeys[3]!, "reader-build");
+  await provider.applyLocalUpdate(Y.encodeStateAsUpdate(peer, before), {armSettle: false});
+  before = Y.encodeStateVector(peer);
+  await provider.applyLocalUpdate(richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "private unsettled tail"), {armSettle: false});
+  const records = engine.requests.filter(request => request.method === YDOC_METHOD.recordUpdate).length;
+  for (const key of witnessKeys) meta.delete(key);
+
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, before));
+  await vi.waitFor(() => expect(heads).toHaveBeenCalledWith(convertedHead));
+
+  for (const key of witnessKeys) expect(provider.doc.getMap("meta").has(key)).toBe(false);
+  expect(ydocProjection.yDocToMarkdown(provider.doc)).toContain("private unsettled tail");
+  expect(provider.headSha256).toBe(convertedHead);
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.recordUpdate)).toHaveLength(records);
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(0);
+  peer.destroy();
+  await provider.evict();
+});
+
+it("delivers a confirmed absent head after resync and suppresses a delayed head after eviction", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const resyncStarted = Promise.withResolvers<void>();
+  const finishResync = Promise.withResolvers<void>();
+  let delay = false;
+  const heads = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync) return response;
+        if (delay) {resyncStarted.resolve(); await finishResync.promise;}
+        return {...response, result: {...response.result as Record<string, JsonValue>, headSha256: null}};
+      }},
+    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    onRemoteUpdate() {}, onHeadChanged: heads, scheduleSettle: () => () => {},
+  });
+  const owner = provider.nativeOwner!;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1,
+    payload: {sessionId: owner.sessionId, resyncRequired: true}});
+  await owner.resyncIfNeeded();
+  expect(heads).toHaveBeenCalledExactlyOnceWith(null);
+  expect(provider.headSha256).toBeNull();
+
+  delay = true;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 101, sessionGeneration: 1,
+    payload: {sessionId: owner.sessionId, resyncRequired: true}});
+  await resyncStarted.promise;
+  await provider.evict();
+  finishResync.resolve();
+  await drain();
+  expect(heads).toHaveBeenCalledOnce();
 });
 
 it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as const)("handles a refused invalidation resync: %s", async (mode) => {
@@ -1791,6 +1992,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -2074,6 +2276,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -2167,6 +2370,7 @@ describe("YdocLiveAdapter", () => {
             id: request.id,
             result: {
               lineageClaimId: "winning-claim",
+              headSha256: null,
               lineageOriginatedHere: false,
               recoveredPaths: [],
               artifactAssets: [],
@@ -2234,7 +2438,7 @@ describe("YdocLiveAdapter", () => {
           emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
-            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+            result: { headSha256: null, lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
           };
         }
         return engine.sendRequest(request);
@@ -2362,7 +2566,7 @@ describe("YdocLiveAdapter", () => {
           emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
-            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+            result: { headSha256: null, lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
           };
         }
         return engine.sendRequest(request);

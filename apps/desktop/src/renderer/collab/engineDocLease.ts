@@ -145,6 +145,7 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
+      headSha256?: string | null;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -184,12 +185,14 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
   kind: LiveDocumentKind,
+  allowLossySourceSha256?: string,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
     ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
+        ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
         workspaceId,
         path,
         sessionId,
@@ -199,6 +202,7 @@ function makeTransport(
       }
       return {
         available: result.available,
+        headSha256: result.headSha256,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.objectId ? { objectId: result.objectId } : {}),
         ...(result.versionId ? { versionId: result.versionId } : {}),
@@ -291,6 +295,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  allowLossySourceSha256?: string;
   accessEnded?: boolean;
   workspaceId: string;
   path: string;
@@ -433,12 +438,14 @@ function createEngineDocSession(
     localSeq,
     writesRefused,
     documentKind,
+    input.allowLossySourceSha256,
   );
 
   let snapshot = emptyLeaseSnapshot(requestKey);
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  let currentHeadSha256: string | null | undefined;
   const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
     objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
@@ -536,6 +543,7 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
+    headSha256: currentHeadSha256 === undefined ? bound.headSha256 : currentHeadSha256,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -1032,6 +1040,11 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
+    if (event.headSha256 !== undefined) {
+      currentHeadSha256 = event.headSha256;
+      publish(current => ({ ...current, outcome: current.outcome?.kind === "bound"
+        ? { ...current.outcome, headSha256: event.headSha256 } : current.outcome }));
+    }
     refusedDoc = event.editRefusal !== undefined ? (binding?.doc ?? null) : null;
     if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {

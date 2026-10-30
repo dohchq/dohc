@@ -21,11 +21,8 @@ const STORED_VERDICTS = 'dohc.lossyNoteVerdicts';
 const checker = `${checkerUrl.slice(checkerUrl.lastIndexOf('/') + 1)} ${navigator.userAgent}`;
 const verdicts = storedVerdicts();
 const checks = new Map<string, Promise<boolean>>();
-type Answer = {lossy: boolean; witnessKeepsMeaning?: boolean};
+type Answer = {lossy: boolean};
 const requests = new Map<number, {resolve: (answer: Answer) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
-// Witnesses whose source keeps its meaning in the projection they record. No
-// document that holds one is a lossy note, so it needs no check of its own.
-const keepingWitnesses = new Set<string>();
 let worker: Worker | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
@@ -79,13 +76,13 @@ function idle(): void {
 function startWorker(): Worker {
   const started = new Worker(checkerUrl, {type: 'module'});
   started.onerror = () => {if (worker === started) stop(new Error('The note check stopped.'));};
-  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; witnessKeepsMeaning?: boolean; error?: string}>) => {
+  started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; error?: string}>) => {
     if (worker !== started) return;
     const request = requests.get(data.id);
     if (!request) return;
     requests.delete(data.id);
     clearTimeout(request.timer);
-    if (typeof data.lossy === 'boolean') request.resolve({lossy: data.lossy, witnessKeepsMeaning: data.witnessKeepsMeaning});
+    if (typeof data.lossy === 'boolean') request.resolve({lossy: data.lossy});
     else request.reject(new Error(data.error ?? 'The note check failed.'));
     if (!requests.size) idle();
   };
@@ -106,7 +103,7 @@ export function knownLossyNoteVerdict(contentHash: string): boolean | undefined 
   return verdicts.get(contentHash);
 }
 
-function ask(note: {markdown: string} | {state: Uint8Array}): Promise<Answer> {
+function ask(note: {markdown: string} | {state: Uint8Array; headSha256: string | null}): Promise<Answer> {
   return new Promise<Answer>((resolve, reject) => {
     clearTimeout(idleTimer);
     try {
@@ -114,7 +111,7 @@ function ask(note: {markdown: string} | {state: Uint8Array}): Promise<Answer> {
       const id = ++nextId;
       const timer = setTimeout(() => stop(new Error('The note check took too long.')), DEADLINE_MS);
       requests.set(id, {resolve, reject, timer});
-      if ('state' in note) worker.postMessage({id, state: note.state}, [note.state.buffer]);
+      if ('state' in note) worker.postMessage({id, state: note.state, headSha256: note.headSha256}, [note.state.buffer]);
       else worker.postMessage({id, markdown: note.markdown});
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -191,51 +188,29 @@ export function useLossyNote(input: {
   return {state: input.waiting ? 'clear' : 'checking', checkedHash: null};
 }
 
-/**
- * The check of a bound session's own document. A session records the bytes
- * it was seeded from as a witness when they differ from dohc's form. A
- * witness of other bytes than the ones already checked means the session may
- * hold a different note, so the worker checks the session's whole state
- * before anyone edits it: a witness that later edits left behind is not
- * lossy, since saving writes dohc's form of what the session holds. A
- * session with no witness is already in dohc's form. A witness whose source
- * keeps its meaning settles every session that holds it, so this window
- * checks each such witness once.
- */
-export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; checkedHash: string | null}): LossyNoteCheck {
+/** Checks the saved source's meaning and the authoritative file head, including after edits. */
+export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; headSha256?: string | null}): LossyNoteCheck {
+  const [metaRevision, setMetaRevision] = useState(0);
+  useEffect(() => {
+    const meta = input.doc?.getMap('meta');
+    const changed = () => setMetaRevision(revision => revision + 1);
+    meta?.observe(changed);
+    return () => meta?.unobserve(changed);
+  }, [input.doc]);
   const sha = input.doc?.getMap('meta').get('dohcMarkdownSourceSha256');
-  const witness = input.doc ? witnessKey(input.doc) : null;
   // Keyed by the document too: sync can replace a session's document with
   // another that records the same source.
-  const key = input.doc && typeof sha === 'string' && sha !== input.checkedHash ? `session:${docId(input.doc)}:${sha}` : null;
+  const meta = input.doc?.getMap('meta');
+  const hasWitness = meta && ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'].some(key => meta.has(key));
+  const key = input.doc && hasWitness ? `session:${docId(input.doc)}:${metaRevision}:${sha}:${meta?.get('dohcMarkdownSourceProjectionSha256')}:${input.headSha256}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
-  const verdict = useVerdict(input.open, key, witness !== null && keepingWitnesses.has(witness) ? false : undefined, () => {
-    if (!doc.current) return Promise.resolve(true);
-    // The witness in the state the worker checks, which sync may have
-    // changed since this note rendered.
-    const checked = witnessKey(doc.current);
-    return ask({state: Y.encodeStateAsUpdate(doc.current)}).then((answer) => {
-      if (answer.witnessKeepsMeaning && checked !== null) {
-        keepingWitnesses.add(checked);
-        if (keepingWitnesses.size > VERDICT_LIMIT) keepingWitnesses.delete(keepingWitnesses.values().next().value!);
-      }
-      return answer.lossy;
-    });
+  const verdict = useVerdict(input.open, key, undefined, () => {
+    if (!doc.current || input.headSha256 === undefined) return Promise.resolve(true);
+    return ask({state: Y.encodeStateAsUpdate(doc.current), headSha256: input.headSha256}).then(answer => answer.lossy);
   });
   if (key === null) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
-}
-
-// A document's witness as a key of keepingWitnesses, or null unless all
-// three of its fields are there.
-function witnessKey(doc: Y.Doc): string | null {
-  const meta = doc.getMap('meta');
-  const sha = meta.get('dohcMarkdownSourceSha256');
-  const projection = meta.get('dohcMarkdownSourceProjectionSha256');
-  return typeof meta.get('dohcMarkdownSource') === 'string' && typeof sha === 'string' && typeof projection === 'string'
-    ? `${sha}:${projection}`
-    : null;
 }
 
 const docIds = new WeakMap<Y.Doc, number>();
@@ -280,10 +255,4 @@ export function resetLossyNoteCheckForTests(): void {
   stop(new Error('The test ended.'));
   checks.clear();
   verdicts.clear();
-  keepingWitnesses.clear();
-}
-
-/** For tests that need a lossy note in an engine session. */
-export function rememberLossyNoteVerdictForTests(contentHash: string, lossy: boolean): void {
-  verdicts.set(contentHash, lossy);
 }

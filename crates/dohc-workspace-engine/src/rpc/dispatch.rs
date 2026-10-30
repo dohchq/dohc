@@ -567,8 +567,7 @@ impl EngineService {
                     .await?
             }
             "conflicts.open" => {
-                self.conflicts_open(&ctx, request.workspace, request.params)
-                    .await?
+                Box::pin(self.conflicts_open(&ctx, request.workspace, request.params)).await?
             }
             "conflicts.resolve" => {
                 Box::pin(self.conflicts_resolve(

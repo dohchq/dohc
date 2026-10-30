@@ -8,6 +8,7 @@ import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 vi.mock("node:fs", () => ({ existsSync: vi.fn(() => false), mkdirSync: vi.fn() }));
+vi.mock("./realDaemonWorkspaceSessions", () => ({ realDaemonReaderConfig: () => "reader-config" }));
 vi.mock("../../e2e/helpers/desktopApp", () => {
   throw new Error("Relay startup must not load the desktop launcher");
 });
@@ -114,6 +115,7 @@ it.each([false, true])("initializes with the source or sibling compiled entry (c
   initializer.emit("close", 0, null);
   await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
   expect(mkdirSync).toHaveBeenCalledWith(join("scratch", "relay-deployment", "live-host"));
+  expect(vi.mocked(spawn).mock.calls[1]?.[2]).toMatchObject({ env: { DOHC_ENGINE_READER_CONFIG: "reader-config" } });
   child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
   const relay = await starting;
   const stopping = relay.stop();

@@ -183,6 +183,7 @@ fn set_richdoc_frontmatter_and_settle(
                     Arc::new(FilesNoFaults),
                     CancellationToken::new(),
                     None,
+                    None,
                 )
                 .await
                 .expect("settle rich-document frontmatter edit");
@@ -656,6 +657,30 @@ fn copied_collection_adoption_stores_are_isolated_and_survive_reopen() {
         drop(reopened);
         supervisor.close(db).expect("close reopened actor");
     }
+}
+
+#[test]
+fn adoption_adds_id_to_noncanonical_body_without_frontmatter() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let source = "Paragraph: \\<\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code` [link](https://example.com)";
+    write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+    write_file(scratch.path(), "tasks/generated.md", source.as_bytes());
+    ingest(&mut sink, "tasks/collection.yaml").unwrap();
+    ingest(&mut sink, "tasks/generated.md").unwrap();
+    seed_captured_richdoc_lineage(&sink, "tasks/generated.md");
+    sink.reconcile_collections_observed(None).unwrap();
+    let id = adopted_record_id(&db, "tasks/generated.md");
+    let expected =
+        dohc_engine_domain::collections::collection_record_markdown_with_id(source, &id).unwrap();
+    assert_eq!(snapshot(&db, "tasks/generated.md").unwrap().text, expected);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("tasks/generated.md")).unwrap(),
+        expected
+    );
+    drop(sink);
+    supervisor.close(&db).unwrap();
 }
 
 proptest! {
@@ -1741,6 +1766,17 @@ fn re_adopting_the_same_file_without_an_id_preserves_identity_history_and_relati
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();
     let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(
+        crate::rpc::markdown_recovery::tests::witness_reader(&scratch, "witness-safe"),
+    )));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(sink.actor.configure_reader_resolver(Arc::new(
+            dohc_engine_collab::reader_resolver::ReaderResolver::new(reader),
+        )))
+        .unwrap();
     write_file(
         scratch.path(),
         "tasks/collection.yaml",
@@ -1821,7 +1857,21 @@ fn re_adopting_the_same_file_without_an_id_preserves_identity_history_and_relati
         stripped_target.as_bytes(),
     );
     ingest(&mut sink, "tasks/target.md").expect("capture stripped record id");
-    sink.reconcile_collections_observed(None)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(sink.actor.reconcile_collections_guarded(
+            WORKSPACE_ID.into(),
+            VERSION_ID.into(),
+            sink.shadow_root.clone(),
+            sink.leases.clone(),
+            Arc::new(sink.self_writes.clone()),
+            sink.now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            sink.root_guard().unwrap(),
+        ))
         .expect("re-adopt record after id removal");
 
     assert_eq!(

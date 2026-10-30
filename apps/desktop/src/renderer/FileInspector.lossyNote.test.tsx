@@ -58,7 +58,7 @@ function lossySession() {
   doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
   doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
   doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-  return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
+  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
 }
 
 function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
@@ -82,7 +82,7 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
-    openEngineYDocSession: vi.fn(async () => ({
+    openEngineYDocSession: vi.fn(async (): Promise<{ available: true; initialUpdate: Uint8Array; lineageGeneration: number; headSha256?: string }> => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)),
       lineageGeneration: 1,
@@ -105,13 +105,22 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("dohc can't edit this document yet without changing parts it can't show.");
+    expect(notice.textContent).toContain("dohc can't edit this note yet without changing parts it can't show.");
     await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."));
     expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(true);
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("says when dohc holds a change to it", async () => {
+    bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
+    render(<FileInspector workspaceId="ws-1" path="a.md" changeHeld />);
+
+    const notice = await screen.findByTestId("lossy-note-notice");
+    expect(notice.textContent).toContain("dohc held a change to this note. Saving it would also change parts dohc can't show.");
+    expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
   });
 
   it("opens the file in the system's app", async () => {
@@ -125,11 +134,14 @@ describe("a lossy note", () => {
 
   it("warns before Edit anyway, and opens the editor only once the person confirms", async () => {
     const bridge = bridgeFor([{ text: LOSSY, contentHash: sha(LOSSY) }]);
+    // The session opens on the bytes the person read, so consent covers it.
+    bridge.openEngineYDocSession.mockResolvedValue({ available: true,
+      initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)), lineageGeneration: 1, headSha256: sha(LOSSY) });
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original."));
     expect(bridge.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "ws-1", objectId: "object-1", limit: 1 });
     expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: "ws-1", momentId: "moment-1" });
@@ -151,7 +163,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("History does not track this file, so dohc can't restore the original."));
     expect(bridge.listFileChats).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "a.md" });
     expect(dialog.textContent).not.toContain("History keeps the original.");
@@ -164,7 +176,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
   });
@@ -176,7 +188,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
     await user.click(screen.getByTestId("lossy-note-edit-anyway-cancel"));
@@ -184,7 +196,7 @@ describe("a lossy note", () => {
     // Capture records the outside edit while the note stays open.
     bridge.readEngineMoment.mockResolvedValue({ moment: { afterText: LOSSY } });
     await user.click(screen.getByTestId("lossy-note-edit-anyway"));
-    const reopened = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const reopened = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() => expect(reopened.textContent).toContain("History keeps the original."));
   });
 
@@ -215,7 +227,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
-    const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
+    const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     expect(dialog.textContent).toContain("Saving rewrites the parts dohc can't show, such as raw HTML or reference links.");
     expect(dialog.textContent).not.toContain("History");
   });
@@ -278,7 +290,7 @@ describe("a lossy note", () => {
     ]);
     bridge.openEngineYDocSession
       .mockResolvedValueOnce(lossySession())
-      .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(fixed)), lineageGeneration: 1 });
+      .mockResolvedValue({ available: true as const, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(fixed)), lineageGeneration: 1 });
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
     await screen.findByTestId("lossy-note-notice");
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());

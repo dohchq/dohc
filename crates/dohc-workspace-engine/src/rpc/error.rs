@@ -187,6 +187,20 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
         return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
     }
+    if matches!(
+        error,
+        RuntimeError::MarkdownWriteHeld { .. }
+            | RuntimeError::Sync(SyncError::MarkdownWriteHeld { .. })
+    ) {
+        return WireError::new(ErrorCode::Conflict, "markdown-write-held");
+    }
+    if matches!(
+        error,
+        RuntimeError::Collab(CollabError::MarkdownWitnessCheckPending { .. })
+            | RuntimeError::Sync(SyncError::MarkdownWitnessCheckPending { .. })
+    ) {
+        return WireError::new(ErrorCode::Overloaded, "markdown-witness-check-pending");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
@@ -598,9 +612,9 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
-        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
-            ErrorCode::Internal
-        }
+        CollabError::MarkdownReaderPending(_)
+        | CollabError::MarkdownReaderUnavailable
+        | CollabError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -645,6 +659,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
         SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
+        SyncError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
@@ -653,6 +668,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::MarkdownWriteHeld { .. }
         | SyncError::LiveDocumentBindingActive
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation

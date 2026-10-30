@@ -54,12 +54,13 @@ export type Notice = {
   command?: string;
   // Closes the notice's toast once its row is read. The row stays.
   onRead?: () => void;
+  read?: boolean;
   Icon: typeof Bell;
 };
 
 // A workspace error the shell reported. `details` is the report Copy puts
 // on the clipboard; `seen` means its toast was closed and only the row in
-// Notices remains.
+// Notices remains. `read` means the row was read, not only its toast closed.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
   // Omitted for a failure. A warning needs the person, though nothing failed.
@@ -80,6 +81,7 @@ export interface WorkspaceErrorNotice {
   actionLabel?: string;
   additionalActionLabels?: string[];
   seen: boolean;
+  read?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -120,7 +122,11 @@ const retriesRun = (notice: NoticeRow): boolean =>
 // A failed automation run, or an agent run that says why it didn't start. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
-  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
+// A held change to a lossy note, from another workspace. dohc held it on
+// purpose, so it shows as a warning, not a failure.
+const isHeld = (notice: NoticeRow): boolean => notice.kind === "markdown-write-held";
 
 // What Copy puts on the clipboard for a failed run's notice. The notice store
 // already bounds the body, so Copy keeps all of the text the person sees.
@@ -783,6 +789,8 @@ export function NoticeCenter(props: {
   onRetryWorkspaceError?: (id: string) => void;
   onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
+  // Told when an error's row is read. Closing its toast doesn't read it.
+  onReadWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Told each time an error's toast comes on screen.
   onWorkspaceErrorShown?: (id: string) => void;
@@ -1192,9 +1200,13 @@ export function NoticeCenter(props: {
         ...(props.onDismissWorkspaceError
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
-        ...(!error.seen && props.onHideWorkspaceError
-          ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
+        ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
+          ? { onRead: () => {
+            if (!error.seen) props.onHideWorkspaceError?.(error.id);
+            if (!error.read) props.onReadWorkspaceError?.(error.id);
+          } }
           : {}),
+        read: error.read === true,
         timeMs: error.atMs,
         // A success has nothing to report, so it has nothing to copy.
         copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
@@ -1451,6 +1463,7 @@ export function NoticeCenter(props: {
     props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
     props.onHideWorkspaceError,
+    props.onReadWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,
@@ -1498,7 +1511,7 @@ export function NoticeCenter(props: {
       return kept.length === current.size ? current : new Set(kept);
     });
   }, [notices, props.workspaceId, setAsideKey]);
-  const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
+  const unreadNotices = notices.filter((notice) => !notice.read && !localRead.has(localReadKey(props.workspaceId, notice)));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
   // Every row counts until it is read.
@@ -1673,10 +1686,12 @@ export function NoticeCenter(props: {
           {sentToast ? (
             <div
               data-testid="sent-notice-toast"
-              role={sentToastFades ? "status" : "alert"}
+              role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <SenderMark kind={sentToast.notice.senderKind} />
+              {isHeld(sentToast.notice)
+                ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                : <SenderMark kind={sentToast.notice.senderKind} />}
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
                 {/* About four lines, then it scrolls, so a long reason never
@@ -1708,7 +1723,7 @@ export function NoticeCenter(props: {
                   key={sentToastKey}
                   iconOnly
                   pinName
-                  label="Copy error details"
+                  label={isHeld(sentToast.notice) ? "Copy notice details" : "Copy error details"}
                   testId="sent-notice-toast-copy"
                   getText={() => failureDetails(sentToast.notice)}
                 />
@@ -1723,7 +1738,7 @@ export function NoticeCenter(props: {
                   }}
                   className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
-                  Open
+                  {isHeld(sentToast.notice) ? "Open note" : "Open"}
                 </button>
               ) : null}
               {onHideSentNoticeToast ? (
@@ -2057,7 +2072,9 @@ export function NoticeCenter(props: {
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
                           <span className="flex h-6 w-4 shrink-0 items-center justify-center">
-                            <SenderMark kind={notice.senderKind} className="shrink-0" />
+                            {isHeld(notice)
+                              ? <AlertTriangle size={14} aria-hidden className="shrink-0 text-warning" />
+                              : <SenderMark kind={notice.senderKind} className="shrink-0" />}
                           </span>
                           <NoticeText
                             title={notice.title}
@@ -2074,7 +2091,7 @@ export function NoticeCenter(props: {
                                       <CopyButton
                                         iconOnly
                                         pinName
-                                        label="Copy error details"
+                                        label={isHeld(notice) ? "Copy notice details" : "Copy error details"}
                                         testId={`sent-notice-${notice.noticeId}-copy`}
                                         getText={() => failureDetails(notice)}
                                       />
@@ -2128,7 +2145,7 @@ export function NoticeCenter(props: {
                                         onClick={openNotice}
                                         className={ROW_ACTION_CLASS}
                                       >
-                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                        {busy ? "Opening…" : isHeld(notice) ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
                                       </button>
                                     ) : null}
                                   </div>

@@ -305,6 +305,8 @@ export function MarkdownView(props: {
   // Whether the note is a lossy note. The inspector holds the engine open
   // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
+  // The engine holds a change to this note, which Edit anyway saves.
+  changeHeld?: boolean;
   onEditAnyway: () => void;
   // Set while capture holds the note. A held lossy note shows the hold, which
   // Edit anyway would reach only after its warning.
@@ -2350,7 +2352,7 @@ export function MarkdownView(props: {
           <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
         </EngineMayHoldDocumentNotice>
       ) : props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
