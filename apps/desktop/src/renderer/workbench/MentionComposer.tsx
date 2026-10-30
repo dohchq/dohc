@@ -148,6 +148,8 @@ export function MentionComposer(props: {
   // Where a chat's box sits: under a stream, in a thread's panel, or in a
   // narrow pane. Each keeps its own margins.
   inset?: "stream" | "thread" | "narrow";
+  // The box sits at the bottom of its view, so toasts stay above it.
+  pinned?: boolean;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -538,8 +540,7 @@ export function MentionComposer(props: {
 
   const isPost = props.surface === "post";
   const formRef = useRef<HTMLFormElement | null>(null);
-  // A post composer sits at the top of its page; a chat's at the bottom.
-  useToastsAbove(formRef, !isPost);
+  useToastsAbove(formRef, props.pinned === true);
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
   // A poll sends once it has a question and two choices the engine accepts.

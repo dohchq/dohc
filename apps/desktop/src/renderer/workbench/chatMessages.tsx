@@ -872,9 +872,11 @@ export function ChatComposer(props: {
   onChange: (value: string) => void;
   onSend: () => void;
   onEscape?: () => void;
+  // The box sits at the bottom of its view, so toasts stay above it.
+  pinned?: boolean;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
-  useToastsAbove(formRef);
+  useToastsAbove(formRef, props.pinned === true);
   return (
     <form
       ref={formRef}

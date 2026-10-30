@@ -2,6 +2,7 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
+import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
@@ -875,8 +876,11 @@ export function NoticeCenter(props: {
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(stack);
+    // A chat's message box moves the stack without resizing it.
+    const stopRoom = onComposerRoomChange(measure);
     return () => {
       observer?.disconnect();
+      stopRoom();
       root.style.removeProperty("--dohc-toast-room");
     };
   }, [open]);

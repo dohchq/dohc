@@ -2,7 +2,7 @@
 import { cleanup, render } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { useToastsAbove } from "./toastClearance";
+import { onComposerRoomChange, useToastsAbove } from "./toastClearance";
 
 function Box(props: { top: number; height: number; enabled?: boolean }) {
   const ref = useRef<HTMLFormElement | null>(null);
@@ -35,4 +35,17 @@ it("raises the toasts above the highest shown message box, and drops the room wh
 it("leaves the toasts in the corner for a box that doesn't count", () => {
   render(<Box top={window.innerHeight - 60} height={60} enabled={false} />);
   expect(room()).toBe("");
+});
+
+it("tells the toast stack when the room changes, and only then", () => {
+  const changed = vi.fn();
+  const stop = onComposerRoomChange(changed);
+  const bottom = window.innerHeight;
+  const { rerender, unmount } = render(<><Box top={bottom - 60} height={60} /></>);
+  expect(changed).toHaveBeenCalledTimes(1);
+  rerender(<><Box top={bottom - 60} height={60} /><Box top={bottom - 50} height={50} /></>);
+  expect(changed).toHaveBeenCalledTimes(1);
+  unmount();
+  expect(changed).toHaveBeenCalledTimes(2);
+  stop();
 });

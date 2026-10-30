@@ -4220,6 +4220,7 @@ export function ChatsView(props: {
             belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
             composer={(inset) => dm.connected ? (
               <MentionComposer
+                pinned
                 testIdPrefix="chats-dm"
                 composerId="chats-dm-composer"
                 value={composer}
