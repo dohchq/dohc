@@ -43,6 +43,7 @@
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
   --dohc-accent: #2d342e;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 60%, transparent);
   --dohc-agent: #666d2e;
   --dohc-match: #326fce;
   --dohc-success: #38684e;
@@ -75,6 +76,7 @@
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
   --dohc-match: #377afa;
   --dohc-success: #82c29b;
@@ -103,6 +105,7 @@
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
   --color-accent: var(--dohc-accent);
+  --color-focus: var(--dohc-focus);
   --color-agent: var(--dohc-agent);
   --color-match: var(--dohc-match);
   --color-line: var(--dohc-line);
@@ -158,7 +161,7 @@ body {
   }
 
   [data-keyboard-nav] :focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--dohc-accent) 35%, transparent);
+    outline: 2px solid var(--dohc-focus);
     outline-offset: 0;
   }
 

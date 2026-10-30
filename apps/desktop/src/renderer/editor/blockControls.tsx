@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import {
   MENU_ACTIVE_OPTION,
+  MENU_ACTIVE_OPTION_BESIDE_CURRENT,
   MENU_ENTER,
   MENU_FRAME,
   MENU_ICON,
@@ -959,7 +960,7 @@ export function TurnIntoMenu({
                 tabIndex={-1}
                 aria-selected={index === selected}
                 data-active={index === selected || undefined}
-                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${
+                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION_BESIDE_CURRENT} ${
                   current ? MENU_ROW_TONE.current : `${MENU_ROW_TONE.rest} data-active:text-ink`
                 }`}
                 // Only a pointer that moves picks the active option, so a

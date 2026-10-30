@@ -20,6 +20,7 @@ export interface ThemeTokens {
   muted: string;
   subtle: string;
   accent: string;
+  focus: string;
   agent: string;
   match: string;
   success: string;
@@ -50,6 +51,9 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     subtle: "#7f7b6e",
     // Green-graphite (the brand accent): keyboard focus, primary buttons.
     accent: "#2d342e",
+    // The keyboard focus halo: the accent at the alpha that keeps it 3:1 on
+    // every surface and state fill (see the contrast test).
+    focus: "color-mix(in srgb, var(--dohc-accent) 60%, transparent)",
     // Olive, the default agent color: AA as text on bg, panel and panel-2.
     agent: "#666d2e",
     // Find-match highlight (search panel <mark>, pressed search toggles):
@@ -81,6 +85,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     muted: "#a9a599",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
+    focus: "color-mix(in srgb, var(--dohc-accent) 50%, transparent)",
     agent: "#c0c585",
     // Dark variant: 3:1+ vs every surface and the 11% selected-row fill,
     // with paper (bg) text on it at AA.
@@ -108,6 +113,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   muted: "--dohc-muted",
   subtle: "--dohc-subtle",
   accent: "--dohc-accent",
+  focus: "--dohc-focus",
   agent: "--dohc-agent",
   match: "--dohc-match",
   success: "--dohc-success",

@@ -262,6 +262,20 @@ describe("Menu", () => {
     expect(forget.className.split(" ")).not.toContain("bg-selected");
   });
 
+  it("adds the keyboard's row line only beside a current or checked row", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const rename = screen.getByRole("menuitem", { name: "Rename" }).className.split(" ");
+    expect(rename).not.toContain("dohc-focus-row");
+    expect(rename).toContain("focus-visible:outline-none");
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+  });
+
   it("keeps the checked row's selected fill whatever has focus", async () => {
     const user = userEvent.setup();
     render(

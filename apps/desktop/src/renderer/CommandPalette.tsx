@@ -143,8 +143,11 @@ export function CommandPalette(props: {
                 <button
                   type="button"
                   data-active={index === selected || undefined}
+                  // A result Tab reaches becomes the selected one, so its fill
+                  // shows focus without a halo, as the arrows' does.
+                  onFocus={() => setSelectedIndex(index)}
                   onClick={() => runCommand(command)}
-                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${MENU_ACTIVE_OPTION} ${
+                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline-none ${MENU_ACTIVE_OPTION} ${
                     // Keyboard selection stays stronger than hover.
                     index === selected ? "text-ink" : "text-muted hover:bg-hover hover:text-ink"
                   }`}
