@@ -5,7 +5,7 @@ import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createA
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously"; url?: string }) => {
-  window: Window & typeof globalThis & { value?: string; log?: string[]; routedSaw?: boolean };
+  window: Window & typeof globalThis & { value?: string; log?: string[] };
 } };
 
 const limits = { maxBundleBytes: 4096, maxDocumentBytes: 8192 };
@@ -51,37 +51,27 @@ describe("compiled app document", () => {
     }
   });
 
-  it("opens a plain link to another site in a new tab, and leaves every other link to the browser", () => {
+  it("gives a plain link to another site a new tab's target for its click only, and leaves every other link alone", async () => {
     const links = '<a id="out" href="https://example.org/page"><b>Out</b></a><a id="top" target="_top" href="https://example.org/top">Top</a>' +
       '<a id="own" href="/other">Own</a><a id="blank" target="_blank" href="https://example.org/blank">Blank</a>' +
-      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>' +
-      '<a id="handled" href="https://example.org/handled">Handled</a><a id="routed" href="https://example.org/routed">Routed</a>';
-    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};` +
-      'document.getElementById("handled").addEventListener("click",e=>e.preventDefault());' +
-      'addEventListener("click",e=>{if(e.target.id==="routed"){window.routedSaw=e.defaultPrevented;e.preventDefault();}});')], limits);
+      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>';
+    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};`)], limits);
     const dom = new JSDOM(output.html, { runScripts: "dangerously", url: "https://app.example.net/bootstrap" });
-    const opened: unknown[][] = [];
-    dom.window.open = (...args: unknown[]) => { opened.push(args); return null; };
-    // The test's own listener moves to the end on each click, as dohc's does, so it reads what dohc's did, then keeps
-    // jsdom from navigating.
-    let prevented = false;
-    const last = (event: Event) => { prevented = event.defaultPrevented; event.preventDefault(); };
-    dom.window.addEventListener("click", () => { dom.window.removeEventListener("click", last); dom.window.addEventListener("click", last); }, true);
-    const click = (selector: string, init: MouseEventInit = {}) => {
+    // The browser follows a link with the target it has when the click ends. The test reads that, then keeps jsdom from navigating.
+    let target: string | null = null;
+    dom.window.addEventListener("click", event => { target = (event.target as Element).closest("a")!.getAttribute("target"); event.preventDefault(); });
+    const click = async (selector: string, init: MouseEventInit = {}) => {
       dom.window.document.querySelector(selector)!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
-      return prevented;
+      const during = target;
+      await new Promise(resolve => dom.window.setTimeout(resolve));
+      return [during, dom.window.document.querySelector(selector)!.closest("a")!.getAttribute("target")];
     };
-    expect(click("#out b")).toBe(true);
-    expect(click("#top")).toBe(true);
-    expect(opened).toEqual([["https://example.org/page", "_blank", "noopener"], ["https://example.org/top", "_blank", "noopener"]]);
-    for (const selector of ["#own", "#blank", "#mail", "#file"]) expect(click(selector)).toBe(false);
-    expect(click("#out", { ctrlKey: true })).toBe(false);
-    expect(click("#out", { button: 1 })).toBe(false);
-    expect(click("#handled")).toBe(true);
-    // A listener the app adds on window decides before dohc's.
-    expect(click("#routed")).toBe(true);
-    expect(dom.window.routedSaw).toBe(false);
-    expect(opened).toHaveLength(2);
+    expect(await click("#out b")).toEqual(["_blank", null]);
+    expect(await click("#top")).toEqual(["_blank", "_top"]);
+    for (const selector of ["#own", "#mail", "#file"]) expect(await click(selector)).toEqual([null, null]);
+    expect(await click("#blank")).toEqual(["_blank", "_blank"]);
+    expect(await click("#out", { ctrlKey: true })).toEqual([null, null]);
+    expect(await click("#out", { button: 1 })).toEqual([null, null]);
     dom.window.close();
   });
 
@@ -119,7 +109,7 @@ describe("compiled app document", () => {
 
     it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
-      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>\{const link=[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
       expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
       expect(dom.window.document.title).toBe("Trip");

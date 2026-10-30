@@ -64,16 +64,16 @@ function parsePage(text: string): AppPage {
 
 const attributeValue = (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll(" ", "&nbsp;");
 
-// A plain link to another site would take the app's own frame there, and the launch page's frame-src refuses that,
-// so the link opens in a new tab, as one with target="_blank" does. Links the app handles itself, links with a
-// modifier key or download, and links to the launch page's own origin keep the browser's behavior. Each click moves
-// its listener to the end of window's list, so it decides after every listener the app has.
-const LINK_SCRIPT = '{const link=e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
-  'if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.defaultPrevented||e.button!==0||e.ctrlKey||e.metaKey||' +
-  'e.shiftKey||e.altKey||a.hasAttribute("download")||!["","_self","_parent","_top"].includes(a.target.toLowerCase()))return;' +
+// A plain link to another site would take the app's own frame there, the launch page's frame-src refuses that, and
+// the frame would show the browser's error page instead of the app. For the length of the click, such a link gets
+// target="_blank", so the browser opens it in a new tab unless the app cancels the click. This listener comes before
+// any of the app's. Links with a modifier key or download, links with another target, and links to the launch page's
+// own origin keep the browser's behavior.
+const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
+  'if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey||' +
+  'a.hasAttribute("download")||!["","_self","_parent","_top"].includes(a.target.toLowerCase()))return;' +
   'const u=new URL(a.href);if(!/^https?:$/.test(u.protocol)||u.origin===new URL(document.baseURI).origin)return;' +
-  'e.preventDefault();open(u.href,"_blank","noopener");};' +
-  'addEventListener("click",()=>{removeEventListener("click",link);addEventListener("click",link);},true);}';
+  'const t=a.getAttribute("target");a.target="_blank";setTimeout(()=>t===null?a.removeAttribute("target"):a.setAttribute("target",t));},true);';
 
 /**
  * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
