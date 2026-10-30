@@ -99,7 +99,7 @@ pub(crate) fn adoption_contains_predecessor_in(
     };
     let result = (|| {
         let cursor: Option<i64> = conn.query_row(
-            "SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0",
+            &format!("SELECT terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0", owner_activations::CURRENT_ACTIVATIONS),
             params![namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id,
                 serde_json::to_string(binding).map_err(|_| ApplicationError::Corrupt)?],
             |row| row.get(0),

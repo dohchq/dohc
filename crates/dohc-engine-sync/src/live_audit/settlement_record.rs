@@ -429,7 +429,7 @@ fn publication_source_before_in_tx(
         // The first unavailable interval from that exact cut kept its preimage.
         let moment: String = tx
             .query_row(
-                "SELECT s.moment_id FROM live_owner_adoptions a
+                "SELECT s.moment_id FROM live_owner_activations a
              JOIN live_device_settlements s ON s.relay_database_namespace=a.relay_database_namespace
                AND s.workspace_id=a.workspace_id AND s.main_version_id=a.main_version_id
                AND s.object_id=a.object_id AND s.lineage_claim_id=a.lineage_claim_id
@@ -438,7 +438,7 @@ fn publication_source_before_in_tx(
                AND u.settlement_id=s.settlement_id AND u.moment_id=s.moment_id
              WHERE a.workspace_id=?1 AND a.relay_database_namespace=?2 AND a.main_version_id=?3
                AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.terminal_cursor=?6
-               AND a.binding_json=?7 AND s.terminal_cursor<?8
+               AND a.evidence_digest IS NOT NULL AND a.binding_json=?7 AND s.terminal_cursor<?8
              ORDER BY s.terminal_cursor LIMIT 1",
                 params![
                     b.workspace_id,

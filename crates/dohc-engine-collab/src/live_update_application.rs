@@ -1923,13 +1923,13 @@ pub fn apply_committed_with_settlement_limit(
                 if owed_audits.iter().any(|retry| retry.namespace == held.namespace
                     && retry.binding.lineage_claim_id == b.lineage_claim_id
                     && retry.binding.restore_fence_generation == b.restore_fence_generation) {
-                    let count: i64 = tx.query_row("SELECT COUNT(*) FROM live_device_update_applications a \
+                    let count: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM live_device_update_applications a \
                         WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 \
                         AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.journal_cursor>COALESCE(\
                           (SELECT MAX(terminal_cursor) FROM live_device_settlements WHERE relay_database_namespace=?1 \
                            AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),\
-                          (SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 \
-                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),0)",
+                          (SELECT terminal_cursor FROM {} WHERE relay_database_namespace=?1 \
+                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),0)", owner_activations::CURRENT_ACTIVATIONS),
                         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0)).map_err(read_sql)?;
                     if usize::try_from(count).map_err(|_| ApplicationError::Corrupt)? >= max {
                         return Ok(ApplicationResult::Pending(ApplicationPending::SettlementRequired));
