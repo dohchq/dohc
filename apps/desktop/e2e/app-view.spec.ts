@@ -279,16 +279,20 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await shown(page.getByTestId("quick-open"));
     await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
-    // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark.
+    // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark. Until then, a
+    // read through main can reach the old frame and wait for its renderer to exit. Playwright's frame fails at once.
+    const guestUrl = await electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId);
+    const guest = electronApp.windows().find(window => window.url() === guestUrl)!;
+    const appFrame = async (script: string) => guest.mainFrame().childFrames()[0]!.evaluate(script);
     await page.getByTestId("app-view-reload").click();
-    await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count')?.textContent").catch(() => null)).toBe("0");
+    await expect.poll(() => appFrame("document.getElementById('count')?.textContent").catch(() => null)).toBe("0");
     await ready(page);
     expect(await guestIds(electronApp)).toEqual([guestId]);
-    // Playwright's own session on a new frame then sets light, the scheme it emulates. Users have no such session, so
-    // this sends dohc's scheme until it lands after Playwright's. Only main's session on the new frame can carry it.
+    // Playwright's own session on the new frame sets light, the scheme it emulates, before any read through it runs.
+    // Users have no such session, so this sends dohc's scheme again. Only main's session on the new frame can carry it.
     await expect.poll(async () => {
       await page.evaluate(workspaceId => window.dohcDesktop!.appView({ action: "colorScheme", workspaceId, colorScheme: "dark" }), workspaceId);
-      return inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches");
+      return appFrame("matchMedia('(prefers-color-scheme: dark)').matches");
     }).toBe(true);
     await clickApp(electronApp, guestId, "#counter");
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("1");
