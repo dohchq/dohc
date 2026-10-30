@@ -313,7 +313,6 @@ function RunChip(props: { run: ChatRunRecord }) {
     };
   }, [open]);
 
-  const started = formatChatTime(props.run.startedAtMs);
   return (
     <span
       ref={containerRef}
@@ -338,50 +337,61 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Command</span>
-            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
-              {props.run.command}
-            </code>
-          </span>
-          <span className="grid grid-cols-2 gap-2">
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Started</span>
-              <time
-                data-testid="chats-run-started"
-                dateTime={started.iso}
-                className="text-[11px] tabular-nums text-ink"
-              >
-                {started.label}
-              </time>
-            </span>
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
-                {props.run.exitCode ?? "—"}
-              </span>
-            </span>
-          </span>
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Log</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
-                {props.run.logPath ?? "No log path"}
-              </code>
-              {props.run.logPath ? (
-                <CopyButton
-                  iconOnly
-                  testId="chats-run-copy-log"
-                  label="Copy log path"
-                  pinName
-                  getText={() => props.run.logPath ?? null}
-                />
-              ) : null}
-            </span>
-          </span>
+          <RunDetails run={props.run} />
         </span>
       ) : null}
     </span>
+  );
+}
+
+// What ran for an agent's reply: its command, when it started, how it
+// ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord }) {
+  const started = formatChatTime(props.run.startedAtMs);
+  return (
+    <>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Command</span>
+        <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
+          {props.run.command}
+        </code>
+      </span>
+      <span className="grid grid-cols-2 gap-2">
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Started</span>
+          <time
+            data-testid="chats-run-started"
+            dateTime={started.iso}
+            className="text-[11px] tabular-nums text-ink"
+          >
+            {started.label}
+          </time>
+        </span>
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Exit code</span>
+          <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
+            {props.run.exitCode ?? "—"}
+          </span>
+        </span>
+      </span>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Log</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.logPath ?? "No log path"}
+          </code>
+          {props.run.logPath ? (
+            <CopyButton
+              iconOnly
+              testId="chats-run-copy-log"
+              label="Copy log path"
+              pinName
+              getText={() => props.run.logPath ?? null}
+            />
+          ) : null}
+        </span>
+      </span>
+    </>
   );
 }
 

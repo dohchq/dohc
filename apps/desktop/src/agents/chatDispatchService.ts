@@ -69,7 +69,7 @@ function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string |
   const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
   const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
   const sentence = {
-    finished: `${agent ?? "Your agent"} finished`,
+    finished: `${agent ?? "Your agent"} replied`,
     stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
     "no-reply": `${whose(true)} produced no reply`,
     "timed-out": `${whose(true)} timed out`,
@@ -217,6 +217,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
 
 interface ChatDispatchThreadState {
   liveRunId: string | null;
+  liveTriggerMessageId: string | null;
   pendingCount: number;
   paused: boolean;
   stoppedRun?: ChatDispatchStoppedRun;
@@ -727,6 +728,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (run.endedAtMs === undefined) return;
         const saved = savedRunOutcome(run);
         let outcome: RunOutcome;
+        let reply: string | undefined;
         if (saved !== "exited") {
           outcome = saved;
         } else if (run.failureHandled) {
@@ -738,13 +740,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         } else {
           const linked = await dispatch.listRunMessages(workspaceId, runId, durableDispatchRequest);
           outcome = linked.length === 0 ? "no-reply" : "finished";
+          reply = linked.at(-1);
           // After a restart, no in-memory check is left to mark it failed.
           if (outcome === "no-reply") await markRunFailureHandled(workspace, run);
         }
         // A request Restricted Mode stopped whose requeue landed before
         // dohc could drop the notice is back in line, so the notice is stale.
         if (outcome !== "restricted" || !(await backInLine(dispatch, run))) {
-          await noticeRun(workspace, run, outcome);
+          await noticeRun(workspace, run, outcome, reply);
         }
       }
       await notices.owed.remove(workspaceId, runId);
@@ -782,11 +785,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Tells this computer's person how a run ended.
+  // Tells this computer's person how a run ended. A finished run's notice
+  // names one of the agent's replies, so a chat showing it can skip the notice.
   async function noticeRun(
     workspace: ChatDispatchWorkspace,
     run: AgentRunRecord,
     outcome: RunOutcome,
+    reply?: string,
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
@@ -809,7 +814,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
       ),
       body: runNoticeBody(run, outcome, nodeAvailable),
-      target: { thread: run.threadId, run: run.runId },
+      target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
     });
   }
 
@@ -1579,11 +1584,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       stoppedRunForThread(workspace, threadId),
     ]);
     const live = liveRuns.get(workspaceId);
+    const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
     return {
-      liveRunId:
-        live?.claim.run.threadId === threadId && live.finalized === false
-          ? live.claim.run.runId
-          : null,
+      liveRunId: running?.runId ?? null,
+      liveTriggerMessageId: running?.triggerMessageId ?? null,
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
