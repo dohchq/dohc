@@ -1033,6 +1033,32 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(row.className).not.toContain("bg-selected");
   });
 
+  it("reads the shares again for an invitation a notice's Open names that arrived after Chats listed them", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    const received = (shareId: string) => ({
+      shareId,
+      channelWireId: `wire-${shareId}`,
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ received: [received("share-in")] }));
+    const props = {
+      workspaceId: "workspace-a",
+      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+    };
+    const { rerender } = render(<ChatsView {...props} />);
+    await screen.findByTestId("chats-join-shared");
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ received: [received("share-in"), received("share-new")] }));
+    const onInvitationRevealed = vi.fn();
+    rerender(<ChatsView {...props} revealInvitation={{ shareId: "share-new", inputs: inputCount() }} onInvitationRevealed={onInvitationRevealed} />);
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const join = screen.getAllByTestId("chats-join-shared").find((button) => button.getAttribute("data-invitation") === "share-new")!;
+    expect(document.activeElement).toBe(join);
+    expect(join.closest("li")!.getAttribute("aria-current")).toBe("true");
+  });
+
   it("waits to show the invitation a notice's Open names until another Join finishes joining", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue(
