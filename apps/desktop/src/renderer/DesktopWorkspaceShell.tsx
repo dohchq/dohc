@@ -184,7 +184,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
-import { isLiveStopEditsPending } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, LIVE_STOP_EDITS_PENDING_RESUME, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -971,11 +971,20 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
+  const pendingLiveStops = useRef(new Set<string>());
+  const pendingStopsWorkspace = useRef(workspaceId);
+  if (pendingStopsWorkspace.current !== workspaceId) {
+    pendingLiveStops.current.clear();
+    pendingStopsWorkspace.current = workspaceId;
+  }
   // A Stop names the row's document. A Try again closes that document's
   // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
-      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) clearIdentity(`live-stop-edits-pending:${objectId}`);
+      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
+        pendingLiveStops.current.delete(objectId);
+        clearIdentity(`live-stop-edits-pending:${objectId}`);
+      }
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
@@ -984,29 +993,57 @@ export function DesktopWorkspaceShell(props: {
     },
     [clearIdentity, workspaceAdmission],
   );
-  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string) => {
+  // Refused edits a Stop wrote into the file. Edits it kept stay in their
+  // own notice, which the sync status carries.
+  const liveDocumentStopped = useCallback(
+    (path: string, keptEdits: "recovered" | "kept") => {
+      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
+    },
+    [showSuccessNotice],
+  );
+  const resumeLiveDocument = useCallback(
+    (id: string, path: string) => bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
+    [],
+  );
+  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string, refusal: LiveStopRefusal) => {
     const current = () => workspaceIdRef.current === id && !workspaceAdmission.superseded;
     const identity = `live-stop-edits-pending:${objectId}`;
     const report = () => {
       if (!current()) return;
+      pendingLiveStops.current.add(objectId);
+      const needsResume = liveStopOffersResume(refusal);
       reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
-        message: "Recent edits haven't reached the server yet.", retry});
+        message: refusal.code === "edits-pending"
+          ? needsResume ? LIVE_STOP_EDITS_PENDING_RESUME : "Recent edits haven't reached the server yet."
+          : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
+        ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
+        ...(needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
+    };
+    const resume = () => {
+      if (!current()) return;
+      void resumeLiveDocument(id, path).then(() => {
+        if (!current()) return;
+        pendingLiveStops.current.delete(objectId);
+        clearIdentity(identity);
+      }).catch(error => {
+        if (current()) reportShellError(`dohc could not resume live editing for ${path}.`, error, resume, undefined, identity);
+      });
     };
     const retry = () => {
-      if (!current()) return false;
-      void stopLiveDocument(id, path, objectId).catch(error => {
+      if (!current()) return;
+      void stopLiveDocument(id, path, objectId).then(result => {
+        if (current() && result.keptEdits === "recovered") liveDocumentStopped(path, "recovered");
+      }).catch(error => {
         if (!current()) return;
-        if (isLiveStopEditsPending(error)) report();
-        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+        const next = readLiveStopRefusal(error);
+        if (next) {
+          refusal = next;
+          report();
+        } else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
       });
     };
     report();
-  }, [workspaceAdmission, stopLiveDocument, reportShellFailure, reportShellError]);
-  const resumeLiveDocument = useCallback(
-    (id: string, path: string) =>
-      bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
-    [],
-  );
+  }, [workspaceAdmission, stopLiveDocument, resumeLiveDocument, reportShellFailure, reportShellError, clearIdentity, liveDocumentStopped]);
   // The dialog maps refusal codes to app-owned copy and filters diagnostics.
   const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
     const page = await bridge().listOwnerLiveRefusals({
@@ -1037,14 +1074,6 @@ export function DesktopWorkspaceShell(props: {
       });
     },
     [reportShellError, openLiveDocuments],
-  );
-  // Refused edits a Stop wrote into the file. Edits it kept stay in their
-  // own notice, which the sync status carries.
-  const liveDocumentStopped = useCallback(
-    (path: string, keptEdits: "recovered" | "kept") => {
-      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
-    },
-    [showSuccessNotice],
   );
   // Save recovery copy, from a notice or the Live documents dialog, of the
   // kept edits the row's incident names. Set once the shell can open the copy it wrote.
@@ -1849,6 +1878,28 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  useEffect(() => {
+    if (captureDecidedFor !== workspaceId || syncStatus === null || pendingLiveStops.current.size === 0) return;
+    let active = true;
+    const current = () => active && workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded;
+    void (async () => {
+      let cursor: string | undefined;
+      const seen = new Set<string>();
+      do {
+        const page = await loadLiveDocuments(workspaceId, cursor);
+        if (!current()) return;
+        for (const row of page.documents) {
+          if (!row.saveOnly && row.status === "retired" && pendingLiveStops.current.delete(row.objectId)) {
+            clearIdentity(`live-stop-edits-pending:${row.objectId}`);
+          }
+        }
+        cursor = page.nextCursor ?? undefined;
+        if (cursor === undefined || seen.has(cursor) || pendingLiveStops.current.size === 0) return;
+        seen.add(cursor);
+      } while (current());
+    })().catch(() => { /* An unproven read cannot take back a failure. */ });
+    return () => { active = false; };
+  }, [captureDecidedFor, syncStatus, workspaceId, workspaceAdmission, loadLiveDocuments, clearIdentity]);
   const shownStopFailures=useRef(new Map<string,string>());
   useEffect(() => {
     if (captureDecidedFor!==workspaceId || syncStatus===null) return;
@@ -1918,7 +1969,12 @@ export function DesktopWorkspaceShell(props: {
       const stopAgain=() => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
         void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
-          .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
+          .then(() => {
+            if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+            pendingLiveStops.current.delete(row.objectId);
+            clearIdentity(`live-stop-edits-pending:${row.objectId}`);
+            if (result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");
+          },
             (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
               reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);

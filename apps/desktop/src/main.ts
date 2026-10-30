@@ -37,7 +37,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
-import { LIVE_STOP_EDITS_PENDING } from "./ipc/liveEditingStop";
+import { LIVE_STOP_EDITS_PENDING, liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
@@ -1253,11 +1253,18 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
 // only ever goes to the relay this machine signed in with.
 function relayShareErrorCopy(
   status: number,
-  data: { error?: string; code?: string } | null,
+  data: { error?: string; code?: string; sessionHost?: unknown; path?: unknown } | null,
 ): string {
   switch (data?.code) {
     case "edits-pending":
       return LIVE_STOP_EDITS_PENDING;
+    case "host-paused":
+    case "host-diverged":
+    case "host-no-edit-grant":
+    case "host-moved":
+    case "host-start-failed":
+    case "host-not-loaded":
+      return liveStopHostCopy(data.code, data.sessionHost, data.path);
     case "secret_path":
       return "Secret files can't be shared.";
     case "recipient_not_found":
@@ -1424,7 +1431,7 @@ async function relayShareJsonWithCredentials<T>(
     ) {
       return { kind: "missing", removed: data.code === "share_access_removed" };
     }
-    throw new Error(relayShareErrorCopy(response.status, data));
+    throw liveStopRelayError(data) ?? new Error(relayShareErrorCopy(response.status, data));
   }
   if (options && !("retainRestoreConflict" in options)) {
     return { kind: "success", body: data as T };
@@ -6600,8 +6607,12 @@ function registerIpcHandlers(): void {
     }),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
-  ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stop(
-    {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
+  ownerLiveStopAgainForCli = async (operation, kept) => {
+    const result = await agentOwnerLiveDocuments.stop(
+      {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
+    notifyRenderer({workspaceId: operation.workspace.workspaceId});
+    return result;
+  };
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,

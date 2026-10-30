@@ -470,6 +470,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,

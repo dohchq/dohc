@@ -11,12 +11,12 @@ export function pendingStopHarness(workspaceId: string, path: string, objectId: 
       binding: { ...document, workspaceId, lineageClaimId: "a".repeat(64), selectorPaths: [path], restoreFenceGeneration: 0 } };
     return recorded;
   });
-  const relay = vi.fn(async () => { throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet."); });
+  const relay = vi.fn(async (_credentials: unknown, _path: string, _init?: RequestInit): Promise<unknown> => { throw new Error("Live editing didn't stop. Recent edits haven't reached the server yet."); });
   const actions = createOwnerLiveDocumentActions({
     remoteForWorkspace: async () => ({ credentials: { serverUrl: "https://account.test", relayUrl: "https://relay.test",
       userId: "owner", email: "owner@example.test", token: "token" }, credentialGeneration: 1 }),
     currentCredentialGeneration: () => 1,
-    relayShareJsonWithCredentials: relay,
+    relayShareJsonWithCredentials: relay as OwnerLiveDocumentActionDependencies<{workspaceId: string}>["relayShareJsonWithCredentials"],
     ownerLiveStop,
     liveDocument: async () => document,
     withoutEditors: async (_workspace, _path, change) => change(),

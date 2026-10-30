@@ -1,5 +1,5 @@
 import type { relayShareOperations } from "./shareOperations";
-import { isLiveStopEditsPending, LIVE_STOP_EDITS_PENDING } from "./liveEditingStop";
+import { readLiveStopRefusal, liveStopHostCopy, liveStopError, LIVE_STOP_EDITS_PENDING, LIVE_STOP_EDITS_PENDING_RESUME, liveStopNeedsResume } from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
 import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
@@ -169,15 +169,28 @@ export function createOwnerLiveDocumentActions<
   const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
   // The server's live document list, as one owner request.
-  const liveHost = async (operation: Operation, method: "DELETE" | "POST", body: object) => {
+  const liveHost = async (operation: Operation, method: "DELETE" | "POST" | "GET", body?: object) => {
     const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
     if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
     const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
-      method,body:JSON.stringify(body),
+      method,...(body === undefined ? {} : {body:JSON.stringify(body)}),
     });
     operation.assertCurrent();
     if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
     return result;
+  };
+  const pendingStopError = async (operation: Operation, objectId: string): Promise<Error> => {
+    let needsResume = false;
+    try {
+      const page = activeLiveDocuments.parse(await liveHost(operation, "GET"));
+      const row = page.documents.find(row => row.objectId === objectId);
+      const kept = dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId === objectId && !row.saveOnly);
+      needsResume = liveStopNeedsResume(row && {...row, quarantine: kept?.recovery});
+    } catch {
+      // An unproven list adds no explanation of why edits could not reach the server.
+    }
+    operation.assertCurrent();
+    return new Error(needsResume ? LIVE_STOP_EDITS_PENDING_RESUME : LIVE_STOP_EDITS_PENDING);
   };
   // The server's document that this computer no longer has: only the server
   // stops live editing for it. Edits kept here stay for Save recovery copy.
@@ -187,7 +200,17 @@ export function createOwnerLiveDocumentActions<
       operation.assertCurrent();
       let result: unknown;
       try {result=await liveHost(operation,"DELETE",{path:input.path,objectId:input.objectId,retire:true});}
-      catch (error) {operation.assertCurrent();throw error;}
+      catch (error) {
+        operation.assertCurrent();
+        const refusal = readLiveStopRefusal(error);
+        if (refusal) {
+          if (refusal.code === "edits-pending") throw await pendingStopError(operation, input.objectId);
+          const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
+          console.warn(`[desktop] ${copy}`);
+          throw liveStopError(refusal);
+        }
+        throw error;
+      }
       // The server names its document's current path, which a rename there may have changed.
       z.object({ok:z.literal(true),objectId:z.literal(input.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
@@ -241,10 +264,14 @@ export function createOwnerLiveDocumentActions<
           ...(local.binding ? {restoreFenceGeneration:local.binding.restoreFenceGeneration} : {})});
       } catch (error) {
         operation.assertCurrent();
-        if (isLiveStopEditsPending(error)) {
+        const refusal = readLiveStopRefusal(error);
+        if (refusal) {
           await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
           operation.assertCurrent();
-          throw new Error(LIVE_STOP_EDITS_PENDING);
+          if (refusal.code === "edits-pending") throw await pendingStopError(operation, local.document.objectId);
+          const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
+          console.warn(`[desktop] ${copy}`);
+          throw liveStopError(refusal);
         }
         throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
       }
@@ -359,6 +386,8 @@ export function createRelaySharesIpcHandlers<
       ]));
       const current = activeLiveDocuments.parse(active);
       const stopped = retiredLiveDocuments.parse(retired);
+      const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
+      operation.assertCurrent();
       if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.lastPath ||
         stopped.nextCursor === input.retiredAfter)) {
         throw new Error("The live document list changed. Refresh the list and try again.");
@@ -373,9 +402,13 @@ export function createRelaySharesIpcHandlers<
         ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
           document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused")),
       }]));
+      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
       const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
       for (const row of documents.values()) {
         // Each row speaks for the server's document, never for another that had or has its path.
+        const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
+        if (deferred) Object.assign(row, {deferredStop: deferred,
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
