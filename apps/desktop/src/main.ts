@@ -422,6 +422,7 @@ import {
   readWorkspaceSecretState,
 } from "./workspaces/workspaceSecretEnrollmentState";
 import {
+  closeActivityFirst,
   closeWorkspaceActivityAndRelay,
   settleYDocsAfterFileObservation,
   createWorkspaceActivity,
@@ -1881,26 +1882,25 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     workspaceHosts.close(binding.workspaceId);
     pressWindows.forget(binding.workspaceId);
     state.relayedPresses.stop();
-    const results = await Promise.allSettled([
-      // The executor hands its held dataset claims back before the host closes.
-      state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
-      state.linkedChatStore?.close() ?? Promise.resolve(),
-      state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
-      Promise.resolve().then(() =>
-        agentIntegration.disposeState(state.agentIntegration),
-      ),
-      state.sitePreviews.stopWorkspace(binding.workspaceId),
-      ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
-      engineYDocSessionIpc.retireAuthority(binding.attachmentId),
-      workspaceActivity.close(physicalWorkspace, state.activity, {
-        expectedRootPath: binding.canonicalRootPath,
-        preserveStatus: false,
-      }),
-    ]);
-    const failed = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
+    await closeActivityFirst(
+      () =>
+        workspaceActivity.close(physicalWorkspace, state.activity, {
+          expectedRootPath: binding.canonicalRootPath,
+          preserveStatus: false,
+        }),
+      () => [
+        // The executor hands its held dataset claims back before the host closes.
+        state.collectionAutomations.dispose().finally(() => closeLocalDatasetHost(state.datasetHost)),
+        state.linkedChatStore?.close() ?? Promise.resolve(),
+        state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
+        Promise.resolve().then(() =>
+          agentIntegration.disposeState(state.agentIntegration),
+        ),
+        state.sitePreviews.stopWorkspace(binding.workspaceId),
+        ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
+        engineYDocSessionIpc.retireAuthority(binding.attachmentId),
+      ],
     );
-    if (failed) throw failed.reason;
   },
 });
 function requireWorkspaceAuthority(
