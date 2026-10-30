@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -765,6 +765,47 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
+  it("uses the authoritative head for an edited witness and forwards explicit consent with an absent head", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-consent-"));
+    const source = "# Readme\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const doc = markdownToYDoc(source);
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    Y.applyUpdate(doc, documentEditUpdate(Y.encodeStateAsUpdate(doc), { replacement: "Unsettled tail." }, { keepBlocks: true })!);
+    try {
+      await writeFile(join(root, "readme.md"), source);
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      const edit = { path: "readme.md", edit: { find: "Editable.", replacement: "Changed." }, origin };
+      await context.documents!.edit(edit);
+      const [guarded] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      const state = Y.encodeStateAsUpdate(doc);
+      for (const headSha256 of [null, sha(source)]) {
+        await expect(guarded.change(state, { keepBlocks: true, headSha256 })).rejects.toThrow("parts it can't show");
+      }
+      const converted = await guarded.change(state, { keepBlocks: true, headSha256: sha("converted head") });
+      expect(converted).toBeInstanceOf(Uint8Array);
+
+      await context.documents!.edit({ ...edit, allowLossySourceSha256: sha(source) });
+      const [consented] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[1]!;
+      expect(consented.allowLossySourceSha256).toBe(sha(source));
+      await expect(consented.assertEditable("readme.md")).resolves.toBeUndefined();
+      const update = await consented.change(state, { keepBlocks: true, headSha256: null });
+      Y.applyUpdate(doc, update!);
+      expect(yDocToMarkdown(doc)).toContain("Changed.");
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(source);
+
+      await writeFile(join(root, "readme.md"), source.replace("Hidden.", "Another source."));
+      await expect(consented.assertEditable("readme.md")).rejects.toThrow("parts it can't show");
+    } finally {
+      doc.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("hands a document edit to the live sessions as an update against their state", async () => {
     const f = fixture();
     const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
@@ -774,10 +815,10 @@ describe("desktop CLI workspace context", () => {
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
-    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true }))!);
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!);
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
     // A refusal from the projection reaches the caller.
-    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true, headSha256: null }))
       .rejects.toThrow("not in the document");
   });
 

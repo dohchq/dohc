@@ -260,6 +260,26 @@ async function flushLocalBatch(): Promise<void> {
   });
 }
 
+it("receives saved state at the resolved path when opened through a case alias", async () => {
+  let report!: Parameters<typeof harness.api.onEngineYDocSaveState>[0];
+  const subscribe = harness.api.onEngineYDocSaveState.bind(harness.api);
+  vi.spyOn(harness.api, "onEngineYDocSaveState").mockImplementation(listener => {
+    report = listener;
+    return subscribe(listener);
+  });
+  retainDocument("notes/folder/a.md");
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  act(() => editDocument());
+  await flushLocalBatch();
+  expect(retained.snapshot.saveState.kind).toBe("saving");
+  act(() => report({
+    sessionId: harness.sessionId()!, workspaceId: "ws-1", path: "Notes/Folder/A.md",
+    state: { kind: "saved-here" }, seq: harness.applied.at(-1)!.seq, headSha256: "a".repeat(64),
+  }));
+  expect(retained.snapshot.saveState.kind).toBe("saved-here");
+  expect(boundOutcome().headSha256).toBe("a".repeat(64));
+});
+
 it("never flips back to Saved on a timer — only a real settle report clears it", async () => {
   await retainBound();
 

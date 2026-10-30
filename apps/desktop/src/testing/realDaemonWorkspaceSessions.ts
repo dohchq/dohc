@@ -4,6 +4,14 @@ import {
   type EngineDaemonClientSource,
   type EngineDaemonLifecycleOptions,
 } from "@dohc/workspace-engine-client/daemon";
+import { fileURLToPath } from "node:url";
+import { installedReaderConfig } from "../workspaces/installedReaderConfig";
+
+export function realDaemonReaderConfig(): string {
+  const config = installedReaderConfig(fileURLToPath(new URL("../../resources", import.meta.url)));
+  if (!config) throw new Error("The test daemon needs the prepared Markdown reader. Run pnpm qa:prepare.");
+  return config;
+}
 
 // Aggregate test load delays a real daemon's workspace work well beyond the
 // product's deadlines: 2 s for a session's workspace open and 5 s for a
@@ -38,6 +46,7 @@ export function createRealDaemonLifecycle(
 ): EngineDaemonLifecycle {
   return new EngineDaemonLifecycle({
     requestTimeoutMs: REAL_DAEMON_DEADLINE_MS,
+    readerConfig: realDaemonReaderConfig(),
     ...options,
   });
 }

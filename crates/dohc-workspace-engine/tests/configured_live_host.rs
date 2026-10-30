@@ -228,6 +228,8 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     };
     assert_eq!(settled.result["status"], "settled");
     assert_eq!(settled.result["settlement"]["materialized"], true);
+    // The first baseline covers no accepted edit, so it records nothing.
+    assert_eq!(settled.result["settlement"]["settlementId"], Value::Null);
     assert_eq!(
         std::fs::read_to_string(root.join("note.md")).unwrap(),
         markdown
@@ -251,12 +253,14 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     };
     assert_eq!(covered.result["settlement"]["applicationCount"], 1);
     assert_eq!(covered.result["settlement"]["terminalCursor"], 2);
-    assert_eq!(
+    // The first recorded settlement publishes its own moment; the
+    // baseline's moment stays local.
+    assert_ne!(
         covered.result["settlement"]["momentId"],
         settled.result["settlement"]["momentId"]
     );
     let counts:(i64,i64)=db.query_row("SELECT (SELECT COUNT(*) FROM live_device_settlements),(SELECT COUNT(*) FROM engine_search_files_fts WHERE object_id='object' AND text=?1)",[markdown],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(counts, (2, 1));
+    assert_eq!(counts, (1, 1));
     let Envelope::Error(refused) = daemon.request(
         8,
         "liveApplication.settle",

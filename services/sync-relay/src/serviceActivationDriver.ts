@@ -11,7 +11,7 @@ import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents"
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
-import {settlementResult,type CommittedSettlement} from "./liveSettlement";
+import {settlementResponse,settlementPending,type CommittedSettlement} from "./liveSettlement";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
@@ -344,10 +344,11 @@ export class ServiceActivationDriver {
     const reconciled=await this.#reconcile(target,value,signal,false);
     if(reconciled?.kind!=="reconciled")return reconciled;
     const o=this.options,{registrationId,tip}=reconciled;
-    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
-      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal);
+    const settled=await settlementResponse(o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal),tip);
     signal.throwIfAborted();o.assertCurrent();
-    return {kind:"settled",settlement:settlementResult(response.result,tip)};
+    if(settlementPending(settled))return settled;
+    return {kind:"settled",settlement:settled};
   }
   /**
    * Records what the engine applied of a document whose owner lost live
@@ -489,8 +490,10 @@ export class ServiceActivationDriver {
       if(!reply.hasMoreApplications)break;
     }
     const owned=this.#delivery.departedOwnerDelivery(input),tip=owned?.tip ?? null;
-    if(settle && !settlementResult(await send("liveApplication.settle",{retirement:key,terminalReceipt:tip && {...tip}}),tip).materialized){
-      return {kind:"pending",reason:"Settlement has not reached the file."};
+    if(settle){
+      const settled=await settlementResponse(send("liveApplication.settle",{retirement:key,terminalReceipt:tip && {...tip}}).then(result=>({result})),tip);
+      if(settlementPending(settled))return settled;
+      if(!settled.materialized)return {kind:"pending",reason:"Settlement has not reached the file."};
     }
     // Retained output publishes whether or not this pass settled any.
     if((await workspace.replica.publish(signal)).hasMore){check();return {kind:"pending",reason:"Hosted publication has more pages."};}
@@ -618,6 +621,7 @@ export class ServiceActivationDriver {
     // another binding reactivates on a later pass.
     if(!held.activationPending && this.#invalidated(held,document!))return fenced;
     try{
+      // The consumer materializes any retained handover cut before draining edits.
       const outcome=await held.consumer.drain(document!,signal);check();
       if(outcome.kind!=="done")return outcome;
       if(held.activationPending){

@@ -202,6 +202,7 @@ fn lower_relay_base_recovers_a_third_copy_as_one_ordinary_sibling() {
                 0,
                 1_100,
                 None,
+                None,
             )
         })
         .expect("settle the losing base projection");
@@ -613,6 +614,7 @@ fn different_scene_seeds_open_a_version_conflict() {
                     "loser",
                     0,
                     1_100,
+                    None,
                     None,
                 )
             })
@@ -6573,6 +6575,7 @@ fn simultaneous_seed_resolutions_replay_the_same_choice_or_review_different_choi
                                     "settled-crossing",
                                     0,
                                     11_002,
+                                    None,
                                     None,
                                 )
                             })

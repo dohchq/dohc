@@ -21,6 +21,9 @@ pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 /// Received Collection snapshot projection committed; no moment was recorded.
 pub const COLLECTIONS_PROJECTED_EVENT: &str = "collections.projected";
 
+/// Local Markdown holds changed; callers re-read the durable refusals.
+pub const SYNC_REFUSALS_CHANGED_EVENT: &str = "sync.refusalsChanged";
+
 /// Wake-up after initial capture leaves Starting or Importing. The payload
 /// identifies the workspace; callers retry their fenced read. A receiver from
 /// `subscribe_with_wakes` gets it as a retained wake, once per workspace, even
@@ -102,7 +105,7 @@ struct RetainedWakes {
             dohc_engine_files::observation::ObservationCursor,
         >,
     >,
-    /// (event name, workspace id): one pending capture wake of each kind.
+    /// (event name, workspace id): one pending workspace wake of each kind.
     workspaces: Mutex<std::collections::BTreeSet<(&'static str, String)>>,
     /// The current subscriber came from `subscribe_with_wakes`.
     subscribed: AtomicBool,
@@ -155,8 +158,8 @@ impl EngineEventReceiver {
 
 impl EngineEvents {
     /// `subscribe`, plus the retained wakes: `workspace.filesChanged`,
-    /// `capture.initialSettled` and `capture.importProgress`, delivered before
-    /// ordinary notices.
+    /// `capture.initialSettled`, `capture.importProgress` and
+    /// `sync.refusalsChanged`, delivered before ordinary notices.
     pub fn subscribe_with_wakes(&self) -> EngineEventReceiver {
         let ordinary = self.subscribe();
         self.wakes.subscribed.store(true, Ordering::Release);
@@ -187,6 +190,10 @@ impl EngineEvents {
     /// Announce that `workspace`'s fresh import committed more files.
     pub(crate) fn emit_import_progress(&self, workspace: &str) {
         self.emit_workspace_wake(CAPTURE_IMPORT_PROGRESS_EVENT, workspace);
+    }
+
+    pub(crate) fn emit_refusals_changed(&self, workspace: &str) {
+        self.emit_workspace_wake(SYNC_REFUSALS_CHANGED_EVENT, workspace);
     }
 
     /// A receiver from `subscribe_with_wakes` keeps one wake of each kind per
@@ -340,6 +347,28 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refusal_changes_coalesce_per_workspace_through_a_full_notice_queue() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_wakes();
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY + 10 {
+            events.emit("ordinary", json!({}));
+        }
+        for workspace in ["a", "a", "b"] {
+            events.emit_refusals_changed(workspace);
+        }
+        let mut workspaces = Vec::new();
+        for _ in 0..2 {
+            let wake = receiver.recv().await.unwrap();
+            assert_eq!(wake.name, SYNC_REFUSALS_CHANGED_EVENT);
+            workspaces.push(wake.payload["workspaceId"].as_str().unwrap().to_owned());
+        }
+        workspaces.sort();
+        assert_eq!(workspaces, ["a", "b"]);
+        assert!(lock(&events.wakes.workspaces).is_empty());
+        assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
+    }
 
     #[tokio::test]
     async fn file_wake_coalesces_when_the_shared_notice_queue_is_full() {

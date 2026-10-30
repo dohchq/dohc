@@ -115,6 +115,9 @@ export interface ShellError {
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
+  // The row was read: its stored notice was, or a step that `reads` it ran.
+  // Closing a toast alone leaves the row unread.
+  read?: boolean;
 }
 
 // The error hook a notice owner hands to a shared part that reports its own
@@ -449,25 +452,33 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearCollectionsWaiting = useCallback(() => clearKind("collections-waiting"), [clearKind]);
-  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void, openHistory?: () => void) => {
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void, openHistory?: () => void, read?: (id: string) => void) => {
     setShellErrors(current => [
       ...current.filter(error => error.kind !== "sync-refusal"),
       ...notices.map(notice => {
         const prior = current.find(error => error.id === notice.noticeId);
+        const markdownHeld = notice.kind === "markdown-write-held";
         const reason = notice.detail?.split("\n")[0];
         const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
         // Sync has moved past the refused saves, so there is nothing to try again.
         const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
         const path = notice.target?.path;
+        // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
+        const step = (label: string, run: () => void) =>
+          ({ action: { label, reads: true, run: () => { run(); read?.(notice.noticeId); } } });
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-          title: bindingChanged || attributionRefused ? notice.title : undefined,
+          title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
-          atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
-          retry: bindingChanged || attributionRefused ? null : retry,
-          ...(attributionRefused ? { tone: "warning" as const } : {}),
-          ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}),
-          ...(attributionRefused && openHistory ? { action: { label: "Open History", run: openHistory } } : {}) };
+          atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
+          read: prior?.read === true || notice.readAtMs !== null,
+          retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
+          // A hold is on purpose: nothing failed.
+          ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
+          ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
+          // A held note's row stays until the change is saved.
+          ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
+          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}) };
       }),
     ]);
   }, []);
@@ -643,7 +654,7 @@ export function useShellError(workspaceId: string) {
     if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
     else if (target?.action?.reads) {
-      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true } : error)));
+      setShellErrors((current) => current.map((error) => (error.id === id ? { ...error, seen: true, read: true } : error)));
     }
     target?.action?.run();
   }, []);

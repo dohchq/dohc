@@ -148,7 +148,8 @@ pub use ydoc_apply::{
     prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx, project_ydoc_with_store,
     reconcile_imported_resulting_head_in_tx, reconcile_local_head_in_tx,
     reconcile_local_resulting_head_in_tx, reconcile_prepared_local_head_in_tx,
-    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    retire_ydoc_lineage_in_tx, retry_markdown_projection_in_tx, validate_scene_asset_with_store,
+    workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, lineage_originated_here, originate_appended_ydoc_base_in_tx,

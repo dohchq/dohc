@@ -190,6 +190,7 @@ fn version_fence_session_view(
         .filter(|session| session.workspace == *handle)
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
     Ok(YdocSessionView {
+        conversion_consent: session.conversion_consent.clone(),
         owner_draft: session.owner_draft.clone(),
         key: session.key.clone(),
         path: session.path.clone(),
@@ -230,6 +231,7 @@ async fn settle_ydoc_session_for_version_fence(
             Arc::new(NoFaults),
             token.clone(),
             session.restore_generation,
+            session.conversion_consent.clone(),
         )
         .await
         .map_err(map_runtime)?;

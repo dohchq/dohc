@@ -242,7 +242,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       expect(ack).toMatchObject({deliveryId: application!.delivery_id, updateDigest: hash(localUpdate)});
       results.nativeAck = ack;
     } finally {engine.close();}
-    const settlement = await active.settle(document); expect(settlement.materialized).toBe(true);
+    const settlement = await active.settle(document); expect(settlement).toMatchObject({materialized: true});
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(first.mirror.doc));
     results.edit = {saveEvent, peerMarkdown: yDocToMarkdown(peer.mirror.doc), ordinaryCaptureCalls, localMarkdown: "Hello", settlement};
     const wrong = await desktop(0, "wrong-bearer", {token: tokens[1]});

@@ -2120,6 +2120,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "allowLossySourceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "path": {
             "type": "string",
             "minLength": 1,

@@ -7,6 +7,13 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("markdown-write-held")]
+    MarkdownWriteHeld {
+        key: Box<dohc_engine_collab::DocKey>,
+        path: String,
+        head_sha256: Option<String>,
+        checkpoint_sha256: String,
+    },
     #[error(transparent)]
     CaptureBatchPass(std::sync::Arc<RuntimeError>),
     #[error("chat-mention-access-changed")]
@@ -167,6 +174,7 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::MarkdownWriteHeld { .. } => "markdown-write-held",
             RuntimeError::CaptureBatchPass(error) => error.code(),
             RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",

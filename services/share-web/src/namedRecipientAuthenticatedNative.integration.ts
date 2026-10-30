@@ -235,7 +235,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     await browserExpect(first.page.getByRole("status")).toContainText("Changes saved");
     await browserExpect(peer.editor).toContainText("From Alice in Chromium.");
     const browserAck = await nativeAck(); results.browserAck = browserAck;
-    const firstSettlement = await active.settle(document); expect(firstSettlement.materialized).toBe(true);
+    const firstSettlement = await active.settle(document); expect(firstSettlement).toMatchObject({materialized: true});
     const firstMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
     expect(firstMarkdown).toContain("From Alice in Chromium."); results.firstSettlement = firstSettlement;
     expect((await active.captureNative(current.binding)).registrationId).toBe(capture.registrationId);
@@ -244,7 +244,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     await browserExpect(first.editor).toContainText("From Bob after settlement.");
     const afterAck = await nativeAck(); results.afterSettlementAck = afterAck;
     expect(afterAck!.journalCursor).toBeGreaterThan(browserAck!.journalCursor);
-    const secondSettlement = await active.settle(document); expect(secondSettlement.materialized).toBe(true);
+    const secondSettlement = await active.settle(document); expect(secondSettlement).toMatchObject({materialized: true});
     const settledMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
     expect(settledMarkdown).toContain("From Alice in Chromium."); expect(settledMarkdown).toContain("From Bob after settlement.");
     results.secondSettlement = secondSettlement; results.settledMarkdown = settledMarkdown;

@@ -93,10 +93,10 @@ fn candidate(
         json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":digest}),
     )
 }
-#[test]
-fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
+#[tokio::test]
+async fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     use dohc_engine_collab::owner_outbox::release;
-    let (_dir, mut store, observed, checkpoint) = fixture();
+    let (dir, mut store, observed, checkpoint) = fixture();
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
@@ -117,14 +117,22 @@ fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     let mut op = candidate(&mut store, &observed, &update, 0);
     op.origin_id = "peer".into();
     op.relay_seq = Some(2);
-    let result = apply_ydoc_envelope(
-        &mut store,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &op,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    cache.reader_resolver = Some(std::sync::Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(std::sync::Arc::new(
+            dohc_engine_reader::Reader::new(Some(super::markdown_write_hold::witness_reader(
+                &dir,
+                "witness-safe",
+            ))),
+        )),
+    ));
+    let result = loop {
+        match apply_ydoc_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases) {
+            Ok(result) => break result,
+            Err(SyncError::MarkdownWitnessCheckPending { pending, .. }) => pending.resolve().await,
+            Err(error) => panic!("{error:?}"),
+        }
+    };
     assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
     assert!(result.refusals.is_empty());
     store

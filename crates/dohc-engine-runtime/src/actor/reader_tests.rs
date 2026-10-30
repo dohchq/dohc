@@ -241,6 +241,77 @@ async fn outside_races_dispatch_the_third_observed_proof_before_holding() {
 }
 
 fn crashing_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
+    fake_reader(scratch, "startup-crash")
+}
+
+pub(super) fn pending_snapshot_proof() -> Arc<reader_resolver::PendingProof> {
+    let data: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let scratch = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("w", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "w".into(),
+                version_id: "main".into(),
+                object_id: "proof".into(),
+                path: "note.md".into(),
+                text: data["source"].as_str().unwrap().into(),
+                moment_id: "proof-source".into(),
+                metadata_origin: "test".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(
+        &STANDARD
+            .decode(data["claimedCheckpoint"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let key = DocKey::new("w", "main", "proof").unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &key,
+        ContentKind::Richdoc,
+        &doc.encode_full_state(),
+        &NoFaults,
+        3,
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET path='note.md'", [])
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
+    let resolver = reader_resolver::ReaderResolver::new(Arc::new(Reader::new(None)));
+    match store.read_with(|conn| {
+        reader_resolver::resolve(
+            conn,
+            &key,
+            &doc,
+            &doc.project(ContentKind::Richdoc)?.content,
+            Some(&resolver),
+        )
+    }) {
+        Err(dohc_engine_collab::CollabError::MarkdownReaderPending(proof)) => proof,
+        result => panic!("expected snapshot preparation, got {result:?}"),
+    }
+}
+
+pub(super) fn fake_reader(scratch: &ScratchDir, mode: &str) -> dohc_engine_reader::Config {
     use dohc_engine_storage::hex_sha256;
     use serde_json::json;
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
@@ -260,12 +331,14 @@ fn crashing_reader(scratch: &ScratchDir) -> dohc_engine_reader::Config {
     let mut manifest = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
     let script = include_str!("../../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &manifest.to_string())
-        .replace("MODE", "\"startup-crash\"");
-    let bundle = scratch.path().join("crashing-reader.cjs");
+        .replace("MODE", &serde_json::to_string(mode).unwrap());
+    static NEXT_READER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_READER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bundle = scratch.path().join(format!("reader-{id}.cjs"));
     std::fs::write(&bundle, &script).unwrap();
     manifest["bundleSha256"] = hex_sha256(script.as_bytes()).into();
     manifest["sources"] = json!([]);
-    let manifest_path = scratch.path().join("reader-manifest.json");
+    let manifest_path = scratch.path().join(format!("reader-{id}-manifest.json"));
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     dohc_engine_reader::Config {
         node,

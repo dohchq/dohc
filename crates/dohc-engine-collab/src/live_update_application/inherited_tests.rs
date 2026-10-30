@@ -701,7 +701,7 @@ fn an_inherited_delivery_below_the_floor_stays_private() {
     assert!(carried.iter().all(|delivery| delivery.native_sequence <= floor));
     let tail = {
         let held = f.handle.registration.lock().unwrap();
-        f.store.read_with(|conn| settlement::private_tail(conn, &held, floor, floor)).unwrap()
+        f.store.read_with(|conn| settlement::private_tail(conn, &held, floor, floor, 0)).unwrap()
     };
     assert!(tail.any && tail.sequences.is_empty());
     let key = retirement_key(&f, 10);
@@ -745,7 +745,7 @@ fn a_successor_replays_its_predecessors_settlement_as_stored() {
     successor(&mut f);
     f.adopt().unwrap();
     assert!(seeds(&f).is_empty());
-    assert!(coverage_floor(&f, &settled.settlement_id) < adopted_head(&f));
+    assert!(coverage_floor(&f, settled.settlement_id.as_deref().unwrap()) < adopted_head(&f));
     replays(&mut f, &settled, |f| settle_as(f, Some(terminal.clone()), "retired"));
 }
 
@@ -771,7 +771,7 @@ fn catch_up_rows_before_adoption_need_no_application() {
         };
         let first = settle_as(&mut f, Some(terminal.clone()), "resumed").unwrap();
         assert_eq!(first.previous_cursor, 3, "carried={carried}");
-        assert_eq!(coverage_floor(&f, &first.settlement_id), adopted, "carried={carried}");
+        assert_eq!(coverage_floor(&f, first.settlement_id.as_deref().unwrap()), adopted, "carried={carried}");
         assert_eq!(applied_deliveries(&f), [covered.delivery_id.clone(), terminal.delivery_id.clone()], "carried={carried}");
         replays(&mut f, &first, |f| settle_as(f, Some(terminal.clone()), "resumed"));
     }
@@ -853,7 +853,7 @@ fn carried_since_the_floor(count: i64) -> (Fixture, Vec<CarriedDelivery>) {
     }
     host_document(&mut f, true, true);
     let settled = retirement_settle(&mut f, 10, None).unwrap();
-    assert_eq!(coverage_floor(&f, &settled.settlement_id), floor);
+    assert_eq!(coverage_floor(&f, settled.settlement_id.as_deref().unwrap()), floor);
     release_parked(&mut f);
     let carried: Vec<CarriedDelivery> = accepted.iter().map(|receipt| carried_delivery(&f, receipt)).collect();
     assert_eq!(manifest(&f, "adoption"), carried);
@@ -958,7 +958,7 @@ fn a_predecessors_refusal_stays_private_on_replay() {
             let head = adopted_head(&f);
             let tail = {
                 let held = f.handle.registration.lock().unwrap();
-                f.store.read_with(|conn| settlement::private_tail(conn, &held, head, head)).unwrap()
+                f.store.read_with(|conn| settlement::private_tail(conn, &held, head, head, 0)).unwrap()
             };
             assert!(tail.any && tail.sequences.is_empty(), "{case}");
         } else {

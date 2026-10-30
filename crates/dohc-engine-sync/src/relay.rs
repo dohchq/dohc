@@ -776,6 +776,8 @@ pub enum SyncPassOutcome {
 
 pub struct RelaySyncClient<T> {
     transport: T,
+    pending_preparation:
+        std::sync::Mutex<Option<dohc_engine_collab::markdown_write_safety::PendingPreparation>>,
     /// Group automation claims this client's applies committed and nobody
     /// took yet. A pass that fails after an apply committed leaves them here:
     /// its retry finds the message stored and claims nothing again.
@@ -1012,9 +1014,43 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn resuming(transport: T, continuation: PullContinuation) -> Self {
         Self {
             transport,
+            pending_preparation: std::sync::Mutex::new(None),
             automation_claims: std::sync::Mutex::new(Vec::new()),
             continuation,
         }
+    }
+
+    pub fn take_pending_preparation(
+        &self,
+    ) -> Option<dohc_engine_collab::markdown_write_safety::PendingPreparation> {
+        self.pending_preparation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn local(&self, error: SyncError) -> RelayError {
+        use dohc_engine_collab::markdown_write_safety::PendingPreparation;
+        let pending = match &error {
+            SyncError::MarkdownReaderPending(pending) => {
+                Some(PendingPreparation::Reader(pending.clone()))
+            }
+            SyncError::MarkdownWitnessCheckPending { key, path, pending } => {
+                Some(PendingPreparation::Witness {
+                    key: key.clone(),
+                    path: path.clone(),
+                    pending: pending.clone(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(pending) = pending {
+            *self
+                .pending_preparation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        }
+        local(error)
     }
 
     /// The Group automation claims this client's applies committed since the
@@ -2810,7 +2846,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                     faults,
                 )
-                .map_err(local)?;
+                .map_err(|error| self.local(error))?;
             for change in recovered.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
@@ -2936,7 +2972,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
-            Err(error) => return Err(local(error)),
+            Err(error) => return Err(self.local(error)),
         };
         p.pass.replace_drain_holds(
             archived
@@ -2958,7 +2994,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
                 leases,
             )
-            .map_err(local)?;
+            .map_err(|error| self.local(error))?;
             p.pass.replace_drain_holds(released.holds);
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
@@ -2989,7 +3025,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
-            Err(error) => return Err(local(error)),
+            Err(error) => return Err(self.local(error)),
         }
         let completed: Vec<&ReplicationEnvelope> =
             p.completed.iter().map(|&index| &ordered[index]).collect();
@@ -3012,7 +3048,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // queue reaches the pass here, under the same token.
         let drained =
             crate::drain_report::claim(store, workspace_id, &mut settlements.report_id, faults)
-                .map_err(local)?;
+                .map_err(|error| self.local(error))?;
         pass.record_facts.extend(drained.record_facts);
         for change in drained.extras.changes {
             insert_changed_path(&mut pass.changed_paths, change);
@@ -3036,7 +3072,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // the claimed token; a later drain remains unowned, while a newer pull
         // retags relay rows so a stale cursor cannot destroy an unread refusal.
         let pending_refusals =
-            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(|error| self.local(error))?;
         for refusal in pending_refusals {
             push_refusal_once(&mut pass.refusals, refusal);
         }
@@ -3084,7 +3120,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 crate::ydoc_apply::DrainReporting::Durable,
                 faults,
             )
-            .map_err(local)?;
+            .map_err(|error| self.local(error))?;
             p.pass.clear_freed(&drained.cleared);
         }
         // Retained work replays under the feed it arrived on.
@@ -3116,7 +3152,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     Ok(hold)
                 })
-                .map_err(local)?
+                .map_err(|error| self.local(error))?
                 .map(|hold| (object_id.to_owned(), hold)),
             _ => None,
         };
@@ -3194,7 +3230,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             {
                 p.still_retryable.push(index);
             }
-            Ok(Err(error)) => return Err(local(error)),
+            Ok(Err(error)) => return Err(self.local(error)),
             Ok(Ok(outcome)) => {
                 p.made_progress = true;
                 p.completed.push(index);
@@ -3701,7 +3737,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // wedges the pull rather than losing a count.
                 Err(error) => match error.share_disposition() {
                     ShareDisposition::Skip => skipped += 1,
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
         }
@@ -4150,7 +4186,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ));
                         continue;
                     }
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
             // A chat op is fully applied by the boundary above —

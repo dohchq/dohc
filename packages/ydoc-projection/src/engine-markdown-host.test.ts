@@ -7,7 +7,9 @@ import {dirname, join} from 'node:path'
 import {afterAll, beforeAll, expect, it} from 'vitest'
 import * as Y from 'yjs'
 import {buildEngineReader} from '../scripts/build-engine-reader.mjs'
-import {markdownToYDoc} from './import-export.js'
+import {markdownToYDoc, yDocToMarkdown} from './import-export.js'
+import {witnessKeepsMeaning} from './lossy-markdown.js'
+import commonmark from './fixtures/commonmark-edit-meaning.json'
 import rows from './engine-markdown-reader.fixture.json'
 
 let directory: string, bundle: string
@@ -111,6 +113,47 @@ it('hello reports protocol, schema and actual runtime only', async () => {
       runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
         unicode: process.versions.unicode, icu: process.versions.icu}})
     await host.expectNoUnreadOutput()
+  } finally {await host.close()}
+})
+it('checks only saved source and digest metadata, independently of later edits', async () => {
+  const host = await start()
+  try {
+    await hello(host)
+    let id = 1
+    for (const sourceText of ['Title\n=====\n\n* one\n', '# Native\n\nText.', ...[148, 161, 192, 193, 572, 575, 577]
+      .map(number => commonmark.examples.find(example => example.example === number)!.markdown + '\n\nEditable paragraph.\n')]) {
+      const doc = markdownToYDoc(sourceText), source = Buffer.from(sourceText)
+      try {
+        const sourceSha256 = hash(source), projectionSha256 = hash(Buffer.from(yDocToMarkdown(doc)))
+        doc.getMap('meta').set('dohcMarkdownSource', sourceText)
+        doc.getMap('meta').set('dohcMarkdownSourceSha256', sourceSha256)
+        doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', projectionSha256)
+        doc.getMap('frontmatter').set('status', 'edited')
+        for (const recordedProjection of [projectionSha256, '0'.repeat(64)]) {
+          doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', recordedProjection)
+          host.child.stdin.write(Buffer.concat([
+            control({id: ++id, method: 'check-markdown-witness', source: declared(source), sourceSha256,
+              projectionSha256: recordedProjection}), blob(1, source), control({id, end: true}),
+          ]))
+          expect(await host.json()).toEqual({id, kind: 'witness-checked', sourceSha256,
+            projectionSha256: recordedProjection, keepsMeaning: witnessKeepsMeaning(doc)})
+        }
+      } finally {doc.destroy()}
+    }
+    await host.expectNoUnreadOutput()
+  } finally {await host.close()}
+})
+
+it.each(['checkpoint', 'candidate', 'over-cap', 'source-digest'])('rejects a witness request with %s', async mode => {
+  const host = await start(), source = Buffer.from('Text.')
+  try {
+    await hello(host)
+    const request: Record<string, unknown> = {id: 2, method: 'check-markdown-witness', source: declared(source),
+      sourceSha256: hash(source), projectionSha256: hash(source)}
+    if (mode === 'checkpoint' || mode === 'candidate') request[mode] = declared(Buffer.alloc(0))
+    if (mode === 'over-cap') request.source = {length: 2 * 1024 * 1024 + 1, sha256: hash(source)}
+    if (mode === 'source-digest') request.sourceSha256 = '0'.repeat(64)
+    await rejection(host, control(request))
   } finally {await host.close()}
 })
 it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bom => {

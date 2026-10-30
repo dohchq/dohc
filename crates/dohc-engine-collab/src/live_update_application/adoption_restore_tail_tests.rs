@@ -170,7 +170,12 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
                         30,
                     )?;
                     crate::author_coverage::advance_in(tx, &f.key, false)?;
-                    Ok(audit.result(id, "settled".into(), written.snapshot.blob_sha256, false))
+                    Ok(audit.result(
+                        Some(id),
+                        "settled".into(),
+                        written.snapshot.blob_sha256,
+                        false,
+                    ))
                 })?;
                 let TxnOutcome::Committed(result) = result else {
                     return Err(ApplicationError::Interrupted);
@@ -2712,7 +2717,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
         .unwrap();
     let resume = NativeRestoreResume {
         application: input,
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     f._owner
         .resume_restore(
@@ -2950,7 +2955,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             &mut f.store, None,
             NativeRestoreResume {
                 application: input,
-                settlement_id: settled.settlement_id,
+                settlement_id: settled.settlement_id.unwrap(),
             },
             coordinate.clone(),
             PROOF_BYTES,
@@ -3109,4 +3114,47 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     .unwrap();
     assert!(matches!(retry, ApplicationResult::Applied(..)));
     mark("complete");
+}
+
+#[test]
+fn a_new_settlement_refuses_an_equal_cursor_interval() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let result = with_settlement(
+        &mut f.store,
+        &f.handle,
+        None,
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            assert!(audit.is_empty());
+            let doc = store.read_with(|conn| durable::load_doc_in(conn, &f.key))?;
+            let text = doc.project(ContentKind::Richdoc)?.content;
+            let vector = hex_sha256(&doc.encode_state_vector());
+            store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: "workspace", version_id: "main", object_id: "object",
+                        path: std::borrow::Cow::Borrowed("owner.md"),
+                        text: std::borrow::Cow::Borrowed(&text), moment_id: "empty-settlement",
+                        metadata_origin: "ydoc", metadata_summary: None,
+                        metadata_correlation_id: None, author_json: None, now_ms: 30, request_id: None,
+                    },
+                ).map_err(|_| ApplicationError::Corrupt)?;
+                tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [&written.snapshot.blob_sha256]).map_err(write_sql)?;
+                audit.record_in_tx(tx, "empty-settlement", &written.snapshot.blob_sha256, &vector, 30)
+            })
+        },
+    );
+    assert!(
+        matches!(result, Err(ApplicationError::InvalidInput(message)) if message == "a new settlement must cover an accepted edit")
+    );
+    assert_eq!(
+        f.store.table_row_count("live_device_settlements").unwrap(),
+        0
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
 }

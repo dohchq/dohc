@@ -316,37 +316,78 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
-  it("opens the current file for a terminal binding refusal instead of retrying sync", () => {
+  it("opens the current file for a terminal binding refusal instead of retrying sync, and reads it", () => {
     const retry = vi.fn();
     const open = vi.fn();
+    const read = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "This file's name, location, or sharing changed before this save arrived. Open the file to continue.";
     const notice = { noticeId: "renamed-save", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "dohc skipped an earlier save",
       body: reason, detail: reason, target: { path: "renamed.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
-    act(() => result.current.showSyncRefusals([notice], retry, open));
+    act(() => result.current.showSyncRefusals([notice], retry, open, undefined, read));
     expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open" } });
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(open).toHaveBeenCalledWith("renamed.md");
+    expect(read).toHaveBeenCalledWith("renamed-save");
     expect(retry).not.toHaveBeenCalled();
     expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
   });
 
-  it("opens History when author names did not sync, instead of retrying sync", () => {
+  it("shows a held local save as a warning whose Open note reads it", () => {
+    const retry = vi.fn();
+    const open = vi.fn();
+    const read = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.", target: { path: "note.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open, undefined, read));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: notice.title, message: notice.body, tone: "warning",
+      retry: null, action: { label: "Open note" } });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(open).toHaveBeenCalledWith("note.md");
+    expect(read).toHaveBeenCalledWith("held-save");
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("keeps a held notice read when its persisted mark arrives, then removes the completed hold", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = { noticeId: "held-save", kind: "markdown-write-held", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "Held a change to note.md",
+      body: "Saving it would also change parts dohc can't show.", target: { path: "note.md" }, createdAtMs: 1,
+      readAtMs: null, postedHere: true };
+    const retry = vi.fn();
+    act(() => result.current.showSyncRefusals([notice], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: false, read: false });
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
+    act(() => result.current.showSyncRefusals([{ ...notice, readAtMs: 2 }], retry));
+    expect(result.current.shellErrors[0]?.seen).toBe(true);
+    act(() => result.current.showSyncRefusals([], retry));
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("opens History when author names did not sync, instead of retrying sync, and reads it", () => {
     const retry = vi.fn();
     const openHistory = vi.fn();
+    const read = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     const reason = "dohc could not verify who changed this file. The file will share without author names.";
     const notice = { noticeId: "unattributed", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
       recipientShareId: null, senderKind: null, senderLabel: null, title: "Some author names did not sync for “n.md”",
       body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.", detail: `${reason}\nWorkspace: ws-a`,
       target: { path: "n.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
-    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory));
+    act(() => result.current.showSyncRefusals([notice], retry, vi.fn(), openHistory, read));
     expect(result.current.shellErrors[0]).toMatchObject({
       title: notice.title, message: notice.body, tone: "warning", retry: null, action: { label: "Open History" },
     });
     act(() => result.current.runShellErrorAction(notice.noticeId));
     expect(openHistory).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledWith("unattributed");
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true, read: true });
     expect(retry).not.toHaveBeenCalled();
   });
 

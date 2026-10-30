@@ -31,9 +31,9 @@ it("retries an unmaterialized owner settlement and caches only its completed res
       ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)},
     });
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(false);
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(true);
-    expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(true);
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: false});
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
+    expect(await delivery.settle(f.input.evidence.document)).toMatchObject({materialized: true});
     expect(settles).toBe(2);
   } finally {f.close();}
 });
@@ -82,14 +82,14 @@ it("records owner origin and ACK progress with exact quota transfer and restart 
     const before = Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw);
     const updateAck = {...receipt,localYDocSequence: 2,applicationReplayed: false};
     store.acknowledgeOwnerDeliveryApplication(latest,updateAck);
-    expect(store.ownerDeliveryProgress(latest)).toEqual({adoptionId:"origin",adoptionSequence: 1,terminal: receipt,sequence: 2});
+    expect(store.ownerDeliveryProgress(latest)).toEqual({adoptionId:"origin",adoptionSequence: 1,adoptionTerminal: capture.cut.terminalReceipt,terminal: receipt,sequence: 2});
     expect(Number(f.journalRows().usage)-liveDeliveryBookkeepingBytes(f.raw)).toBe(before);
     expect(() => store.acknowledgeOwnerDeliveryApplication(latest,{...updateAck,applicationReplayed: true})).toThrow();
     expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("three","third"),"third")).result.kind).toBe("accepted");
     const historical = store.openOwnerDelivery({host,document: input.document,actor}), third = store.nextOwnerApplication(historical)!.metadata.accepted.receipt;
     expect(() => store.acknowledgeOwnerDeliveryApplication(historical,{...updateAck,journalCursor: third.journalCursor})).toThrow();
     store.acknowledgeOwnerDeliveryApplication(historical,{...third,localYDocSequence: 1,applicationReplayed: false});
-    expect(store.ownerDeliveryProgress(historical)).toEqual({adoptionId:"origin",adoptionSequence: 1,terminal: third,sequence: 2});
+    expect(store.ownerDeliveryProgress(historical)).toEqual({adoptionId:"origin",adoptionSequence: 1,adoptionTerminal: capture.cut.terminalReceipt,terminal: third,sequence: 2});
     expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_delivery_reservations").get()!.count).toBe(0);
   } finally { f.close(); }
 });

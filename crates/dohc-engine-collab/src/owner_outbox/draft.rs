@@ -398,7 +398,7 @@ pub(super) fn bounded(doc: &Ydoc) -> Result<Vec<u8>, OwnerOutboxError> {
 }
 
 /// Refuse ordinary publication and settlement before either writes durable state.
-pub(crate) fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+pub fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let observed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),

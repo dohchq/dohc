@@ -327,6 +327,52 @@ mod tests {
     }
 
     #[test]
+    fn a_base_projection_proof_does_not_spend_its_budget_on_the_handover() {
+        use owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+        let mut f = Fixture::new();
+        let base_projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+        let base_digest = hex_sha256(base_projection.as_bytes());
+        assert_ne!(base_digest, f.cut.source_digest);
+        f.edit(true);
+        f.adopt().unwrap();
+        f.store
+            .read_with(|conn| {
+                let mut remaining = usize::MAX;
+                let (binding, namespace, _) =
+                    read_native_accepted_in(conn, &f.key, &mut remaining)?.unwrap();
+                assert_eq!(
+                    read_restore_predecessor_in(
+                        conn,
+                        &f.key,
+                        &namespace,
+                        &binding,
+                        &mut remaining
+                    )?,
+                    None
+                );
+                // The existing base proof needs these two reads and its original blob.
+                let base_budget = usize::MAX - remaining + f.cut.baseline_bytes.len();
+                let mut remaining = base_budget;
+                assert_eq!(
+                    contains_in(
+                        conn,
+                        &f.key,
+                        "owner.md",
+                        Some(&f.binding.lineage_claim_id),
+                        PublicationContentKind::Projection,
+                        &base_digest,
+                        &mut remaining
+                    )
+                    .unwrap(),
+                    PublicationProof::Contained
+                );
+                assert_eq!(remaining, 0);
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn restore_preparation_authenticates_original_owner_prefix_before_adoption_terminal() {
         let mut f = Fixture::new();
         f.edit(true);
@@ -907,7 +953,14 @@ mod tests {
             NativeHistoryReconstruction {
                 working_reserve_bytes: 8 * 1024 * 1024,
             },
-            |_, audit| Ok(audit.result("test".into(), "test-moment".into(), "a".repeat(64), false)),
+            |_, audit| {
+                Ok(audit.result(
+                    Some("test".into()),
+                    "test-moment".into(),
+                    "a".repeat(64),
+                    false,
+                ))
+            },
         );
         let result = result.unwrap();
         assert_eq!(result.previous_cursor, 7);

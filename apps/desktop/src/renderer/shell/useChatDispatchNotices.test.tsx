@@ -172,7 +172,7 @@ it.each([
   expect(h.openChat).toHaveBeenCalledWith({ level: "thread", channel, thread });
 });
 
-it("lands Open in the paused chat, closing its toast and keeping its row", async () => {
+it("lands Open in the paused chat, closing its toast and keeping its row, read", async () => {
   const h = setup();
   h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
   const hook = h.mount();
@@ -181,7 +181,7 @@ it("lands Open in the paused chat, closing its toast and keeping its row", async
   expect(paused?.seen).toBe(false);
   await act(async () => hook.result.current.runShellErrorAction(paused!.id));
   expect(h.openChat).toHaveBeenCalledWith({ level: "thread", channel: GROUP, thread: GROUP_CHAT });
-  expect(hook.result.current.shellErrors).toEqual([{ ...paused, seen: true }]);
+  expect(hook.result.current.shellErrors).toEqual([{ ...paused, seen: true, read: true }]);
   expect(h.dismiss).not.toHaveBeenCalled();
 });
 
