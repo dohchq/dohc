@@ -1,17 +1,15 @@
-import { Suspense, useState, type ComponentProps, type ReactNode } from "react";
+import { Suspense, type ComponentProps, type ReactNode } from "react";
 import type { SyncStatusResult, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
 import { SkeletonRows } from "../ui/SkeletonRows";
-// Type-only: erased at compile time, so these chunks stay lazy.
-import type { AppsView } from "../workbench/AppsView";
+// Type-only: erased at compile time, so this chunk stays lazy.
 import type { SearchView } from "../workbench/SearchView";
 import { SidePanel } from "../workbench/SidePanel";
 import {
   isViewId,
-  setView,
   setSidebarWidth,
   SHARING_VIEW_ID,
   type WorkbenchState,
@@ -20,7 +18,6 @@ import { LazyChatsView, LazyGraphView, LazySharingView, LazySitePreviewPage } fr
 import { SIDE_PANEL_VIEWS } from "./sidePanelViews";
 
 type GraphViewProps = ComponentProps<typeof LazyGraphView>;
-type AppsViewProps = ComponentProps<typeof AppsView>;
 type SitePreviewPageProps = ComponentProps<typeof LazySitePreviewPage>;
 
 export interface ShellSidePanelProps {
@@ -31,25 +28,23 @@ export interface ShellSidePanelProps {
   openHistoryTab: () => void;
   openGraphTab: () => void;
   openChatsTab: () => void;
-  refreshSites: () => void;
+  // Add an app here… opens the Explorer's Apps section. Null while the
+  // workspace has no app to pin.
+  showAppsInExplorer: (() => void) | null;
   explorerView: ReactNode;
   search: ComponentProps<typeof SearchView>["search"];
   openSearchResult: ComponentProps<typeof SearchView>["onOpenResult"];
   workspaceId: string;
   activeDocumentPath: string | null;
-  focusedTabPath: AppsViewProps["activePath"];
-  appsNotices: AppsViewProps["notices"];
+  focusedTabPath: string | null;
   graphKey: GraphViewProps["refreshKey"];
-  openPathWithHeading: GraphViewProps["onOpenPath"] & AppsViewProps["onOpenPath"];
+  openPathWithHeading: GraphViewProps["onOpenPath"];
   openGraphChatThread: GraphViewProps["onOpenChatThread"];
   captureAvailable: boolean;
   captureDecided: boolean;
   syncStatus: SyncStatusResult | null;
   chatsNavigatorProps: ComponentProps<typeof LazyChatsView>;
-  pinnedRoots: AppsViewProps["pinnedApps"];
   setAppPinned: (appRoot: string, pinned: boolean) => Promise<void>;
-  listingsSettled: AppsViewProps["filesSettledRevision"];
-  createFirstApp: AppsViewProps["onCreateFirstApp"];
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   historyTimeline: ReactNode;
   sharing: ComponentProps<typeof LazySharingView>;
@@ -58,13 +53,6 @@ export interface ShellSidePanelProps {
   reportShellError: SitePreviewPageProps["reportError"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
-
-// What a registered view renders from: the panel's props, plus the slot the
-// Apps view fills in the panel header.
-export type SidePanelContext = ShellSidePanelProps & {
-  appsHead: HTMLSpanElement | null;
-  setAppsHead: (node: HTMLSpanElement | null) => void;
-};
 
 // The left side panel: the view the activity bar selected, or a pinned app.
 export function ShellSidePanel(props: ShellSidePanelProps) {
@@ -81,9 +69,8 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     reportShellError,
     setAppPinned,
     setShareTarget,
+    showAppsInExplorer,
   } = props;
-  const [appsHead, setAppsHead] = useState<HTMLSpanElement | null>(null);
-  const context: SidePanelContext = { ...props, appsHead, setAppsHead };
   const view = isViewId(wb.activeView) ? SIDE_PANEL_VIEWS[wb.activeView] : null;
   return (
     <SidePanel
@@ -92,16 +79,16 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
       onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
       actions={
         <>
-          {view?.actions?.(context)}
+          {view?.actions?.(props)}
           <MoreMenu
             label="Sidebar actions"
             testId="side-panel-menu"
             items={[
               { label: "Customize…", onSelect: () => customize(view?.customize ?? "sidebar") },
-              // Pinned apps open here. The Apps view pins one or makes one.
-              ...(wb.activeView === "sites"
-                ? []
-                : [{ label: "Add an app here…", onSelect: () => mutateWb((state) => setView(state, "sites")) }]),
+              // Pinned apps open here. The Explorer's Apps section pins one.
+              ...(showAppsInExplorer
+                ? [{ label: "Add an app here…", onSelect: showAppsInExplorer }]
+                : []),
             ]}
           />
         </>
@@ -113,7 +100,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
           clears it. */}
       <ErrorBoundary scope="side-panel" resetKeys={[wb.activeView]}>
       {view ? (
-        view.render(context)
+        view.render(props)
       ) : wb.activeView === SHARING_VIEW_ID ? (
         <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
           <LazySharingView {...sharing} />

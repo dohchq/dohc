@@ -16,7 +16,6 @@ export const VIEW_IDS = [
   "chats",
   "search",
   "graph",
-  "sites",
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
