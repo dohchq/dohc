@@ -23,6 +23,9 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  AppViewRequest,
+  AppViewResult,
+  AppViewEvent,
   workspaceSyncOperations,
   CaptureHoldsEvent,
   workspaceFolderNameOperations,
@@ -273,6 +276,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
+  appView: async payload => AppViewResult.parse(await ipcRenderer.invoke(CHANNELS.appView, AppViewRequest.parse(payload))),
+  onAppViewEvent: listener => onEvent(CHANNELS.appViewEvent, AppViewEvent, listener),
   ...operationBridge(datasetOperations, invoke),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   ...operationBridge(sharedViewAccessOperations, invoke),

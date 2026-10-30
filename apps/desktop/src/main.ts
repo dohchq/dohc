@@ -85,6 +85,7 @@ import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
 import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
+import { registerAppViews } from "./window/appViews";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
@@ -1861,11 +1862,13 @@ function relayCloseTargetsForPhysicalWorkspace(
   ];
 }
 
+let appViews: ReturnType<typeof registerAppViews> | undefined;
 const workspaceAuthorities = createWorkspaceAuthorityOwner({
   findWorkspace,
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
   disposeState: async (state, binding, workspaceAtDisposal) => {
+    await appViews?.closeWorkspace(binding.workspaceId);
     forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
     const physicalWorkspace = {
@@ -5592,8 +5595,12 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
     retirement: {
       ...rendererWorkspaceRetirement,
       retireSender: session => {
+        const closingApps = appViews?.closeOwner(session.sender.id) ?? Promise.resolve();
         shareDirectWriteDelivery.retireSender(session.sender);
-        return rendererWorkspaceRetirement.retireSender(session);
+        const retiring = rendererWorkspaceRetirement.retireSender(session);
+        return { ...retiring,
+          requiredForAdmission: Promise.all([retiring.requiredForAdmission, closingApps]).then(() => {}),
+        };
       },
     },
     onCleanupError: (scope, error) => {
@@ -6930,23 +6937,39 @@ function registerIpcHandlers(): void {
   describeDatasetForCli = (workspaceId, datasetId) => withPhysicalWorkspaceOperation(workspaceId,
     operation => describeAutomationDataset(operation, datasetId, datasetDependencies));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
+  const localAppLauncher = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+      signal.throwIfAborted(); operation.assertCurrent();
+      const host = await datasetForWorkspace(workspace, signal);
+      let pending = localDatasetLaunches.get(host);
+      if (!pending) {
+        pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
+        localDatasetLaunches.set(host, pending);
+        void pending.catch(() => localDatasetLaunches.delete(host));
+      }
+      const launcher = await pending;
+      signal.throwIfAborted(); operation.assertCurrent();
+      return launcher;
+    });
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
       ...ownerPublicationDependencies, datasetForWorkspace,
-      launchLocalDataset: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-        signal.throwIfAborted(); operation.assertCurrent();
-        const host = await datasetForWorkspace(workspace, signal);
-        let pending = localDatasetLaunches.get(host);
-        if (!pending) {
-          pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
-          localDatasetLaunches.set(host, pending);
-          void pending.catch(() => localDatasetLaunches.delete(host));
-        }
-        const launcher = await pending;
-        signal.throwIfAborted(); operation.assertCurrent();
-        return launcher.launch(publicationId, signal);
-      }),
+      launchLocalDataset: async (workspace, publicationId, signal) =>
+        (await localAppLauncher(workspace, signal)).launch(publicationId, signal),
     });
+  appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
+    registerHandler: handleIpc, assertTrustedSender,
+    withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId,
+      "This app does not belong to this window's workspace. Open it from its workspace.", work),
+    activePublication: async (operation, appRoot) => {
+      const listed = await localPublication({ action: "listLocal", workspaceId: operation.workspace.workspaceId, appRoot },
+        "app-view", operation);
+      operation.assertCurrent();
+      return listed?.kind === "localListed" ? listed.publications.find(publication => publication.active)?.publicationId ?? null : null;
+    },
+    launch: async (operation, publicationId) =>
+      (await localAppLauncher(operation.workspace, operation.signal)).launchSession(publicationId, operation.signal, { keepAlive: true }),
+  });
   const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
     const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
     if (dataset) await moveToServer(workspace, dataset.datasetId, signal);
