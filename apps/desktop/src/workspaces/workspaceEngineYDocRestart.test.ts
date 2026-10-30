@@ -3247,6 +3247,63 @@ it("a settling close persists outage text when the user never types again", asyn
   await capture.stop();
 });
 
+// Forget stops the capture, which closes the workspace's engine session, and
+// then closes the sessions its close loop could not save. Their close must not
+// open an engine session that nothing would close.
+it("a session closed after its capture stopped opens no engine session", async () => {
+  const reported: string[] = [];
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-after-stop-",
+    "ydoc-after-stop",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-after-stop",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => reported.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  state.daemonAlive = true;
+
+  await capture.stop();
+  await session.close();
+  expect(state.generation).toBe(1);
+  // The text it could not save is reported, not dropped quietly.
+  expect(reported).toContain("Y.Doc close recovery of note.md");
+});
+
+it("a workspace close still closes every session after one refuses its release", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-close-every-",
+    "ydoc-close-every",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-close-every",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  await capture.openYDocSession({ path: "a.md", onRemoteUpdate: () => undefined });
+  await capture.openYDocSession({ path: "b.md", onRemoteUpdate: () => undefined });
+  // Only the first release is refused.
+  let refusals = 1;
+  Object.defineProperty(state, "failRelease", { get: () => refusals-- > 0 });
+
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow("release-refused");
+  expect(state.releasedGenerations).toEqual([2]);
+  await capture.stop();
+});
+
 // The reconcile half of adoptGeneration: a replacement generation carrying
 // daemon-side work the canonical doc never saw must be merged in, exactly once.
 it("merges a daemon-side edit made during the outage into the canonical doc once", async () => {
