@@ -666,6 +666,8 @@ export interface SyncRelayStorage {
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
+    import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** The prepared activation a new Stop of the document would retire, once no retirement is open. */
   retirableServiceActivation(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").RetirableServiceActivation | null;
   /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */

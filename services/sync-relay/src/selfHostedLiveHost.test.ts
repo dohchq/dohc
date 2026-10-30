@@ -11,7 +11,7 @@ import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
-import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, scope, retainServiceActivation} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
@@ -231,6 +231,32 @@ it("stays unavailable until retained documents have a running native host", asyn
   expect(f.host.current()).toBeDefined();
   f.starts[0]!.controller.abort();
   expect(f.host.unavailable).toBe(true);
+});
+
+it.each(["not running", "stopped"] as const)("answers Stop with the session host state %s without fencing", async state => {
+  const entered = deferred(), finish = deferred();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(state === "not running" ? {beforeStart: async () => {entered.resolve(); await finish.promise;}} : {});
+  try {
+    if (state === "not running") await entered.promise;
+    else {await f.waitStarted(1); f.starts[0]!.controller.abort();}
+    retainServiceActivation(f.raw, namespace, true);
+    const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: f.host,
+      resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
+    const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {method: "DELETE",
+      headers: {"content-type": "application/json", authorization: "Bearer account-token"}, body: JSON.stringify({path: binding.currentPath, retire: true})}));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ok: false, code: state === "not running" ? "host-offline" : "host-not-loaded", sessionHost: state,
+      error: state === "not running"
+        ? "Live editing didn't stop. The server's session host is offline and may hold recent edits. Try again once it's back, or contact the server's operator."
+        : "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
+    expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
+    expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+    expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
+      [`Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${state}`],
+    ]);
+  } finally {finish.resolve(); if (state === "not running") await f.waitStarted(1);}
 });
 
 it("restarts only a daemon that failed and gives the replacement the whole hosted set", async () => {

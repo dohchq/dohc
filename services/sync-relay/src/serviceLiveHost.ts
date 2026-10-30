@@ -1,4 +1,5 @@
 import {workspaceIsDeleted} from "./storage/accountDeletion";
+import {stopWithoutSessionHost} from "./sessionHostStop";
 import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp} from "./serviceActivationDriver";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
@@ -1447,7 +1448,9 @@ export async function startServiceLiveHost(options: {
         callerSignal?: AbortSignal): Promise<T | "waiting"> {
         check();
         const candidate = storage.retirableServiceActivation(document), attached = checked(document.workspaceId), driver = activation;
-        if (!candidate || hostedKey(document) === undefined || !attached || !driver) return fence();
+        if (!candidate) return fence();
+        if (!attached) return stopWithoutSessionHost(document, "running without this workspace", fence);
+        if (hostedKey(document) === undefined || !driver) return stopWithoutSessionHost(document, "running without this document", fence);
         // A dormant document reloads, so its queues can drain.
         try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
         const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});
@@ -1455,12 +1458,16 @@ export async function startServiceLiveHost(options: {
         // A release that fails ends this connection, which ends the block.
         const release = () => driver.releaseRetirementPreparation(attached.handle, document.objectId, candidate, signal).catch(abort);
         const fenced = () => {
-          try {return storage.serviceActivationRetirement(document)?.activationId === candidate.activationId;}
+          try {return storage.serviceActivationRetirementDecision(document, candidate) !== null;}
           catch {abort(); return true;}
         };
         try {
           return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(value), joined, async () => {
             current();
+            const queued = storage.retirableServiceActivation(document);
+            if (!queued) return fence();
+            if (queued.activationId !== candidate.activationId || queued.lineageClaimId !== candidate.lineageClaimId ||
+              queued.restoreFenceGeneration !== candidate.restoreFenceGeneration) throw relayError("conflict");
             // The engine's preparation, not this drain, decides whether edits remain.
             try {await driver.consumer(value).consumer.drain(value, joined);}
             catch {joined.throwIfAborted(); current();}
@@ -1474,13 +1481,14 @@ export async function startServiceLiveHost(options: {
                 const wire = error.wireError;
                 if (wire?.code === "CONFLICT") {
                   // Only the relay's durable fence proves Stop committed.
-                  if (storage.serviceActivationRetirement(document)?.activationId === candidate.activationId) return fence();
+                  if (storage.serviceActivationRetirementDecision(document, candidate)) return fence();
                   throw relayError("restore-in-progress");
                 }
                 if (wire?.code === "SESSION_EXPIRED" || wire?.code === "WORKSPACE_UNAVAILABLE" ||
                   (wire?.code === "INVALID_PARAMS" && wire.message === "invalid-retirement-preparation")) {
                   reconnect = true;
                   console.error("Live editing Stop preparation is unavailable.", error);
+                  if (wire.code === "INVALID_PARAMS") throw error;
                   throw relayError("restore-in-progress");
                 }
                 throw error;

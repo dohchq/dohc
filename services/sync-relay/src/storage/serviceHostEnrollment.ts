@@ -466,7 +466,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       // A new one needs the host to have delivered its edits and blocked new ones.
       const retirement = openServiceActivationRetirement(storage, {workspaceId, objectId: current.objectId}, nowMs, activation => {
         const prepared = input.prepared;
-        if (prepared?.activationId !== activation.activationId || prepared.lineageClaimId !== activation.lineageClaimId) throw relayError("edits-pending");
+        if (!prepared) throw relayError("host-offline");
+        if (prepared.activationId !== activation.activationId || prepared.lineageClaimId !== activation.lineageClaimId) throw relayError("conflict");
         if (prepared.restoreFenceGeneration !== activation.restoreFenceGeneration) throw new ServiceHostRetirementConflict(activation.restoreFenceGeneration);
         prepared.assertCurrent();
       });

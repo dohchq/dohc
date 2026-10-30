@@ -17,6 +17,8 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   conflict: 409,
   "restore-in-progress": 409,
   "edits-pending": 409,
+  "host-offline": 409,
+  "host-not-loaded": 409,
   dependents_changed: 409,
   discussion_limit_reached: 413,
   discussion_rate_limited: 429,
@@ -89,6 +91,8 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   conflict: "conflict",
   "restore-in-progress": "Stop live editing is waiting. You can keep editing.",
   "edits-pending": "Live editing didn't stop. Recent edits haven't reached the server yet.",
+  "host-offline": "Live editing didn't stop. The server's session host is offline and may hold recent edits. Try again once it's back, or contact the server's operator.",
+  "host-not-loaded": "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",
@@ -129,6 +133,8 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   unknown_chat_op: "unrecognized chat op cannot be authorship-verified",
 });
 
+export type SessionHostState = "not running" | "stopped" | "running without this workspace" | "running without this document";
+
 /** An error the relay answers with its own status, code, and message. */
 export class RelayError extends Error {
   readonly statusCode: number;
@@ -137,6 +143,7 @@ export class RelayError extends Error {
     readonly code: RelayErrorCode,
     message: string = RELAY_ERROR_MESSAGES[code],
     statusCode: number = RELAY_ERROR_STATUSES[code],
+    readonly sessionHost?: SessionHostState,
   ) {
     super(message);
     this.statusCode = statusCode;
@@ -170,7 +177,8 @@ export function errorBody(code: RelayErrorCode): Response {
  */
 export function errorResponse(error: unknown): Response {
   if (error instanceof RelayError) {
-    return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
+    return jsonResponse({ ok: false, error: error.message, code: error.code,
+      ...(error.sessionHost === undefined ? {} : {sessionHost: error.sessionHost}) }, error.statusCode);
   }
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);

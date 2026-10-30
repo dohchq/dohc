@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import {stopWithoutSessionHost} from "./sessionHostStop";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
@@ -338,7 +339,9 @@ export async function startSelfHostedLiveHost(options: {
     /** Stop through the running daemon, which delivers the document's edits first. With none running, `fence` runs unprepared. */
     async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
       callerSignal?: AbortSignal): Promise<T | "waiting"> {
-      return current && !current.invalidated.aborted ? current.stop(document, fence, callerSignal) : fence();
+      if (!current) return stopWithoutSessionHost(document, "not running", fence);
+      if (current.invalidated.aborted) return stopWithoutSessionHost(document, "stopped", fence);
+      return current.stop(document, fence, callerSignal);
     },
     /**
      * The running daemon's page reads and Try again of refused queues it keeps

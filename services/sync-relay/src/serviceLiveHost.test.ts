@@ -507,7 +507,7 @@ it("gives several unfinished targets in one workspace one catch-up pull a pass",
 
 const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 type DrainLimits = {maxEntriesPerDrain?: number; maxBytesPerDrain?: number};
-const sha256 =(bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
@@ -788,7 +788,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         // As the engine's, a preparation needs every queue of the activation to hold nothing deliverable and no Try again.
         case "liveApplication.prepareRetirement": {
           if (engine.prepareFailure) throw engine.prepareFailure;
-          if (Object.keys(request.params).sort().join() !== Object.keys(preparationWire.params).sort().join()) throw new Error("INVALID_PARAMS: invalid-retirement-preparation");
+          validatePreparationParams(request.params);
           const deliverable = native.entries.length > 0 && (native.state === "active" || native.retryDeliveryId !== null);
           const granted = native.retryDeliveryId !== null || [keptOutbox, ...keptOutboxes.values()].some(queue => queue && queue.retryDeliveryId !== null);
           if (deliverable || granted) return reply(granted ? preparationWire.retryOutstanding : preparationWire.nativePending);
@@ -797,6 +797,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         }
         case "liveApplication.releaseRetirementPreparation": {
           if (engine.releaseFailure) throw engine.releaseFailure;
+          validatePreparationParams(request.params);
           const released = JSON.stringify(engine.prepared) === JSON.stringify(request.params);
           if (released) engine.prepared = undefined;
           return reply(released ? preparationWire.released : preparationWire.notReleased);
@@ -1449,6 +1450,12 @@ const preparationWire = JSON.parse(readFileSync(new URL("../../../crates/dohc-wo
   retryOutstanding: {status: "pending"; reason: "retry-outstanding"}; released: {released: true}; notReleased: {released: false};
   errors: Record<string, NonNullable<EngineRequestError["wireError"]>>;
 };
+function validatePreparationParams(params: Record<string, unknown>): void {
+  if (Object.keys(params).sort().join() !== Object.keys(preparationWire.params).sort().join() ||
+    Object.entries(preparationWire.params).some(([key, value]) => typeof params[key] !== typeof value)) {
+    throw new Error("INVALID_PARAMS: invalid-retirement-preparation");
+  }
+}
 const ACTIVATION = `ordinary-activation-${"a".repeat(64)}`, SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
 // The engine requests of a retirement, and of a departure with none, as after a share's deletion,
 // without the membership a restarted daemon starts with.
@@ -4431,7 +4438,7 @@ it("fails the fence and ends the block when the restore generation changes durin
 
 // A known preparation refusal cannot fence or strand editing. Its release
 // also finishes before a queued Try again can recheck authority and grant.
-it.each(Object.entries(preparationWire.errors))("answers a %s preparation refusal without a server error or a held block", async (_name, wire) => {
+it.each(Object.entries(preparationWire.errors))("answers a %s preparation refusal without a fence or a held block", async (_name, wire) => {
   const o = await enrolledServiceHost(), n = refusedNative(o);
   o.engine.prepareFailure = new EngineRequestError(900, wire);
   // A reply may have been lost after the engine installed the block.
@@ -4447,8 +4454,13 @@ it.each(Object.entries(preparationWire.errors))("answers a %s preparation refusa
   parked.release.resolve();
   const response = await stopping;
   expect(response).toBeInstanceOf(Response);
-  expect((response as Response).status).toBe(409);
-  expect(await (response as Response).json()).toEqual({ok: false, code: "restore-in-progress", error: "Stop live editing is waiting. You can keep editing."});
+  if (wire.code === "INVALID_PARAMS") {
+    expect((response as Response).status).toBe(500);
+    expect(await (response as Response).json()).toMatchObject({ok: false, code: "internal_error"});
+  } else {
+    expect((response as Response).status).toBe(409);
+    expect(await (response as Response).json()).toEqual({ok: false, code: "restore-in-progress", error: "Stop live editing is waiting. You can keep editing."});
+  }
   expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([prepared(o)]);
   expect(o.engine.prepared).toBeUndefined();
   stillLive(o);
@@ -4467,6 +4479,25 @@ it("replays a committed Stop on a preparation Conflict and refuses the Try again
   expect(engineParams(o, "ydoc.ownerOutbox.retry")).toEqual([]);
   const retired = preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, nowMs: 20, guard() {}});
+  const open = readServiceActivationRetirement(o.f.storage as StorageContext, o.document)!;
+  const tip = o.tip(), evidence = o.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(tip.journalCursor)!;
+  o.f.storage.createServiceActivationStore(o.f.history).completeRetirement({workspaceId: "workspace",
+    key: {...prepared(o), acceptedThrough: open.acceptedThrough},
+    boundary: {terminalReceipt: tip, eventCount: Number(evidence.accepted_event_count), historyEvidenceDigest: String(evidence.accepted_evidence_digest)},
+    host: o.host.coordinate, registeredAtMs: Date.now(), nowMs: Date.now(), guard() {}});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.f.storage.serviceActivationRetirementDecision(o.document, prepared(o))).toMatchObject({activationId: ACTIVATION, acceptedThrough: retired!.acceptedCursor});
+  expect(o.f.storage.serviceActivationRetirementDecision({...o.document, workspaceId: "other"}, prepared(o))).toBeNull();
+  expect(o.f.storage.serviceActivationRetirementDecision({...o.document, objectId: "other"}, prepared(o))).toBeNull();
+  for (const stale of [{...prepared(o), activationId: SUCCESSOR}, {...prepared(o), lineageClaimId: "c".repeat(64)},
+    {...prepared(o), restoreFenceGeneration: open.restoreFenceGeneration + 1}]) {
+    expect(o.f.storage.serviceActivationRetirementDecision(o.document, stale)).toBeNull();
+  }
+  const identity = o.f.storage.getWorkspaceIdentity("workspace")!;
+  o.raw.prepare("UPDATE sync_relay_workspaces SET stream_identity='other' WHERE workspace_id='workspace'").run();
+  expect(o.f.storage.serviceActivationRetirementDecision(o.document, prepared(o))).toBeNull();
+  o.raw.prepare("UPDATE sync_relay_workspaces SET stream_identity=? WHERE workspace_id='workspace'").run(identity.streamIdentity);
   parked.release.resolve();
   await expect(stopping).resolves.toMatchObject({retired: true, acceptedCursor: retired!.acceptedCursor});
   await expect(granting).resolves.toBe("unavailable");
@@ -4474,3 +4505,40 @@ it("replays a committed Stop on a preparation Conflict and refuses the Try again
   expect(engineParams(o, "liveApplication.releaseRetirementPreparation")).toEqual([]);
   expect(n.row()).toMatchObject({retrying: false});
 });
+
+it("rechecks the retirement candidate after a Stop queued behind another Stop", async () => {
+  const o = await enrolledServiceHost();
+  o.passes.deliver = false;
+  const parked = o.park("liveApplication.prepareRetirement"), first = hostStop(o);
+  await parked.entered.promise;
+  const second = hostStop(o);
+  parked.release.resolve();
+  await expect(first).resolves.toMatchObject({retired: true});
+  await expect(second).resolves.toMatchObject({retired: true});
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([prepared(o)]);
+});
+
+it.each(["liveApplication.prepareRetirement", "liveApplication.releaseRetirementPreparation"])(
+  "rejects a wrong request scalar type against the shared fixture for %s", async method => {
+    const o = await enrolledServiceHost();
+    const request = {id: 900, workspace: "attached-handle", method, params: {...prepared(o), restoreFenceGeneration: "0"}};
+    await expect(o.client().sendRequest(request)).rejects.toThrow("INVALID_PARAMS: invalid-retirement-preparation");
+  });
+
+it.each(["running without this workspace", "running without this document"] as const)(
+  "answers Stop with the session host state %s without fencing", async state => {
+    const o = await enrolledServiceHost();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await o.host.update({workspaces: [], documents: [], ...stay});
+    if (state === "running without this document") await o.host.update({workspaces: [o.workspace], documents: [], ...stay});
+    const response = await hostStop(o).catch(errorResponse);
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(409);
+    expect(await (response as Response).json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: state,
+      error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
+    stillLive(o);
+    expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([]);
+    expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
+      [`Live editing Stop for workspace workspace, object object. Session host: ${state}`],
+    ]);
+  });
