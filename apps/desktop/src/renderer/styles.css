@@ -3019,6 +3019,11 @@ input.dohc-math__source {
   font-size: inherit;
   line-height: inherit;
 }
+/* A chip or inline box keeps to the line, so two lines stay two lines. */
+.dohc-chat-peek * {
+  max-height: 20px;
+  vertical-align: top;
+}
 .dohc-chat-peek :is(p, li, blockquote, pre, h1, h2, h3, h4, h5, h6)::after {
   content: " ";
 }
@@ -3033,4 +3038,10 @@ input.dohc-math__source {
 }
 .dohc-chat-peek ol > li::before {
   content: counter(dohc-peek) ". ";
+}
+
+/* The list contains each message's layout but not its paint, so a hover
+ * bar can rise over the message above. */
+[data-chat-virtualized] .legend-list-content-container > * > * {
+  contain: layout style !important;
 }

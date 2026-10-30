@@ -586,6 +586,8 @@ describe("ChatLane", () => {
     // Only the reply that has a run gets More.
     expect(screen.getAllByTestId("chats-lane-more")).toHaveLength(1);
     fireEvent.click(screen.getByTestId("chats-lane-more"));
+    // A chat row clips what overflows it, so the list opens over the page.
+    expect(screen.getByTestId("chats-lane-more-menu").getAttribute("popover")).toBe("manual");
     fireEvent.click(await screen.findByTestId("chats-lane-more-run-details"));
     const details = await screen.findByTestId("chats-lane-run-details");
     expect(details.textContent).toContain("nova reply");

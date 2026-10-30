@@ -245,6 +245,8 @@ export function Menu(props: {
   /** The list lines up with the trigger's right edge, or with its left at "start". */
   align?: "start" | "end";
   closeOnPick?: boolean;
+  /** The list opens over the page, for a trigger inside a box that clips it, such as a chat row. */
+  topLayer?: boolean;
   /** Rendered under the rows, inside the list. */
   children?: ReactNode;
 }) {
@@ -273,6 +275,7 @@ export function Menu(props: {
   // room is known before anything shows.
   useLayoutEffect(() => {
     if (!open) return;
+    if (props.topLayer) list.current?.showPopover?.();
     const box = trigger.current?.getBoundingClientRect();
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
@@ -293,7 +296,7 @@ export function Menu(props: {
       setPlace(null);
       setPointerMoved(false);
     };
-  }, [open, width, props.align]);
+  }, [open, width, props.align, props.topLayer]);
 
   // Placed, a list shorter than its rows shows its top, so it scrolls to the
   // row focus opened on.
@@ -374,6 +377,7 @@ export function Menu(props: {
       {open ? (
         <div
           ref={list}
+          popover={props.topLayer ? "manual" : undefined}
           role="menu"
           aria-label={props.label}
           data-testid={props.menuTestId}
@@ -389,6 +393,7 @@ export function Menu(props: {
           }}
           style={{
             width,
+            ...(props.topLayer ? { margin: 0, inset: "auto" } : {}),
             ...(place
               ? {
                   left: place.left,

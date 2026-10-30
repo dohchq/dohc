@@ -318,6 +318,7 @@ function MessageMore(props: { testId: string; detailsShown: boolean; onToggleDet
       onOpenChange={setOpen}
       width={176}
       menuTestId={`${props.testId}-menu`}
+      topLayer
       items={[{
         id: "run-details",
         label: props.detailsShown ? "Hide run details" : "Run details",
