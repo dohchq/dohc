@@ -3499,6 +3499,14 @@ export const AppViewEvent = z.discriminatedUnion("kind", [
     ctrlKey: z.boolean(), shiftKey: z.boolean(), altKey: z.boolean(), metaKey: z.boolean() }).strict(),
 ]);
 export type AppViewEvent = z.infer<typeof AppViewEvent>;
+// A window opens, themes and closes apps only in the workspace open in it.
+export const appViewOperations = {
+  appView: {
+    capabilityId: "app.view", channel: "desktop:app-view", payload: AppViewRequest, result: AppViewResult,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "This app does not belong to this window's workspace. Open it from its workspace.",
+  },
+} as const satisfies OperationTable;
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -7323,9 +7331,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
-    OperationBridge<typeof engineYDocSaveOperations> {
+    OperationBridge<typeof engineYDocSaveOperations>,
+    OperationBridge<typeof appViewOperations> {
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
-  appView(payload: AppViewRequest): Promise<AppViewResult>;
   onAppViewEvent(listener: (event: AppViewEvent) => void): () => void;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: z.input<typeof OwnerRestoreRequest> & {action: Action}): Promise<OwnerRestoreResult<Action>>;

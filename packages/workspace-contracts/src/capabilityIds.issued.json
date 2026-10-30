@@ -262,5 +262,6 @@
   "workspace.name.suggest",
   "agent.run.retry",
   "settings.agents.order",
-  "device.update.download"
+  "device.update.download",
+  "app.view"
 ]

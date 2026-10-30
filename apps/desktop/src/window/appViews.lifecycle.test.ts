@@ -6,8 +6,9 @@ vi.mock("electron", async () => {
     BrowserWindow: { fromWebContents: vi.fn() }, session: { fromPartition: vi.fn() } };
 });
 import { app, BrowserWindow, session, type IpcMainInvokeEvent, type WebContents } from "electron";
-import { AppViewRequest } from "../ipc/bridgeContract";
+import { appViewOperations, AppViewRequest } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
+import { registerOperations } from "../ipc/operationTable";
 import { installAppViewEmbedder, registerAppViews } from "./appViews";
 
 let nextId = 1000;
@@ -32,13 +33,8 @@ function fixture() {
   const operation = { workspace: { workspaceId: "w" }, signal: lifetime.signal, assertCurrent: () => lifetime.signal.throwIfAborted() };
   const launches: Array<{ url: string; ended: AbortSignal; stop: ReturnType<typeof vi.fn>; isAlive(): boolean; end(reason: string): void }> = [];
   const activePublication = vi.fn(async () => "approved" as string | null);
-  let handler!: (event: IpcMainInvokeEvent, payload: unknown) => unknown;
-  const manager = registerAppViews({ registerHandler: (_channel, callback) => { handler = callback; },
-    assertTrustedSender: () => {},
-    withWorkspaceOperation: async (_sender, workspaceId, work) => {
-      if (workspaceId !== "w") throw Error("Wrong workspace");
-      return work(operation);
-    }, activePublication,
+  let handler!: (event: IpcMainInvokeEvent, payload: unknown) => Promise<unknown>;
+  const manager = registerAppViews({ activePublication,
     launch: vi.fn(async () => {
       const ended = new AbortController();
       const launch = { url: `http://127.0.0.1:${43000 + launches.length}/bootstrap#${"a".repeat(43)}`, ended: ended.signal,
@@ -47,6 +43,12 @@ function fixture() {
       launches.push(launch); return launch;
     }),
   });
+  // Calls go through the row, as main registers it, in a window whose open workspace is "w".
+  registerOperations({ handle: (_channel, listener) => { handler = listener; }, assertTrustedSender: () => {},
+    withActiveWorkspace: async (_event: IpcMainInvokeEvent, workspaceId, _message, work) => {
+      if (workspaceId !== "w") throw Error("Wrong workspace");
+      return work(operation);
+    } }, appViewOperations, { appView: manager.appView });
   installAppViewEmbedder(owner as unknown as WebContents);
   cleanups.push(() => manager.closeOwner(owner.id));
   const invoke = (payload: unknown) => Promise.resolve(handler({ sender: owner } as unknown as IpcMainInvokeEvent, payload));

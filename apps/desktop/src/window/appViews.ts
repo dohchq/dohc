@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { app, BrowserWindow, session, type Input, type IpcMainInvokeEvent, type WebContents, type WebPreferences } from "electron";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { AppViewRequest, type AppViewResult, type AppViewEvent } from "../ipc/bridgeContract";
+import type { AppViewEvent, AppViewRequest, AppViewResult } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
 import { palette } from "../renderer/tokens";
@@ -124,10 +124,6 @@ export function installAppViewEmbedder(owner: WebContents): void {
 }
 
 export function registerAppViews<Workspace extends { workspaceId: string }>(dependencies: {
-  registerHandler(channel: string, handler: (event: IpcMainInvokeEvent, payload: unknown) => unknown): void;
-  assertTrustedSender(event: IpcMainInvokeEvent): void;
-  withWorkspaceOperation<Result>(sender: WebContents, workspaceId: string,
-    work: (operation: AppViewOperation<Workspace>) => Promise<Result>): Promise<Result>;
   activePublication(operation: AppViewOperation<Workspace>, appRoot: string): Promise<string | null>;
   launch(operation: AppViewOperation<Workspace>, publicationId: string): Promise<LocalAppLaunchSession>;
 }) {
@@ -284,69 +280,68 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
     guest.debugger.on("detach", () => entry.frames.clear());
     void theme(entry);
   });
-  dependencies.registerHandler(CHANNELS.appView, async (event, raw): Promise<AppViewResult> => {
-    dependencies.assertTrustedSender(event);
-    const input = AppViewRequest.parse(raw);
-    return dependencies.withWorkspaceOperation(event.sender, input.workspaceId, async operation => {
-      const window = BrowserWindow.fromWebContents(event.sender);
-      if (!window || window.webContents !== event.sender) throw Error("Open this app from its workspace window.");
-      const entries = ownerEntries(event.sender);
-      if (input.action === "colorScheme") {
-        await Promise.all([...entries.values()].filter(entry => entry.workspaceId === input.workspaceId).map(entry => {
-          entry.colorScheme = input.colorScheme; return theme(entry);
-        }));
-        operation.assertCurrent(); return { kind: "colorScheme" };
-      }
-      const execute = async (): Promise<AppViewResult> => {
+  // The desktop:app-view row's handler. The row admits only a trusted sender, inside the workspace open in its window.
+  const appView = async (input: AppViewRequest,
+    { event, operation }: { event: IpcMainInvokeEvent; operation: AppViewOperation<Workspace> }): Promise<AppViewResult> => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.webContents !== event.sender) throw Error("Open this app from its workspace window.");
+    const entries = ownerEntries(event.sender);
+    if (input.action === "colorScheme") {
+      await Promise.all([...entries.values()].filter(entry => entry.workspaceId === input.workspaceId).map(entry => {
+        entry.colorScheme = input.colorScheme; return theme(entry);
+      }));
+      operation.assertCurrent(); return { kind: "colorScheme" };
+    }
+    const execute = async (): Promise<AppViewResult> => {
+      operation.assertCurrent();
+      const previous = entries.get(input.viewId);
+      if (previous && previous.workspaceId !== input.workspaceId) throw Error("This app belongs to another workspace.");
+      if (previous) await close(previous);
+      if (input.action === "close") return { kind: "closed", viewId: input.viewId };
+      if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw Error("Choose an app in your workspace.");
+      if (entries.size >= 8) throw Error("Close another app before opening this one.");
+      const entry: Entry = { owner: event.sender, workspaceId: input.workspaceId, appRoot: input.appRoot,
+        viewId: input.viewId, publicationId: "", partition: appViewPartition(input.workspaceId, input.appRoot),
+        colorScheme: input.colorScheme, attached: false, closed: false, frames: new Set(), removeLifetime() {} };
+      entries.set(input.viewId, entry);
+      const retire = () => { void close(entry); };
+      operation.signal.addEventListener("abort", retire, { once: true });
+      entry.removeLifetime = () => operation.signal.removeEventListener("abort", retire);
+      try {
+        const publicationId = await dependencies.activePublication(operation, input.appRoot);
         operation.assertCurrent();
-        const previous = entries.get(input.viewId);
-        if (previous && previous.workspaceId !== input.workspaceId) throw Error("This app belongs to another workspace.");
-        if (previous) await close(previous);
-        if (input.action === "close") return { kind: "closed", viewId: input.viewId };
-        if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw Error("Choose an app in your workspace.");
-        if (entries.size >= 8) throw Error("Close another app before opening this one.");
-        const entry: Entry = { owner: event.sender, workspaceId: input.workspaceId, appRoot: input.appRoot,
-          viewId: input.viewId, publicationId: "", partition: appViewPartition(input.workspaceId, input.appRoot),
-          colorScheme: input.colorScheme, attached: false, closed: false, frames: new Set(), removeLifetime() {} };
-        entries.set(input.viewId, entry);
-        const retire = () => { void close(entry); };
-        operation.signal.addEventListener("abort", retire, { once: true });
-        entry.removeLifetime = () => operation.signal.removeEventListener("abort", retire);
-        try {
-          const publicationId = await dependencies.activePublication(operation, input.appRoot);
-          operation.assertCurrent();
-          if (entry.closed) throw Error("This app tab closed. Open the app again.");
-          if (!publicationId) { await close(entry); return { kind: "unapproved", viewId: input.viewId }; }
-          partitionEntries(entry.partition);
-          const launch = await dependencies.launch(operation, publicationId);
-          entry.launch = launch;
-          if (entry.closed) { await launch.stop(); throw Error("This app tab closed. Open the app again."); }
-          operation.assertCurrent();
-          const url = appViewLaunchUrl(launch.url);
-          if (!url) throw Error("The app address is not on this device. Open the app again.");
-          entry.publicationId = publicationId;
-          // An ended approval removes the page. Any other ending keeps it on screen until the tab reloads or closes.
-          const ended = () => {
-            const approval = launch.ended.reason === "needs-approval";
-            emit(entry, { kind: approval ? "approval-ended" : "session-ended", viewId: entry.viewId });
-            if (approval) void close(entry);
-          };
-          launch.ended.addEventListener("abort", ended, { once: true });
-          if (!launch.isAlive()) { ended(); throw Error("This app's approval changed. Review the app again."); }
-          return { kind: "opened", viewId: input.viewId, publicationId, url, partition: entry.partition };
-        } catch (error) {
-          await close(entry);
-          if (error instanceof Error && error.message === "Close another app before opening this one.") throw error;
-          throw Error("dohc could not open this app. Review its approval and try again.", { cause: error });
-        }
-      };
-      const key = `${event.sender.id}:${input.viewId}`;
-      const pending = (pendingByView.get(key) ?? Promise.resolve()).catch(() => {}).then(execute);
-      pendingByView.set(key, pending);
-      try { return await pending; } finally { if (pendingByView.get(key) === pending) pendingByView.delete(key); }
-    });
-  });
+        if (entry.closed) throw Error("This app tab closed. Open the app again.");
+        if (!publicationId) { await close(entry); return { kind: "unapproved", viewId: input.viewId }; }
+        partitionEntries(entry.partition);
+        const launch = await dependencies.launch(operation, publicationId);
+        entry.launch = launch;
+        if (entry.closed) { await launch.stop(); throw Error("This app tab closed. Open the app again."); }
+        operation.assertCurrent();
+        const url = appViewLaunchUrl(launch.url);
+        if (!url) throw Error("The app address is not on this device. Open the app again.");
+        entry.publicationId = publicationId;
+        // An ended approval removes the page. Any other ending keeps it on screen until the tab reloads or closes.
+        const ended = () => {
+          const approval = launch.ended.reason === "needs-approval";
+          emit(entry, { kind: approval ? "approval-ended" : "session-ended", viewId: entry.viewId });
+          if (approval) void close(entry);
+        };
+        launch.ended.addEventListener("abort", ended, { once: true });
+        if (!launch.isAlive()) { ended(); throw Error("This app's approval changed. Review the app again."); }
+        return { kind: "opened", viewId: input.viewId, publicationId, url, partition: entry.partition };
+      } catch (error) {
+        await close(entry);
+        if (error instanceof Error && error.message === "Close another app before opening this one.") throw error;
+        throw Error("dohc could not open this app. Review its approval and try again.", { cause: error });
+      }
+    };
+    const key = `${event.sender.id}:${input.viewId}`;
+    const pending = (pendingByView.get(key) ?? Promise.resolve()).catch(() => {}).then(execute);
+    pendingByView.set(key, pending);
+    try { return await pending; } finally { if (pendingByView.get(key) === pending) pendingByView.delete(key); }
+  };
   return {
+    appView,
     closeOwner,
     async closeWorkspace(workspaceId: string) {
       await Promise.all([...issuedByOwner.values()].flatMap(entries => [...entries.values()])

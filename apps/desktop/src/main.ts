@@ -15,7 +15,7 @@ import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
-import { liveDraftRecoveryOperations } from "./ipc/bridgeContract";
+import { appViewOperations, liveDraftRecoveryOperations } from "./ipc/bridgeContract";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -6958,9 +6958,6 @@ function registerIpcHandlers(): void {
         (await localAppLauncher(workspace, signal)).launch(publicationId, signal),
     });
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
-    registerHandler: handleIpc, assertTrustedSender,
-    withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId,
-      "This app does not belong to this window's workspace. Open it from its workspace.", work),
     activePublication: async (operation, appRoot) => {
       const listed = await localPublication({ action: "listLocal", workspaceId: operation.workspace.workspaceId, appRoot },
         "app-view", operation);
@@ -6970,6 +6967,7 @@ function registerIpcHandlers(): void {
     launch: async (operation, publicationId) =>
       (await localAppLauncher(operation.workspace, operation.signal)).launchSession(publicationId, operation.signal, { keepAlive: true }),
   });
+  registerOperations(operationBoundary, appViewOperations, { appView: appViews.appView });
   const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
     const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
     if (dataset) await moveToServer(workspace, dataset.datasetId, signal);
