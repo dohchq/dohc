@@ -12,7 +12,7 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { collectionPlace, moveCollectionToServer } from "./collectionMove";
+import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./collectionMove";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 
@@ -39,17 +39,25 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
-it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
+/**
+ * The owner's Collection on this computer, with one record, and the owner's server with the folder shared with a teammate who accepted it.
+ * `relay` sees each request of the owner's move before it is sent. `restart` closes this computer's Collections and opens them again.
+ */
+async function collectionOnThisComputer(options: { relay?(path: string, init: RequestInit, send: (init: RequestInit) => Promise<unknown>): Promise<unknown> } = {}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-collection-move-")); roots.push(workspaceRoot);
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
-  const local = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local",
-    compile: createDatasetFixtureCompiler(), holder: unguardedCollections }); hosts.push(local);
+  const open = async () => {
+    const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, localPersonId: () => "person-local",
+      compile: createDatasetFixtureCompiler(), holder: unguardedCollections }); hosts.push(host);
+    return host;
+  };
+  let local = await open();
+  const restart = async () => { hosts.splice(hosts.indexOf(local), 1); await local.close(); local = await open(); };
   const adapter = sourceCaptureAdapter(sources);
   const prepared = await local.prepare({ descriptorPath: "items/dataset.json", adapter });
   const approved = await local.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   const pinned = { revision: approved.revision, revisionSha256: approved.revisionSha256 };
 
-  // The owner's server, with the folder shared with a teammate who accepted it.
   const relay = relayFixture(), relayDirectory = await mkdtemp(join(tmpdir(), "dohc-collection-move-relay-")); roots.push(relayDirectory);
   relay.storage.createShare({ share: { shareId: "team", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({ paths: ["items"], versionId: null }), createdAtMs: 1 },
     grant: { grantId: "team-grant", shareId: "team", principalKind: "user", principalUserId: "teammate", principalEmail: null, access: "edit",
@@ -73,6 +81,12 @@ it("gives a teammate access to a Collection on this computer by moving it to the
   const session = { credentialGeneration: 1, currentCredentialGeneration: () => 1, signal: controller.signal, assertCurrent() {} };
   const authorized = (user: string) => async (credentials: { token: string }, path: string, init: RequestInit) =>
     transport(credentials, path, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), authorization: `Bearer ${user}-token` } });
+  const relayStream = (credentials: { token: string }, path: string, init: RequestInit) => {
+    const send = (next: RequestInit) => authorized("owner")(credentials, path, next);
+    return options.relay ? options.relay(path, init, send) : send(init);
+  };
+  const move = { workspaceId: "w", credentials: credentials("owner"), credentialGeneration: 1, currentCredentialGeneration: () => 1, relayStream };
+  const finished = (datasetId: string) => finishedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
   const owner = createRemoteDatasetData({ workspaceId: "w", credentials: credentials("owner"), ...session, relayJson: authorized("owner") });
   const teammate = createRemoteDatasetData({ workspaceId: "w", shareId: "team", credentials: credentials("teammate"), ...session, relayJson: authorized("teammate") });
   const workspace = { workspaceId: "w" };
@@ -82,12 +96,11 @@ it("gives a teammate access to a Collection on this computer by moving it to the
       return work({ workspace, signal: controller.signal, assertCurrent() {} });
     },
     hostForWorkspace: async () => local,
-    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: async datasetId => local.transferStatus(datasetId),
+    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: finished,
       async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } }),
-    collectionPlace: async (_workspace, datasetId) => collectionPlace({ transfer: local.transferStatus(datasetId), relayUrl: "https://relay.test",
+    collectionPlace: async (_workspace, datasetId) => collectionPlace({ transfer: await finished(datasetId), relayUrl: "https://relay.test",
       automations: async () => ({ automations: 0, scheduledAutomations: 0 }), runs: async () => { throw Error("Nothing asks without automations."); } }),
-    moveToServer: (_workspace, datasetId, signal) => moveCollectionToServer({ local, workspaceId: "w", datasetId, credentials: credentials("owner"),
-      credentialGeneration: 1, currentCredentialGeneration: () => 1, relayStream: authorized("owner"), signal }),
+    moveToServer: (_workspace, datasetId, signal) => moveCollectionToServer({ local, datasetId, ...move, signal }),
     flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
     withAdapter: async (_workspace, work) => work(adapter),
     createSources: async () => { throw Error("Nothing creates sources here."); },
@@ -98,17 +111,22 @@ it("gives a teammate access to a Collection on this computer by moving it to the
     collection("window", { ...address, action: "invoke", ...pinned, operationId, idempotencyKey, input });
   await ownerInvoke(id(6), "owner-before", { name: "Owner" });
   const setGrant = { ...address, action: "setGrant", grantId: "team-grant", grant: { ...pinned, operationIds: [id(6)], discover: true } };
+  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
+}
+
+it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
+  const { collection, teammate, address, invoke, ownerInvoke, setGrant, controller, transferStatus } = await collectionOnThisComputer();
 
   // Without the owner's agreement nothing moves, and the refusal says what moving means.
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({ kind: "permissions",
     place: { kind: "here", server: { host: "relay.test", runs: null, automations: 0, scheduledAutomations: 0 } } });
   await expect(collection("window", setGrant)).rejects.toThrow("Giving a person access moves this Collection to relay.test.");
-  expect(local.transferStatus(id(1))).toBeNull();
+  expect(transferStatus(id(1))).toBeNull();
   await expect(teammate.invoke(invoke(id(6), "teammate-before", { name: "Too early" }))).rejects.toThrow();
 
   // Agreeing moves the Collection with its records, then gives the teammate exactly the chosen action.
   await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
-  expect(local.transferStatus(id(1))?.state).toBe("imported");
+  expect(transferStatus(id(1))?.state).toBe("imported");
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({ kind: "permissions",
     permissions: [{ kind: "data", current: true, metadata: { operationIds: [id(6)] } }], place: { kind: "server", host: "relay.test" } });
   await expect(teammate.invoke(invoke(id(6), "teammate-add", { name: "Teammate" }))).resolves.toMatchObject({ result: { name: "Teammate" } });
@@ -118,5 +136,52 @@ it("gives a teammate access to a Collection on this computer by moving it to the
   // Once the Collection is on the server, the owner changes access with no further agreement.
   await expect(collection("window", { ...setGrant, grant: { ...setGrant.grant, operationIds: [id(5), id(6)] } })).resolves.toEqual({ kind: "grant-updated" });
   await expect(teammate.invoke(invoke(id(5), "teammate-list-allowed"))).resolves.toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
+  controller.abort();
+});
+
+// The first chunk of an upload, then a broken connection.
+function firstChunkOnly(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  let sent = false;
+  return new ReadableStream<Uint8Array>({ async pull(controller) {
+    if (sent) { await reader.cancel(); controller.error(Error("The connection broke.")); return; }
+    sent = true;
+    const item = await reader.read();
+    if (item.done) controller.close(); else controller.enqueue(item.value);
+  } });
+}
+
+it.each([
+  ["while its upload is under way", (init: RequestInit, send: (init: RequestInit) => Promise<unknown>) =>
+    send({ ...init, body: firstChunkOnly(init.body as ReadableStream<Uint8Array>) })],
+  ["after the server kept it, before its answer arrived", (init: RequestInit, send: (init: RequestInit) => Promise<unknown>) => send(init)],
+])("finishes a move that stopped %s on the next read after a restart", async (_when, upload) => {
+  // The server stops answering during the move's upload, and answers again after this computer restarts.
+  let down = false, uploads = 0;
+  const { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, transferStatus } = await collectionOnThisComputer({
+    async relay(path, init, send) {
+      if (down) throw Error("The server stopped answering.");
+      if (init.method !== "POST" || !path.includes("/imports/") || uploads++) return send(init);
+      down = true;
+      await upload(init, send).catch(() => undefined);
+      throw Error("The server stopped answering.");
+    } });
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  expect(transferStatus(id(1))?.state).toBe("ready");
+
+  // After a restart, a read tries to finish the move. While the server is still away it fails, and the Collection stays fenced.
+  await restart();
+  await expect(collection("window", { ...address, action: "permissions" })).rejects.toThrow("The server stopped answering.");
+  await expect(ownerInvoke(id(6), "owner-while-moving", { name: "Too late" })).rejects.toThrow("The server stopped answering.");
+  expect(transferStatus(id(1))?.state).toBe("ready");
+
+  // Once the server answers, the next read finishes the move with the owner's record, and access saves with no new agreement.
+  down = false;
+  expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({ kind: "permissions", place: { kind: "server", host: "relay.test" } });
+  expect(transferStatus(id(1))?.state).toBe("imported");
+  expect(await ownerInvoke(id(5), "owner-list")).toMatchObject({ result: [{ name: "Owner" }] });
+  await expect(collection("window", setGrant)).resolves.toEqual({ kind: "grant-updated" });
+  await expect(teammate.invoke(invoke(id(6), "teammate-add", { name: "Teammate" }))).resolves.toMatchObject({ result: { name: "Teammate" } });
+  expect(await ownerInvoke(id(5), "owner-list-after")).toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
   controller.abort();
 });

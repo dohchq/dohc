@@ -373,7 +373,7 @@ export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, 
 }
 
 export interface DatasetAuthorityRoute {
-  /** Returns the durable local transfer marker; absent means this dataset is local. */
+  /** Returns the durable local transfer marker once its move finished; absent means this dataset is local. */
   status(datasetId: string): Promise<import("./localDatasetTransfer").DatasetTransferStatus | null>;
   remote(origin: string, datasetId: string): Promise<OwnerDatasetData>;
 }
