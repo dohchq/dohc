@@ -7,6 +7,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -243,6 +244,22 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
 
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
+
+    // The failure's toast sits above the message box, so Send stays in reach.
+    const toasts = page.getByTestId("notice-toasts");
+    await expect(toasts).toContainText("Nova's run failed");
+    await waitForVisibleAnimations(page);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
+      }
+    }
+    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
+    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
+    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
+    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
 
     // The failure is a row in Notices. The conversation keeps only what
     // people and the agent wrote, so once the notice is there it still holds
