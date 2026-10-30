@@ -1955,14 +1955,14 @@ describe("notices sent to you", () => {
   ])("drops the invitation's reveal when the person %s before Chats lists it", async (_, moveOn) => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    const first = deferred<typeof INVITATION_LISTING>();
-    const listChatChannelShares = vi.fn(() => Promise.resolve(INVITATION_LISTING));
-    listChatChannelShares.mockReturnValueOnce(first.promise);
-    Object.assign(bridge, { listChatChannelShares });
+    // Every share read, including the one each reveal makes, waits until the
+    // person has moved on.
+    const listed = deferred<typeof INVITATION_LISTING>();
+    Object.assign(bridge, { listChatChannelShares: vi.fn(() => listed.promise) });
     renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     await moveOn(user, bridge);
-    first.resolve(INVITATION_LISTING);
+    listed.resolve(INVITATION_LISTING);
     const join = await screen.findByTestId("chats-join-shared");
     expect(join.getAttribute("data-invitation")).toBe("share-1");
     // Runs Chats' pending effects, where a live reveal would focus Join.
