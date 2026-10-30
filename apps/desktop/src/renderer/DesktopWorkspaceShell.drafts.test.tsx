@@ -367,7 +367,7 @@ describe("workspace switch admission", () => {
         expect(bridge.setWorkspaceUiState, "saving waits for Restore tabs").not.toHaveBeenCalled();
         await user.click(within(row).getByRole("button", { name: "Copy notice details" }));
         expect((await navigator.clipboard.readText()).split("\n")[0], "the action first, so the toast's limit cuts only the reason")
-          .toBe("Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. The workspace took more than 4 minutes to open.");
+          .toBe("Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. Your saved tabs didn't load within 4 minutes.");
 
         await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
 
