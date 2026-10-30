@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Upload, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
@@ -109,14 +109,14 @@ function CollectionApproval({ capability, local }: { capability: AppCollectionCa
 }
 
 /** The local launcher answers with a loopback address only. Anything else never reaches the browser. */
-function localLaunchUrl(raw: string): string | null {
+export function localLaunchUrl(raw: string): string | null {
   let url: URL;
   try { url = new URL(raw); } catch { return null; }
   return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.port !== "" && url.username === "" && url.password === "" ? url.toString() : null;
 }
 
 /** Starts an approved app on this device and hands its loopback address to the browser. False when the caller went stale first. */
-async function openLocalApp(api: ReturnType<typeof bridge>, workspaceId: string, publicationId: string, current: () => boolean): Promise<boolean> {
+export async function openLocalApp(api: ReturnType<typeof bridge>, workspaceId: string, publicationId: string, current: () => boolean): Promise<boolean> {
   const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId, publicationId });
   if (!current()) return false;
   if (result.kind !== "localLaunched" || result.publicationId !== publicationId) throw new Error("dohc could not confirm which app started. Try again.");
@@ -135,92 +135,17 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
 // onLocalChange runs after anything that may change this device's approvals, so other views read them again.
 type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError; onLocalChange?: () => void };
 
-export function OwnerAppPublication(props: PublicationProps) {
+type ControlProps = PublicationProps & { open: boolean; onOpenChange: (open: boolean) => void; testId: string };
+
+/** Review app: the person's one way to see what the app can reach, and to approve or publish it. */
+export function OwnerAppPublication(props: ControlProps) {
   return <PublicationControl key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
 }
 
-function PublicationControl(props: PublicationProps) {
-  const [open, setOpen] = useState(false);
-  const close = () => {
-    setOpen(false);
-  };
+function PublicationControl(props: ControlProps) {
   return <>
-    <IconButton data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
-      <Upload size={13} aria-hidden />
-    </IconButton>
-    {open ? <PublicationDialog {...props} onClose={close} onReopen={() => setOpen(true)} /> : null}
-  </>;
-}
-
-/**
- * The app page's way in when the app has no standalone preview. An app approved on this device opens from here;
- * otherwise the person reviews it first. A change to `reload` reads this device's approvals again.
- */
-export function OwnerAppEntry(props: PublicationProps & { reload: number }) {
-  return <AppEntry key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
-}
-
-const CHECK_FAILED = "dohc could not check whether this app is approved on this device.";
-
-function AppEntry(props: PublicationProps & { reload: number }) {
-  // undefined while this device's approvals load; null when none is active; "failed" when dohc could not read them.
-  const [state, setState] = useState<LocalPublication | null | undefined | "failed">(undefined);
-  const [check, setCheck] = useState(0);
-  const [open, setOpen] = useState(false);
-  const [opening, setOpening] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const alive = useRef(true);
-  const request = useRef(0);
-  const report = useRef(props.reportError);
-  report.current = props.reportError;
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; request.current += 1; };
-  }, []);
-  const recheck = useCallback(() => { if (alive.current) setCheck(value => value + 1); }, []);
-  useEffect(() => {
-    let current = true;
-    void (async () => {
-      const page = await bridge().publishOwnerApp({ action: "listLocal", workspaceId: props.workspaceId, appRoot: props.appRoot });
-      if (!current) return;
-      if (page.kind !== "localListed") throw new Error(CHECK_FAILED);
-      setState(page.publications.find(row => row.appRoot === props.appRoot && row.active) ?? null);
-    })().catch(cause => {
-      if (!current) return;
-      setState("failed");
-      report.current?.(CHECK_FAILED, cause, recheck);
-    });
-    return () => { current = false; };
-  }, [props.workspaceId, props.appRoot, props.reload, check, recheck]);
-
-  const launch = async (publication: LocalPublication) => {
-    const mine = ++request.current;
-    const current = () => alive.current && mine === request.current;
-    setOpening(true); setError(null);
-    try {
-      await openLocalApp(bridge(), props.workspaceId, publication.publicationId, current);
-    } catch (cause) {
-      if (!current()) return;
-      if (props.reportError) props.reportError("dohc could not open this app in your browser.", cause, () => { if (alive.current) void launch(publication); });
-      else setError(ipcErrorMessage(cause, "dohc could not open this app in your browser."));
-      // The approval may have ended outside this page, so read it again.
-      recheck();
-    } finally { if (current()) setOpening(false); }
-  };
-
-  if (state === undefined) return <SkeletonRows rows={2} label="Loading local apps…" className="w-full max-w-sm" />;
-  const failed = state === "failed";
-  const approved = failed ? null : state;
-  return <>
-    <p role={failed && !props.reportError ? "alert" : undefined} className="m-0 max-w-sm text-sm text-muted">
-      {approved ? "Approved on this device. Later source edits need a new approval." : failed ? CHECK_FAILED : "Review this app to open it on this device or publish it to a shared link."}</p>
-    <div className="flex flex-wrap items-center justify-center gap-2">
-      {/* One button for every state, so focus returning from the dialog lands on Open in browser after approval. */}
-      <PrimaryButton disabled={opening} onClick={() => approved ? void launch(approved) : setOpen(true)}>{!approved ? "Review and open app" : opening ? "Opening…" : "Open in browser"}</PrimaryButton>
-      {approved ? <SecondaryButton disabled={opening} onClick={() => setOpen(true)}>Review app</SecondaryButton> : failed ? <SecondaryButton onClick={recheck}>Try again</SecondaryButton> : null}
-    </div>
-    {error ? <p role="alert" className="m-0 max-w-sm text-[13px] text-danger">{error}</p> : null}
-    {open ? <PublicationDialog {...props} onLocalChange={() => { recheck(); props.onLocalChange?.(); }} onClose={() => setOpen(false)} onReopen={() => setOpen(true)} /> : null}
+    <SecondaryButton size="compact" data-testid={props.testId} onClick={() => props.onOpenChange(true)}>Review app</SecondaryButton>
+    {props.open ? <PublicationDialog {...props} onClose={() => props.onOpenChange(false)} onReopen={() => props.onOpenChange(true)} /> : null}
   </>;
 }
 

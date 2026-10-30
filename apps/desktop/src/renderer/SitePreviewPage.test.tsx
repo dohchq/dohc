@@ -651,37 +651,6 @@ describe("SitePreviewPage", () => {
     expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
   });
 
-  it("offers approval for a generated form without a standalone preview entry", async () => {
-    const publishOwnerApp = vi.fn(async (request: { action: string }) => request.action === "listLocal"
-      ? { kind: "localListed", publications: [] } : Promise.reject(new Error(`unexpected ${request.action}`)));
-    vi.stubGlobal("dohcDesktop", { ...bridgeMock, publishOwnerApp });
-    bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, entryPath: null,
-      sourceFiles: ["report/dohc.json", "report/app.publish.json", "report/frontend.js"], shareManifest: noRunnableArtifact });
-    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.getByText("Review this app to open it on this device or publish it to a shared link.")).toBeTruthy();
-    expect(screen.queryByText("This app has no previewable entry, dev script, or build output yet.")).toBeNull();
-    expect(publishOwnerApp).toHaveBeenCalledWith({ action: "listLocal", workspaceId: "ws-sites", appRoot: "report" });
-    expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
-  });
-
-  it("opens a generated form approved on this device from the app page", async () => {
-    const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "report", sourceRevision: "b".repeat(64), approved: true, active: true,
-      datasetCapability: { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64), operationIds: [], operations: [] } };
-    const publishOwnerApp = vi.fn(async (request: { action: string }) => request.action === "listLocal"
-      ? { kind: "localListed", publications: [localRow] }
-      : { kind: "localLaunched", publicationId: localRow.publicationId, url: "http://127.0.0.1:43123/" });
-    vi.stubGlobal("dohcDesktop", { ...bridgeMock, publishOwnerApp });
-    bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, entryPath: null,
-      sourceFiles: ["report/dohc.json", "report/app.publish.json", "report/frontend.js"], shareManifest: noRunnableArtifact });
-    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Open in browser" }));
-    expect(screen.getByText("Approved on this device. Later source edits need a new approval.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Review and open app" })).toBeNull();
-    expect(publishOwnerApp).toHaveBeenCalledWith({ action: "launchLocal", workspaceId: "ws-sites", publicationId: localRow.publicationId });
-    expect(bridgeMock.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
-  });
-
   it("keeps a stored preview mode over the workspace default", async () => {
     window.localStorage.setItem("dohc.site-preview-mode.v1:ws-sites:report", "static");
     bridgeMock.getSitePackage.mockResolvedValueOnce({
@@ -750,7 +719,7 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
-    expect(screen.queryByTestId("site-preview-publish")).toBeNull();
+    expect(screen.queryByTestId("site-preview-review")).toBeNull();
   });
 
   it("reuses the last successful preview mode when it remains available", async () => {
@@ -802,7 +771,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(screen.getByTestId("site-preview-shared-label").textContent).toBe("Shared");
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
-    expect(screen.queryByTestId("site-preview-publish")).toBeNull();
+    expect(screen.queryByTestId("site-preview-review")).toBeNull();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
@@ -844,7 +813,7 @@ describe("SitePreviewPage", () => {
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShareSite={onShareSite} />);
     await screen.findByTestId("site-preview-frame");
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish app" }));
+    await userEvent.setup().click(screen.getByTestId("site-preview-review"));
     await userEvent.setup().click(await screen.findByRole("button", { name: "Share app folder" }));
     expect(onShareSite).toHaveBeenCalledExactlyOnceWith({ paths: ["report"], label: "Report" });
   });
@@ -1743,8 +1712,9 @@ describe("SitePreviewPage", () => {
 
     expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
-    expect(screen.queryByTestId("site-preview-reload")).toBeNull();
-    expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
+    // Disabled, not hidden, so nothing in the toolbar moves.
+    expect((screen.getByTestId("site-preview-reload") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("site-preview-open-external") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
   });
 
