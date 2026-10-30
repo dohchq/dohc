@@ -11,11 +11,6 @@ export function shareSenderParts(name: string | null | undefined, email: string 
 }
 
 export function ShareSender({name, email}: {name: string | null | undefined; email: string | null | undefined}) {
-  const {full, address, displayName} = shareSenderParts(name, email);
-  return (
-    <span className="flex min-w-0 items-baseline text-[11px] text-muted" title={full}>
-      {displayName ? <span className="min-w-0 truncate">{displayName}</span> : null}
-      {address ? <span className="max-w-full shrink-0 whitespace-pre-wrap break-all font-mono">{displayName ? ` (${address})` : address}</span> : null}
-    </span>
-  );
+  const full = shareSenderLabel(name, email);
+  return <span className="block truncate text-[11px] text-muted" title={full}>{full}</span>;
 }

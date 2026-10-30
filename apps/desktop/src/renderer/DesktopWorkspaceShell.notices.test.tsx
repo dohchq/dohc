@@ -17,6 +17,7 @@ import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
+import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
@@ -1919,6 +1920,72 @@ describe("notices sent to you", () => {
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
     renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
     await screen.findByTestId("tab-b.md");
+  });
+
+  // Chats' answer for a Group invitation, share-1, that waits with Join.
+  const INVITATION_LISTING = {
+    joined: [],
+    sessionKey: null,
+    relay: {
+      state: "answered" as const,
+      granted: [],
+      received: [{ shareId: "share-1", channelWireId: "wire-share-1", access: "read-write" as const, granterEmail: "owner@example.com" }],
+      removed: [],
+    },
+  };
+
+  it("opens Chats at a Group invitation, with its Join focused, once the workspace it switched to is ready", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
+    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+    const join = await screen.findByTestId("chats-join-shared");
+    await waitFor(() => expect(document.activeElement).toBe(join));
+  });
+
+  it.each([
+    ["leaves Chats", async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByTestId("activity-explorer"));
+      await user.click(screen.getByTestId("activity-chats"));
+    }],
+    ["types", async (user: ReturnType<typeof userEvent.setup>) => user.keyboard("a")],
+    ["leaves the window", async () => {
+      fireEvent.blur(window);
+    }],
+    ["picks a menu bar command", async (_user: ReturnType<typeof userEvent.setup>, bridge: ReturnType<typeof makeBridge>) => {
+      act(() => bridge.emitMenuCommand("command-palette"));
+    }],
+  ])("drops the invitation's reveal when the person %s before Chats lists it", async (_, moveOn) => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    // Every share read, including the one each reveal makes, waits until the
+    // person has moved on.
+    const listed = deferred<typeof INVITATION_LISTING>();
+    Object.assign(bridge, { listChatChannelShares: vi.fn(() => listed.promise) });
+    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+    await moveOn(user, bridge);
+    listed.resolve(INVITATION_LISTING);
+    const join = await screen.findByTestId("chats-join-shared");
+    expect(join.getAttribute("data-invitation")).toBe("share-1");
+    // Runs Chats' pending effects, where a live reveal would focus Join.
+    await act(async () => undefined);
+    expect(document.activeElement).not.toBe(join);
+  });
+
+  it("drops the invitation's reveal when the person typed after pressing Open, before the workspace it switched to was ready", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
+    const pressed = inputCount();
+    await user.keyboard("a");
+    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: pressed } } });
+    await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
+    const join = await screen.findByTestId("chats-join-shared");
+    expect(join.getAttribute("data-invitation")).toBe("share-1");
+    // Runs Chats' pending effects, where a live reveal would focus Join.
+    await act(async () => undefined);
+    expect(document.activeElement).not.toBe(join);
   });
 
   it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {

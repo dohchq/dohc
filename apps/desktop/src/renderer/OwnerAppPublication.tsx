@@ -5,6 +5,7 @@ import type { AppCollectionCapability } from "@dohc/security-contract/app-public
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
+import { CollectionMoveNote, type CollectionServer } from "./collections/CollectionMoveNote";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
@@ -13,6 +14,7 @@ import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
+const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
 type LocalPublication = Extract<OwnerAppPublicationResult, { kind: "localListed" }>["publications"][number];
 type ActiveLink = RelayShareLinkRow & { selector: NonNullable<RelayShareLinkRow["selector"]> };
@@ -23,14 +25,21 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
   return <>{operations.map((operation, index) => <span key={operation.name}>{index ? ", " : ""}<span className="font-mono">{operation.name}</span> ({operation.readOnly ? "reads only" : "changes data"})</span>)}</>;
 }
 
-function DatasetApproval({ capability, workspaceId, reportError }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError }) {
+/**
+ * `moves`: publishing moves a Collection on this computer to the workspace's server.
+ * `onPlace` hears where to: a server, null when nothing moves, or undefined until dohc knows.
+ */
+function DatasetApproval({ capability, workspaceId, reportError, moves = false, onPlace }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError; moves?: boolean; onPlace?(server: CollectionServer | null | undefined): void }) {
   const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "failed" | "available" } | null>(null);
   const [reload, setReload] = useState(0);
   const report = useRef(reportError);
   report.current = reportError;
+  const placed = useRef(onPlace);
+  placed.current = onPlace;
   useEffect(() => {
-    let current = true;
+    let current = true, failure = "dohc could not find this Collection.";
     setAddress(null);
+    placed.current?.(undefined);
     void (async () => {
       let after: string | undefined;
       const seen = new Set<string>();
@@ -39,19 +48,30 @@ function DatasetApproval({ capability, workspaceId, reportError }: { capability:
         if (!current) return;
         if (page.kind !== "list") throw Error("dohc could not find this Collection.");
         const dataset = page.datasets.find(value => value.datasetId === capability.datasetId);
-        if (dataset) { setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath, status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing") }); return; }
+        if (dataset) {
+          failure = "dohc could not check where this Collection is.";
+          const access = moves && dataset.datasetPath
+            ? await bridge().dataset({ action: "permissions", workspaceId, datasetPath: dataset.datasetPath, expectedDatasetId: capability.datasetId, limit: 1 }) : null;
+          if (!current) return;
+          const place = access?.kind === "permissions" ? access.place : undefined;
+          setAddress({ workspaceId, datasetId: capability.datasetId, path: dataset.datasetPath, status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing") });
+          placed.current?.(!moves ? null : place === undefined ? undefined : place.kind === "here" ? place.server : null);
+          return;
+        }
         after = page.nextCursor ?? undefined;
         if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
         if (after) seen.add(after);
       } while (after);
-      if (current) setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
+      if (!current) return;
+      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
+      placed.current?.(moves ? undefined : null);
     })().catch(error => {
       if (!current) return;
       setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
-      report.current("dohc could not find this Collection.", error, () => { if (current) setReload(value => value + 1); });
+      report.current(failure, error, () => { if (current) setReload(value => value + 1); });
     });
     return () => { current = false; };
-  }, [workspaceId, capability.datasetId, reload]);
+  }, [workspaceId, capability.datasetId, moves, reload]);
   const found = address?.workspaceId === workspaceId && address.datasetId === capability.datasetId ? address : null;
   return <div data-testid="app-publication-capability" className="space-y-2">
     <p className="m-0 font-medium">{capability.name}</p>
@@ -238,6 +258,18 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       return next;
     });
   }, []);
+  // Where Publish moves each of a preparation's Collections, once dohc knows, so the review says it before Publish can run.
+  const [collectionPlaces, setCollectionPlaces] = useState<ReadonlyMap<string, CollectionServer | null>>(new Map());
+  const collectionPlaced = useCallback((key: string, server: CollectionServer | null | undefined) => setCollectionPlaces(previous => {
+    if (server === undefined ? !previous.has(key) : previous.get(key) === server) return previous;
+    const next = new Map(previous);
+    if (server === undefined) next.delete(key); else next.set(key, server);
+    return next;
+  }), []);
+  const collectionKeys = prepared && !prepared.local
+    ? prepared.capabilities.flatMap(capability => capability.kind === "dataset" ? [collectionKey(prepared.approvalId, capability.datasetId)] : []) : [];
+  const collectionsUnchecked = collectionKeys.some(key => !collectionPlaces.has(key));
+  const collectionMoves = collectionKeys.flatMap(key => { const server = collectionPlaces.get(key); return server ? [{ key, server }] : []; });
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
   // Local approvals need no host, so they load and fail independently of links and shared publications.
@@ -499,7 +531,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={collectionKey(prepared.approvalId, capability.datasetId)} moves={!prepared.local && !reactivating}
+            onPlace={server => collectionPlaced(collectionKey(prepared.approvalId, capability.datasetId), server)} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
             <CollectionApproval key={capability.collectionPath} capability={capability} local={prepared.local === true} />)}
           {!prepared.local && !reactivating ? prepared.capabilities.filter(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.access === "helper" && operation.fields !== undefined)).map(capability => capability.kind === "dataset" ? <fieldset key={capability.datasetId} disabled={!!busy} className="space-y-2 border-0 p-0">
             <legend className="text-[13px] font-medium text-ink">Allow people with the link to read</legend>
@@ -511,6 +544,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             </label>)}
             <p className="m-0 text-[12px] text-muted">Approved reads show current records and later changes. People with the link can use only the selected reads. Unpublish to withdraw access.</p>
           </fieldset> : null) : null}
+          {collectionMoves.map(move => <CollectionMoveNote key={move.key} action="Publishing" server={move.server} className="m-0" />)}
           <p className="m-0">The app can use external services and send them data it receives.</p>
           {prepared.local ? null : <p className="m-0">Unpublishing stops new access through dohc. It cannot remove copies sent elsewhere.</p>}
         </div>
@@ -520,7 +554,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             <div><dt>Publication</dt><dd data-testid="app-publication-digest" className="m-0 break-all">{prepared.candidateDigest}</dd></div></dl>
         </details>
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={!!busy || responsesBusy} onClick={back}>Back</SecondaryButton>
-          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy || responsesBusy} onClick={() => void approve()}>{busy === "approve" ? (prepared.local ? "Approving…" : "Publishing…") : prepared.local ? "Approve for this device" : reactivating ? "Republish this revision" : "Publish this revision"}</PrimaryButton></footer>
+          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy || responsesBusy || collectionsUnchecked} onClick={() => void approve()}>{busy === "approve" ? (prepared.local ? "Approving…" : "Publishing…") : prepared.local ? "Approve for this device" : reactivating ? "Republish this revision" : "Publish this revision"}</PrimaryButton></footer>
       </> : <>
         <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">This device</h3>

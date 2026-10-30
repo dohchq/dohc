@@ -282,6 +282,7 @@ export function WorkspaceManager(props: {
         onWorkspaceReady={onWorkspaceReady}
         onBack={() => props.onDismissShareHandoff?.()}
         onOpened={() => props.onShareHandoffOpened?.()}
+        ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
         onConnectionError={connectionNotices.reporter(reopen("share"))}
         initialServerUrl={retryServerUrl}
       />

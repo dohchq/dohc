@@ -3800,7 +3800,7 @@ export type GetRelayReceivedSharePayload = z.infer<
   typeof GetRelayReceivedSharePayload
 >;
 
-export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
+export const GetRelayReceivedShareResult = z.union([
   z
     .object({
       found: z.literal(false),
@@ -3818,6 +3818,14 @@ export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
     .object({
       found: z.literal(true),
       share: RelayShareReceivedRow,
+    })
+    .strict(),
+  // A Group or a direct message. It opens in Chats, where the person joins
+  // it into a workspace of their own, rather than as a share of files.
+  z
+    .object({
+      found: z.literal(true),
+      chats: z.literal(true),
     })
     .strict(),
 ]);

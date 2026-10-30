@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { relayShareOperations } from "./shareOperations";
 import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
+import {closeTestStorages, interceptStorage, request as relayRequest, testHandler, testStorage} from "../../../../services/sync-relay/src/testing";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
@@ -1331,6 +1332,33 @@ describe("registered account share handlers", () => {
     await expect(h.invoke(relayShareOperations.getRelayReceivedShare.channel, { shareId: "share" }))
       .rejects.toThrow("Invalid exact received share response");
     expect(h.request.mock.calls[0]?.[3]).toEqual({ retainNotFound: true });
+  });
+
+  it.each([
+    {invite: "a Group", channelKind: "channel" as const, selector: {kind: "group", channelWireId: "wire-orders", paths: ["orders"], versionId: null}},
+    {invite: "a message request", channelKind: "dm" as const, selector: {kind: "chat", channelWireId: "wire-dm"}},
+  ])("answers $invite from the relay as a Chats invitation", async ({channelKind, selector}) => {
+    const storage = await testStorage();
+    try {
+      storage.claimWorkspace({workspaceId: "workspace-a", ownerUserId: "owner", createdAtMs: 1});
+      storage.createShare({
+        share: {shareId: "invite", workspaceId: "workspace-a", granterUserId: "owner", createdAtMs: 1, selectorJson: JSON.stringify(selector)},
+        grant: {grantId: "grant-invite", shareId: "invite", principalKind: "user", principalUserId: "teammate", principalEmail: null,
+          access: "read-write", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
+      });
+      const relay = testHandler(interceptStorage(storage, {findChannelCreateKind: () => channelKind}));
+      const response = await relay(relayRequest("teammate", "/sync/shares/invite"));
+      expect(response.status).toBe(200);
+      const h = harness();
+      h.request.mockResolvedValue({kind: "success", body: await response.json()});
+      await expect(h.invoke(relayShareOperations.getRelayReceivedShare.channel, {shareId: "invite"}))
+        .resolves.toEqual({found: true, chats: true});
+      h.request.mockResolvedValue({kind: "success", body: {...(await (await relay(relayRequest("teammate", "/sync/shares/invite"))).json()), shareId: "other"}});
+      await expect(h.invoke(relayShareOperations.getRelayReceivedShare.channel, {shareId: "invite"}))
+        .rejects.toThrow("Invalid exact received share response");
+    } finally {
+      await closeTestStorages();
+    }
   });
 
   it("rejects an exact received-share result after the credential generation changes", async () => {

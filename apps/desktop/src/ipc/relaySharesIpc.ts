@@ -57,7 +57,7 @@ import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHand
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { pathShareLanes } from "../workspaces/relayShareLanes";
+import { isReadableChatChannelRow, pathShareLanes } from "../workspaces/relayShareLanes";
 import { buildShareCode } from "../workspaces/syncCode";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
@@ -618,18 +618,23 @@ export function createRelaySharesIpcHandlers<
       });
     }
     const body = result.body;
+    const row: Record<string, unknown> =
+      body !== null && typeof body === "object" && !Array.isArray(body)
+        ? { ...body }
+        : {};
+    if (row.shareId !== input.shareId) {
+      throw new Error("Invalid exact received share response.");
+    }
+    if (isReadableChatChannelRow(row)) {
+      return GetRelayReceivedShareResult.parse({ found: true, chats: true });
+    }
     const received = RelayShareReceivedRow.parse({
-      ...(body !== null && typeof body === "object" && !Array.isArray(body)
-        ? body
-        : {}),
+      ...row,
       shareCode: buildShareCode({
         shareId: input.shareId,
         relayUrl: credentials.relayUrl!,
       }),
     });
-    if (received.shareId !== input.shareId) {
-      throw new Error("Invalid exact received share response.");
-    }
     return GetRelayReceivedShareResult.parse({ found: true, share: received });
   };
 
