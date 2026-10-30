@@ -962,26 +962,55 @@ async fn markdown_owner_consent_open_and_settle_validate_the_same_source() {
 /// the session seeds from the file and the open's consent covers its bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_owner_consent_opens_a_never_opened_note() {
-    edit_anyway_opens_a_note_with_no_ydoc_state(false).await;
+    edit_anyway_opens_a_note_with_no_ydoc_state(false, Rename::None).await;
 }
 
 /// Edit anyway on a note whose earlier local session closed, which prunes its
 /// Y.Doc state to a bare marker. The new session seeds from the file again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_owner_consent_opens_a_note_whose_session_closed() {
-    edit_anyway_opens_a_note_with_no_ydoc_state(true).await;
+    edit_anyway_opens_a_note_with_no_ydoc_state(true, Rename::None).await;
 }
 
-async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
+/// Edit anyway on a note renamed in dohc after its earlier local session
+/// closed. The new session seeds from the file at the new path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_opens_a_note_renamed_after_its_session_closed() {
+    edit_anyway_opens_a_note_with_no_ydoc_state(true, Rename::InDohc).await;
+}
+
+/// Edit anyway on a note another program moved after its earlier local session
+/// closed. Capture records the move, and the new session seeds from the file
+/// at the new path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_owner_consent_opens_a_note_moved_on_disk_after_its_session_closed() {
+    edit_anyway_opens_a_note_with_no_ydoc_state(true, Rename::OnDisk).await;
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Rename {
+    None,
+    InDohc,
+    OnDisk,
+}
+
+async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool, rename: Rename) {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_engine_storage::{EngineStore, hex_sha256};
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
     let scratch = ScratchDir::new().unwrap();
     let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
     let source = "- parent\n  - child\n";
-    {
+    // For the move, capture imports the note, so it tracks the file it later
+    // sees disappear. The other cases write the note's head directly.
+    let object = if rename == Rename::OnDisk {
+        dohc_engine_domain::derive_capture_object_id("w", "main", "note.md")
+    } else {
+        "note".to_owned()
+    };
+    if rename != Rename::OnDisk {
+        crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
         let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
         store.bind_root_token(token, &NoFaults).unwrap();
         VersionedTextStore::new(&mut store)
@@ -1013,7 +1042,11 @@ async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
     let opened = service
         .workspace_open(
             &ctx,
-            json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
+            if rename == Rename::OnDisk {
+                json!({"rootDir":scratch.path(),"workspaceId":"w"})
+            } else {
+                json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"})
+            },
         )
         .await
         .unwrap();
@@ -1024,16 +1057,22 @@ async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
         .actor
         .configure_reader_resolver(Arc::new(
             dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
-                dohc_engine_reader::Reader::new(Some(
-                    crate::rpc::markdown_recovery::tests::witness_reader(
-                        &scratch,
-                        "witness-unsafe",
-                    ),
-                )),
+                dohc_engine_reader::Reader::new(Some(unsafe_witness_reader(&scratch))),
             )),
         ))
         .await
         .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while rename == Rename::OnDisk
+        && service
+            .capture_flush(&ctx, Some(workspace.clone()))
+            .await
+            .unwrap()["settled"]
+            != json!(true)
+    {
+        assert!(tokio::time::Instant::now() < deadline, "capture settles");
+        tokio::task::yield_now().await;
+    }
     if edited_before {
         let (earlier, egress) = service
             .ydoc_open(
@@ -1056,7 +1095,7 @@ async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
             .unwrap();
         let reader = EngineStore::open_read_only(&engine_db_path(&scratch).unwrap()).unwrap();
         let marker =
-            dohc_engine_collab::read_marker(&reader, &DocKey::new("w", "main", "note").unwrap())
+            dohc_engine_collab::read_marker(&reader, &DocKey::new("w", "main", &object).unwrap())
                 .unwrap()
                 .expect("the closed session leaves its marker");
         assert_eq!(
@@ -1065,25 +1104,85 @@ async fn edit_anyway_opens_a_note_with_no_ydoc_state(edited_before: bool) {
             "the close pruned the note's Y.Doc state"
         );
     }
-    service
+    let path = if rename == Rename::None {
+        "note.md"
+    } else {
+        "renamed.md"
+    };
+    if rename != Rename::None {
+        std::fs::rename(scratch.path().join("note.md"), scratch.path().join(path)).unwrap();
+    }
+    if rename == Rename::InDohc {
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .versioned_text_rename(
+                dohc_engine_domain::RenameTextFile {
+                    workspace_id: "w".into(),
+                    version_id: "main".into(),
+                    from_path: "note.md".into(),
+                    to_path: path.into(),
+                    moment_id: "rename".into(),
+                    request_id: None,
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                open.root.clone(),
+                Arc::new(service.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    if rename == Rename::OnDisk {
+        let db = engine_db_path(&scratch).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let flushed = service
+                .capture_flush(&ctx, Some(workspace.clone()))
+                .await
+                .unwrap();
+            let mut store = EngineStore::open_read_only(&db).unwrap();
+            let heads = VersionedTextStore::new(&mut store);
+            let old = heads.read_text("w", "main", "note.md").unwrap().is_some();
+            let new = heads.read_text("w", "main", path).unwrap().is_some();
+            if flushed["settled"] == json!(true) && !old && new {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "capture records the move: {flushed}, old head {old}, new head {new}"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+    let refused = service
         .ydoc_open(
             &ctx,
             Some(workspace.clone()),
             json!({
-                "versionId":"main","path":"note.md","contentKind":"richdoc",
+                "versionId":"main","path":path,"contentKind":"richdoc",
                 "allowLossySourceSha256":hex_sha256(b"another source"),
             }),
             2,
         )
         .await
         .expect_err("consent to other bytes opens nothing");
+    assert_eq!(
+        refused.code,
+        ErrorCode::Internal,
+        "the source comparison refuses, not a missing marker"
+    );
     assert!(lock(&service.sessions).is_empty());
     let (opened, egress) = service
         .ydoc_open(
             &ctx,
             Some(workspace.clone()),
             json!({
-                "versionId":"main","path":"note.md","contentKind":"richdoc",
+                "versionId":"main","path":path,"contentKind":"richdoc",
                 "allowLossySourceSha256":hex_sha256(source.as_bytes()),
             }),
             3,
