@@ -1,4 +1,4 @@
-import { activityPin, settingsNavPin } from "../src/testPins";
+import { settingsNavPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,13 +8,14 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openExplorerView,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // Screenshot harness (@ui-audit) for the places a Collection's or dohc's
-// setup files show: Customize… on each kind of Collection, the Apps view, and
+// setup files show: Customize… on each kind of Collection, the Explorer's Apps section, and
 // Settings opened from Customize…. Light and dark. Not a regression test; it
 // runs only when a shot directory is set.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
@@ -49,7 +50,7 @@ async function openCustomize(page: Page, folder: string, name: string): Promise<
   return dialog;
 }
 
-test("@ui-audit Customize files, the Apps view, and Settings from Customize…", async () => {
+test("@ui-audit Customize files, the Explorer's Apps section, and Settings from Customize…", async () => {
   test.setTimeout(240_000);
   await mkdir(SHOT_DIR, { recursive: true });
   const temp = await createTempWorkspace();
@@ -105,10 +106,11 @@ test("@ui-audit Customize files, the Apps view, and Settings from Customize…",
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // The Apps view, empty and then with an app.
-    await page.getByTestId(activityPin("sites")).click();
-    await expect(page.getByTestId("sites-view")).toBeVisible();
-    await expect(page.getByTestId("sites-create-first")).toBeVisible();
+    // The Explorer without apps, which has no Apps section, and then with an
+    // app, which brings the section.
+    await openExplorerView(page);
+    await expect(page.getByTestId("explorer-files-section")).toBeVisible();
+    await expect(page.getByTestId("explorer-apps-section")).toHaveCount(0);
     await shoot(page, "apps-empty");
     await writeWorkspaceFiles(temp, [{ path: "demo/index.html", contents: "<!doctype html><title>Demo</title><h1>Demo</h1>\n" }]);
     await expect(page.locator('[data-testid="sites-row"][data-root="demo"]')).toBeVisible();
