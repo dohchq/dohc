@@ -1012,7 +1012,7 @@ const aboutLink = (source: string, title: string, line: number, snippet: string,
 };
 const ABOUT_LINK_ROWS = [
   aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
-  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan|the plan]].", 1),
   aboutLink("research/competitors.md", "Competitor landscape", 7,
     "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
 ];

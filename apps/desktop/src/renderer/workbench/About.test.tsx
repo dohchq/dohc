@@ -214,11 +214,12 @@ describe("About Access", () => {
     expect(rows.map((row) => row.textContent)).toEqual([
       "Anyone with the link", "Ssam@example.com", "Kkim@example.comended", "Llee@example.comended",
     ]);
-    expect(within(rows[0]!).getByRole("img", { name: "View" })).toBeTruthy();
-    expect(within(rows[1]!).getByRole("img", { name: "Edit" })).toBeTruthy();
+    expect(within(rows[0]!).getByRole("img", { name: "Can view" })).toBeTruthy();
+    expect(within(rows[1]!).getByRole("img", { name: "Can edit" })).toBeTruthy();
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
-    // Two grants give access now; the two ended ones stay listed.
+    // Two grants give access now; the two ended ones stay listed, their names quieter.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
+    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-subtle"))).toEqual([false, false, true, true]);
   });
 
   it("reads again when the Share dialog closes, so Only you follows a new share", async () => {
@@ -268,7 +269,7 @@ describe("About Access", () => {
     const row = await screen.findByTestId("about-access-row");
     expect(row.textContent).toContain("You");
     expect(row.getAttribute("title")).toBe("Shared by Ice de Vera");
-    expect(within(row).getByRole("img", { name: "Comment" })).toBeTruthy();
+    expect(within(row).getByRole("img", { name: "Can comment" })).toBeTruthy();
   });
 
   it("keeps a stale list and marks it settled but old", async () => {
@@ -733,19 +734,38 @@ describe("About Links", () => {
     // Each row is the linking file's title, then what it says; its path is in the tooltip.
     const rows = linkRows();
     expect(rows.map((row) => row.textContent)).toEqual([
-      "alphaalpha cites [[plan]] here.",
-      "alphaalpha cites [[plan]] here.",
-      "betabeta cites [[plan]] here.",
+      "alphaalpha cites plan here.",
+      "alphaalpha cites plan here.",
+      "betabeta cites plan here.",
     ]);
     expect(rows.map((row) => row.getAttribute("title"))).toEqual([
       "alpha cites [[plan]] here.\nnotes/alpha.md",
       "alpha cites [[plan]] here.\nnotes/alpha.md",
       "beta cites [[plan]] here.\nnotes/beta.md",
     ]);
-    expect(rows[0]!.querySelector("mark")?.textContent).toBe("[[plan]]");
+    // The link reads as its words, not its syntax.
+    expect(rows[0]!.querySelector("mark")?.textContent).toBe("plan");
 
     await userEvent.setup().click(rows[1]!);
     expect(openLink).toHaveBeenCalledWith("notes/alpha.md", 9);
+  });
+
+  it("shows a link's alias or label, and starts a line a few words before a link far into it", async () => {
+    const at = (snippet: string, literal: string, line: number): LinkRecord => {
+      const start = snippet.indexOf(literal);
+      return { ...link("notes/alpha.md", line), snippet, highlightStart: start, highlightEnd: start + literal.length };
+    };
+    bridgeMock.linksIn.mockResolvedValue(linksPage([
+      at("We agreed in last week's long meeting to ship from [[product-plan|the plan]] on Friday.", "[[product-plan|the plan]]", 1),
+      at("See [the plan](product-plan.md) first.", "[the plan](product-plan.md)", 2),
+    ]));
+    render(<Links />);
+
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(linkRows().map((row) => row.querySelector("mark")!.parentElement!.textContent)).toEqual([
+      "…to ship from the plan on Friday.",
+      "See the plan first.",
+    ]);
   });
 
   it("asks nothing while closed, reads when opened, and keeps its rows while it reads again on opening", async () => {
@@ -1598,7 +1618,8 @@ describe("About History", () => {
     expect(rows.map((row) => row.dataset.momentId)).toEqual(["run-1", "edit-1", "edit-2"]);
     const fold = screen.getByTestId("engine-moment-run-toggle");
     expect(fold.getAttribute("aria-label")).toBe("3 changes");
-    expect(screen.getByTestId("about-history-count").textContent).toBe("3+");
+    // The head counts changes, not rows.
+    expect(screen.getByTestId("about-history-count").textContent).toBe("6");
     // The run opens in place, its earlier edits under its newest.
     await userEvent.setup().click(fold);
     expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId))

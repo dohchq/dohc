@@ -636,16 +636,34 @@ function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string {
   return `${links.rows.length + (chats?.rows.length ?? 0)}${more ? "+" : ""}`;
 }
 
+// A link as its reader sees it: a wikilink's alias or target, a Markdown
+// link's label, without the brackets.
+function linkWords(source: string): string {
+  const wiki = /^!?\[\[([^\]|]*)(?:\|([^\]]*))?\]\]$/.exec(source);
+  const words = wiki ? (wiki[2] ?? wiki[1]) : /^!?\[([^\]]*)\]\(/.exec(source)?.[1];
+  return words?.trim() || source;
+}
+
+// Words kept before a link that starts far into its line, so the link and
+// what follows it stay in view in a narrow rail.
+const LEAD_WORDS = 3;
+const LEAD_CHARS = 16;
+
 // The words around a link, with the link's own words marked. Main clamps the
 // range; this guards a range that drifted anyway, so it never throws.
 function LinkSnippet(props: { link: LinkEntry }) {
   const { snippet } = props.link;
   const start = Math.max(0, Math.min(props.link.highlightStart, snippet.length));
   const end = Math.max(start, Math.min(props.link.highlightEnd, snippet.length));
+  let before = snippet.slice(0, start);
+  if (before.length > LEAD_CHARS) {
+    const words = before.split(/(?<=\s)(?=\S)/);
+    if (words.length > LEAD_WORDS) before = `…${words.slice(-LEAD_WORDS).join("")}`;
+  }
   return (
     <span className="col-start-2 col-end-4 min-w-0 truncate text-[12px] leading-4 text-subtle">
-      {snippet.slice(0, start)}
-      <mark className="bg-transparent text-muted">{snippet.slice(start, end)}</mark>
+      {before}
+      <mark className="bg-transparent text-muted">{linkWords(snippet.slice(start, end))}</mark>
       {snippet.slice(end)}
     </span>
   );
@@ -976,7 +994,8 @@ export function AboutHistoryView(props: {
   );
   const shown = groups.slice(0, HISTORY_GROUPS);
   const readMore = view.status === "ready" && view.more;
-  const more = groups.length > HISTORY_GROUPS || readMore;
+  // The head counts changes, as a run's "5+ changes" does, not rows.
+  const count = view.status === "ready" ? `${view.moments.length}${readMore ? "+" : ""}` : undefined;
   // The runs opened in place, by their key, which a newer edit on top keeps.
   const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(() => new Set());
   const toggleRun = (key: string) => setOpenRuns((open) => {
@@ -990,7 +1009,7 @@ export function AboutHistoryView(props: {
     <AboutSection
       id="history"
       label="History"
-      count={view.status === "ready" ? `${shown.length}${more ? "+" : ""}` : undefined}
+      count={count}
       empty={view.status === "ready" && view.moments.length === 0 && !view.more && !paused}
       expanded={props.expanded}
       onToggle={props.onToggle}
@@ -1133,6 +1152,8 @@ function AccessRowView(props: { row: AccessRow }) {
         ? "You"
         : (row.recipientEmail ?? row.recipientUserId ?? "Unnamed person");
   const level = row.access === null ? null : LEVELS[row.access];
+  // Beside a mark, "Edit" alone reads like a button.
+  const can = level ? `Can ${level.label.toLowerCase()}` : undefined;
   const sharer = row.via === "received" ? (row.sharerName ?? row.granterEmail) : null;
   return (
     <div
@@ -1147,13 +1168,14 @@ function AccessRowView(props: { row: AccessRow }) {
       ) : (
         <ChatAvatar presentation={row.via === "received" ? ownPresentation : neutralPresentation} name={who} kind="human" size="strip" />
       )}
-      <span className="min-w-0 flex-1 truncate">{who}</span>
+      {/* An ended or damaged grant is listed but not counted, so it reads quieter. */}
+      <span className={`min-w-0 flex-1 truncate ${row.status === "active" ? "" : "text-subtle"}`}>{who}</span>
       {row.status !== "active" ? (
         <span className="shrink-0 text-[11px] text-subtle">
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
-        <span role="img" aria-label={level.label} title={level.label} className="shrink-0 text-subtle">
+        <span role="img" aria-label={can} title={can} className="shrink-0 text-subtle">
           <level.icon size={13} aria-hidden />
         </span>
       ) : null}
