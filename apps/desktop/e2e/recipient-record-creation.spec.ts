@@ -295,6 +295,14 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
       await expect.poll(async () => JSON.stringify(await records(fixture.owner.page)), {timeout: 120_000}).toContain("Owner text KEEP");
       await test.info().attach("owner state after restart before restore", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created[0]!.path), null, 2)});
     }
+    // Stop and restore removes a recipient's file only once the owner's History
+    // names the relay-confirmed recipient.
+    for (const record of created) {
+      await expect.poll(async () => (await readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))
+        ?.find(moment => moment.namedAuthor)?.namedAuthor?.label ?? null, { timeout: 120_000 }).toBe(`${RECIPIENT_EMAIL} (Edit)`);
+    }
+    await test.info().attach("owner History before restore", { contentType: "application/json",
+      body: JSON.stringify(await Promise.all(created.map(record => readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))), null, 2) });
     // Owner settlement is held by the existing debounce seam. History still
     // attributes the file to the recipient when this destructive action runs.
     const result = await fixture.owner.page.evaluate(async workspaceId =>
