@@ -145,7 +145,7 @@ describe("Explorer Home", () => {
     expect(screen.queryByTestId("explorer-home")).toBeNull();
   });
 
-  it("draws no Pinned or Recent section with nothing in it, and always draws Pages with its +", async () => {
+  it("draws no Pinned or Recent section with nothing in it, and always draws Pages with its + and no chevron", async () => {
     const onNewPage = vi.fn();
     const user = userEvent.setup();
     render(<Explorer {...explorerProps({ files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage })} />);
@@ -155,6 +155,10 @@ describe("Explorer Home", () => {
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     expect(rowLabels("Pages")).toEqual([]);
+    // Nothing to fold: no chevron, and the header claims no expanded state.
+    const toggle = screen.getByTestId("explorer-pages-toggle");
+    expect(toggle.hasAttribute("aria-expanded")).toBe(false);
+    expect(toggle.querySelector("svg")).toBeNull();
     await user.click(within(section("Pages")).getByRole("button", { name: "New page" }));
     expect(onNewPage).toHaveBeenCalledWith("");
   });

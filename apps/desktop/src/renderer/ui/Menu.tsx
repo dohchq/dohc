@@ -242,6 +242,8 @@ export function Menu(props: {
   disabled?: boolean;
   menuTestId?: string;
   width?: number;
+  /** The trigger edge the list lines up with: its end by default, or its start to open rightward. */
+  align?: "start" | "end";
   closeOnPick?: boolean;
   /** Rendered under the rows, inside the list. */
   children?: ReactNode;
@@ -254,6 +256,7 @@ export function Menu(props: {
   // The row a cancelled field gives focus back to, once it renders again.
   const refocus = useRef<string | null>(null);
   const width = props.width ?? MENU_WIDTH_PX;
+  const align = props.align ?? "end";
   const [place, setPlace] = useState<Place | null>(null);
   const [pointerMoved, setPointerMoved] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
@@ -274,7 +277,8 @@ export function Menu(props: {
     const box = trigger.current?.getBoundingClientRect();
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const edge = align === "start" ? box.left + width : box.right;
+      const left = Math.max(EDGE_PX, Math.min(edge, window.innerWidth - EDGE_PX) - width);
       const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
       const above = box.top - GAP_PX - EDGE_PX;
       setPlace(
@@ -289,7 +293,7 @@ export function Menu(props: {
       setPlace(null);
       setPointerMoved(false);
     };
-  }, [open, width]);
+  }, [open, width, align]);
 
   // Placed, a list shorter than its rows shows its top, so it scrolls to the
   // row focus opened on.

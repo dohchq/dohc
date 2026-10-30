@@ -112,6 +112,7 @@ function SectionActions(props: { label: string; testId: string; items: readonly 
       open={open}
       onOpenChange={setOpen}
       width={248}
+      align="start"
       trigger={(trigger) => (
         <button {...trigger} type="button" data-testid={props.testId} aria-label={props.label} title={props.label} className={HEADER_BUTTON}>
           <MoreHorizontal size={13} aria-hidden />
@@ -544,6 +545,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
         const open = !collapsed.has(section.id);
         const sectionKey = `section:${section.id}`;
         const testId = SECTION_TEST_IDS[section.id];
+        // An empty section has nothing to fold, so it shows no chevron.
+        const empty = section.rows.length === 0 && !section.more && !section.body && !section.after;
         return (
           <section
             key={section.id}
@@ -557,7 +560,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                 ref={(element) => registerRef(sectionKey, element)}
                 data-home-key={sectionKey}
                 data-testid={`${testId}-toggle`}
-                aria-expanded={open}
+                aria-expanded={empty ? undefined : open}
                 tabIndex={tabbableKey === sectionKey ? 0 : -1}
                 onFocus={() => setFocusedKey(sectionKey)}
                 onClick={() => {
@@ -576,7 +579,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     {section.count}
                   </span>
                 ) : null}
-                <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+                {empty ? null : (
+                  <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+                )}
               </button>
               {section.actions ? (
                 <SectionActions label={`${section.label} actions`} testId={`${testId}-actions`} items={section.actions} />
@@ -679,6 +684,9 @@ const HomeRow = memo(function HomeRow(props: {
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu ? 1 : 0);
+  // At rest the name runs to the row's end and only a set pin keeps its place;
+  // on hover or focus a spacer (less the row's gap) clears the pin and menu.
+  const resting = onSetPinned && pinned ? 1 : 0;
   const [reached, setReached] = useState(false);
   const dragPath = drag && path ? path : null;
   return (
@@ -712,7 +720,7 @@ const HomeRow = memo(function HomeRow(props: {
           onDrop={dragPath !== null ? (event) => drag!.drop(dragPath, event) : undefined}
           onDragLeave={drag?.leave}
           onDragEnd={drag?.end}
-          style={{ paddingLeft: 8 + (row.depth - 1) * 20, paddingRight: 8 + trailing * 24 }}
+          style={{ paddingLeft: 8 + (row.depth - 1) * 20, paddingRight: 8 + resting * 24 }}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left text-[13px] focus-visible:-outline-offset-2"
         >
           {props.chevronSlot ? (
@@ -731,6 +739,13 @@ const HomeRow = memo(function HomeRow(props: {
             <span className={`min-w-0 truncate text-[12px] ${row.unavailable ? "shrink-0 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
           ) : null}
           {app ? <AppMarks app={app} /> : null}
+          {trailing > resting ? (
+            <span
+              aria-hidden
+              style={{ width: (trailing - resting) * 24 - 8 }}
+              className="hidden shrink-0 group-hover:block group-has-[:focus-visible]:block"
+            />
+          ) : null}
         </button>
         {trailing > 0 && (reached || pinned) ? (
           <span className="absolute right-1 top-0.5 flex items-center">

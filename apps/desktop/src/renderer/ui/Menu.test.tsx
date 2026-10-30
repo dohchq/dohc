@@ -6,12 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MENU_SEPARATOR, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
-function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
+function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; align?: "start" | "end"; children?: ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <div>
       <button type="button">Elsewhere</button>
-      <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} closeOnPick={props.closeOnPick} items={props.items}>
+      <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} closeOnPick={props.closeOnPick} align={props.align} items={props.items}>
         {props.children}
       </Menu>
     </div>
@@ -422,6 +422,25 @@ describe("Menu", () => {
       expect(menu.style.maxHeight).toBe("554px");
       expect(menu.style.getPropertyValue("--dohc-menu-from")).toBe("4px");
       expect(menu.className).toContain("dohc-menu-in");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("lines up with its trigger's end, or with its start to open rightward, inside the window", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("innerWidth", 1000);
+    const box = (left: number) => ({ top: 100, bottom: 124, left, right: left + 24, width: 24, height: 24, x: left, y: 100, toJSON: () => ({}) });
+    try {
+      for (const [align, left, expected] of [["end", 280, "160px"], ["start", 280, "280px"], ["start", 900, "844px"]] as const) {
+        render(<Harness items={items} align={align} />);
+        const trigger = screen.getByTestId("row-menu");
+        vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(box(left));
+        await user.click(trigger);
+        expect(screen.getByRole("menu").style.left).toBe(expected);
+        cleanup();
+      }
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
