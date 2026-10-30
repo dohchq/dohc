@@ -280,6 +280,11 @@ export function createLocalCollectionApps(options: {
   const pendingCount = (publicationId: string) => pendingKeys(publicationId).length;
   return {
     current,
+    async checkBrowserPublication(publicationId: string, authorityRevision: number, signal: AbortSignal) {
+      const { capability } = current(publicationId, authorityRevision);
+      await schema(capability, await call(signal, engine => engine.activeVersionId()), signal);
+      current(publicationId, authorityRevision);
+    },
     async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent: ApprovalAgent | null | undefined, displace: (displaced: LocalAppRow | undefined, commit: () => void) => void) {
       options.assertCurrent(); signal.throwIfAborted();
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS), declared = candidate.capabilities[0];

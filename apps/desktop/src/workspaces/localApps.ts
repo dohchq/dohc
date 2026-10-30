@@ -21,6 +21,9 @@ export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof
     assertBrowserPublication(publicationId, authorityRevision) {
       kind(publicationId, authorityRevision);
     },
+    async checkBrowserPublication(publicationId, authorityRevision, signal) {
+      if (kind(publicationId, authorityRevision) === "collection") await collection.checkBrowserPublication(publicationId, authorityRevision, signal);
+    },
     request: async (publicationId, action, input, signal) => kind(publicationId) === "dataset"
       ? dataset.request(publicationId, action, input, signal) : collection.request(publicationId, action, input, signal),
     readBrowserFile: async (publicationId, input, signal) => {

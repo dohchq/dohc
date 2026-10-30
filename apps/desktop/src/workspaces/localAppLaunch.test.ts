@@ -6,12 +6,13 @@ import { createLocalAppLaunchHost, LocalAppUnavailableError, type LocalAppLaunch
 
 const publicationId = "a".repeat(64);
 const hosts: LocalAppLaunchHost[] = [];
-afterEach(async () => { vi.restoreAllMocks(); await Promise.all(hosts.splice(0).map(host => host.close())); });
-async function fixture() {
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await Promise.all(hosts.splice(0).map(host => host.close())); });
+async function fixture(keepAlive = false) {
   const lifetime = new AbortController(), session = new AbortController();
   let revision = 1, shared = false;
   const bytes = Buffer.from("document.getElementById('root').textContent='Approved app';");
   const backend = {
+    checkBrowserPublication: vi.fn(async (_id: string, _expected: number, _signal: AbortSignal) => {}),
     assertBrowserPublication: vi.fn((id: string, expected: number) => {
       if (id !== publicationId || shared || expected !== revision) throw Error("Unavailable publication");
     }),
@@ -23,13 +24,14 @@ async function fixture() {
     readBrowserFile: vi.fn(async (_publication: string, _body: unknown, _signal?: AbortSignal) => ({ file: { fileId: "file_0123456789abcdef", name: "receipt.pdf", contentType: "application/pdf", byteLength: 4, sha256: "a".repeat(64) }, bytesBase64: "JVBERg==" })),
   };
   const host = await createLocalAppLaunchHost({ backend, lifetime: lifetime.signal }); hosts.push(host);
-  const url = await host.launch(publicationId, session.signal), origin = new URL(url).origin, handoff = new URL(url).hash.slice(1);
+  const managed = keepAlive ? await host.launchSession(publicationId, session.signal, { keepAlive: true }) : undefined;
+  const url = managed?.url ?? await host.launch(publicationId, session.signal), origin = new URL(url).origin, handoff = new URL(url).hash.slice(1);
   const post = (path: string, body?: unknown, headers: Record<string, string> = {}) => fetch(origin + path, { method: "POST", headers: { origin, "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
   const open = async () => {
     const response = await post("/session", { handoff }); expect(response.status).toBe(200);
     return await response.json() as { proof: string; html: string };
   };
-  return { host, backend, lifetime, session, url, origin, handoff, post, open, narrow() { revision++; }, share() { shared = true; } };
+  return { host, backend, lifetime, session, managed, url, origin, handoff, post, open, narrow() { revision++; }, share() { shared = true; } };
 }
 const invoke = { id: "one", op: "backend.invoke", operation: "register", idempotencyKey: "attempt-1", input: { count: 1 } };
 
@@ -38,12 +40,32 @@ it("serves only an approved snapshot after a one-use fragment handoff", async ()
   const bootstrap = await fetch(f.origin + "/bootstrap"); expect(bootstrap.status).toBe(200);
   const html = await bootstrap.text();
   expect(html).not.toContain(f.handoff); expect(html).not.toContain("Approved app");
-  expect(html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads'");
+  expect(html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'");
   expect(bootstrap.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
   expect(bootstrap.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   const opened = await f.open(); expect(opened.html).toContain("Approved app"); expect(opened.html).not.toContain(opened.proof);
   expect((await f.post("/session", { handoff: f.handoff })).status).toBe(404);
   expect((await fetch(f.origin + "/backend.js")).status).toBe(404);
+});
+it("exposes a managed session that closes its listener and reports approval changes", async () => {
+  const f = await fixture();
+  const managed = await f.host.launchSession(publicationId, f.session.signal);
+  expect(managed.isAlive()).toBe(true);
+  f.narrow();
+  expect(managed.isAlive()).toBe(false);
+  expect(managed.ended.reason).toBe("needs-approval");
+  await managed.stop();
+  await expect(fetch(managed.url)).rejects.toThrow();
+});
+it("stops a managed session explicitly and releases its staged slot", async () => {
+  const f = await fixture();
+  const managed = await f.host.launchSession(publicationId, f.session.signal);
+  await managed.stop();
+  expect(managed.ended.reason).toBe("ended");
+  expect(managed.isAlive()).toBe(false);
+  await expect(fetch(managed.url)).rejects.toThrow();
+  const next = await f.host.launchSession(publicationId, f.session.signal);
+  await next.stop();
 });
 it("resumes a refreshed parent using its origin-bound proof and freshly checked approved bundle", async () => {
   const f = await fixture();
@@ -183,6 +205,33 @@ it("never extends the hard session lifetime through resume", async () => {
   }
   now = started + 30 * 60_000 + 1;
   expect((await f.post("/resume", undefined, headers)).status).toBe(404);
+});
+it("keeps an in-dohc session alive without heartbeats or a hard cap", async () => {
+  const f = await fixture(true), opened = await f.open();
+  const html = await (await fetch(f.origin + "/bootstrap")).text();
+  expect(html).not.toContain("setTimeout(stop,1800000)");
+  expect(html).not.toContain("setTimeout(poll");
+  const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now + 2 * 60 * 60_000);
+  expect(f.managed!.isAlive()).toBe(true);
+  expect((await f.post("/resume", undefined, { "x-dohc-app-proof": opened.proof })).status).toBe(200);
+  await f.managed!.stop();
+  expect(f.managed!.isAlive()).toBe(false);
+});
+it("ends an in-dohc session when its Collection approval check refuses", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const f = await fixture(true); await f.open();
+  f.backend.checkBrowserPublication.mockRejectedValue(Error("The Collection schema changed."));
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(f.managed!.ended.reason).toBe("needs-approval");
+  await f.managed!.stop();
+});
+it("keeps an in-dohc session during temporary engine unavailability", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const f = await fixture(true); await f.open();
+  f.backend.checkBrowserPublication.mockRejectedValue(new LocalAppUnavailableError("The engine did not answer."));
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(f.managed!.isAlive()).toBe(true);
+  await f.managed!.stop();
 });
 
 it("returns only validated app refusals after rechecking current authority", async () => {
