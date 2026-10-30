@@ -11,7 +11,7 @@ afterEach(cleanup);
 
 // File tiles carry the kind registry's names.
 const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
-const LABELS = { markdown: DOCUMENT, collection: "Collection", drawing: FILE_KIND_RECORDS.drawing.name, app: "App" };
+const LABELS = { markdown: DOCUMENT, collection: "Collection", drawing: FILE_KIND_RECORDS.drawing.name };
 
 const FILES = [
   { path: "a.md", kind: "file" as const },
@@ -22,7 +22,7 @@ const FILES = [
 function renderStart(overrides: Partial<Parameters<typeof EmptyEditorGroup>[0]> = {}) {
   const props = {
     platform: "win32",
-    create: { markdown: vi.fn(), collection: vi.fn(), drawing: vi.fn(), app: vi.fn() },
+    create: { markdown: vi.fn(), collection: vi.fn(), drawing: vi.fn() },
     recent: [],
     files: FILES,
     onOpen: vi.fn(),
@@ -33,7 +33,7 @@ function renderStart(overrides: Partial<Parameters<typeof EmptyEditorGroup>[0]> 
 }
 
 describe("start surface tiles", () => {
-  it.each(["markdown", "collection", "drawing", "app"] as const)("runs the %s action from its tile", async (kind) => {
+  it.each(["markdown", "collection", "drawing"] as const)("runs the %s action from its tile", async (kind) => {
     const { create } = renderStart();
     fireEvent.click(screen.getByRole("button", { name: LABELS[kind] }));
     expect(create[kind]).toHaveBeenCalledOnce();
@@ -86,26 +86,25 @@ describe("start surface tiles", () => {
     expect(create.collection).toHaveBeenCalledOnce();
 
     await user.tab();
-    await user.tab();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "App" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: LABELS.drawing }));
   });
 
   it("ignores presses while an action is still running", async () => {
     let finish = () => {};
-    const app = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const drawing = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
     const markdown = vi.fn();
-    renderStart({ create: { app, markdown } });
+    renderStart({ create: { drawing, markdown } });
 
-    fireEvent.click(screen.getByRole("button", { name: "App" }));
-    fireEvent.click(screen.getByRole("button", { name: "App" }));
+    fireEvent.click(screen.getByRole("button", { name: LABELS.drawing }));
+    fireEvent.click(screen.getByRole("button", { name: LABELS.drawing }));
     fireEvent.click(screen.getByRole("button", { name: DOCUMENT }));
-    expect(app).toHaveBeenCalledOnce();
+    expect(drawing).toHaveBeenCalledOnce();
     expect(markdown).not.toHaveBeenCalled();
 
     finish();
     await vi.waitFor(() => {
-      fireEvent.click(screen.getByRole("button", { name: "App" }));
-      expect(app).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole("button", { name: LABELS.drawing }));
+      expect(drawing).toHaveBeenCalledTimes(2);
     });
   });
 });

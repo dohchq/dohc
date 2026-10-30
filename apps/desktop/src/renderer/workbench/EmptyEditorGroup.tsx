@@ -19,17 +19,15 @@ const KIND_TONE: Record<StartKind, string> = {
   markdown: "text-ink",
   collection: "text-hue-teal",
   drawing: "text-hue-plum",
-  app: "text-hue-amber",
 };
 
 // What a person can make, in tile order. A file kind takes its name from the
-// kind registry. The registry names no Collection or App, so those two labels
-// live only here.
+// kind registry. The registry names no Collection, so that label lives only
+// here.
 const START_KINDS: readonly { kind: StartKind; label: string; glyph: ReactNode; shortcut?: "new-file" }[] = [
   { kind: "markdown", label: FILE_KIND_RECORDS.markdown.name, shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
   { kind: "collection", label: "Collection", glyph: <ObjectGlyph kind="collection" size={16} className={KIND_TONE.collection} /> },
   { kind: "drawing", label: FILE_KIND_RECORDS.drawing.name, glyph: <KindGlyph kind={FILE_KIND_RECORDS.drawing} size={16} className={KIND_TONE.drawing} /> },
-  { kind: "app", label: "App", glyph: <ObjectGlyph kind="app" size={16} className={KIND_TONE.app} /> },
 ];
 
 const RECENT_LIMIT = 5;
@@ -73,7 +71,7 @@ export function EmptyEditorGroup(props: {
   onDropFiles?: (files: File[]) => void;
 }) {
   const recentId = useId();
-  // A press while an action runs does nothing, so a double click makes one app.
+  // A press while an action runs does nothing, so a double click creates once.
   const running = useRef(false);
   const recent = useMemo(() => props.files ? recentFiles(props.recent, props.files) : [], [props.recent, props.files]);
   const tiles = START_KINDS.flatMap((tile) => {
@@ -101,8 +99,9 @@ export function EmptyEditorGroup(props: {
           grows below them and never moves them. */}
       <div aria-hidden className="max-h-64 min-h-8 shrink-0 basis-[22%]" />
       <div className="mx-auto flex w-full max-w-176 flex-col gap-8 px-8 pb-8">
+        {/* One row where every label fits whole, else a column. */}
         {tiles.length > 0 ? (
-          <div className="grid grid-cols-2 gap-4 @lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 @sm:grid-cols-3">
             {tiles.map((tile) => (
               <button
                 key={tile.kind}

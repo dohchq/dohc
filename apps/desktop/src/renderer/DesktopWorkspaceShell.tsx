@@ -309,7 +309,6 @@ import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
-import { createFirstAppFiles } from "./workbench/createFirstApp";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -3841,36 +3840,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
-  const createFirstApp = useCallback(async () => {
-    try {
-      const { root } = await createFirstAppFiles({
-        workspaceId,
-        files,
-        folders,
-        mutations: bridge(),
-      });
-      try {
-        await refreshFiles();
-      } catch (error) {
-        reportShellError(
-          "The app was created, but the workspace could not refresh.",
-          error,
-        );
-        return;
-      }
-      openVirtualTab(siteTabPath(root));
-    } catch (error) {
-      reportShellError("Could not create the app.", error);
-      await refreshFiles().catch(() => undefined);
-    }
-  }, [
-    files,
-    folders,
-    openVirtualTab,
-    refreshFiles,
-    reportShellError,
-    workspaceId,
-  ]);
   // Add an app here… opens the Explorer with its Apps section open and its
   // first row focused. The request belongs to one workspace, like a reveal.
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
@@ -4495,15 +4464,14 @@ export function DesktopWorkspaceShell(props: {
     [commandContext, runCommand],
   );
   // The start surface's tiles: each kind's existing create action, where the
-  // workspace allows it. An app is a folder, so it needs folder creation.
+  // workspace allows it.
   const startActions = useMemo(
     () => ({
       ...(isCommandAvailable("new-file", commandContext) ? { markdown: commandHandlers["new-file"] } : {}),
       ...(isCommandAvailable("new-collection", commandContext) ? { collection: commandHandlers["new-collection"] } : {}),
       ...(isCommandAvailable("new-drawing", commandContext) ? { drawing: createUntitledDrawing } : {}),
-      ...(isCommandAvailable("new-folder", commandContext) ? { app: createFirstApp } : {}),
     }),
-    [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
+    [commandContext, commandHandlers, createUntitledDrawing],
   );
   // Files dropped on the start surface land at the workspace root.
   const importDroppedFiles = useCallback((dropped: File[]) => {
