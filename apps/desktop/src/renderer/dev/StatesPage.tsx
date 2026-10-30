@@ -2386,6 +2386,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={undefined} dataCollections={[]} />
           </div>
         </Specimen>
+        <Specimen label="loading: blank for 150 ms, then skeleton rows">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} listed={false} />
+          </div>
+        </Specimen>
         <Specimen label="failed apps read: words in Notices">
           <div className="w-60 rounded-lg border border-line bg-panel p-1">
             <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />

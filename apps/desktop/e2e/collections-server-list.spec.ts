@@ -127,7 +127,10 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await expectRowTooltip(page, section.getByTestId("collections-elsewhere"), "Others on Studio Mac",
       "Other Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.", "collections-server-list");
     await expect(section.getByTestId("collections-refusal")).toHaveCount(0);
-    await expect(section.getByRole("button", { name: "Restore from recovery file" })).toHaveCount(0);
+    await section.getByRole("button", { name: "Collections actions", exact: true }).click();
+    await expect(page.getByRole("menuitemradio", { name: "Show archived Collections", exact: true })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Restore from recovery file…", exact: true })).toHaveCount(0);
+    await page.keyboard.press("Escape");
     const listed = await page.evaluate(workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     expect(listed).toMatchObject({ kind: "list", datasets: [{ datasetId: definition.datasetId, datasetPath: "registrations/dataset.json" }],
       nextCursor: null, elsewhere: { server: new URL(relay.baseUrl).origin, computer: { label: "Studio Mac", sameName: false } } });

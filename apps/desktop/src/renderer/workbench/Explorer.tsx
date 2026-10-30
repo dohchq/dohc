@@ -514,10 +514,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
   const renameFocus = useRef<{ from: string; to: string } | null>(null);
+  // A rename in Home returns focus to Home's row for the path.
+  const rowFor = useCallback((path: string) => rowRefs.current.get(path) ??
+    [...fileTreeRef.current?.querySelectorAll<HTMLElement>("[data-home-key]") ?? []].find((row) => row.dataset.path === path), []);
   useFocusSurface(fileTreeRef, () => {
     const paths = renameFocus.current;
     renameFocus.current = null;
-    return paths ? rowRefs.current.get(paths.to) ?? rowRefs.current.get(paths.from) : null;
+    return paths ? rowFor(paths.to) ?? rowFor(paths.from) : null;
   });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
@@ -958,7 +961,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           try {
             return await bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath });
           } catch (cause) {
-            if (document.activeElement === rowRefs.current.get(toPath)) {
+            if (document.activeElement === rowFor(toPath)) {
               renameFocus.current = { from: toPath, to: path };
             }
             throw cause;
@@ -968,7 +971,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         () => setEditing(current => current === edit ? null : current),
       );
     },
-    [runChanges, workspaceId],
+    [rowFor, runChanges, workspaceId],
   );
 
   const commitCreateFolder = useCallback(

@@ -70,10 +70,11 @@ describe("Explorer collection folders", () => {
   it("offers recovery before the workspace has any data Collections", () => {
     const onRestoreCollection = vi.fn();
     const view = render(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection })} />);
-    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Restore from recovery file" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Collections actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore from recovery file…" }));
     expect(onRestoreCollection).toHaveBeenCalledOnce();
     view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
-    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
   });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
@@ -161,7 +162,7 @@ describe("Collections this computer cannot use", () => {
       dataCollections: [], onRestoreCollection: vi.fn() })} />);
     const section = screen.getByRole("region", { name: "Collections" });
     expect(within(section).getByTestId("collections-refusal").textContent).toBe("Which computer keeps these Collections?Use this computer");
-    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    expect(within(section).queryByRole("button", { name: "Collections actions" })).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     expect(within(section).queryByRole("button", { name: "Try again" })).toBeNull();
@@ -196,8 +197,10 @@ describe("Collections on this computer's server, where another computer keeps th
     expectTooltip(within(section).getByText("Others on Laptop"), words);
     expect(within(section).getByTestId("collections-elsewhere").textContent).toBe(`Others on Laptop${words}Use this computer`);
     expect(within(section).queryByTestId("collections-refusal")).toBeNull();
-    expect(within(section).getByLabelText("Archived collections")).toBeTruthy();
-    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Collections actions" }));
+    expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Restore from recovery file…" })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     // Behind main's question, which names the other computer.
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
@@ -207,7 +210,7 @@ describe("Collections on this computer's server, where another computer keeps th
     expectTooltip(screen.getByText("On Laptop"), offline);
     expect(screen.queryByRole("button", { name: "Registrations" })).toBeNull();
     expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
-    expect(screen.queryByText("Restore from recovery file")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
     // Main named no computer: the row says the whole sentence, with the same step.
     rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], collectionsElsewhere: { computer: null, others: false, words: offline }, onKeepCollections })} />);
     expect(screen.getByTestId("collections-elsewhere").textContent).toBe(`${offline}Use this computer`);

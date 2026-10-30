@@ -143,12 +143,13 @@ describe("the Collections section", () => {
     });
     renderShell(bridge);
     await waitFor(() => expect(bridge.dataset).toHaveBeenCalledOnce());
-    expect(screen.queryByLabelText("Archived collections")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
 
     await act(async () => listed.resolve({ kind: "list", datasets: [], nextCursor: null }));
-    await user.click(await screen.findByLabelText("Archived collections"));
-    expect(screen.getByRole("button", { name: "Restore from recovery file" })).toBeTruthy();
-    expect((screen.getByLabelText("Archived collections") as HTMLInputElement).checked).toBe(true);
+    await user.click(await screen.findByRole("button", { name: "Collections actions" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
+    await user.click(screen.getByRole("button", { name: "Collections actions" }));
+    expect(screen.getByRole("menuitem", { name: "Restore from recovery file…" })).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" }).getAttribute("aria-checked")).toBe("true");
   });
 });

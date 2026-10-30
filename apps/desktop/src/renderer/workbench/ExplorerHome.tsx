@@ -16,6 +16,7 @@ import {
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { RetryRow } from "../ui/controls";
 import { isDeleteKey } from "../ui/keys";
+import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, type ExplorerProps, type RowDropPreview } from "./Explorer";
@@ -82,6 +83,8 @@ type Section = {
   // A last row that is not a file, such as Show all in Files.
   more?: { key: string; label: string; testId: string; onActivate: () => void };
   add?: { label: string; onClick: () => void };
+  // The section's own actions, in a ⋯ beside its +.
+  actions?: MenuItem[];
   // What the section shows before or after its rows.
   body?: ReactNode;
   after?: ReactNode;
@@ -97,6 +100,26 @@ const SECTION_TEST_IDS: Record<HomeSectionId, string> = {
   apps: "explorer-apps",
   other: "explorer-other-files",
 };
+
+const HEADER_BUTTON = "grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink";
+
+function SectionActions(props: { label: string; testId: string; items: readonly MenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label={props.label}
+      items={props.items}
+      open={open}
+      onOpenChange={setOpen}
+      width={208}
+      trigger={(trigger) => (
+        <button {...trigger} type="button" data-testid={props.testId} aria-label={props.label} title={props.label} className={HEADER_BUTTON}>
+          <MoreHorizontal size={13} aria-hidden />
+        </button>
+      )}
+    />
+  );
+}
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
@@ -161,6 +184,20 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     !!refusal ||
     !!explorer.collectionsElsewhere;
   const appsShown = apps?.state.status === "failed" || appList.length > 0;
+  const collectionActions: MenuItem[] = [];
+  if (!refusal && explorer.onIncludeArchivedCollections) {
+    const archived = explorer.includeArchivedCollections ?? false;
+    collectionActions.push({
+      id: "archived",
+      label: "Show archived Collections",
+      checked: archived,
+      testId: "collections-show-archived",
+      onSelect: () => explorer.onIncludeArchivedCollections?.(!archived),
+    });
+  }
+  if (!refusal && explorer.onRestoreCollection && !explorer.shareView && !explorer.collectionsElsewhere) {
+    collectionActions.push({ id: "restore", label: "Restore from recovery file…", testId: "collections-restore", onSelect: explorer.onRestoreCollection });
+  }
 
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
@@ -184,29 +221,13 @@ export function ExplorerHome(props: ExplorerHomeProps) {
         ? { more: { key: "collections:more", label: "Show more collections", testId: "collections-more", onActivate: explorer.onMoreDataCollections } }
         : {}),
       ...(explorer.shareView ? {} : { add: { label: "New Collection", onClick: () => explorer.onNewCollection("") } }),
+      ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
         <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
       ) : undefined,
-      after: refusal ? undefined : (
-        <>
-          {explorer.collectionsElsewhere ? <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} /> : null}
-          {explorer.onIncludeArchivedCollections ? (
-            <label className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted">
-              <input
-                type="checkbox"
-                checked={explorer.includeArchivedCollections ?? false}
-                onChange={(event) => explorer.onIncludeArchivedCollections?.(event.target.checked)}
-              />
-              Archived collections
-            </label>
-          ) : null}
-          {explorer.onRestoreCollection && !explorer.shareView && !explorer.collectionsElsewhere ? (
-            <button type="button" className="h-7 rounded-md px-2 text-left text-[12px] text-muted hover:bg-hover hover:text-ink" onClick={explorer.onRestoreCollection}>
-              Restore from recovery file
-            </button>
-          ) : null}
-        </>
-      ),
+      after: !refusal && explorer.collectionsElsewhere ? (
+        <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
+      ) : undefined,
     });
   }
   if (appsShown) {
@@ -557,6 +578,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                 ) : null}
                 <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
               </button>
+              {section.actions ? (
+                <SectionActions label={`${section.label} actions`} testId={`${testId}-actions`} items={section.actions} />
+              ) : null}
               {section.add ? (
                 <button
                   type="button"
@@ -564,7 +588,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                   aria-label={section.add.label}
                   title={section.add.label}
                   onClick={section.add.onClick}
-                  className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink"
+                  className={HEADER_BUTTON}
                 >
                   <Plus size={13} aria-hidden />
                 </button>
@@ -700,8 +724,9 @@ const HomeRow = memo(function HomeRow(props: {
             )
           ) : null}
           <HomeGlyph row={row} active={active} />
-          <span className="min-w-0 flex-1 truncate">{row.label}</span>
-          {row.detail ? <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{row.detail}</span> : null}
+          {/* The folder hint gives way before the name; the title holds the whole path. */}
+          <span className="min-w-0 flex-auto truncate">{row.label}</span>
+          {row.detail ? <span className="min-w-0 shrink-[999] truncate text-[12px] text-subtle">{row.detail}</span> : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
         {trailing > 0 && (reached || pinned) ? (
