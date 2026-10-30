@@ -116,6 +116,8 @@ export function installAppViewEmbedder(owner: WebContents): void {
     params.partition = entry.partition;
     entry.attached = true;
     admitted = entry;
+    // Electron creates the guest before this task ends. An admission it didn't use doesn't outlast the task.
+    queueMicrotask(() => { if (admitted === entry) admitted = undefined; });
   });
 }
 

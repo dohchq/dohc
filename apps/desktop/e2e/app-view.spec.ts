@@ -164,13 +164,16 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
     const guestId = (await guestIds(electronApp))[0]!;
     await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
-    // The approved app's address admits one guest. A second guest at the same address is refused.
-    const issued = (await page.getByTestId("app-view-webview").getAttribute("src"))!;
-    expect(await attaches()).toContainEqual({ src: issued, refused: false });
+    // The approved app's address admits one guest. A second guest at the same address is refused. The page drops
+    // the address's fragment once it loads, so the address comes from main's record.
+    const admitted = (await attaches()).filter(attach => !attach.refused);
+    const issued = admitted.at(-1)!.src;
+    await expect.poll(() => electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId)).toBe(issued.split("#")[0]);
     await injectGuest(page, issued, preload);
     await expect.poll(attaches).toContainEqual({ src: issued, refused: true });
     await removeInjected();
-    expect(await guestsCreated()).toBe(1);
+    // Electron created a guest only for each attach dohc admitted.
+    expect(await guestsCreated()).toBe(admitted.length);
     expect(await guestIds(electronApp)).toEqual([guestId]);
     const isolation = await electronApp.evaluate(({ webContents, BrowserWindow }, id) => {
       const guest = webContents.fromId(id)!;

@@ -67,6 +67,16 @@ it("denies unissued attachments and strips every renderer-supplied preference fr
   f.owner.emit("will-attach-webview", reject, {}, { src: result.url });
   expect(reject.preventDefault).toHaveBeenCalledTimes(2);
 });
+it("clears an admission that Electron didn't use in the same task", async () => {
+  const f = fixture();
+  const opened = await f.open() as { url: string };
+  f.owner.emit("will-attach-webview", { preventDefault: vi.fn() }, {}, { src: opened.url });
+  await Promise.resolve();
+  const late = Object.assign(new EventEmitter(), { id: nextId++, hostWebContents: f.owner, session: f.isolated,
+    getType: () => "webview", close: vi.fn() });
+  app.emit("web-contents-created", {}, late);
+  expect(late.close).toHaveBeenCalledOnce();
+});
 it("creates no launch or guest authorization without an active approval", async () => {
   const f = fixture(); f.activePublication.mockResolvedValue(null);
   expect(await f.open()).toEqual({ kind: "unapproved", viewId: "one" });
