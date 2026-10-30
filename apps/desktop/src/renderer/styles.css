@@ -3014,3 +3014,75 @@ input.dohc-math__source {
 @utility dohc-section-label {
   @apply text-[12px] font-medium text-subtle;
 }
+
+/* An agent at work: three dots in its hue. Under reduced motion they hold still. */
+.dohc-working-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.dohc-working-dots > i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: dohc-working-dot 1.2s ease-in-out infinite;
+}
+.dohc-working-dots > i:nth-child(2) {
+  opacity: 0.65;
+  animation-delay: 0.2s;
+}
+.dohc-working-dots > i:nth-child(3) {
+  opacity: 1;
+  animation-delay: 0.4s;
+}
+@keyframes dohc-working-dot {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-2px); }
+}
+
+/* A thread's latest reply under its parent: two lines of running text. Lists
+ * keep their markers inline. The end of the second line fades out. */
+.dohc-chat-peek {
+  max-height: 40px;
+  overflow: hidden;
+  line-height: 20px;
+  mask-image: linear-gradient(black, black), linear-gradient(to right, black calc(100% - 64px), transparent);
+  mask-size: 100% 20px, 100% 20px;
+  mask-position: top, bottom;
+  mask-repeat: no-repeat;
+}
+.dohc-chat-peek :is(div, p, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+/* A chip or inline box keeps to the line, so two lines stay two lines. */
+.dohc-chat-peek * {
+  max-height: 20px;
+  vertical-align: top;
+}
+.dohc-chat-peek :is(p, li, blockquote, pre, h1, h2, h3, h4, h5, h6)::after {
+  content: " ";
+}
+.dohc-chat-peek ul > li::before {
+  content: "• ";
+}
+.dohc-chat-peek ol {
+  counter-reset: dohc-peek;
+}
+.dohc-chat-peek ol > li {
+  counter-increment: dohc-peek;
+}
+.dohc-chat-peek ol > li::before {
+  content: counter(dohc-peek) ". ";
+}
+
+/* The list contains each message's layout but not its paint, so a hover
+ * bar can rise over the message above. */
+[data-chat-virtualized] .legend-list-content-container > * > * {
+  contain: layout style !important;
+}

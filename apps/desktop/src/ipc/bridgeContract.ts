@@ -5821,6 +5821,8 @@ export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
+  // The message the live run answers, so its working line sits under it.
+  liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   // The conversation's latest run, when dohc's restart or quit stopped it.

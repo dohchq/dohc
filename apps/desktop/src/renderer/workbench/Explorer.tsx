@@ -5,7 +5,7 @@ import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
+import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -96,6 +96,7 @@ export interface ExplorerProps {
   recoveryPaths: ReadonlySet<string>;
   /** Display names for virtual paths that cannot carry a useful file name. */
   tabLabels?: ReadonlyMap<string, string>;
+  tabGlyphs?: ReadonlyMap<string, ObjectKind>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -1859,7 +1860,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
                               <TabGlyph
-                                {...tabMark(tab.path, fileByPath)}
+                                {...tabMark(tab.path, fileByPath, props.tabGlyphs?.get(tab.path))}
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />

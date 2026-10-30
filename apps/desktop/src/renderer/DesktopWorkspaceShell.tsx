@@ -5113,6 +5113,7 @@ export function DesktopWorkspaceShell(props: {
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         tabLabels={tabLabels}
+        tabGlyphs={chatEditors.glyphs}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -5968,6 +5969,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      tabGlyphs={chatEditors.glyphs}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}

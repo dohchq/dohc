@@ -469,6 +469,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   collection: "Registrations",
   group: "trip",
   chat: "Home",
+  agent: "Nova",
   compare: "Compare with Main",
   change: "Diff: plan.md",
   graph: "Graph",
@@ -3117,7 +3118,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The catalog is a listbox the textarea controls, not a menu, so it
           is drawn open here under its composer instead of being opened. */}
-      <Section part="composer-poll" title="Composer catalog and poll">
+      <Section part="composer-poll" title="Composer catalog and poll" menusAtRest>
         <Specimen label="/ in a new post: Poll active">
           <ComposerCatalogSpecimen theme={theme} surface="post" />
         </Specimen>
