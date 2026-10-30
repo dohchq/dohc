@@ -69,7 +69,7 @@ describe("graphLayout", () => {
   });
 
   it("separates two nodes that start on one point, whatever their indexes", () => {
-    // Files whose path hashes collide start on one point.
+    // Remembered positions can put two files on one point.
     const layout = layoutOf(144, [], (i) => (i === 0 || i === 143 ? { x: 0, y: 0 } : { x: i * 50, y: 2000 }));
     reheat(layout, 1);
     for (let i = 0; i < 20; i++) tick(layout, DEFAULT_FORCES);
