@@ -269,6 +269,8 @@ describe("Menu", () => {
     const rename = screen.getByRole("menuitem", { name: "Rename" }).className.split(" ");
     expect(rename).not.toContain("dohc-focus-row");
     expect(rename).toContain("focus-visible:outline-none");
+    // A mouse open focuses the first row; only the keyboard may draw a line.
+    expect(rename.filter((name) => name.startsWith("focus:outline"))).toEqual([]);
     cleanup();
 
     render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
