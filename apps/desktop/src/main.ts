@@ -54,7 +54,7 @@ import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
 import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
-import { collectionPlace, moveCollectionToServer } from "./workspaces/collectionMove";
+import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -1699,7 +1699,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     if (authority.kind === "server") return authority.server.data(signal, () => operation.assertCurrent()).permissions!(page);
     const { local } = authority;
     const data = createDatasetAuthorityRouter(local, {
-      status: async id => local.transferStatus(id),
+      status: id => finishedTransferOf(workspace, local, id, signal),
       remote: async targetOrigin => {
         const remote = await remoteForWorkspace(workspace);
         operation.assertCurrent();
@@ -4744,14 +4744,18 @@ interface ServerCollection {
   /** The owner's automation host state, which says what the server runs. */
   automationHost(): Promise<{ status: number; body: unknown }>;
 }
+// A Collection's transfer record once its move finished, which every read of a Collection on this computer waits for.
+function finishedTransferOf(workspace: RegistryEntry, local: LocalDatasetHost, datasetId: string, signal: AbortSignal) {
+  return finishedTransfer({ local, workspaceId: workspace.workspaceId, datasetId, server: () => remoteForWorkspace(workspace),
+    currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal });
+}
 async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal): Promise<ServerCollection | null> {
   const authority = await collectionsAuthorityFor(workspace, signal);
   let credentials: CloudSessionCredentials, credentialGeneration: number;
   if (authority.kind === "server") ({ credentials, credentialGeneration } = authority.server);
   else {
-    const transfer = authority.local.transferStatus(datasetId);
+    const transfer = await finishedTransferOf(workspace, authority.local, datasetId, signal);
     if (transfer === null) return null;
-    if (transfer.state !== "imported") throw new Error("This Collection is transferring. Wait for the transfer to finish, then retry.");
     ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
     signal.throwIfAborted();
     if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error("Sign in to the server that hosts this Collection.");
@@ -6451,7 +6455,7 @@ function registerIpcHandlers(): void {
         scope: JSON.stringify([scope, generation]),
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
         remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
-          status: async id => { current(); return local.transferStatus(id); },
+          status: async id => { current(); return finishedTransferOf(workspace, local, id, signal); },
           remote: async targetOrigin => {
             const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
             if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
@@ -6679,7 +6683,7 @@ function registerIpcHandlers(): void {
       if (authority.kind === "server") return { kind: "server", host: new URL(authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl).host };
       const { local } = authority, remote = workspace.remote ? await remoteForWorkspace(workspace) : null;
       signal.throwIfAborted();
-      return collectionPlace({ transfer: local.transferStatus(datasetId), relayUrl: remote?.credentials.relayUrl ?? null,
+      return collectionPlace({ transfer: await finishedTransferOf(workspace, local, datasetId, signal), relayUrl: remote?.credentials.relayUrl ?? null,
         automations: async () => automationCounts(workspace.workspaceId, datasetBaseFolder((await local.approvedArtifacts(datasetId)).revision.definition)),
         runs: async () => remote && await readAutomationHost(workspace.workspaceId, remote.credentials, remote.credentialGeneration, signal).then(serverRunsOfAnswer, () => null) });
     },
@@ -6712,7 +6716,7 @@ function registerIpcHandlers(): void {
       if (authority.kind === "server") return authority.server.data(signal, () => signal.throwIfAborted());
       const { local } = authority;
       return createDatasetAuthorityRouter(local, {
-        status: async datasetId => { signal.throwIfAborted(); return local.transferStatus(datasetId); },
+        status: datasetId => { signal.throwIfAborted(); return finishedTransferOf(workspace, local, datasetId, signal); },
         remote: async (targetOrigin, datasetId) => {
           const remote = await remoteForWorkspace(workspace);
           signal.throwIfAborted();
@@ -6810,11 +6814,8 @@ function registerIpcHandlers(): void {
       return fromServer(server.elsewhere.server, { credentials: server.credentials, credentialGeneration: server.credentialGeneration });
     }
     const { local } = authority;
-    const transfer = local.transferStatus(datasetId);
-    if (transfer) {
-      if (transfer.state !== "imported") throw new Error("Finish sharing this Collection before exporting it.");
-      return fromServer(transfer.targetOrigin, await remoteForWorkspace(workspace));
-    }
+    const transfer = await finishedTransferOf(workspace, local, datasetId, signal);
+    if (transfer) return fromServer(transfer.targetOrigin, await remoteForWorkspace(workspace));
     const archive = await local.prepareExport(datasetId, { signal });
     try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize, workspaceRoots: listWorkspaces().map(entry => entry.rootPath) })).savedPath; }
     finally { await archive.dispose(); }
