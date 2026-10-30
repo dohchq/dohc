@@ -60,7 +60,8 @@ $cert.Dispose();$rsa.Dispose()`;
     expect(events.some(e=>e.path==="/document"&&e.status===200&&e.cookie)).toBe(true);
     // A plain link to another site opens it in a new tab, and the app stays.
     const [opened]=await Promise.all([context.waitForEvent("page"),child.locator("#out").click()]);
-    await expect(opened).toHaveURL("https://external.example.org/page");await expect(opened).toHaveTitle("Outside");await opened.close();
+    await expect(opened).toHaveURL("https://external.example.org/page");await expect(opened).toHaveTitle("Outside");
+    expect(await opened.evaluate(()=>window.opener===null)).toBe(true);await opened.close();
     // The launch page's COOP cuts the opener even when the app's own code asks to keep it.
     const [own]=await Promise.all([context.waitForEvent("page"),child.locator("#own").click()]);
     await expect(own).toHaveURL("https://external.example.org/page");

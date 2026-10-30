@@ -54,8 +54,10 @@ describe("compiled app document", () => {
   it("gives a plain link to another site a new tab's target for its click only, and leaves every other link alone", async () => {
     const links = '<a id="out" href="https://example.org/page"><b>Out</b></a><a id="top" target="_top" href="https://example.org/top">Top</a>' +
       '<a id="own" href="/other">Own</a><a id="blank" target="_blank" href="https://example.org/blank">Blank</a>' +
-      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>';
-    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};`)], limits);
+      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>' +
+      '<a id="named" href="https://example.org/report">Report</a>';
+    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};` +
+      'document.getElementById("named").addEventListener("click",e=>{e.preventDefault();e.currentTarget.target="report";});')], limits);
     const dom = new JSDOM(output.html, { runScripts: "dangerously", url: "https://app.example.net/bootstrap" });
     // The browser follows a link with the target it has when the click ends. The test reads that, then keeps jsdom from navigating.
     let target: string | null = null;
@@ -72,6 +74,8 @@ describe("compiled app document", () => {
     expect(await click("#blank")).toEqual(["_blank", "_blank"]);
     expect(await click("#out", { ctrlKey: true })).toEqual([null, null]);
     expect(await click("#out", { button: 1 })).toEqual([null, null]);
+    // A target the app sets during the click stays.
+    expect(await click("#named")).toEqual(["report", "report"]);
     dom.window.close();
   });
 
