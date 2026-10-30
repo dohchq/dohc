@@ -95,7 +95,7 @@ describe("ChatsView channels", () => {
     );
   });
 
-  it("keeps a failed create in the dialog and in Notices", async () => {
+  it("shows a failed create in the dialog, and in Notices once the dialog closes", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     const cause = new Error("The workspace engine is not running.");
@@ -107,8 +107,28 @@ describe("ChatsView channels", () => {
     await user.click(screen.getByTestId("chats-new-channel-submit"));
 
     await screen.findByTestId("chats-new-channel-error");
-    expect(onError).toHaveBeenCalledWith(expect.stringContaining("The workspace engine is not running."), cause);
     expect((screen.getByTestId("chats-new-channel-name") as HTMLInputElement).value).toBe("launch");
+    expect(onError).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("The workspace engine is not running."), cause);
+  });
+
+  it("reports nothing when a retry creates the group", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.createChatChannel
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockResolvedValueOnce({ channel: channel({ id: "channel-9", name: "launch", slug: "launch", wireId: "channel-9" }) });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+
+    await waitFor(() => expect(screen.queryByTestId("chats-new-channel-dialog")).toBeNull());
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("creates a group with the type and purpose the form holds", async () => {

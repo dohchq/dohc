@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -253,11 +253,14 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
 
 
 // Over an agent DM's composer, only when the agent can't answer: what's
-// wrong, and the one action that fixes it.
-export function AgentProblemLine(props: { words: string; action: string; onAction?: (() => void) | undefined }) {
+// wrong, and the one action that fixes it. An agent that's off is a state,
+// not a fault, so it reads without the warning.
+export function AgentProblemLine(props: { words: string; action: string; off?: boolean; onAction?: (() => void) | undefined }) {
   return (
     <div data-testid="chats-agent-problem" className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted">
-      <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
+      {props.off
+        ? <PowerOff size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+        : <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />}
       <span className="min-w-0 truncate">{props.words}</span>
       {props.onAction ? (
         <button

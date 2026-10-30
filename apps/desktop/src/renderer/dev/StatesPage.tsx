@@ -469,6 +469,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   collection: "Registrations",
   group: "trip",
   chat: "Home",
+  agent: "Nova",
   compare: "Compare with Main",
   change: "Diff: plan.md",
   graph: "Graph",

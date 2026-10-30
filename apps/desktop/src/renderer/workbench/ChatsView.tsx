@@ -661,7 +661,12 @@ export function ChatsView(props: {
   }, [nav, poll, newThreadPoll]);
   const [startingThread, setStartingThread] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
-  const resetGroupForm = useCallback(() => setCreatingGroup(false), []);
+  // A failed create the dialog showed and no retry fixed.
+  const unreportedCreateFailure = useRef<{ message: string; error: unknown } | null>(null);
+  const resetGroupForm = useCallback(() => {
+    unreportedCreateFailure.current = null;
+    setCreatingGroup(false);
+  }, []);
   const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
   // is on (signed in + relay) or a DM already exists locally — a solo user
@@ -3464,14 +3469,20 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
         return null;
       } catch (error) {
-        // The dialog keeps the draft and says why; Notices keeps the failure after it closes.
-        const message = ipcErrorMessage(error, `dohc could not create ${input.name}.`);
-        if (token === liveToken.current) props.onError(message, error);
+        // The open dialog says why and keeps the draft. Notices hears of it
+        // only if the person closes the dialog without a retry that worked.
+        const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
+        if (token === liveToken.current) unreportedCreateFailure.current = { message, error };
         return message;
       }
     },
-    [resetGroupForm, openConversation, props.onError, workspaceId],
+    [resetGroupForm, openConversation, workspaceId],
   );
+  const closeGroupDialog = useCallback(() => {
+    const failure = unreportedCreateFailure.current;
+    resetGroupForm();
+    if (failure) props.onError(failure.message, failure.error);
+  }, [props.onError, resetGroupForm]);
 
   const goBack = useCallback(() => {
     // Back is an explicit command like any conversation click: report it
@@ -4524,7 +4535,8 @@ export function ChatsView(props: {
   }
 
   // The Agents list's rule: a name to post as, and a runner that starts it.
-  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
+  // The row keeps one name while any agent exists, whether or not it's on.
+  const hasAgent = (props.agentSetup?.agents.length ?? 0) > 0;
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
@@ -4541,7 +4553,7 @@ export function ChatsView(props: {
     const agentProblem = !agentDm || !props.agentSetup ? null
       : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
       : !channelSettingsAgent.launch ? { words: `${channelSettingsAgent.name} isn't set up.`, action: "Set up" }
-      : !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on" }
+      : !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
       : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
@@ -4801,7 +4813,7 @@ export function ChatsView(props: {
             workspacePath={props.workspacePath}
             header={top}
             notice={agentProblem ? (
-              <AgentProblemLine words={agentProblem.words} action={agentProblem.action} onAction={props.onSetupAgent} />
+              <AgentProblemLine words={agentProblem.words} action={agentProblem.action} off={"off" in agentProblem} onAction={props.onSetupAgent} />
             ) : null}
             {...(agentDm ? {
               agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
@@ -5260,13 +5272,13 @@ export function ChatsView(props: {
               {props.userSettings && props.onSaveUserSettings ? (
                 <button
                   type="button"
-                  data-testid={agentReady ? "chats-manage-agent" : "chats-add-agent-open"}
+                  data-testid={hasAgent ? "chats-manage-agent" : "chats-add-agent-open"}
                   onClick={() =>
-                    agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
+                    hasAgent && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
                   }
                   className="mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible"
                 >
-                  {agentReady ? (
+                  {hasAgent ? (
                     <>
                       <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
                       Manage agents
@@ -5284,7 +5296,7 @@ export function ChatsView(props: {
         </nav>
       </div>
       {creatingGroup ? (
-        <NewGroupDialog onCreate={createChannel} onClose={resetGroupForm} />
+        <NewGroupDialog onCreate={createChannel} onClose={closeGroupDialog} />
       ) : null}
       {acceptingDmRequest ? (
         <AcceptDmDialog
