@@ -68,7 +68,7 @@ export function NewFileDialog(props: {
         }}
       >
         <div className="flex flex-col gap-1">
-          <h2 id="new-file-title" className="m-0 text-sm font-semibold text-ink">
+          <h2 id="new-file-title" className="m-0 text-base font-semibold text-ink">
             New file
           </h2>
           <p id="new-file-help" className="m-0 text-xs text-muted">

@@ -561,13 +561,14 @@ describe("SettingsDialog", () => {
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
     const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
-    // Unchanged, the reset's place is held by an empty box nobody can reach.
-    expect(slots()).toEqual(["DIV.control", "SPAN:hidden.24"]);
+    // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
+    expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
 
+    // Reset takes that place, and the stepper keeps the right edge.
     await user.click(larger);
     await waitFor(() => expect(within(row).getByRole("button", { name: "Reset" })).toBeTruthy());
-    expect(slots()).toEqual(["DIV.control", "BUTTON.24"]);
+    expect(slots()).toEqual(["BUTTON.24", "DIV.control"]);
     // The dot hangs outside the title's line, so the title does not move either.
     expect(within(row).getByTitle("Modified").className).toContain("absolute");
     // A second quick click still lands on +.
@@ -606,16 +607,6 @@ describe("SettingsDialog", () => {
     await user.unhover(zoomIn);
     expect(within(row).queryByRole("tooltip")).toBeNull();
     expect(zoomIn.getAttribute("aria-describedby")).toBeNull();
-  });
-
-  it("keeps the reset's place on a row that cannot reset, so controls share a right edge", async () => {
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
-
-    const updates = await screen.findByTestId("settings-row-desktop-updates");
-    const last = within(updates).getByTestId("desktop-updates-step").parentElement!.lastElementChild!;
-    expect(last.tagName).toBe("SPAN");
-    expect(last.getAttribute("aria-hidden")).toBe("true");
-    expect(last.className).toContain("size-6");
   });
 
   it("closes a stepper's tooltip with the first Escape and Settings with the next", async () => {
@@ -2677,15 +2668,12 @@ describe("SettingsDialog", () => {
   });
 
   it("marks and focuses the part a Customize… command opened Settings for", async () => {
-    const user = userEvent.setup();
-    const ask = vi.fn();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection={CUSTOMIZE_TARGETS.sidebar.section}
         focus={CUSTOMIZE_TARGETS.sidebar}
-        askAgent={{ ready: true, ask, setUp: vi.fn() }}
         onClose={() => {}}
       />,
     );
@@ -2695,20 +2683,15 @@ describe("SettingsDialog", () => {
     expect(document.activeElement).toBe(row);
     expect(screen.getByRole("group", { name: "Sidebar" })).toBe(row);
     expect(screen.getByTestId("settings-row-theme").dataset.highlighted).toBeUndefined();
-    await user.click(within(row).getByRole("button", { name: "Ask my agent" }));
-    expect(ask).toHaveBeenCalledExactlyOnceWith({ kind: "settings", target: CUSTOMIZE_TARGETS.sidebar });
   });
 
   it("marks the editor's row, and not the settings file's, for the editor", async () => {
-    const user = userEvent.setup();
-    const ask = vi.fn();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection={CUSTOMIZE_TARGETS.editor.section}
         focus={CUSTOMIZE_TARGETS.editor}
-        askAgent={{ ready: true, ask, setUp: vi.fn() }}
         onClose={() => {}}
       />,
     );
@@ -2717,36 +2700,16 @@ describe("SettingsDialog", () => {
     expect(row.dataset.highlighted).toBe("true");
     expect(document.activeElement).toBe(row);
     expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("appearance");
-    await user.click(within(row).getByRole("button", { name: "Ask my agent" }));
-    expect(ask).toHaveBeenCalledExactlyOnceWith({ kind: "settings", target: CUSTOMIZE_TARGETS.editor });
   });
 
-  it("offers the settings file to the agent, or the way to set one up", async () => {
+  it("copies the settings file's path from beside it", async () => {
     const user = userEvent.setup();
-    const setUp = vi.fn();
-    const { rerender } = render(
-      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="advanced" onClose={() => {}} />,
-    );
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="advanced" onClose={() => {}} />);
     const row = await screen.findByTestId("settings-row-settings-file");
-    expect(row.dataset.highlighted).toBeUndefined();
-    expect(within(row).queryByTestId("ask-agent")).toBeNull();
-
-    rerender(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="advanced"
-        askAgent={{ ready: false, ask: vi.fn(), setUp }}
-        onClose={() => {}}
-      />,
-    );
-    expect(within(row).getByText("You have no agent set up.")).toBeTruthy();
-    // A search that hides the Agents section must not hold the dialog back.
-    await user.type(screen.getByTestId("settings-search"), "json");
-    await user.click(within(row).getByRole("button", { name: "Set up an agent" }));
-    expect(screen.getByTestId("settings-dialog").dataset.activeSection).toBe("agents");
-    expect((screen.getByTestId("settings-search") as HTMLInputElement).value).toBe("");
-    expect(setUp).not.toHaveBeenCalled();
+    await within(row).findByText("/state/dohc-settings.json");
+    await user.click(within(row).getByRole("button", { name: "Copy settings file path" }));
+    await waitFor(() => expect(within(row).getByRole("button", { name: "Path copied" })).toBeTruthy());
+    expect(await navigator.clipboard.readText()).toBe("/state/dohc-settings.json");
   });
 
   // Main refuses a save or reset until this workspace's engine open has

@@ -100,7 +100,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     }} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
   return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
     onSubmit={event => { event.preventDefault(); void prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
-    <h2 id="collection-fields-title" className="m-0 text-sm font-semibold text-ink">Fields and names</h2>
+    <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">Fields and names</h2>
     <label className="text-[12px] text-muted">Change<select aria-label="Change" disabled={pending} className={`${selectClass} mt-1 w-full`} value={kind} onChange={event => {
       const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
       if (next === "changeField") { selectField(fieldId); return; }

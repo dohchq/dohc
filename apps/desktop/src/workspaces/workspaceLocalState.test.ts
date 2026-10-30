@@ -1,7 +1,7 @@
 import { chmod, link, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Request, Response } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type Request, type Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import {
   existingLocalStateDir,
@@ -28,10 +28,15 @@ class Daemon implements EngineDaemonClient {
   ready = true;
   hold: Promise<void> | null = null;
   fail = false;
+  busy = 0;
 
   async sendRequest(request: Request): Promise<Response> {
     if (request.method === "workspace.open") {
       await this.hold;
+      if (this.busy > 0) {
+        this.busy -= 1;
+        throw new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+      }
       if (this.fail) throw new Error("open refused");
       const { rootDir } = request.params as { rootDir: string };
       await mkdir(join(rootDir, ".dohc", "local"), { recursive: true });
@@ -50,9 +55,9 @@ afterEach(async () => {
 });
 
 let workspaces = 0;
-async function engine() {
+async function engine(sleep: (ms: number) => Promise<void> = async () => undefined) {
   const daemon = new Daemon();
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep });
   opened.push(sessions);
   readLocalStateFrom(sessions);
   workspaces += 1;
@@ -241,8 +246,8 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
   const runOn = (system: NodeJS.Platform) => Object.defineProperty(process, "platform", { value: system });
   afterEach(() => runOn(platform));
   // The test scratch is made for the system the tests run on.
-  async function windowsEngine() {
-    const made = await engine();
+  async function windowsEngine(sleep?: (ms: number) => Promise<void>) {
+    const made = await engine(sleep);
     runOn("win32");
     return made;
   }
@@ -257,7 +262,7 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await ownedLocalStateDir(workspace.rootPath)).toMatch(/local$/);
     expect(await existingLocalStateFolder(workspace.rootPath, "automations")).toMatch(/automations$/);
 
-    await sessions.closeWorkspaceBinding(workspace);
+    await sessions.closeWorkspace(workspace);
     expect(await refusal(ownedLocalStateDir(workspace.rootPath))).toBe("not-opened");
   });
 
@@ -279,6 +284,23 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     held.resolve();
     await opening;
     expect(await reading).toMatch(/local$/);
+  });
+
+  it("reads the saved layout when it asks while the open waits for a busy store", async () => {
+    const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const { daemon, sessions, workspace, open } = await windowsEngine(async () => { paused.resolve(); await resume.promise; });
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    daemon.busy = 1;
+    const asked = vi.spyOn(sessions, "localStateOpenAt");
+    const opening = open();
+    await paused.promise;
+    const reading = readUiStateFile(workspace.rootPath);
+    await vi.waitFor(() => expect(asked).toHaveBeenCalled());
+    resume.resolve();
+    await opening;
+    expect(await reading).toEqual({ sidebarOpen: true });
   });
 
   // A read is trusted only while one open holds the folder throughout.
@@ -303,16 +325,53 @@ describe("this computer's .dohc/local for a reader on Windows", () => {
     expect(await readOwnedLocalState(workspace.rootPath, settings)).toBe("{}");
   });
 
-  it("reads no saved layout before an open or once it closes", async () => {
+  // A refused read, unlike "no saved layout", keeps the window from saving
+  // its defaults over the file.
+  it("refuses a saved-layout read before an open or once it closes", async () => {
     const { sessions, workspace, open } = await windowsEngine();
     const local = join(workspace.rootPath, ".dohc", "local");
     await mkdir(local, { recursive: true });
     await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
-    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
     await open();
     expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
-    await sessions.closeWorkspaceBinding(workspace);
-    expect(await readUiStateFile(workspace.rootPath)).toBeNull();
+    await sessions.closeWorkspace(workspace);
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
+  });
+
+  it("reads the saved layout across a close that keeps the workspace, as the sync client's rebind does", async () => {
+    const { sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    const saved = JSON.stringify({ sidebarOpen: true });
+    await writeFile(join(local, "ui-state.json"), saved);
+    await open();
+    const asked = vi.spyOn(sessions, "localStateOpenAt");
+    const closing = sessions.closeWorkspaceBinding(workspace);
+    const reading = readUiStateFile(workspace.rootPath);
+    await vi.waitFor(() => expect(asked).toHaveBeenCalled());
+    await closing;
+    await open();
+    expect(await reading).toEqual({ sidebarOpen: true });
+    expect(await readFile(join(local, "ui-state.json"), "utf8")).toBe(saved);
+  });
+
+  it("refuses a saved-layout read whose wait ends while the open is still under way", async () => {
+    const { daemon, sessions, workspace, open } = await windowsEngine();
+    const local = join(workspace.rootPath, ".dohc", "local");
+    await mkdir(local, { recursive: true });
+    await writeFile(join(local, "ui-state.json"), JSON.stringify({ sidebarOpen: true }));
+    const held = Promise.withResolvers<void>();
+    daemon.hold = held.promise;
+    const opening = open();
+    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
+    // As when the wait runs past two open deadlines.
+    const waits = vi.spyOn(sessions, "openInProgress").mockReturnValue(Promise.resolve());
+    expect(await refusal(readUiStateFile(workspace.rootPath))).toBe("not-opened");
+    waits.mockRestore();
+    held.resolve();
+    await opening;
+    expect(await readUiStateFile(workspace.rootPath)).toEqual({ sidebarOpen: true });
   });
 
   it("says a settings read before an open read no file, not that the file is unusable", async () => {

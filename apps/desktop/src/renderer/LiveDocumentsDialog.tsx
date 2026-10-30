@@ -583,7 +583,7 @@ export function LiveDocumentsDialog({
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 id="live-documents-title" className="m-0 text-sm font-semibold text-ink">
+          <h2 id="live-documents-title" className="m-0 text-base font-semibold text-ink">
             Live documents
           </h2>
           <p className="mt-1 text-[13px] text-muted">
@@ -633,7 +633,7 @@ export function LiveDocumentsDialog({
                 aria-current={row.path === reveal ? "true" : undefined}
                 tabIndex={-1}
                 className={`flex flex-wrap items-center gap-3 rounded-md py-2 focus-visible:-outline-offset-2 ${
-                  row.path === reveal ? "bg-selected px-2" : ""}`}
+                  row.path === reveal ? "-mx-2 border-transparent bg-selected px-2" : ""}`}
               >
                 <span
                   title={row.path}

@@ -88,7 +88,7 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
   return (
     <div
       data-testid="about-header"
-      className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3.5 text-[13px]"
+      className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3 text-[13px]"
     >
       {"path" in subject ? (
         <KindGlyph kind={fileKindForPath(subject.path)} size={14} className="text-muted" />
@@ -122,7 +122,7 @@ export function AboutSection(props: {
   const bodyId = useId();
   const Icon = props.icon;
   return (
-    <section data-testid={`about-${props.id}`} aria-label={props.label}>
+    <section data-testid={`about-${props.id}`} aria-label={props.label} className="mt-4 first:mt-2">
       <h3 className="m-0">
         <button
           ref={props.toggleRef}
@@ -131,20 +131,23 @@ export function AboutSection(props: {
           aria-expanded={props.expanded}
           aria-controls={bodyId}
           onClick={props.onToggle}
-          className="dohc-section-label flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1.5 pt-3.5 text-left hover:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          className="dohc-section-label flex h-6 w-full cursor-pointer items-center gap-2 px-3 text-left hover:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
         >
           <Icon size={12} strokeWidth={1.9} aria-hidden />
           {props.label}
-          <span className="ml-auto flex items-center gap-2 text-[11px] font-normal tabular-nums normal-case tracking-normal">
-            {props.count !== undefined ? (
-              <span data-testid={`about-${props.id}-count`}>{props.count}</span>
-            ) : null}
-            {props.expanded ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
-          </span>
+          {props.expanded ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
+          {props.count !== undefined ? (
+            <span
+              data-testid={`about-${props.id}-count`}
+              className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal"
+            >
+              {props.count}
+            </span>
+          ) : null}
         </button>
       </h3>
       {props.expanded ? (
-        <div id={bodyId} className="px-2 pb-1">
+        <div id={bodyId} className="px-1">
           {props.children}
         </div>
       ) : null}

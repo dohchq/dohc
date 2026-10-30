@@ -56,14 +56,12 @@ export function ChatLane(props: {
   // main's trust dialog for the workspace named.
   onAgentWaitsForTrust?: (workspaceId: string) => void;
   workspacePath?: string;
-  // An agent DM's unsent message and poll, kept with the tab's other drafts so
-  // a request handed to the agent lands here.
+  // An agent DM's unsent message and poll, kept with the tab's other drafts.
   draft?: {
     value: string;
     onChange: (value: string) => void;
     poll: ComposerPollDraft | null;
     onPollChange: (poll: ComposerPollDraft | null) => void;
-    autoFocus?: boolean;
   };
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -434,7 +432,6 @@ export function ChatLane(props: {
         <MentionComposer
           testIdPrefix="chats-lane"
           composerId="chats-lane-composer"
-          autoFocus={props.draft?.autoFocus}
           value={composer}
           sending={sending}
           disabled={loading}

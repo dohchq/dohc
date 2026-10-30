@@ -21,7 +21,6 @@ import {
   DocumentControls,
   ViewActions,
 } from "../../desktop/src/renderer/fileInspectorUi";
-import { FrontmatterAsWritten } from "../../desktop/src/renderer/FrontmatterAsWritten";
 import { PageIdentity } from "../../desktop/src/renderer/PageIdentity";
 import { PropertiesPanel } from "../../desktop/src/renderer/PropertiesPanel";
 import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
@@ -866,8 +865,7 @@ export function ProductDemo() {
                       filenameStem={filenameStem(activePath)}
                       onEnterBody={() => editorRef.current?.focus("start")}
                     />
-                    <PropertiesPanel body={activeFullText} onChange={updateIdentity} />
-                    <FrontmatterAsWritten markdown={activeFullText} propertiesShown />
+                    <PropertiesPanel body={activeFullText} onChange={updateIdentity} onShowSource={toggleSource} />
                   </div>
                   <MarkdownEditor
                     key={activePath}

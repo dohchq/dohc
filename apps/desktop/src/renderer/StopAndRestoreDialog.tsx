@@ -412,7 +412,7 @@ export function StopAndRestoreDialog({
       role: "dialog", "aria-modal": true, "aria-labelledby": "stop-and-restore-title", "data-testid": "stop-and-restore-dialog",
       className: "dohc-elevated dohc-pop-in w-[min(520px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5",
     }}>
-      <h2 id="stop-and-restore-title" className="m-0 text-sm font-semibold text-ink">Stop and restore</h2>
+      <h2 id="stop-and-restore-title" className="m-0 text-base font-semibold text-ink">Stop and restore</h2>
       {state.kind === "loading" || state.kind === "choose" || state.kind === "working" ? (
         <div className="mt-3 space-y-3">
           {targets.length > 1 ? (

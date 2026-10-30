@@ -54,7 +54,6 @@ const PARTS = [
   "tab-row-actions",
   "slash-menu",
   "editor-group-focus",
-  "frontmatter-as-written",
   "title-bar-status",
   "capture-recovery",
   "recovery-row",

@@ -72,7 +72,6 @@ import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
-import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
@@ -118,7 +117,7 @@ const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
     default: mod.PropertiesPanel,
   })),
-) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement>;
+) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement | null>;
 
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
@@ -966,8 +965,12 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  // The record this file is, as the record row hears from main. The engine
+  // gave it its `id`, so the properties count that line as shown.
+  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
+  const recordId = record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} />
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
@@ -2224,20 +2227,9 @@ export function MarkdownView(props: {
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
-              </Suspense>
-            )}
-            <LiveFrontmatterAsWritten
-              workspaceId={props.workspaceId}
-              path={props.path}
-              // Null until the inspector has read the file.
-              body={props.contentRequestId > 0 ? props.body : null}
-              ydoc={displayDoc}
-              saveState={engine.saveState}
-              propertiesShown={!readOnly}
-            />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2412,12 +2404,9 @@ export function MarkdownView(props: {
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {!readOnly ? (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
-              </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2486,15 +2475,19 @@ export function MarkdownView(props: {
               opening={opening}
             />
             {recordButtons}
-            {/* Opening, the panel draws its pills where they will be and the
-                block as written starts as it will once the open answers, so
-                the ready document draws in the same place. */}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
-              </Suspense>
-            )}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            {/* Opening, the panel draws its pills where they will be, so the
+                ready document draws in the same place. */}
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel
+                body={draft}
+                onChange={onPropertiesDraft}
+                fieldMarks={fieldMarks}
+                opening={opening}
+                readOnly={readOnly}
+                recordId={recordId}
+                onShowSource={toggleSourceView}
+              />
+            </Suspense>
           </div>
           {/* The editor's own rules draw the body, so it replaces it in place. */}
           <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">

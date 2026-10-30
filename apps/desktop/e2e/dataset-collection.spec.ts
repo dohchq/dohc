@@ -4,6 +4,7 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
@@ -165,10 +166,8 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark" }).click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.evaluate(async () => {
-        await Promise.allSettled(document.getAnimations().map(animation => animation.finished));
-        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      });
+      await waitForVisibleAnimations(page);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       await page.screenshot({ path: test.info().outputPath(`collection-management-${theme}.png`) });
     }
     await openManagement(collection);

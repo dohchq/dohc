@@ -154,6 +154,7 @@ import {
   pinnedAppCommandId,
   type CommandContext,
   type CommandHandlers,
+  type CommandId,
 } from "./commands/commandRows";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
@@ -214,7 +215,6 @@ import {
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
-import { useAskAgent } from "./shell/useAskAgent";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
@@ -368,6 +368,9 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
+
+// The commands that still run under the opening cover.
+const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
@@ -1306,17 +1309,12 @@ export function DesktopWorkspaceShell(props: {
   // Restore per-workspace workbench state from .dohc/local/ui-state.json. The shell
   // renders at once under the opening cover (launch budgets key off shell
   // visibility); the cover lifts in the commit that applies the stored state,
-  // or the defaults when it is missing or unreadable. The stored state applies
-  // only if the user touched nothing in the meantime — a pre-load user action
-  // wins (and gets an immediate write, since wb may never change again to arm the debounced
-  // one). The touched flag is a ref set synchronously inside every workbench
-  // mutation (mutateWb below): comparing committed state against defaults
-  // would race React's commit — a queued-but-uncommitted user action would
-  // read as "untouched" and the stored state would clobber it. Writes stay
-  // off until the load settles so a default-state write can never clobber
-  // the stored one.
+  // or the defaults when there is none or the read fails. The stored state
+  // replaces whatever changed under the cover, and file opens wait for it, so
+  // nothing done under the cover loses the saved tabs. Writes start once the
+  // read answers, and never after a failed read, which can't say what is
+  // saved, so a default-state write can never clobber the stored one.
   const uiStateLoaded = useRef(false);
-  const userTouchedWb = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
     groupId: string;
@@ -1330,19 +1328,24 @@ export function DesktopWorkspaceShell(props: {
   // Admission and the saved-layout read never wait on this state.
   const workbenchRestored =
     restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
+  // A file open waits for the saved layout. While the opening cover shows, a
+  // command other than Settings does nothing and is not replayed. Settings
+  // opens from every entry, as its shortcut does, and doesn't change the layout.
+  const workbenchRestoredRef = useRef(false);
+  const heldFileOpens = useRef<[string, HeadingTarget?, Omit<ScrollTarget, "path">?][]>([]);
+  const openingCoverShown = useRef(false);
   // The tab paths the stored state restored — the only ones a file listing is
-  // allowed to close. Empty until the load applies, and empty forever when the
-  // user acted first and the stored tabs were discarded. STATE, not a ref: the
-  // reconciliation below reads it, and the listing can win the race against
-  // this load, so it has to re-run when the restore lands.
+  // allowed to close. Empty until the load applies, and empty forever when
+  // nothing was stored. STATE, not a ref: the reconciliation below reads it,
+  // and the listing can win the race against this load, so it has to re-run
+  // when the restore lands.
   const [restoredTabPaths, setRestoredTabPaths] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   );
 
   // The one mutation seam for workbench state: every user-driven transition
-  // routes through here so the touched flag is set before React even queues
-  // the update. Loading stored state and restored-tab pruning are the only
-  // other writers.
+  // routes through here. Loading stored state and restored-tab pruning are
+  // the only other writers.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
@@ -1359,7 +1362,6 @@ export function DesktopWorkspaceShell(props: {
       ) {
         invalidateDmNavigation(dmNavigationRequest);
       }
-      userTouchedWb.current = true;
       writeWb(next);
     },
     [writeWb],
@@ -1409,14 +1411,14 @@ export function DesktopWorkspaceShell(props: {
   // When the person hides the selected view or unpins the selected app, the
   // selection moves to a view on the rail. Any other change to the rail,
   // such as hiding another view, reordering, or pinning, leaves it alone, and
-  // so does a link or command that opens a hidden view. When the settings
-  // first arrive, a selection the rail does not show moves once; before that
-  // it stands, so a restart keeps the view that was open.
+  // so does a link or command that opens a hidden view. Once the settings
+  // and the saved layout are in, a selection the rail does not show moves
+  // once; before that it stands, so a restart keeps the view that was open.
   const railKey = railOrder.join("\0");
   const settingsLoaded = props.userSettings !== null;
   const previousRailRef = useRef<readonly ActivityViewId[] | null>(null);
   useEffect(() => {
-    if (!settingsLoaded) return;
+    if (!settingsLoaded || !workbenchRestored) return;
     const previous = previousRailRef.current;
     const rail = railOrderRef.current;
     previousRailRef.current = rail;
@@ -1424,7 +1426,7 @@ export function DesktopWorkspaceShell(props: {
       previous === null
         ? keepActiveViewShown(state, rail)
         : keepActiveViewAfterRailChange(state, previous, rail));
-  }, [mutateWb, railKey, settingsLoaded]);
+  }, [mutateWb, railKey, settingsLoaded, workbenchRestored]);
   // Toggling the side panel open shows a view on the rail, never a hidden one.
   const toggleSidePanel = useCallback(
     () => mutateWb((state) => toggleSidebarOnRail(state, railOrderRef.current)),
@@ -1479,7 +1481,7 @@ export function DesktopWorkspaceShell(props: {
     {
       onSuccess: (stored) => {
         let restoredFileSurface: typeof restoredActiveFileSurface.current = null;
-        if (stored && !userTouchedWb.current) {
+        if (stored) {
           const parsed = parseUiState(stored);
           const restoredGroup = activeGroup(parsed);
           if (
@@ -1504,11 +1506,6 @@ export function DesktopWorkspaceShell(props: {
           waitsForFile: restoredFileSurface !== null,
         });
         uiStateLoaded.current = true;
-        if (userTouchedWb.current) {
-          void bridge()
-            .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
-            .catch(() => undefined);
-        }
       },
       onError: () => {
         restoredActiveFileSurface.current = null;
@@ -1516,7 +1513,6 @@ export function DesktopWorkspaceShell(props: {
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
-        uiStateLoaded.current = true;
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
@@ -1566,7 +1562,7 @@ export function DesktopWorkspaceShell(props: {
   // Durability at the edges: the debounce above silently drops changes made
   // within 500ms of quitting or switching workspaces — flush the latest state
   // fire-and-forget on beforeunload and on unmount (workspace switch remounts
-  // the shell via key={workspaceId}). Gated on the load having resolved so a
+  // the shell via key={workspaceId}). Gated on the read having answered so a
   // default snapshot can never clobber stored state.
   useEffect(() => {
     const flush = () => {
@@ -1614,10 +1610,10 @@ export function DesktopWorkspaceShell(props: {
       activeTabPath(next) !== activeTabPath(current)
     ) {
       // This commits through the direct setter, on purpose: reconciling is not
-      // a user action and must not set the touched flag. But it moves the
-      // active tab exactly as mutateWb does, so it owes the same invalidation
-      // — otherwise an in-flight DM navigation still passes its isCurrent()
-      // check and lands its destination on top of the tab we just activated.
+      // a user action. But it moves the active tab exactly as mutateWb does, so
+      // it owes the same invalidation — otherwise an in-flight DM navigation
+      // still passes its isCurrent() check and lands its destination on top of
+      // the tab we just activated.
       invalidateDmNavigation(dmNavigationRequest);
     }
     // Activating a neighbour remounts the keyed inspector — that is an open
@@ -1750,7 +1746,7 @@ export function DesktopWorkspaceShell(props: {
   const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !shareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     !!shareView,
@@ -2468,6 +2464,10 @@ export function DesktopWorkspaceShell(props: {
       target?: HeadingTarget,
       scrollTarget?: Omit<ScrollTarget, "path">,
     ) => {
+      if (!workbenchRestoredRef.current) {
+        heldFileOpens.current.push([path, target, scrollTarget]);
+        return;
+      }
       const targetGroupId = wbRef.current.activeEditorGroup;
       const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
@@ -2551,6 +2551,13 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Set here, not in render, so a file open that lands before this runs still
+  // waits behind the held ones.
+  useEffect(() => {
+    workbenchRestoredRef.current = workbenchRestored;
+    if (!workbenchRestored) return;
+    for (const held of heldFileOpens.current.splice(0)) openFile(...held);
+  }, [openFile, workbenchRestored]);
   // Main writes the copy next to the file and keeps the queue; a slow answer
   // for a workspace this window left paints nothing. One save per file runs
   // at a time, and asking again while it runs waits for it.
@@ -2780,11 +2787,12 @@ export function DesktopWorkspaceShell(props: {
     },
     [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
-  // Read once: the shell remounts for each workspace.
+  // Read once: the shell remounts for each workspace. It opens once the saved
+  // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
   useEffect(() => {
     const open = openOnReady.current;
-    if (!workspaceIsReady || open === undefined) return;
+    if (!workbenchRestored || open === undefined) return;
     openOnReady.current = undefined;
     if (typeof open === "string") {
       openFile(open);
@@ -2799,17 +2807,17 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
-  // A file the OS opened with dohc. Main sends it once this window has opened
-  // this workspace, and it opens when the workspace is ready.
-  const [openedFromOs, setOpenedFromOs] = useState<{ path: string } | null>(null);
+  }, [openAutomationControls, openFile, reportShellError, workbenchRestored]);
+  // Files the OS opened with dohc. Main sends each once this window has opened
+  // this workspace, and they open in order when the workspace is ready.
+  const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
   useEffect(() => bridge().onWorkspaceActivated((next, file) => {
-    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs({ path: file });
+    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs((files) => [...files, file]);
   }), [workspaceId]);
   useEffect(() => {
-    if (!workspaceIsReady || openedFromOs === null) return;
-    setOpenedFromOs(null);
-    openFile(openedFromOs.path);
+    if (!workspaceIsReady || openedFromOs.length === 0) return;
+    setOpenedFromOs([]);
+    for (const path of openedFromOs) openFile(path);
   }, [openFile, openedFromOs, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
@@ -2915,19 +2923,7 @@ export function DesktopWorkspaceShell(props: {
     () => void trustWorkspace(),
     (nav) => { openChatsNavInTab(nav); },
   );
-  const askAgent = useAskAgent({
-    workspaceId,
-    agentSetup,
-    chatsAvailable: captureAvailable,
-    openChat: chatEditors.open,
-    onOpenChat: closeSettings,
-    onSetUp: openAgentSettings,
-    reportShellError,
-  });
-  const customizeContext = useMemo(
-    () => ({ customize, ...(askAgent ? { askAgent } : {}) }),
-    [askAgent, customize],
-  );
+  const customizeContext = useMemo(() => ({ customize }), [customize]);
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
@@ -4458,9 +4454,12 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  const runCommand = useCallback((id: CommandId) => {
+    if (!openingCoverShown.current || SETTINGS_COMMANDS.has(id)) commandHandlers[id]();
+  }, [commandHandlers]);
   const commands = useMemo<Command[]>(
-    () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
-    [commandContext, commandHandlers],
+    () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),
+    [commandContext, runCommand],
   );
   // The start surface's tiles: each kind's existing create action, where the
   // workspace allows it. An app is a folder, so it needs folder creation.
@@ -4520,13 +4519,13 @@ export function DesktopWorkspaceShell(props: {
       event.preventDefault();
       if (command === "command-palette") setPaletteOpen((open) => !open);
       else if (command === "quick-open") setQuickOpenOpen((open) => !open);
-      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
+      else if (isCommandAvailable(command, commandContext)) runCommand(command);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     commandContext,
-    commandHandlers,
+    runCommand,
     openSettings,
     reportShellError,
     undoForEditor,
@@ -4537,9 +4536,9 @@ export function DesktopWorkspaceShell(props: {
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
-      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
+      else if (isCommandAvailable(command, commandContext)) runCommand(command);
     });
-  }, [commandContext, commandHandlers]);
+  }, [commandContext, runCommand]);
 
   // Received workspaces refresh on open and on demand; ended copies stay local.
   // The relay-derived generic chat fact selects the Comment banner's next
@@ -5111,10 +5110,10 @@ export function DesktopWorkspaceShell(props: {
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
-        onIncludeArchivedCollections={shareView ? undefined : setIncludeArchived}
+        onIncludeArchivedCollections={shareView || !collectionsListed ? undefined : setIncludeArchived}
         onOpenDataCollection={openDataCollection}
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
-        onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
+        onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady && collectionsListed ? onRestoreCollection : undefined}
         collectionsRefusal={collectionsRefusal}
         collectionsElsewhere={collectionsElsewhere}
         onKeepCollections={keepCollectionsWithList}
@@ -5300,6 +5299,8 @@ export function DesktopWorkspaceShell(props: {
       ? syncStatus.engineStoreRefused
       : null;
   const storeUpdateRequired = storeUpdateRefusal !== null;
+  // A stopped store or a failed open shows in place of the opening cover.
+  openingCoverShown.current = !workbenchRestored && !storeUpdateRequired && (workspaceIsReady || !workspaceOpenFailure);
   storeUpdateRequiredRef.current = storeUpdateRequired;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
@@ -5798,7 +5799,7 @@ export function DesktopWorkspaceShell(props: {
           }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenSettings={() => openSettings()}
-          viewsDisabled={!workspaceIsReady || storeUpdateRequired}
+          viewsDisabled={!workbenchRestored || storeUpdateRequired}
           notices={
             <NoticeCenter
               workspaceId={workspaceId}
@@ -5854,7 +5855,6 @@ export function DesktopWorkspaceShell(props: {
         {wb.sidebarVisible ? (
           <ShellSidePanel
             customize={customize}
-            {...(askAgent ? { askAgent } : {})}
             wb={shownWb}
             mutateWb={mutateWb}
             sidePanelTitle={sidePanelTitle}
@@ -6104,7 +6104,6 @@ export function DesktopWorkspaceShell(props: {
                     onDraftsChange={chatEditors.get(groupTab.path).onDraftsChange}
                     initialNav={chatEditors.get(groupTab.path).nav}
                     initialDrafts={chatEditors.get(groupTab.path).drafts}
-                    focusNewPost={chatEditors.get(groupTab.path).focusNewPost}
                     editorTabPath={groupTab.path}
                     onOpenInTab={openChatsNavInTab}
                     variant="page"
@@ -6853,7 +6852,6 @@ export function DesktopWorkspaceShell(props: {
             }
             initialSection={settingsSection}
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
-            {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             cloud={cloudSettings}
             onOpenSharing={(target) => {

@@ -3,6 +3,7 @@ import tailwind from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { build, preview, type PreviewServer } from "vite";
 import { createTestScratch, removeTestScratch } from "../src/workspaces/testTemp";
+import { waitForVisibleAnimations } from "./helpers/animations";
 
 // The production restore review and notice toast in Chromium, at window sizes
 // people use. The toast sits above the review and takes clicks there, and an
@@ -125,7 +126,7 @@ test.describe("shared restore review with a notice toast", () => {
               ?.textContent;
           })).toMatch(/Sep 1[0-6]/i);
         } : undefined);
-        await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+        await waitForVisibleAnimations(page);
 
         const { overlaps, misses } = await dialog.evaluate((review) => {
           const bounds = review.getBoundingClientRect();

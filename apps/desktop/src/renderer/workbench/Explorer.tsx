@@ -2,7 +2,8 @@ import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/w
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isDeleteKey } from "../ui/keys";
-import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { SecondaryButton, SectionLabel } from "../ui/controls";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -35,7 +36,6 @@ import {
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
-import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
@@ -260,7 +260,9 @@ function SectionActionButton(props: {
   );
 }
 
-// Depth indent with guide lines (one per ancestor level).
+// Depth indent with guide lines (one per ancestor level). A level is as wide
+// as a glyph, so a child's icon starts under its parent's name, and its line
+// runs under the parent's chevron.
 function IndentGuides({ depth }: { depth: number }) {
   return (
     <>
@@ -268,7 +270,7 @@ function IndentGuides({ depth }: { depth: number }) {
         <span
           key={i}
           aria-hidden
-          className="ml-[7px] h-7 w-[9px] shrink-0 border-l border-line/60"
+          className="ml-1.5 h-7 w-[9px] shrink-0 border-l border-line/60"
         />
       ))}
     </>
@@ -375,7 +377,7 @@ export const TreeRow = memo(function TreeRow(props: {
         // drag drop-target is a filled tint with a solid bar (list.drop-
         // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -397,7 +399,6 @@ export const TreeRow = memo(function TreeRow(props: {
             }`}
           />
         ) : null}
-        <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
           <>
@@ -1426,9 +1427,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
   const editRow = (depth: number): ReactNode => (
-    <li role="none" key="edit-row" className="relative">
-      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
-        <span aria-hidden className="w-1 shrink-0" />
+    <li role="none" key="edit-row" className="relative px-1">
+      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-2 px-2">
         <IndentGuides depth={depth} />
         {editing?.mode === "rename" && editing.isFolder ? (
           <ChevronRight
@@ -1483,7 +1483,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
           // VS Code's rename input signals the same way with focusBorder).
-          className={`min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
+          className={`-ml-1 min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
         />
       </div>
       {editError && (
@@ -1641,7 +1641,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         onDrop={onContainerDrop}
         onDragLeave={onContainerDragLeave}
         onContextMenu={onContainerContextMenu}
-        className={`min-h-0 flex-1 overflow-y-auto py-1 ${
+        className={`min-h-0 flex-1 overflow-y-auto py-2 ${
           rootDropPreview
             ? `outline outline-1 -outline-offset-2 ${
                 rootDropPreview.kind === "blocked" ? "outline-danger/30" : "outline-ink/30"
@@ -1666,7 +1666,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
-          className="relative mb-1 border-b border-line pb-1"
+          className="relative mt-4 first:mt-0"
         >
           <header
             data-testid="open-editors-header"
@@ -1677,14 +1677,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
             >
-              <ChevronRight
-                size={11}
-                aria-hidden
-                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
-              />
-              <span className="min-w-0 flex-1 truncate">Open editors</span>
+              <span className="min-w-0 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
                   aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}
@@ -1693,6 +1688,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   {openEditorCount}
                 </span>
               ) : null}
+              <ChevronRight
+                size={11}
+                aria-hidden
+                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+              />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton
@@ -1777,7 +1777,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 pl-8 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
+                              className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
                             >
                               <TabGlyph
                                 {...tabMark(tab.path, fileByPath)}
@@ -1866,7 +1866,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
-        <section data-testid="explorer-files-section" aria-label="Files">
+        <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
             className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
@@ -1876,14 +1876,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
             >
+              <span className="min-w-0 truncate">Files</span>
               <ChevronRight
                 size={11}
                 aria-hidden
                 className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
               />
-              <span className="min-w-0 flex-1 truncate">Files</span>
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton label="New file" onClick={() => props.onNewPage(creationParentPath())}>
@@ -1913,13 +1913,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 <section
                   data-testid="explorer-pinned"
                   aria-label="Pinned"
-                  className="mb-1 border-b border-line pb-1"
+                  className="mb-2"
                 >
-                  <SectionLabel as="header" className="flex h-6 items-center gap-1.5 px-3">
+                  <SectionLabel as="header" className="flex h-6 items-center gap-2 px-3">
                     <Pin size={10} aria-hidden />
                     Pinned
                   </SectionLabel>
-                  <ul className="m-0 list-none p-0">
+                  <ul className="m-0 list-none px-1 py-0">
                     {props.pinned.map((path) => (
                       <li key={path}>
                         <button
@@ -1940,7 +1940,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               true,
                             );
                           }}
-                          className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                          className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
                           {props.appFolders?.has(path) ? (
                             <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphTone(false)} />
@@ -1982,60 +1982,41 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       </nav>
 
       {confirmDelete ? (
-        <Overlay onClose={() => setConfirmDelete(null)}>
-          <div
-            data-testid="delete-confirm"
-            className="flex max-h-[calc(100vh-32px)] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
-          >
-            <div className="min-h-0 overflow-auto p-4">
-              <p className="m-0 text-sm text-ink">
-                Delete{" "}
-                <span className="break-all font-medium">
-                  {confirmDelete.length === 1
-                    ? basenameOf(confirmDelete[0]!)
-                    : `${confirmDelete.length} items`}
-                </span>
-                ?
-              </p>
-              <p className="mb-0 mt-2 text-xs text-muted">
-                {props.shareView
-                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                      confirmDelete.length === 1 ? "it" : "them"
-                    } from. ${
-                      props.shareView.granterEmail ?? "The person who shared it"
-                    } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
-              </p>
-              {confirmDelete.length > 1 ? (
-                <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-                  {confirmDelete.map((path) => (
-                    <li
-                      key={path}
-                      className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
-                    >
-                      <span className="break-all">{path}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <SecondaryButton onClick={() => setConfirmDelete(null)} className="h-8 py-0">
-                Cancel
-              </SecondaryButton>
-              <DangerButton
-                data-testid="confirm-delete"
-                onClick={() => {
-                  performDeletes(confirmDelete);
-                  setConfirmDelete(null);
-                }}
-                className="h-8 py-0 text-xs"
-              >
-                Delete
-              </DangerButton>
-            </div>
-          </div>
-        </Overlay>
+        <ConfirmDialog
+          title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
+          confirmLabel="Delete"
+          intent="danger"
+          testId="delete-confirm"
+          cancelTestId="cancel-delete"
+          confirmTestId="confirm-delete"
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            performDeletes(confirmDelete);
+            setConfirmDelete(null);
+          }}
+        >
+          <p className="m-0 mt-2 text-[13px] text-muted">
+            {props.shareView
+              ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+                  confirmDelete.length === 1 ? "it" : "them"
+                } from. ${
+                  props.shareView.granterEmail ?? "The person who shared it"
+                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
+              : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
+          </p>
+          {confirmDelete.length > 1 ? (
+            <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+              {confirmDelete.map((path) => (
+                <li
+                  key={path}
+                  className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
+                >
+                  <span className="break-all">{path}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </ConfirmDialog>
       ) : null}
     </>
   );

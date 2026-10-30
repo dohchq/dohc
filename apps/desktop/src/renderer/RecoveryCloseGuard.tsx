@@ -67,7 +67,8 @@ let openRecoveryWarning:
   | null = null;
 
 // Update buttons showing a restart under way. A person going back on a
-// restart this window stopped ends it, and the button offers it again.
+// restart, in this window or another, ends it, and the button offers it
+// again.
 const restartStoppedListeners = new Set<() => void>();
 export function onRestartStopped(listener: () => void): () => void {
   restartStoppedListeners.add(listener);
@@ -81,7 +82,11 @@ export function onRestartStopped(listener: () => void): () => void {
 let activeRound: { id: number; kind: "quit" | "update" } | null = null;
 // The round whose exit this window is waiting to see through: the one that
 // proceeded last. A retraction for it drops the claimed intent.
-let proceededRound: number | null = null;
+let proceededRound: { id: number; kind: "quit" | "update" } | null = null;
+// The proceeded round whose exit a veto here stopped. Going back on any
+// warning in this window takes that exit back, even after a later unload
+// attempt replaced the warning that named it.
+let heldRound: number | null = null;
 // The exit request the last round's arrival became. An install started
 // here at `request - 1` is still current when the only thing that happened
 // since is its own round asking, whether or not that round has proceeded.
@@ -102,16 +107,19 @@ function answerRound(roundId: number, decision: "clear" | "hold" | "cancel"): vo
 
 // The round ended without the exit happening: refused or failed staging,
 // or a cancellation. Every window drops the intent it claimed for that
-// round, and only that; a reload or a newer action keeps its label.
-function forgetRoundIntent(roundId: number): boolean {
-  const owned = activeRound?.id === roundId || proceededRound === roundId;
-  if (!owned) return false;
-  if (activeRound?.id === roundId) activeRound = null;
-  if (proceededRound === roundId) proceededRound = null;
+// round, and only that; a reload or a newer action keeps its label. Returns
+// the exit this window gave up, or null when it held none for the round.
+function forgetRoundIntent(roundId: number): "quit" | "update" | null {
+  const round =
+    activeRound?.id === roundId ? activeRound : proceededRound?.id === roundId ? proceededRound : null;
+  if (!round) return null;
+  if (activeRound === round) activeRound = null;
+  if (proceededRound === round) proceededRound = null;
+  if (heldRound === roundId) heldRound = null;
   if (pendingUnload?.kind === "update" || pendingUnload?.kind === "quit") {
     pendingUnload = null;
   }
-  return true;
+  return round.kind;
 }
 
 export function requestGuardedReload(): void {
@@ -210,7 +218,7 @@ function resumeRoundIntent(
     answerRound(round.id, "clear");
     return Promise.resolve(true);
   }
-  if (proceededRound === round.id) return resumeExit(round.kind);
+  if (proceededRound?.id === round.id) return resumeExit(round.kind);
   // The round ended without the exit: nothing to resume.
   return Promise.resolve(false);
 }
@@ -282,6 +290,7 @@ export function resetGuardedExits(): void {
   pendingWritesDrain = null;
   activeRound = null;
   proceededRound = null;
+  heldRound = null;
   roundRequest = null;
 }
 
@@ -356,7 +365,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // What the user asked for — the confirm button resumes exactly it.
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
-    // The exit round this dialog answers for, when main is waiting on it.
+    // The exit round this dialog answers for, when main is waiting on it,
+    // or the proceeded round whose exit this window's veto holds. A newer
+    // reload or close holds no round.
     round?: number;
   } | null>(null);
   // Live, not a snapshot: the dialog embeds Copy/Dismiss,
@@ -397,6 +408,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     setCloseWarning(null);
     if (round !== undefined && activeRound?.id === round) {
       answerRound(round, hasUnsettledWrites() ? "cancel" : "clear");
+    } else if (heldRound !== null) {
+      // A proceeded exit this window's veto held is not resumed here. It is
+      // taken back, as Go back takes it, so no window keeps it under way.
+      const held = heldRound;
+      const exit = forgetRoundIntent(held);
+      if (exit === "update") for (const listener of restartStoppedListeners) listener();
+      if (exit !== null) {
+        rearmGuard();
+        answerRound(held, "cancel");
+      }
     }
     // closeWarning is read once, at the moment the count reaches zero.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -462,9 +483,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // a "close". Confirming that would call window.close(), which does not
       // quit on macOS.
       void bridge().holdQuit();
+      const held = proceededRound && pending?.kind === proceededRound.kind ? proceededRound.id : null;
+      if (held !== null) heldRound = held;
       showCloseWarning({
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,
+        ...(held !== null ? { round: held } : {}),
       });
     };
     // Required contract, called directly. The bridge and the preload carry
@@ -489,8 +513,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         // The exit is on its way: the claimed intent stays for its unload,
         // and a retraction for this round can still take it back.
         if (activeRound?.id === message.roundId) {
+          proceededRound = activeRound;
           activeRound = null;
-          proceededRound = message.roundId;
         }
         return;
       }
@@ -498,8 +522,11 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         // The round ended without the exit: cancelled by a window, refused
         // or failed at the updater. A dialog still open for it has nothing
         // left to decide, the approval it granted is off, and the intent
-        // claimed for it must not label a later, unrelated close.
-        if (!forgetRoundIntent(message.roundId)) return;
+        // claimed for it must not label a later, unrelated close. A restart
+        // another window went back on is off here too.
+        const exit = forgetRoundIntent(message.roundId);
+        if (exit === null) return;
+        if (exit === "update") for (const listener of restartStoppedListeners) listener();
         rearmGuard();
         setCloseWarning((current) =>
           current?.round === message.roundId ? null : current,
@@ -510,7 +537,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       roundRequest = { request: exitRequest, kind: message.exit };
       const round = { id: message.roundId, kind: message.exit };
       activeRound = round;
+      // A quit replaces the restart this window was waiting to see through,
+      // so no button keeps showing it under way. A newer restart carries
+      // on, and ends through its own round.
+      if (proceededRound?.kind === "update" && round.kind === "quit") for (const listener of restartStoppedListeners) listener();
       proceededRound = null;
+      heldRound = null;
       // Claim the intent up front: a queued reopen can still capture a
       // draft between a clear answer and the exit's own beforeunload, and
       // the warning that blocks it there must resume the QUIT or RESTART.
@@ -615,20 +647,21 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               <SecondaryButton
                 data-testid="recovery-close-goback"
                 autoFocus
-                className="h-8 py-0"
                 onClick={() => {
                   // Going back on a round cancels it for every window: the
                   // originating install settles, and no other window's
                   // dialog keeps asking about an exit that is off. The
                   // approval an earlier local warning granted is off too:
                   // the person is staying, so the next close asks over the
-                  // full list.
-                  const round = closeWarning.round;
-                  if (closeWarning.kind === "update") for (const listener of restartStoppedListeners) listener();
+                  // full list. After the round proceeded, a veto here holds
+                  // the exit, so going back takes it back from every window
+                  // of that round.
+                  const round = closeWarning.round ?? heldRound ?? undefined;
+                  const exit = round === undefined ? null : forgetRoundIntent(round);
+                  if (closeWarning.kind === "update" || exit === "update") for (const listener of restartStoppedListeners) listener();
                   setCloseWarning(null);
-                  if (round !== undefined && activeRound?.id === round) {
+                  if (round !== undefined && exit !== null) {
                     rearmGuard();
-                    forgetRoundIntent(round);
                     answerRound(round, "cancel");
                   }
                 }}

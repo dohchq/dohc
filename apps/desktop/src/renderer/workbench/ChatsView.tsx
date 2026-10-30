@@ -3,7 +3,6 @@ import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
-import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import {
@@ -425,7 +424,7 @@ function NavRow(props: {
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
       {...props.data}
-      className={`mx-2 flex h-8 w-[calc(100%-1rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-visible ${
+      className={`mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-visible ${
         props.active ? "bg-selected" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
@@ -537,9 +536,6 @@ export function ChatsView(props: {
   // Unsent drafts to restore alongside initialNav (same handoff, same
   // apply-once timing).
   initialDrafts?: ChatsDrafts;
-  // The new-post composer takes focus when it mounts, such as after dohc put
-  // a request to the person's agent in it.
-  focusNewPost?: boolean;
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
@@ -4441,7 +4437,8 @@ export function ChatsView(props: {
     );
   }
 
-  const agentReady = props.agentSetup ? agentIsSetUp(props.agentSetup) : false;
+  // The Agents list's rule: a name to post as, and a runner that starts it.
+  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
@@ -4758,7 +4755,6 @@ export function ChatsView(props: {
                 onChange: setNewThreadBody,
                 poll: newThreadPoll,
                 onPollChange: (next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id }),
-                autoFocus: props.focusNewPost,
               },
             } : {})}
           />
@@ -4777,7 +4773,6 @@ export function ChatsView(props: {
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
-                  autoFocus={props.focusNewPost}
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
@@ -4920,7 +4915,7 @@ export function ChatsView(props: {
             label="Home"
             className="mt-2"
           />
-          <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+          <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
             <SectionLabel as="p" data-testid="chats-channels-heading" className="min-w-0 flex-1">
               Groups
             </SectionLabel>
@@ -4981,7 +4976,7 @@ export function ChatsView(props: {
           </ul>
           {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
             <div data-testid="chats-shared-with-you">
-              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+              <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
                 Shared with you
               </SectionLabel>
               {/* The section stays even with nothing to list. Hiding it on an
@@ -4998,7 +4993,7 @@ export function ChatsView(props: {
               ) : null}
               <ul className="m-0 list-none p-0">
                 {receivedNotJoined.map((row) => (
-                  <li key={row.shareId} className="mx-2 flex min-h-8 items-center gap-2 px-2 py-1">
+                  <li key={row.shareId} className="mx-1 flex min-h-8 items-center gap-2 px-2 py-1">
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
@@ -5021,7 +5016,7 @@ export function ChatsView(props: {
           ) : null}
           {dmAvailable || dms.length > 0 ? (
             <div data-testid="chats-dms-section">
-              <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+              <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
                 <SectionLabel as="p" className="min-w-0 flex-1">
                   People
                 </SectionLabel>
@@ -5089,7 +5084,7 @@ export function ChatsView(props: {
           ) : null}
           {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
             <div data-testid="chats-dm-requests-section">
-              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+              <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
                 Message requests
               </SectionLabel>
               <ul className="m-0 list-none p-0">
@@ -5106,7 +5101,7 @@ export function ChatsView(props: {
               </ul>
               {declinedDmRequests.length > 0 ? (
                 <div className="border-t border-line/60 bg-panel-2/40">
-                  <SectionLabel as="p" className="m-0 px-4 pb-1 pt-2">
+                  <SectionLabel as="p" className="m-0 flex h-6 items-center px-3">
                     Declined
                   </SectionLabel>
                   <ul className="m-0 list-none p-0">
@@ -5128,7 +5123,7 @@ export function ChatsView(props: {
           ) : null}
           {agentChats.length > 0 || props.userSettings || otherAgents.length > 0 ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
-              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+              <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
                 Agents
               </SectionLabel>
               {agentChats.map((channel) => {
@@ -5207,7 +5202,7 @@ export function ChatsView(props: {
                   onClick={() =>
                     agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
                   }
-                  className="mx-2 flex h-7 w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible"
                 >
                   {agentReady ? (
                     <>

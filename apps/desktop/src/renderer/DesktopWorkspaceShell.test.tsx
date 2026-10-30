@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
-import type { ChatChannelRecord, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
@@ -19,7 +19,6 @@ import { basenameOf } from "./path";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
-import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -1861,49 +1860,6 @@ describe("customize", () => {
     await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
     // The rail marks Apps at once; its view loads on its own clock.
     expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
-  });
-
-  it("hands a Chats setting to the person's agent in the agent's chat", async () => {
-    const agentChannel: ChatChannelRecord = {
-      id: "channel-agent", name: "Agent", slug: "my-agent", kind: "agent", agentId: "default",
-      createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
-    };
-    // Share answers unlock the channel's composer; without them it fails closed.
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      listChatChannelShares: vi.fn(async () => ({
-        joined: [], sessionKey: null,
-        relay: { state: "answered" as const, granted: [], received: [] },
-      })),
-    });
-    bridge.listChatChannels = vi.fn(async () => ({ channels: [agentChannel], fileThreads: [] }));
-    const user = userEvent.setup();
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(<DesktopWorkspaceShell
-      workspace={WORKSPACE}
-      workspaces={[WORKSPACE]}
-      {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: settingsWithAgent({ name: "Nova" }) }}
-      onSwitchWorkspace={() => {}}
-    />);
-
-    await user.click(await screen.findByTestId("activity-chats"));
-    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
-    const row = await screen.findByTestId("settings-row-your-color");
-    expect(row.dataset.highlighted).toBe("true");
-    await user.click(await within(row).findByRole("button", { name: "Ask my agent" }));
-
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-    expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
-    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-lane-composer");
-    await waitFor(() => expect(composer.value).toBe([
-      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
-      "dohc applies the file when it is saved.",
-      "What I want: ",
-    ].join("\n")));
-    // The conversation takes input, and focus, once it has loaded.
-    await waitFor(() => expect(document.activeElement).toBe(composer));
-    expect(composer.selectionStart).toBe(composer.value.length);
   });
 });
 

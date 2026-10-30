@@ -16,6 +16,7 @@ import {
   EngineRequestDeadlineError,
   type EngineClientSpawnOptions,
 } from "./engineClient";
+import { keepEngineRunScope } from "./engineRunScope";
 
 export const ENGINE_LIFECYCLE_METHOD = {
   ping: "engine.ping",
@@ -577,9 +578,10 @@ export class EngineDaemonLifecycle {
   // fanned out from every client this lifecycle launches, so a consumer never
   // has to know the daemon was replaced.
   onEvent(handler: (event: Event) => void): () => void {
-    this.eventHandlers.add(handler);
+    const scoped = keepEngineRunScope(handler);
+    this.eventHandlers.add(scoped);
     return () => {
-      this.eventHandlers.delete(handler);
+      this.eventHandlers.delete(scoped);
     };
   }
 

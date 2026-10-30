@@ -389,10 +389,10 @@ export function missingSourcesWords(
   };
 }
 
-// One timeline row: 30px, inset, with no rule between rows. Hover and the
+// One timeline row: 28px, inset, with no rule between rows. Hover and the
 // open change take the list ladder's fills. A mark takes an avatar's 18px.
 export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
-const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
+const ROW = "h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
 const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
 
@@ -716,7 +716,7 @@ function GroupRow(props: {
 function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   const createdAt = formatChatTime(props.version.createdAtMs);
   return (
-    <div className="flex h-[30px] min-w-0 items-center gap-1.5 px-2 text-[13px]">
+    <div className="flex h-7 min-w-0 items-center gap-1.5 px-2 text-[13px]">
       <span className={`${MARK_BOX} text-subtle`}>
         <Layers size={14} aria-hidden />
       </span>
@@ -998,7 +998,7 @@ export function EngineHistoryView(props: {
         className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
-        estimatedItemSize={30}
+        estimatedItemSize={28}
         getItemType={(row) => (row.day ? "day" : row.item.kind)}
         stickyHeaderIndices={stickyHeaderIndices}
         recycleItems={false}
@@ -1093,7 +1093,7 @@ export function EngineHistoryView(props: {
               data-testid="engine-history-load-more"
               disabled={props.loadingMore}
               onClick={props.onLoadMore}
-              className="block h-[30px] w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="block h-7 w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {props.loadingMore ? "Loading…" : "Show earlier changes"}
             </button>

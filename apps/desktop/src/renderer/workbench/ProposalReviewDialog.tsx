@@ -256,7 +256,7 @@ export function ProposalReviewDialog(props: {
         className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
       >
         <header className="border-b border-line px-4 py-3">
-          <h3 id="proposal-review-title" className="m-0 text-sm font-semibold text-ink">
+          <h3 id="proposal-review-title" className="m-0 text-base font-semibold text-ink">
             Changes from {sender}
           </h3>
         </header>

@@ -23,6 +23,7 @@ import {
   type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 it("tells a hosted document that is not ready from any other conflict", () => {
   const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
@@ -2655,6 +2656,19 @@ describe("EngineClient", () => {
     peer.send({ ...event, seq: 2 });
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
+    transport.close();
+  });
+
+  it("runs a handler registered inside an engine run inside that run", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const inside: boolean[] = [];
+    inEngineRun(() => transport.onEvent(() => inside.push(insideEngineRun())));
+    transport.onEvent(() => inside.push(insideEngineRun()));
+    peer.send({ type: "event", seq: 1, sessionGeneration: 7, name: "workspace.changed", payload: { paths: ["note.md"] } });
+    expect(inside).toEqual([true, false]);
     transport.close();
   });
 

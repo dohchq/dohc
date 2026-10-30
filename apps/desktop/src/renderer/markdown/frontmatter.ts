@@ -79,8 +79,6 @@ function listProblem(items: readonly unknown[]): string | null {
   return null;
 }
 
-const ELSEWHERE = "Change it in another app, or ask an agent.";
-
 function flowText(value: unknown): string {
   try {
     return frontmatterValueFlowYaml(value);
@@ -95,10 +93,10 @@ function propertyText(value: unknown): Pick<FrontmatterEntry, "value" | "list" |
     const problem = listProblem(value);
     return problem === null
       ? { value: value.join(", "), list: true }
-      : { value: flowText(value), readOnly: `dohc can't edit this list because ${problem}. ${ELSEWHERE}` };
+      : { value: flowText(value), readOnly: `dohc can't edit this list here because ${problem}.` };
   }
   if (value !== null && typeof value === "object") {
-    return { value: flowText(value), readOnly: `dohc can't edit a value with named fields. ${ELSEWHERE}` };
+    return { value: flowText(value), readOnly: "dohc can't edit a value with named fields here." };
   }
   return { value: displayFrontmatterValue(value) };
 }

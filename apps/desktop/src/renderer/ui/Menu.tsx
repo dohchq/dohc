@@ -89,7 +89,7 @@ export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border
  * row, so the focus outline and any second line keep their strength.
  */
 export const MENU_ROW =
-  "flex min-h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
+  "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
 export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
