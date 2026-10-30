@@ -39,21 +39,14 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await openAboutPanel(page);
 
     // Calm empty state, then create.
-    await expect(page.getByTestId("linked-chats-empty")).toContainText(
-      "No chats about this file yet.",
-    );
+    await expect(page.getByTestId("linked-chats-panel")).toBeVisible();
+    await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
+    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
-    const titleInput = page.getByTestId("linked-chat-new-title");
-    await expect(titleInput).toHaveValue("topic.md");
-    await titleInput.fill("Naming discussion");
-    await titleInput.press("Enter");
-
-    await expect(page.getByTestId("linked-chat-title")).toContainText(
-      "Naming discussion",
-    );
-    const composer = page.getByTestId("linked-chat-composer");
-    await composer.fill("Should we rename this topic?");
-    await composer.press("Enter");
+    const comment = page.getByTestId("linked-chat-new-composer");
+    await comment.fill("Naming discussion\nShould we rename this topic?");
+    await comment.press("Enter");
+    await expect(page.getByTestId("linked-chat-title")).toContainText("Naming discussion");
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "Should we rename this topic?",
     );

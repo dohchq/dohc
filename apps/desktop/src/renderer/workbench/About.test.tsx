@@ -220,13 +220,29 @@ describe("About Access", () => {
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
   });
 
-  it("says an empty answer covers only what it checked, never that nobody has access", async () => {
+  it("shows Only you when a complete answer finds no share from this workspace", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(answer());
     render(<Access />);
-    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this file.",
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+  });
+
+  it("claims nothing for a listing that did not finish, and shows only its freshness", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({ coverage: { kind: "granted", complete: false, observation: "interval" } }),
     );
-    expect(screen.getByTestId("about-access-count").textContent).toBe("0");
+    render(<Access />);
+    expect(await screen.findByTestId("about-access-freshness")).toBeTruthy();
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByTestId("about-access-row")).toBeNull();
+  });
+
+  it("says no share to you includes a received file it finds nothing for", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({ unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" } }),
+    );
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("No share to you includes this file.");
   });
 
   it("names a received file's own grant within its coverage", async () => {
@@ -465,9 +481,7 @@ describe("About Access", () => {
     bridgeMock.getObjectAccess.mockResolvedValueOnce(answer({ ref: { kind: "chat", channelWireId: "wire-general" } }))
       .mockRejectedValueOnce(new Error("disk is busy"));
     const { rerender } = render(<ChatAccess channelWireId="wire-general" received={false} />);
-    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this chat.",
-    );
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
     expect(bridgeMock.getObjectAccess).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
       ref: { kind: "chat", channelWireId: "wire-general" },
@@ -1085,7 +1099,6 @@ describe("About Links", () => {
       await act(async () => {});
       expect(screen.getByRole("status").textContent).toBe("Gathering links");
       expect(screen.getByTestId("about-links-count").textContent).toBe("0+");
-      expect(screen.queryByTestId("about-links-empty")).toBeNull();
       await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(linkRows()).toHaveLength(1);
       expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(1);
@@ -1111,7 +1124,6 @@ describe("About Links", () => {
       await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(screen.queryByRole("status")).toBeNull();
       expect(screen.getByTestId("about-chat-links-failed")).toBeTruthy();
-      expect(screen.queryByTestId("about-links-empty")).toBeNull();
       expect(notices.report).toHaveBeenCalledOnce();
       expect(notices.report.mock.calls[0]![0]).toMatchObject({ identity: "about-chat-links:docs/plan.md" });
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
@@ -1151,14 +1163,14 @@ describe("About Links", () => {
     }
   });
 
-  it("says when nothing links here, and how to add a link", async () => {
+  it("draws only the head, with no count, when nothing links here", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([]));
     bridgeMock.chatFileMentionsPage.mockResolvedValue(chatPage([]));
     render(<Links chats />);
-    expect((await screen.findByTestId("about-links-empty")).textContent).toBe(
-      "No links to this file yet. Type [[ in another file to add one.",
-    );
-    expect(screen.getByTestId("about-links-count").textContent).toBe("0");
+    await waitFor(() => expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalled());
+    await act(async () => {});
+    expect(sectionBody("links").textContent).toBe("");
+    expect(screen.queryByTestId("about-links-count")).toBeNull();
   });
 
   it("reads nothing for a file under shared-with-me/, and says dohc does not list its links yet", async () => {
@@ -1214,7 +1226,8 @@ describe("About Links", () => {
     bridgeMock.linksIn.mockReturnValueOnce(old.promise).mockResolvedValueOnce(linksPage([]));
     const view = render(<Links path="docs/plan.md" />);
     view.rerender(<Links path="docs/other.md" />);
-    await screen.findByTestId("about-links-empty");
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
+    await act(async () => {});
     notices.clear.mockReset();
     await act(async () => old.reject(new Error("late")));
     expect(notices.report).not.toHaveBeenCalled();
@@ -1341,6 +1354,7 @@ function HistorySection(props: {
   revision?: number;
   paused?: boolean;
   onOpenMoment?: (id: string, path: string) => void;
+  onOpenHistory?: () => void;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -1353,6 +1367,7 @@ function HistorySection(props: {
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       onOpenMoment={props.onOpenMoment ?? (() => undefined)}
+      {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
       notices={notices}
     />
   );
@@ -1373,7 +1388,7 @@ describe("About History", () => {
     const onOpenMoment = vi.fn();
     render(<HistorySection onOpenMoment={onOpenMoment} />);
     const rows = await screen.findAllByTestId("about-history-open");
-    expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 5 });
+    expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 20 });
     expect(rows[0]!.textContent).toContain("Tightened the plan");
     expect(rows[0]!.getAttribute("title")).toBe("Nova");
     expect(rows[1]!.textContent).toContain("Edited plan.md");
@@ -1408,16 +1423,15 @@ describe("About History", () => {
     expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  it("shows loading lines, then says when the file has no changes", async () => {
+  it("shows loading lines, then only the head when the file has no changes", async () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
     expect(loadingLines("history")).toHaveLength(2);
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
-    expect(screen.getByTestId("about-history-empty").textContent).toBe("History has no changes to this file yet.");
-    expect(screen.getByTestId("about-history-count").textContent).toBe("0");
+    expect(sectionBody("history").textContent).toBe("");
+    expect(screen.queryByTestId("about-history-count")).toBeNull();
   });
 
   it("reports a failed read to the shell and reads again on Try again", async () => {
@@ -1446,7 +1460,6 @@ describe("About History", () => {
     const line = await screen.findByTestId("about-history-updating");
     expect(line.textContent).toBe("Adding recent changes to History");
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(notices.report).not.toHaveBeenCalled();
     await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId("about-history-updating")).toBe(line);
@@ -1490,7 +1503,7 @@ describe("About History", () => {
     bridgeMock.listEngineMoments.mockResolvedValue(page([]));
     render(<HistorySection paused />);
     expect(await screen.findByTestId("about-history-paused")).toBeTruthy();
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
+    expect(sectionBody("history").textContent).toBe(screen.getByTestId("about-history-paused").textContent);
   });
 
   // A read History's growth starts replaces the one an updating answer
@@ -1554,6 +1567,30 @@ describe("About History", () => {
     expect((await screen.findByTestId("about-history-open")).textContent).toContain("Second file");
     await act(async () => forFirst.resolve(page([moment({ summary: "First file" })])));
     expect(screen.getAllByTestId("about-history-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+  });
+
+  it("folds an agent's run into one row and shows the three latest rows", async () => {
+    const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
+    const run = ["run-1", "run-2", "run-3"].map((id) =>
+      moment({ id, agentAuthorName: "Nova", authors: [agent], authorPresentations: [{ group: "agent:nova", hue: null, self: false }] }));
+    const edits = ["edit-1", "edit-2", "edit-3"].map((id) => moment({ id }));
+    bridgeMock.listEngineMoments.mockResolvedValue(page([...run, ...edits]));
+    render(<HistorySection />);
+    const rows = await screen.findAllByTestId("about-history-open");
+    expect(rows.map((row) => row.dataset.momentId)).toEqual(["run-1", "edit-1", "edit-2"]);
+    expect(within(rows[0]!).getByTestId("about-history-folded").textContent).toBe("3 changes");
+    expect(within(rows[1]!).queryByTestId("about-history-folded")).toBeNull();
+    expect(screen.getByTestId("about-history-count").textContent).toBe("3+");
+  });
+
+  it("opens the full History from its head", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue(page([moment()]));
+    const onOpenHistory = vi.fn();
+    const { rerender } = render(<HistorySection onOpenHistory={onOpenHistory} />);
+    await userEvent.setup().click(screen.getByTestId("about-history-all"));
+    expect(onOpenHistory).toHaveBeenCalledTimes(1);
+    rerender(<HistorySection />);
+    expect(screen.queryByTestId("about-history-all")).toBeNull();
   });
 
   it("keeps its rows while it reads again after History grows", async () => {

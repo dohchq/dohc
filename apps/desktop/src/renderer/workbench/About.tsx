@@ -3,7 +3,6 @@ import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
-  ChevronDown,
   ChevronRight,
   CloudOff,
   Eye,
@@ -11,9 +10,9 @@ import {
   FileText,
   FileX,
   History,
-  Link,
   Link2Off,
   LoaderCircle,
+  Lock,
   LogIn,
   MessageSquare,
   Pencil,
@@ -30,15 +29,14 @@ import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
 import { RetryRow, SecondaryButton } from "../ui/controls";
 import { KindGlyph, ObjectGlyph } from "../ui/KindGlyph";
-import { Ref } from "../ui/Ref";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
-import { accessReasonForLane, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
+import { accessReasonForLane, serverName, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { HistoryPaused, HistoryUpdating, MARK_BOX, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryPaused, HistoryUpdating, MARK_BOX, MomentAuthor, engineMomentSourceLabel, engineMomentSummary, groupTimeline } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -60,6 +58,8 @@ export type AboutNotices = {
 
 export type AccessSetup = {
   reason: AccessReason;
+  // The server's address, when dohc knows it.
+  server?: string | null;
   openSyncSettings: () => void;
   connect: () => void;
 };
@@ -107,51 +107,78 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
   );
 }
 
-// A section head is its disclosure: the icon, the label, then the count.
+// A section head is its disclosure, drawn like the Explorer's: the label, the
+// count, then the chevron, with the section's own actions at the right. A
+// count of 0 is not drawn: the empty section is its head alone.
 export function AboutSection(props: {
   id: AboutSectionId;
-  icon: LucideIcon;
   label: string;
   count?: string;
   expanded: boolean;
   onToggle: () => void;
   // For a section that hands focus to its own head.
   toggleRef?: RefObject<HTMLButtonElement | null>;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const bodyId = useId();
-  const Icon = props.icon;
   return (
     <section data-testid={`about-${props.id}`} aria-label={props.label} className="mt-4 first:mt-2">
-      <h3 className="m-0">
-        <button
-          ref={props.toggleRef}
-          type="button"
-          data-testid={`about-${props.id}-toggle`}
-          aria-expanded={props.expanded}
-          aria-controls={bodyId}
-          onClick={props.onToggle}
-          className="dohc-section-label dohc-focus-row mx-1 flex h-6 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left hover:text-muted"
-        >
-          <Icon size={12} strokeWidth={1.9} aria-hidden />
-          {props.label}
-          {props.expanded ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
-          {props.count !== undefined ? (
-            <span
-              data-testid={`about-${props.id}-count`}
-              className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal"
-            >
-              {props.count}
-            </span>
-          ) : null}
-        </button>
-      </h3>
+      <div className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover">
+        <h3 className="m-0 flex h-full min-w-0 flex-1">
+          <button
+            ref={props.toggleRef}
+            type="button"
+            data-testid={`about-${props.id}-toggle`}
+            aria-expanded={props.expanded}
+            aria-controls={bodyId}
+            onClick={props.onToggle}
+            className="dohc-section-label dohc-focus-row flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left group-hover:text-muted"
+          >
+            <span className="min-w-0 truncate">{props.label}</span>
+            {props.count !== undefined && props.count !== "0" ? (
+              <span
+                data-testid={`about-${props.id}-count`}
+                className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-subtle"
+              >
+                {props.count}
+              </span>
+            ) : null}
+            <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${props.expanded ? "rotate-90" : ""}`} />
+          </button>
+        </h3>
+        {props.actions ? <div className="flex shrink-0 items-center gap-1">{props.actions}</div> : null}
+      </div>
       {props.expanded ? (
         <div id={bodyId} className="px-1">
           {props.children}
         </div>
       ) : null}
     </section>
+  );
+}
+
+// An icon control in a section's head, as the Explorer's heads have.
+export function AboutSectionAction(props: {
+  testId: string;
+  label: string;
+  icon: LucideIcon;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const Icon = props.icon;
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      aria-label={props.label}
+      title={props.label}
+      disabled={props.disabled}
+      onClick={props.onClick}
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:pointer-events-none disabled:opacity-30"
+    >
+      <Icon size={13} aria-hidden />
+    </button>
   );
 }
 
@@ -234,7 +261,8 @@ export function AboutMore(props: {
   );
 }
 
-// One chat about the file: its title, then when it last changed.
+// One comment on the file, which is a chat about it: its first line, then
+// when it last changed.
 export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => void }) {
   const when = formatChatTime(props.thread.updatedAtMs);
   return (
@@ -243,17 +271,15 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       data-testid="linked-chat-open"
       data-thread-id={props.thread.id}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} h-10`}
+      className={`${ABOUT_ROW_BUTTON} h-7`}
     >
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <MessageSquare size={14} />
       </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="truncate">{props.thread.title}</span>
-        <time dateTime={when.iso} className="truncate text-[11px] text-subtle">
-          {when.label}
-        </time>
-      </span>
+      <span className="min-w-0 flex-1 truncate">{props.thread.title}</span>
+      <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
+        {formatShortTime(props.thread.updatedAtMs)}
+      </time>
     </button>
   );
 }
@@ -594,25 +620,24 @@ function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string {
   return `${links.rows.length + (chats?.rows.length ?? 0)}${more ? "+" : ""}`;
 }
 
-// The line around a link, with the link's own words marked. Main clamps the
+// The words around a link, with the link's own words marked. Main clamps the
 // range; this guards a range that drifted anyway, so it never throws.
 function LinkSnippet(props: { link: LinkEntry }) {
   const { snippet } = props.link;
   const start = Math.max(0, Math.min(props.link.highlightStart, snippet.length));
   const end = Math.max(start, Math.min(props.link.highlightEnd, snippet.length));
   return (
-    <span className="line-clamp-2 text-[12px] leading-4 [overflow-wrap:anywhere]">
+    <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
       {snippet.slice(0, start)}
-      <mark className="bg-transparent font-medium text-ink">{snippet.slice(start, end)}</mark>
+      <mark className="bg-transparent text-muted">{snippet.slice(start, end)}</mark>
       {snippet.slice(end)}
     </span>
   );
 }
 
-// One link into the file: the file it is in, then the line around it. A
-// file's next links leave out its chip, so they read as one group, and say
-// the file only to a screen reader.
-function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void }) {
+// One link into the file, on one line: the file it is in, then the words
+// around it. The tooltip holds the whole line and the file's path.
+function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
   const { link } = props;
   return (
     <button
@@ -620,17 +645,15 @@ function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void })
       data-testid="about-link"
       data-path={link.source}
       data-line={link.line}
+      title={`${link.snippet}\n${link.source}`}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} py-1`}
+      className={`${ABOUT_ROW_BUTTON} h-7`}
     >
-      <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
-        {props.first ? (
-          <Ref path={link.source} title={link.title} folder />
-        ) : (
-          <span className="sr-only">{`${link.title} ${link.source}`}</span>
-        )}
-        <LinkSnippet link={link} />
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
+        <KindGlyph kind={fileKindForPath(link.source)} size={14} />
       </span>
+      <span className="max-w-[50%] shrink-0 truncate">{link.title}</span>
+      <LinkSnippet link={link} />
     </button>
   );
 }
@@ -639,7 +662,7 @@ function LinkRow(props: { link: LinkEntry; first: boolean; onOpen: () => void })
 // panel around them, so a long list costs nothing while someone types there.
 // A row out of the rail's view skips layout and paint until it scrolls in;
 // its focus ring and hover fill sit inside it, so nothing is clipped.
-export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
+export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_28px]";
 
 // What makes a row the same row from one page to the next.
 const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
@@ -648,14 +671,11 @@ const chatLinkKey = (mention: ChatFileMentionRecord) => mention.attachment.attac
 const LinkList = memo(function LinkList(props: { rows: LinkEntry[]; onOpenLink: (path: string, line: number) => void }) {
   return (
     <ul data-testid="about-links-list" className="m-0 list-none p-0">
-      {props.rows.map((link, index) => {
-        const first = index === 0 || props.rows[index - 1]!.source !== link.source;
-        return (
-          <li key={linkKey(link)} className={`${OFFSCREEN_ROW} ${first && index > 0 ? "mt-1.5" : ""}`}>
-            <LinkRow link={link} first={first} onOpen={() => props.onOpenLink(link.source, link.line)} />
-          </li>
-        );
-      })}
+      {props.rows.map((link) => (
+        <li key={linkKey(link)} className={OFFSCREEN_ROW}>
+          <LinkRow link={link} onOpen={() => props.onOpenLink(link.source, link.line)} />
+        </li>
+      ))}
     </ul>
   );
 });
@@ -675,34 +695,32 @@ const ChatLinkList = memo(function ChatLinkList(props: {
   );
 });
 
-// A chat message that links to the file: where it was said and when, then
-// who said it and what. The record names no author kind, so no avatar
+// A chat message that links to the file, on one line: where it was said,
+// who said what, then when. The record names no author kind, so no avatar
 // guesses one.
 function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void }) {
   const { mention } = props;
   const when = formatChatTime(mention.message.createdAtMs);
+  const where = mention.channelName ?? mention.thread.title;
   return (
     <button
       type="button"
       data-testid="chat-file-mention"
       data-thread-id={mention.thread.id}
+      title={`${mention.message.authorDisplayName}: ${mention.message.preview}`}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} py-1`}
+      className={`${ABOUT_ROW_BUTTON} h-7`}
     >
-      <span className={`${MARK_BOX} self-start text-subtle`}>
+      <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} />
       </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex min-w-0 items-baseline gap-2">
-          <span className="min-w-0 flex-1 truncate">{mention.channelName ?? mention.thread.title}</span>
-          <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
-            {formatShortTime(mention.message.createdAtMs)}
-          </time>
-        </span>
-        <span className="line-clamp-2 text-[12px] leading-4 [overflow-wrap:anywhere]">
-          <span className="font-medium">{mention.message.authorDisplayName}</span> {mention.message.preview}
-        </span>
+      <span className="max-w-[50%] shrink-0 truncate">{where}</span>
+      <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
+        <span className="text-muted">{mention.message.authorDisplayName}</span> {mention.message.preview}
       </span>
+      <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
+        {formatShortTime(mention.message.createdAtMs)}
+      </time>
     </button>
   );
 }
@@ -773,7 +791,7 @@ export function AboutLinksView(props: {
   const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, linkKey, toggleRef, '[data-testid="about-link"]');
   const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, chatLinkKey, toggleRef, '[data-testid="chat-file-mention"]');
   return (
-    <AboutSection id="links" icon={Link} label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}
+    <AboutSection id="links" label="Links" count={count} expanded={props.expanded} onToggle={props.onToggle}
       toggleRef={toggleRef}>
       {links === null ? (
         <AboutNote testId="about-links-shared" icon={Link2Off}>
@@ -818,13 +836,6 @@ export function AboutLinksView(props: {
           ) : null}
         </>
       )}
-      {count === "0" ? (
-        <AboutNote testId="about-links-empty">
-          No links to this file yet. Type{" "}
-          <kbd className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">[[</kbd> in another file
-          to add one.
-        </AboutNote>
-      ) : null}
     </AboutSection>
   );
 }
@@ -853,7 +864,10 @@ export type HistoryView =
   | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
-const HISTORY_ROWS = 5;
+// Enough of a file's changes to fill its latest groups, of which About shows
+// a few. The rest are one press away in History.
+const HISTORY_READ = 20;
+const HISTORY_GROUPS = 3;
 
 // A change with no one author, or several, keeps the file mark here.
 const FILE_MARK = (
@@ -873,6 +887,7 @@ export function AboutHistory(props: {
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  onOpenHistory?: () => void;
   notices: AboutNotices;
 }) {
   const { workspaceId, file } = props;
@@ -893,7 +908,7 @@ export function AboutHistory(props: {
     const request = begin();
     const failed = { status: "failed", retry: () => void load() } as const;
     try {
-      const response = await bridge().listEngineMoments({ workspaceId, objectId, limit: HISTORY_ROWS });
+      const response = await bridge().listEngineMoments({ workspaceId, objectId, limit: HISTORY_READ });
       if (!("status" in response)) {
         request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
@@ -924,7 +939,8 @@ export function AboutHistory(props: {
     : file.objectId === null ? { status: "untracked" }
     : read.view;
   return (
-    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />
+    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle}
+      onOpenMoment={props.onOpenMoment} {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})} />
   );
 }
 
@@ -937,18 +953,31 @@ export function AboutHistoryView(props: {
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  onOpenHistory?: () => void;
 }) {
   const { view } = props;
+  // Consecutive changes fold as History folds them, so a run of edits is one row.
+  const groups = useMemo(
+    () => view.status === "ready"
+      ? groupTimeline(view.moments.map((moment) => ({ kind: "file" as const, moment })))
+        .flatMap((item) => item.kind === "files" ? [item.group] : [])
+      : [],
+    [view],
+  );
+  const shown = groups.slice(0, HISTORY_GROUPS);
+  const more = groups.length > HISTORY_GROUPS || (view.status === "ready" && view.more);
   // Its words start where a row's name does.
   const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
   return (
     <AboutSection
       id="history"
-      icon={History}
       label="History"
-      count={view.status === "ready" ? `${view.moments.length}${view.more ? "+" : ""}` : undefined}
+      count={view.status === "ready" ? `${shown.length}${more ? "+" : ""}` : undefined}
       expanded={props.expanded}
       onToggle={props.onToggle}
+      actions={props.onOpenHistory ? (
+        <AboutSectionAction testId="about-history-all" label="Open History" icon={History} onClick={props.onOpenHistory} />
+      ) : undefined}
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
@@ -964,15 +993,18 @@ export function AboutHistoryView(props: {
           {view.words}
         </AboutNote>
       ) : view.moments.length === 0 ? (
-        paused ?? <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
+        paused
       ) : (
         <ul className="m-0 list-none p-0">
           {paused ? <li>{paused}</li> : null}
-          {view.moments.map((moment) => {
+          {shown.map(({ key, moments }, index) => {
+            const moment = moments[0]!;
+            // The read's last group may go on past it.
+            const changes = `${moments.length}${index === groups.length - 1 && more ? " or more" : ""} changes`;
             const when = formatChatTime(moment.recordedAtMs);
             const source = engineMomentSourceLabel(moment);
             return (
-              <li key={moment.id}>
+              <li key={key}>
                 <button
                   type="button"
                   data-testid="about-history-open"
@@ -983,6 +1015,11 @@ export function AboutHistoryView(props: {
                 >
                   <MomentAuthor moment={moment} fallback={FILE_MARK} />
                   <span className="min-w-0 flex-1 truncate">{engineMomentSummary(moment)}</span>
+                  {moments.length > 1 ? (
+                    <span data-testid="about-history-folded" className="shrink-0 text-[11px] tabular-nums text-subtle">
+                      {changes}
+                    </span>
+                  ) : null}
                   <span className="sr-only">{source}</span>
                   <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
                     {formatShortTime(moment.recordedAtMs)}
@@ -1020,17 +1057,33 @@ export const LEVELS: Record<ShareLevel, { icon: LucideIcon; label: string }> = {
 export type AccessNoun = "file" | "chat";
 
 // What an empty list means, within what it covers. Never "no access": an
-// answer with no coverage is unknown, not empty.
-const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, (noun: AccessNoun) => string> = {
-  granted: (noun) => `No share from this workspace includes this ${noun}.`,
-  "received-own-grant": (noun) => `No grant to you includes this ${noun}.`,
-  "received-account": (noun) => `No share to you includes this ${noun}.`,
-  collection: () => "No app or person has permissions on this Collection.",
+// answer with no coverage is unknown, not empty. A workspace has no members
+// besides its owner, so a complete answer with no share from it, or no
+// permission on a Collection, leaves only its owner: one row says so. A
+// listing that has not finished claims nothing.
+type EmptyWithin = { only: true } | { only: false; words: string };
+const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, (noun: AccessNoun) => EmptyWithin> = {
+  granted: () => ({ only: true }),
+  "received-own-grant": (noun) => ({ only: false, words: `No share to you includes this ${noun}.` }),
+  "received-account": (noun) => ({ only: false, words: `No share to you includes this ${noun}.` }),
+  collection: () => ({ only: true }),
 };
 
-function emptyWithin(answer: AccessAnswer, noun: AccessNoun): string | null {
+function emptyWithin(answer: AccessAnswer, noun: AccessNoun): EmptyWithin | null {
   const kind = answer.coverage.kind;
   return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind](noun);
+}
+
+// The one row an answer with nobody else shows.
+function OnlyYouRow() {
+  return (
+    <div data-testid="about-access-empty" className={`${ABOUT_ROW} h-7`}>
+      <span aria-hidden className={`${MARK_BOX} text-muted`}>
+        <Lock size={14} />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-ink">Only you</span>
+    </div>
+  );
 }
 
 // The count is who has access now: ended and damaged grants stay listed, but
@@ -1112,6 +1165,13 @@ export function AboutAccess(props: {
     subject.kind === "path" ? accessReasonFor(facts, subject.path)
     : props.received == null ? "unexplained"
     : accessReasonForLane(facts, props.received ? "received" : "granted");
+  // The workspace's server answers for its own shares only. What was shared
+  // with this account may live on another, so that cause names none.
+  const owned = subject.kind === "path" ? !facts.shareView && !isSharedWithMePath(subject.path) : props.received === false;
+  const server = owned ? props.context.server : null;
+  // Only the owner shares a file further, from the same dialog as its header's Share.
+  const { share } = props.context;
+  const sharePath = owned && subject.kind === "path" && share ? subject.path : null;
   // The key names the subject in full, kind first so a path never reads as a
   // wire id, and a read keyed on it asks about the ref it was built from.
   const subjectKey = subject.kind === "path" ? `file:${subject.path}` : `chat:${subject.channelWireId}`;
@@ -1175,7 +1235,7 @@ export function AboutAccess(props: {
     return cancel;
   }, [cancel, connection, load, props.expanded]);
 
-  const setup = useMemo<AccessSetup>(() => ({ reason, openSyncSettings, connect }), [connect, openSyncSettings, reason]);
+  const setup = useMemo<AccessSetup>(() => ({ reason, server, openSyncSettings, connect }), [connect, openSyncSettings, reason, server]);
   return (
     <AboutAccessView
       view={read.view}
@@ -1185,6 +1245,7 @@ export function AboutAccess(props: {
       onMore={(answer) => void load({ after: answer })}
       setup={setup}
       noun={noun}
+      {...(sharePath !== null && share ? { onShare: () => share(sharePath) } : {})}
     />
   );
 }
@@ -1261,7 +1322,7 @@ export function AccessUnknown(props: {
       return (
         <AboutNote testId={`${testId}-unknown`} reason="signed-out" icon={LogIn}
           action={{ label: "Connect server", run: setup.connect }}>
-          {props.signedOut}
+          {setup.server ? <>Connect to <span className="font-medium">{serverName(setup.server)}</span> to check who has access.</> : props.signedOut}
         </AboutNote>
       );
     // Settings' Sync and sharing says the same, and holds what resumes it.
@@ -1295,6 +1356,7 @@ export function AboutAccessView(props: {
   onMore: (answer: AccessAnswer) => void;
   setup: AccessSetup;
   noun?: AccessNoun;
+  onShare?: () => void;
 }) {
   const { view } = props;
   const noun = props.noun ?? "file";
@@ -1302,11 +1364,13 @@ export function AboutAccessView(props: {
   return (
     <AboutSection
       id="access"
-      icon={Share2}
       label="Access"
       count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
       expanded={props.expanded}
       onToggle={props.onToggle}
+      actions={props.onShare ? (
+        <AboutSectionAction testId="about-access-share" label="Share file" icon={Share2} onClick={props.onShare} />
+      ) : undefined}
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
@@ -1325,9 +1389,12 @@ export function AboutAccessView(props: {
           ) : (
             <>
               <AccessChecked testId="about-access-freshness" answer={view.answer} />
-              {view.answer.rows.length === 0 ? (
-                <AboutNote testId="about-access-empty">{empty}</AboutNote>
-              ) : (
+              {view.answer.rows.length > 0 ? null : !empty.only ? (
+                <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
+              ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (
+                <OnlyYouRow />
+              ) : null}
+              {view.answer.rows.length === 0 ? null : (
                 <>
                   <ul className="m-0 list-none p-0">
                     {view.answer.rows.map((row) => (

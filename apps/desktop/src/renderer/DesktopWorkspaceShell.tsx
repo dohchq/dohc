@@ -1175,6 +1175,12 @@ export function DesktopWorkspaceShell(props: {
   const cloudConnected = cloudStatus?.connected;
   const cloudWorkspaceSynced = cloudStatus?.workspaceSynced === true;
   const cloudWorkspaceSyncConnected = cloudStatus?.workspaceSyncConnected === true;
+  const cloudServerUrl = cloudStatus?.workspaceServerUrl ?? null;
+  // One Share dialog for every surface: the explorer row's "Share…", the
+  // inspector header's share control, and About's Access.
+  const onSharePath = useCallback((path: string) => {
+    setShareTarget({ kind: "paths", paths: [path] });
+  }, []);
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
@@ -1185,10 +1191,12 @@ export function DesktopWorkspaceShell(props: {
         } : cloudStatusUnreadable ? "unreadable" : "checking",
         shareView: isShareView,
       },
+      server: cloudServerUrl,
       openSyncSettings: () => openSettings("cloud"),
       connect: openCloud,
+      share: onSharePath,
     }),
-    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openCloud, openSettings],
+    [cloudConnected, cloudServerUrl, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, onSharePath, openCloud, openSettings],
   );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
@@ -3955,11 +3963,6 @@ export function DesktopWorkspaceShell(props: {
   const onExplorerRefreshShareMounts = useCallback(() => {
     void refreshShareMounts(true);
   }, [refreshShareMounts]);
-  // One share entry point for both surfaces: the explorer row's "Share…" and
-  // the inspector header's share control open the same dialog.
-  const onSharePath = useCallback((path: string) => {
-    setShareTarget({ kind: "paths", paths: [path] });
-  }, []);
   const onExplorerRefresh = useCallback(() => {
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
@@ -6486,6 +6489,7 @@ export function DesktopWorkspaceShell(props: {
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
               openMoment={openMomentDiffTab}
+            openHistory={openHistoryView}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
             openChatMention={openChatMention}
