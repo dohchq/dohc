@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
@@ -174,7 +174,8 @@ describe("Home's Apps section", () => {
     const onSetPinned = vi.fn();
     const user = userEvent.setup();
     const view = render(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} />);
-    await user.click(await screen.findByRole("button", { name: "Pin to sidebar" }));
+    await user.hover(await screen.findByTestId("sites-row"));
+    await user.click(screen.getByRole("button", { name: "Pin to sidebar" }));
     expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", true);
 
     view.rerender(<Harness onOpenPath={onOpenPath} onSetPinned={onSetPinned} pinnedApps={["client-portal"]} />);
@@ -191,12 +192,11 @@ describe("Home's Apps section", () => {
     await screen.findByText("Docs");
     const toggle = screen.getByTestId("explorer-apps-toggle");
     const [portalRow, docsRow] = screen.getAllByTestId("sites-row");
-    // A pin is a pointer shortcut; the keyboard pins through the row's menu.
-    for (const pin of screen.getAllByTestId("sites-pin")) expect(pin.tabIndex).toBe(-1);
-
     toggle.focus();
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(portalRow);
+    // A pin is a pointer shortcut; the keyboard pins through the row's menu.
+    expect(within(portalRow.parentElement!).getByTestId("sites-pin").tabIndex).toBe(-1);
     await user.keyboard("{Enter}");
     expect(onOpenPath).toHaveBeenLastCalledWith(siteTabPath("client-portal"));
 
@@ -459,9 +459,13 @@ describe("Home's Apps section", () => {
 
   it("keeps a pinned app's pin in view and hides the others until hover or focus", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [app, docs] });
+    const user = userEvent.setup();
     render(<Harness pinnedApps={["client-portal"]} />);
 
     const pinned = await screen.findByRole("button", { name: "Unpin" });
+    // An unpinned row draws its pin on its first hover or focus.
+    expect(screen.queryByRole("button", { name: "Pin to sidebar" })).toBeNull();
+    await user.hover(screen.getAllByTestId("sites-row")[1]!);
     const unpinned = screen.getByRole("button", { name: "Pin to sidebar" });
     expect(pinned.className).not.toContain("opacity-0");
     expect(pinned.querySelector("svg")?.getAttribute("class")).toContain("text-ink");

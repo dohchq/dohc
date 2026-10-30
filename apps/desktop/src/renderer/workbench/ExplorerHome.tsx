@@ -223,10 +223,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     sections.push({
       id: "other",
       label: "Other files",
-      count: kinds.others.length,
+      count: kinds.otherCount,
       countLabel: (count) => plural(count, "file", "files"),
       rows: others,
-      ...(kinds.others.length > OTHER_FILES_SHOWN
+      ...(kinds.otherCount > OTHER_FILES_SHOWN
         ? { more: { key: "other:more", label: "Show all in Files", testId: "other-files-show-all", onActivate: () => props.onShowInFiles(null) } }
         : {}),
     });
@@ -619,7 +619,8 @@ function HomeGlyph({ row, active }: { row: HomeRowModel; active: boolean }) {
 
 // One Home row: its mark and name, then on hover or keyboard focus its pin
 // and menu. Primitives and stable callbacks, so a focus change re-renders
-// only the rows it touches.
+// only the rows it touches. The pin and menu mount on the row's first hover
+// or focus, which keeps a long Home's first paint to the rows themselves.
 const HomeRow = memo(function HomeRow(props: {
   row: HomeRowModel;
   active: boolean;
@@ -654,10 +655,14 @@ const HomeRow = memo(function HomeRow(props: {
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu ? 1 : 0);
+  const [reached, setReached] = useState(false);
   const dragPath = drag && path ? path : null;
   return (
     <li role="none" className="px-1">
-      <div className={`group relative flex h-7 items-center rounded-md transition-colors duration-75 ${fill}`}>
+      <div
+        onPointerEnter={reached ? undefined : () => setReached(true)}
+        className={`group relative flex h-7 items-center rounded-md transition-colors duration-75 ${fill}`}
+      >
         <button
           type="button"
           ref={(element) => props.registerRef(row.key, element)}
@@ -671,7 +676,10 @@ const HomeRow = memo(function HomeRow(props: {
           title={app ? app.root : path}
           tabIndex={props.tabbable ? 0 : -1}
           draggable={dragPath !== null ? true : undefined}
-          onFocus={() => props.onFocus(row.key)}
+          onFocus={() => {
+            setReached(true);
+            props.onFocus(row.key);
+          }}
           onClick={() => props.onClick(row)}
           onContextMenu={(event) => props.onContextMenu(row, event)}
           onDragStart={dragPath !== null ? (event) => drag!.start(dragPath, event) : undefined}
@@ -696,7 +704,7 @@ const HomeRow = memo(function HomeRow(props: {
           {row.detail ? <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{row.detail}</span> : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
-        {trailing > 0 ? (
+        {trailing > 0 && (reached || pinned) ? (
           <span className="absolute right-1 top-0.5 flex items-center">
             {onSetPinned ? (
               <button
@@ -713,7 +721,7 @@ const HomeRow = memo(function HomeRow(props: {
                 <Pin size={13} aria-hidden className={pinned ? "text-ink" : undefined} />
               </button>
             ) : null}
-            {row.menu ? (
+            {row.menu && reached ? (
               <button
                 type="button"
                 data-testid="home-row-menu"

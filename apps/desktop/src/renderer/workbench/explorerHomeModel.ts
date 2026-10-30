@@ -60,9 +60,16 @@ function ownedBy(path: string, owners: ReadonlySet<string>): boolean {
   return owners.has(path);
 }
 
-export type HomeKinds = { pages: WorkspaceFileEntry[]; others: WorkspaceFileEntry[] };
+export const OTHER_FILES_SHOWN = 20;
+
+// `others` holds only the first OTHER_FILES_SHOWN by name; `otherCount` counts them all.
+export type HomeKinds = { pages: WorkspaceFileEntry[]; others: WorkspaceFileEntry[]; otherCount: number };
+
+const compareOthers = (a: WorkspaceFileEntry, b: WorkspaceFileEntry) =>
+  collator.compare(basenameOf(a.path), basenameOf(b.path)) || collator.compare(a.path, b.path);
 
 // One pass over the listing. A dataset's folder holds its dataset.json.
+// Other files are never sorted whole: Home shows only the first few.
 export function classifyFiles(
   files: readonly WorkspaceFileEntry[],
   collectionFolders: ReadonlySet<string>,
@@ -74,13 +81,21 @@ export function classifyFiles(
   }
   const pages: WorkspaceFileEntry[] = [];
   const others: WorkspaceFileEntry[] = [];
+  let otherCount = 0;
   for (const file of files) {
     if (ownedBy(file.path, owners)) continue;
-    if (file.kind === "file" && fileKindForPath(file.path).displayKind === "markdown") pages.push(file);
-    else others.push(file);
+    if (file.kind === "file" && fileKindForPath(file.path).displayKind === "markdown") {
+      pages.push(file);
+      continue;
+    }
+    otherCount += 1;
+    if (others.length === OTHER_FILES_SHOWN && compareOthers(file, others[OTHER_FILES_SHOWN - 1]!) >= 0) continue;
+    let at = others.length;
+    while (at > 0 && compareOthers(file, others[at - 1]!) < 0) at -= 1;
+    others.splice(at, 0, file);
+    if (others.length > OTHER_FILES_SHOWN) others.pop();
   }
-  others.sort((a, b) => collator.compare(basenameOf(a.path), basenameOf(b.path)) || collator.compare(a.path, b.path));
-  return { pages, others };
+  return { pages, others, otherCount };
 }
 
 type PageFolder = { path: string; folders: Map<string, PageFolder>; pages: WorkspaceFileEntry[] };
@@ -137,10 +152,8 @@ export function pageRows(tree: PageFolder, expanded: ReadonlySet<string>): HomeR
   return out;
 }
 
-export const OTHER_FILES_SHOWN = 20;
-
 export function otherRows(others: readonly WorkspaceFileEntry[], files: ReadonlyMap<string, WorkspaceFileEntry>): HomeRowModel[] {
-  return others.slice(0, OTHER_FILES_SHOWN).map((file) => ({
+  return others.map((file) => ({
     key: `other:${file.path}`, section: "other", parentKey: "other", depth: 1,
     label: basenameOf(file.path), glyph: tabMark(file.path, files), open: file.path,
     menu: { path: file.path, kind: "file" }, folder: false, expanded: false,

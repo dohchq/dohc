@@ -286,6 +286,7 @@ describe("Explorer Home", () => {
 
     fireEvent.contextMenu(within(section("Pages")).getByRole("button", { name: "notes" }));
     expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    await userEvent.hover(within(section("Apps")).getByTestId("sites-row"));
     fireEvent.click(within(section("Apps")).getByRole("button", { name: "More actions for Trip" }));
     expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "trip", kind: "folder", pinned: true });
   });
