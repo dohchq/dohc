@@ -62,11 +62,15 @@ describe("app view boundaries", () => {
     expect(appViewShortcut({ ...input, shift: true }, "win32")).not.toBeNull();
     for (const key of ["F5", "F6"]) expect(appViewShortcut({ ...input, key, control: false }, "win32")).not.toBeNull();
     for (const shift of [true, false]) expect(appViewShortcut({ ...input, key: "Tab", shift }, "darwin")).not.toBeNull();
+    for (const key of ["PageDown", "PageUp"]) expect(appViewShortcut({ ...input, key, code: key }, "win32")).not.toBeNull();
+    for (const [key, code] of [["}", "BracketRight"], ["{", "BracketLeft"]])
+      expect(appViewShortcut({ ...input, key, code, control: false, meta: true, shift: true }, "darwin")).not.toBeNull();
     for (const key of ["ArrowLeft", "ArrowRight"]) expect(appViewShortcut({ ...input, key, control: false, alt: true }, "win32")).not.toBeNull();
     expect(appViewShortcut({ ...input, key: "BrowserBack", control: false }, "win32")).toMatchObject({ key: "ArrowLeft", altKey: true });
     expect(appViewShortcut({ ...input, control: false, meta: true }, "darwin")).not.toBeNull();
-    for (const key of ["c", "v", "x", "a", "z", "n", "Enter", "Escape", "ArrowLeft", "ArrowDown", "PageDown"])
+    for (const key of ["c", "v", "x", "a", "z", "n", "Enter", "Escape", "ArrowLeft", "ArrowDown"])
       expect(appViewShortcut({ ...input, key }, "win32")).toBeNull();
+    expect(appViewShortcut({ ...input, key: "PageDown", code: "PageDown", control: false }, "win32")).toBeNull();
     expect(appViewShortcut({ ...input, type: "keyUp" }, "win32")).toBeNull();
     expect(appViewShortcut({ ...input, isComposing: true }, "win32")).toBeNull();
     expect(appViewShortcut({ ...input, alt: true }, "win32")).toBeNull();

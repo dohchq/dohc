@@ -154,8 +154,10 @@ jobs:
       - name: Prepare desktop test runtime
         run: pnpm --filter @dohc/app-backend-runtime build
 
-      - name: Prepare native test engine
-        run: pnpm qa:prepare -- --engine-only
+      # Desktop tests need everything the PR gate prepares, including the
+      # Markdown reader the desktop build stages beside the native engine.
+      - name: Prepare desktop and native test engine
+        run: pnpm qa:prepare
 
       - name: Desktop typecheck
         run: pnpm --filter @dohc/desktop typecheck

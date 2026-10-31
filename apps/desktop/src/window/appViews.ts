@@ -55,14 +55,13 @@ export function appViewShortcut(input: Pick<Input, "type" | "key" | "code" | "co
     ctrlKey: false, shiftKey: false, altKey: true, metaKey: false,
   };
   const key = { key: input.key, code: input.code, ctrlKey: input.control, shiftKey: input.shift, altKey: input.alt, metaKey: input.meta };
-  const shell = (["quick-open", "command-palette", "close-tab", "toggle-sidebar"] as const)
+  const shell = (["quick-open", "command-palette", "close-tab", "toggle-sidebar", "next-tab", "previous-tab"] as const)
     .some(id => matchesShortcut(key, id, platform));
-  const controlTab = input.key === "Tab" && input.control && !input.meta && !input.alt;
   const bare = !input.control && !input.meta && !input.alt && !input.shift;
   const reload = input.key.toLowerCase() === "r" && !input.alt && !input.shift &&
     (platform === "darwin" ? input.meta && !input.control : input.control && !input.meta);
   const history = ["ArrowLeft", "ArrowRight"].includes(input.key) && input.alt && !input.control && !input.meta && !input.shift;
-  return shell || controlTab || (bare && ["F5", "F6"].includes(input.key)) || reload || history ? key : null;
+  return shell || (bare && ["F5", "F6"].includes(input.key)) || reload || history ? key : null;
 }
 
 interface AppViewOperation<Workspace> {

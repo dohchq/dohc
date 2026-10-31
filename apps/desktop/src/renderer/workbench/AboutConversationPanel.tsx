@@ -1,5 +1,5 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
-import { Link, Link2Off } from "lucide-react";
+import { Link2Off } from "lucide-react";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ipcErrorMessage } from "../ipcError";
 import { RetryRow } from "../ui/controls";
@@ -197,8 +197,9 @@ export function AboutConversationLinksView(props: {
   const toggleRef = props.toggleRef ?? ownToggle;
   const focusAdded = useFocusAddedRow(ready?.files ?? null, fileKey, toggleRef, '[data-testid="about-conversation-link"]');
   return (
-    <AboutSection id="links" icon={Link} label="Links"
+    <AboutSection id="links" label="Links"
       count={ready ? `${ready.files.length}${ready.more || ready.building ? "+" : ""}` : undefined}
+      empty={ready !== null && ready.files.length === 0 && !ready.more && !ready.building && !ready.partial}
       expanded={props.expanded} onToggle={props.onToggle} toggleRef={toggleRef}>
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
@@ -225,12 +226,6 @@ export function AboutConversationLinksView(props: {
             <AboutGathering testId="about-conversation-links-gathering" />
           ) : view.partial ? (
             <AboutNote testId="about-conversation-links-partial">This list may not include every file mentioned here.</AboutNote>
-          ) : view.files.length === 0 && !view.more ? (
-            <AboutNote testId="about-conversation-links-empty">
-              No files mentioned here yet. Type{" "}
-              <kbd className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">/</kbd> in a message
-              to add one.
-            </AboutNote>
           ) : null}
         </>
       )}

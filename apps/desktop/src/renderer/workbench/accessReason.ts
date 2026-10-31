@@ -11,9 +11,24 @@ export type AccessFacts = {
 };
 export type AccessContext = {
   facts: AccessFacts;
+  // The server this workspace syncs with, when it syncs.
+  server?: string | null;
   openSyncSettings: () => void;
   connect: () => void;
+  // Opens the Share dialog for a file this workspace owns.
+  share?: (path: string) => void;
+  // The Share dialog is open. Access reads again when it closes.
+  sharing?: boolean;
 };
+
+// A server by its host, as a person reads its address: sync.example.org.
+export function serverName(server: string): string {
+  try {
+    return new URL(server).host;
+  } catch {
+    return server;
+  }
+}
 
 // The cause for a whole list: the workspace's own shares, or the account's
 // received ones. Share asks it for the workspace's own.

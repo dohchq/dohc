@@ -169,7 +169,6 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     const edit = moments.reduce((newest, moment) => moment.momentOrder > newest.momentOrder ? moment : newest);
     await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${edit.id}"]`).click();
     await page.getByTestId("engine-diff-restore-file").click();
-    await page.getByTestId("engine-diff-confirm-restore").click();
     await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
     // On a mismatch, the assertion prints the exact difference.
     await expect.poll(() => readFile(join(temp.rootPath, "readme.md"), "utf8")).toBe(OUTSIDE);

@@ -46,6 +46,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
+  GetWorkspaceUiStateResult,
 } from "../ipc/bridgeContract";
 import {
   activityPathsAffectWorkspaceListing,
@@ -123,6 +124,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
+import { useSavedTabsReread } from "./shell/useSavedTabsReread";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -271,6 +273,7 @@ import {
   HISTORY_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
+  mergeSavedTabs,
   moveTab,
   moveTabToGroup,
   openTab,
@@ -378,6 +381,8 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
+// How long after admission the opening cover says it waits for the saved tabs.
+export const COVER_WAIT_LINES_MS = 5_000;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -894,6 +899,7 @@ export function DesktopWorkspaceShell(props: {
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
+    showSavedTabsNotice,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -1174,6 +1180,13 @@ export function DesktopWorkspaceShell(props: {
   const cloudConnected = cloudStatus?.connected;
   const cloudWorkspaceSynced = cloudStatus?.workspaceSynced === true;
   const cloudWorkspaceSyncConnected = cloudStatus?.workspaceSyncConnected === true;
+  const cloudServerUrl = cloudStatus?.workspaceServerUrl ?? null;
+  // One Share dialog for every surface: the explorer row's "Share…", the
+  // inspector header's share control, and About's Access.
+  const onSharePath = useCallback((path: string) => {
+    setShareTarget({ kind: "paths", paths: [path] });
+  }, []);
+  const sharing = shareTarget !== null;
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
@@ -1184,10 +1197,13 @@ export function DesktopWorkspaceShell(props: {
         } : cloudStatusUnreadable ? "unreadable" : "checking",
         shareView: isShareView,
       },
+      server: cloudServerUrl,
       openSyncSettings: () => openSettings("cloud"),
       connect: openCloud,
+      share: onSharePath,
+      sharing,
     }),
-    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openCloud, openSettings],
+    [cloudConnected, cloudServerUrl, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, onSharePath, openCloud, openSettings, sharing],
   );
   // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
   const appServer = cloudStatus?.workspaceServerUrl ?? null;
@@ -1329,8 +1345,9 @@ export function DesktopWorkspaceShell(props: {
   // or the defaults when there is none or the read fails. The stored state
   // replaces whatever changed under the cover, and file opens wait for it, so
   // nothing done under the cover loses the saved tabs. Writes start once the
-  // read answers, and never after a failed read, which can't say what is
-  // saved, so a default-state write can never clobber the stored one.
+  // read answers. A failed read can't say what is saved, so after one, writes
+  // wait for a later read to apply the saved tabs, and a default-state write
+  // can never clobber the stored one.
   const uiStateLoaded = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
@@ -1487,12 +1504,19 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // A failed read is read again once the workspace opens (useSavedTabsReread).
+  const layoutReadStartedAt = useRef(0);
+  const [layoutReadFailure, setLayoutReadFailure] = useState<{
+    admission: typeof workspaceAdmission;
+    startedAt: number;
+  } | null>(null);
   useAsyncResponseEffect(
     async () => {
       await workspaceAdmission.promise;
       if (workspaceAdmission.superseded) {
         throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      layoutReadStartedAt.current = Date.now();
       return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
@@ -1530,10 +1554,45 @@ export function DesktopWorkspaceShell(props: {
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
+        setLayoutReadFailure({
+          admission: workspaceAdmission,
+          startedAt: layoutReadStartedAt.current,
+        });
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
+  // The saved layout replaces the defaults, and tabs opened since stay open
+  // beside the saved ones, the one in view still in view. A file open in both
+  // keeps its saved place, and an app open now stays in its group so it
+  // doesn't reload. Past the tab limit, saved tabs make room. Saving starts,
+  // with what's shown when nothing was saved.
+  const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
+    const shown = wbRef.current;
+    if (stored) {
+      const saved = parseUiState(stored);
+      writeWb(mergeSavedTabs(saved, shown));
+      setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
+    } else {
+      writeWb({ ...shown });
+    }
+    uiStateLoaded.current = true;
+  }, [writeWb]);
+  useSavedTabsReread({
+    workspaceId,
+    failed: layoutReadFailure?.admission === workspaceAdmission ? layoutReadFailure : null,
+    tabsOpen: () => allTabs(wbRef.current).length > 0,
+    apply: applySavedLayout,
+    show: showSavedTabsNotice,
+  });
+  // The cover's lines for a saved layout that is slow to load.
+  const [coverWaitedFor, setCoverWaitedFor] = useState<typeof workspaceAdmission | null>(null);
+  useEffect(() => {
+    if (!workspaceIsReady || workbenchRestored) return;
+    const timer = setTimeout(() => setCoverWaitedFor(workspaceAdmission), COVER_WAIT_LINES_MS);
+    return () => clearTimeout(timer);
+  }, [workspaceAdmission, workspaceIsReady, workbenchRestored]);
+  const coverWaits = workspaceIsReady && coverWaitedFor === workspaceAdmission;
   useEffect(() => {
     if (
       restoredSurfaceCommit?.selectionGeneration !==
@@ -3143,8 +3202,8 @@ export function DesktopWorkspaceShell(props: {
     },
     [captureRecoveries, reportShellError, reportShellFailure],
   );
-  // Try again on a failed restore opens the change's tab, and that page asks
-  // before it restores, with its Undo restore after.
+  // Try again on a failed restore opens the change's tab, and that page
+  // restores again once a fresh read allows it, with its Undo restore after.
   const [restoreRequest, setRestoreRequest] = useState<{ workspaceId: string; momentId: string } | null>(null);
   const reopenRestore = useCallback(
     (momentId: string, path: string) => {
@@ -3889,11 +3948,6 @@ export function DesktopWorkspaceShell(props: {
   const onExplorerRefreshShareMounts = useCallback(() => {
     void refreshShareMounts(true);
   }, [refreshShareMounts]);
-  // One share entry point for both surfaces: the explorer row's "Share…" and
-  // the inspector header's share control open the same dialog.
-  const onSharePath = useCallback((path: string) => {
-    setShareTarget({ kind: "paths", paths: [path] });
-  }, []);
   const onExplorerRefresh = useCallback(() => {
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
@@ -5045,8 +5099,9 @@ export function DesktopWorkspaceShell(props: {
       />
     ) : engineHistoryReadState === "updating" ? (
       // The next capture's activity reads again, so the line asks nothing.
-      <div className="flex flex-1 items-center justify-center px-4">
-        {historyPaused ? <HistoryPaused testId="history-paused" /> : <HistoryUpdating testId="history-updating" />}
+      // It sits where the first row will, so the rows arrive under it.
+      <div className="shrink-0 px-3">
+        {historyPaused ? <HistoryPaused testId="history-paused" className="h-7" /> : <HistoryUpdating testId="history-updating" className="h-7" />}
       </div>
     ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
@@ -5310,6 +5365,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
+        ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
     [shellErrors, reportFacts],
   );
@@ -6440,6 +6496,7 @@ export function DesktopWorkspaceShell(props: {
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
               openMoment={openMomentDiffTab}
+            openHistory={openHistoryView}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
             openChatMention={openChatMention}
@@ -6595,10 +6652,20 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          {/* The check is over while the saved layout loads. Hidden, not
-              removed, so the heading does not move. */}
-          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
-            dohc is checking your existing files before editing starts.
+          {/* The check is over while the saved layout loads, and a load that
+              takes a while says what it waits for and the way out. Lines are
+              hidden, not removed, in slots as tall as their tallest text, so
+              the heading does not move. */}
+          <div className="grid text-xs text-muted">
+            <p className={`col-start-1 row-start-1 ${workspaceIsReady ? "invisible" : ""}`}>
+              dohc is checking your existing files before editing starts.
+            </p>
+            <p className={`col-start-1 row-start-1 ${coverWaits ? "" : "invisible"}`}>
+              dohc is still waiting for this workspace to open, so it can bring back your saved tabs.
+            </p>
+          </div>
+          <p className={`text-xs text-muted ${coverWaits ? "" : "invisible"}`}>
+            Choose another workspace from the title bar.
           </p>
         </div>
       ) : null}

@@ -20,6 +20,7 @@ export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<
   const controller = await startAutoUpdates({
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
+    stateDir: app.getPath("userData"),
   });
   // Declining a downloaded update quits: on Windows and macOS, relaunching
   // this build would race the install that runs on quit.

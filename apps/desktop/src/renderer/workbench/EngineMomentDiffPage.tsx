@@ -1,11 +1,11 @@
-import { ChevronDown, ChevronUp, ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
+import { ChevronDown, ChevronUp, FileArchive, FileText, Lock } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
 import { momentDiffSides } from "./momentDiffSides";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { Menu, type MenuItem } from "../ui/Menu";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
 import { CopyButton } from "../ui/CopyButton";
@@ -16,10 +16,11 @@ import {
   computeTextDiff,
   type UnifiedDiffLine,
 } from "./unifiedDiff";
-import { EngineMomentSource, engineMomentSummary, type MomentSteps } from "./EngineHistory";
+import { MomentAuthor, MomentName, OriginMark, fileMomentSummary, type MomentSteps } from "./EngineHistory";
+import { formatChatTime } from "../time";
 import { parseTab } from "./workbenchState";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { IconButton } from "../ui/controls";
+import { IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -114,8 +115,9 @@ export function EngineMomentDiffPage({
   // The shell's latest History answer. Each new one reads this change again,
   // because the rules that decide whether History shows it may have changed.
   historyAnswer: object | null;
-  // Try again on a failed restore asks first: the shell opens this tab and
-  // sets `restoreRequested`, and the page opens its confirm dialog.
+  // Try again on a failed restore runs it from this page: the shell opens
+  // this tab and sets `restoreRequested`, and the page restores once a fresh
+  // read shows the change can still be restored.
   onReopenRestore: (momentId: string, path: string) => void;
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
@@ -144,12 +146,21 @@ export function EngineMomentDiffPage({
     | { status: "idle" }
     | { status: "restoring" }
     | { status: "undoing" }
-    | { status: "restored"; restored: "text" | "deleted"; message: string }
+    | { status: "restored"; restored: "text" | "deleted"; message: string; undoOffered: boolean }
   >({ status: "idle" });
-  const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
+  // Restore and Undo restore take each other's place when one finishes, so
+  // a press on one hands the focus to the other, unless focus has moved on.
+  const actionRef = useRef<HTMLButtonElement | null>(null);
+  const actionPressed = useRef(false);
+  useEffect(() => {
+    if (!actionPressed.current) return;
+    actionPressed.current = false;
+    if (document.activeElement === null || document.activeElement === document.body) actionRef.current?.focus();
+  }, [undoMomentId]);
   const pageRef = useRef<HTMLElement | null>(null);
   const restoreInFlight = useRef(false);
   // Liveness of the change this page shows: bumped when the tab changes or
@@ -188,7 +199,7 @@ export function EngineMomentDiffPage({
         if ("status" in result) {
           // The tab no longer names the file, so it shows only that a change exists.
           onPathResolved(momentId, null);
-          setConfirmRestoreOpen(false);
+          setMoreOpen(false);
           setSharedRestoreOpen(false);
           setState(result.status === "untracked" ? { status: "untracked" } : { status: "hidden", result });
           return;
@@ -224,7 +235,7 @@ export function EngineMomentDiffPage({
   }, [historyAnswer, momentId, onPathResolved, onRestoreRequestTaken, readAttempt, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
-    setConfirmRestoreOpen(false);
+    setMoreOpen(false);
     setSharedRestoreOpen(false);
     setUndoMomentId(null);
   }, [tabPath]);
@@ -279,10 +290,7 @@ export function EngineMomentDiffPage({
     restoreInFlight.current = true;
     const live = () => token === liveToken.current;
     const identity = `history-restore:${path}`;
-    if (live()) {
-      setConfirmRestoreOpen(false);
-      setRestoreState({ status: kind === "undo" ? "undoing" : "restoring" });
-    }
+    if (live()) setRestoreState({ status: kind === "undo" ? "undoing" : "restoring" });
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await onBeforeRestore();
@@ -298,17 +306,19 @@ export function EngineMomentDiffPage({
             ? "Undid the restore by removing the file again. This was recorded in history."
             : "Undid the restore. This was recorded in history."
           : result.restored === "deleted"
-            ? "Removed the file this change created. Undo restore is available here."
-            : "Restored the earlier state. Undo restore is available here.",
+            ? "Removed the file this change created."
+            : "Restored the earlier state.",
+        undoOffered: kind !== "undo",
       });
       setUndoMomentId(kind === "undo" ? null : result.restoredMomentId);
     } catch (error) {
       onError(
         kind === "undo" ? `dohc could not undo the restore of ${path}.` : `dohc could not restore ${path}.`,
         error,
-        // The file may have changed by the time the person tries again, so a
-        // restore asks again on its page. Undo puts back the file's state just
-        // before the restore, so it runs again as it is.
+        // History's rules may hide the change by the time the person tries
+        // again, so a restore runs again from its page, after a fresh read.
+        // Undo puts back the file's state just before the restore, so it runs
+        // again as it is.
         kind === "undo" ? () => void runRestore(kind, target, path, token) : () => onReopenRestore(target, path),
         identity,
         path,
@@ -325,10 +335,10 @@ export function EngineMomentDiffPage({
     await runRestore("undo", undoMomentId, moment.path, liveToken.current);
   }, [moment, restoreBusy, runRestore, undoMomentId]);
 
-  // The shell asked for this change's confirm dialog, from a failed
-  // restore's Try again. The page reads the change again first, and the
-  // request is taken on that answer: the dialog opens only if History still
-  // shows the change and it can be restored.
+  // The shell asked to restore this change again, from a failed restore's
+  // Try again. The page reads the change again first, and the request is
+  // taken on that answer: the restore runs only if History still shows the
+  // change and it can be restored.
   useEffect(() => {
     if (!restoreRequested) {
       restoreRequest.current = null;
@@ -343,9 +353,11 @@ export function EngineMomentDiffPage({
     }
     if (requestAnswered <= request.after) return;
     restoreRequest.current = "taken";
-    if (state.status === "ready" && canRestore && !restoreBusy) setConfirmRestoreOpen(true);
+    if (state.status === "ready" && state.moment && canRestore && !restoreBusy) {
+      void runRestore("restore", state.moment.id, state.moment.path, liveToken.current);
+    }
     onRestoreRequestTaken();
-  }, [canRestore, onRestoreRequestTaken, requestAnswered, restoreBusy, restoreRequested, state]);
+  }, [canRestore, onRestoreRequestTaken, requestAnswered, restoreBusy, restoreRequested, runRestore, state]);
 
   useEffect(() => {
     if (!undoMomentId || restoreBusy || !moment) {
@@ -353,7 +365,11 @@ export function EngineMomentDiffPage({
       return;
     }
     registerActiveUndo({
-      run: undoRestore,
+      // The Undo shortcut on Undo restore hands the focus back as a press does.
+      run: () => {
+        if (document.activeElement === actionRef.current) actionPressed.current = true;
+        return undoRestore();
+      },
       acceptsEvent: (event) => {
         if (isEditableShortcutTarget(event.target)) return false;
         const page = pageRef.current;
@@ -465,6 +481,19 @@ export function EngineMomentDiffPage({
     if (!canRestore || restoreBusy) return;
     await runRestore("restore", moment.id, moment.path, liveToken.current);
   };
+  const recordedAt = formatChatTime(moment.recordedAtMs);
+  // What the change did; the title already names the file.
+  const summary = createdFile && !moment.summary ? "Created" : fileMomentSummary(moment);
+  // The rarer ways back, and the file itself, wait behind More.
+  const moreItems: MenuItem[] = [
+    ...(!readOnly && !isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md")
+      ? [{ id: "shared-restore", label: "Restore shared file…", testId: "engine-diff-shared-restore", disabled: restoreBusy, onSelect: () => setSharedRestoreOpen(true) }]
+      : []),
+    ...(!readOnly && stopTarget
+      ? [{ id: "stop-and-restore", label: "Stop and restore…", testId: "engine-diff-stop-and-restore", disabled: restoreBusy, onSelect: () => onStopAndRestore(stopTarget) }]
+      : []),
+    ...(canOpenFile ? [{ id: "open-file", label: "Open file", testId: "engine-diff-open-file", onSelect: () => onOpenFile(moment.path) }] : []),
+  ];
   const stepTo = (direction: "newer" | "older") => {
     const step = steps?.[direction];
     if (!step || !onOpenMoment) return;
@@ -487,15 +516,11 @@ export function EngineMomentDiffPage({
       }}
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-line px-4 py-3">
-        {isProtected ? (
-          <Lock size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
-        ) : afterIsBinary ? (
-          <FileArchive size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
-        ) : (
-          <FileText size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
-        )}
-        <div className="-ml-1 min-w-0 flex-1">
-          <h2 className="m-0 truncate text-[14px] font-normal text-ink">
+        <div className="grid min-w-0 flex-1 grid-cols-[18px_minmax(0,1fr)] items-center gap-x-2">
+          <span aria-hidden className="grid place-items-center text-subtle">
+            {isProtected ? <Lock size={14} /> : afterIsBinary ? <FileArchive size={14} /> : <FileText size={14} />}
+          </span>
+          <h2 className="m-0 min-w-0 truncate text-[14px] font-normal leading-7 text-ink">
             {canOpenFile ? (
               <button
                 type="button"
@@ -510,118 +535,96 @@ export function EngineMomentDiffPage({
               <MomentPath path={moment.path} />
             )}
           </h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-            <span>
-              {moment.operation === "delete"
-                ? "Deleted"
-                : createdFile
-                  ? "Created"
-                  : "Changed"}
-            </span>
-            <EngineMomentSource moment={moment} testId="engine-diff-source" />
+          <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />
+          <div className="flex min-w-0 items-center gap-2 text-[12px] text-subtle">
+            <MomentName moment={moment} testId="engine-diff-source" className="text-[13px] font-medium leading-5 text-ink" />
+            <time dateTime={recordedAt.iso} className="shrink-0 tabular-nums">{recordedAt.label}</time>
             {counts ? <DiffCounts counts={counts} testId="engine-diff-counts" /> : null}
           </div>
-          <p
-            data-testid="engine-diff-summary"
-            className="mb-0 mt-1 truncate text-[11px] text-subtle"
-          >
-            {engineMomentSummary(moment)}
+          <p data-testid="engine-diff-summary" className="col-start-2 m-0 mt-1 truncate text-[12px] text-muted">
+            {summary}
           </p>
-          <div role="status" aria-live="polite">
+          <div role="status" aria-live="polite" className="col-start-2">
             {restoreState.status === "restored" ? (
-              <p
-                data-testid="engine-diff-restore-status"
-                className="mb-0 mt-1 text-[11px] text-success"
-              >
+              <p data-testid="engine-diff-restore-status" className="m-0 mt-1 text-[12px] text-success">
                 {restoreState.message}
+                {/* Undo restore sits beside the line, so only a screen
+                    reader is told it is there. */}
+                {restoreState.undoOffered ? <span className="sr-only"> Undo restore is available here.</span> : null}
               </p>
             ) : null}
           </div>
         </div>
-        {/* Kept typing's way back into a file History Restore refuses:
-            the whole file as it was with the typing, to replace the
-            file's text with. */}
-        {keptTyping !== undefined ? (
-          <CopyButton size="header" label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
-        ) : null}
-        {readOnly ? null : <>
-        <button
-          type="button"
-          data-testid="engine-diff-restore-file"
-          onClick={() => setConfirmRestoreOpen(true)}
-          disabled={!canRestore || restoreBusy}
-          title={
-            undoMomentId
-              ? "This restore has already been applied"
-              : canRestore
-                ? "Restore this file to how it was before this change"
-                : "This change can't be restored directly"
-          }
-          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Undo2 size={12} aria-hidden />
-          {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
-        </button>
-        {!isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md") && <button
-          type="button" data-testid="engine-diff-shared-restore" disabled={restoreBusy}
-          onClick={() => setSharedRestoreOpen(true)}
-          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
-        >Restore shared file…</button>}
-        {stopTarget ? <button
-          type="button" data-testid="engine-diff-stop-and-restore" disabled={restoreBusy}
-          onClick={() => onStopAndRestore(stopTarget)}
-          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
-        >Stop and restore…</button> : null}
-        {undoMomentId ? (
-          <button
-            type="button"
-            data-testid="engine-diff-undo-restore"
-            onClick={() => void undoRestore()}
-            disabled={restoreBusy}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Undo2 size={12} aria-hidden />
-            {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
-          </button>
-        ) : null}
-        </>}
-        {canOpenFile ? (
-          <button
-            type="button"
-            data-testid="engine-diff-open-file"
-            onClick={() => onOpenFile(moment.path)}
-            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-          >
-            <ExternalLink size={12} aria-hidden />
-            Open file
-          </button>
-        ) : null}
-        {steps && onOpenMoment ? (
-          <span className="flex shrink-0 items-center">
-            <IconButton
-              data-testid="engine-diff-newer"
-              aria-label="Newer change"
-              aria-keyshortcuts="]"
-              title="Newer change  ]"
-              aria-disabled={!steps.newer || undefined}
-              onClick={() => stepTo("newer")}
-              className={STEP_ARROW}
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Kept typing's way back into a file History Restore refuses:
+              the whole file as it was with the typing, to replace the
+              file's text with. */}
+          {keptTyping !== undefined ? (
+            <CopyButton size="header" label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
+          ) : null}
+          {readOnly ? null : undoMomentId ? (
+            <SecondaryButton
+              ref={actionRef}
+              size="compact"
+              data-testid="engine-diff-undo-restore"
+              onClick={() => { actionPressed.current = true; void undoRestore(); }}
+              disabled={restoreBusy}
             >
-              <ChevronUp size={14} aria-hidden />
-            </IconButton>
-            <IconButton
-              data-testid="engine-diff-older"
-              aria-label="Older change"
-              aria-keyshortcuts="["
-              title="Older change  ["
-              aria-disabled={!steps.older || undefined}
-              onClick={() => stepTo("older")}
-              className={STEP_ARROW}
+              {restoreState.status === "undoing" ? "Undoing…" : "Undo restore"}
+            </SecondaryButton>
+          ) : (
+            // Restore records a new change and offers Undo, so it asks
+            // nothing first. It returns the file to before this change, and
+            // its name says so, as its status line does; its title says what
+            // that does to the file.
+            <PrimaryButton
+              ref={actionRef}
+              size="compact"
+              data-testid="engine-diff-restore-file"
+              onClick={() => { actionPressed.current = true; void restoreFile(); }}
+              disabled={!canRestore || restoreBusy}
+              title={canRestore ? restoreDetail : "This change can't be restored directly"}
             >
-              <ChevronDown size={14} aria-hidden />
-            </IconButton>
-          </span>
-        ) : null}
+              {restoreState.status === "restoring" ? "Restoring…" : "Restore earlier state"}
+            </PrimaryButton>
+          )}
+          {moreItems.length > 0 ? (
+            <Menu
+              label="More actions"
+              testId="engine-diff-more"
+              items={moreItems}
+              open={moreOpen}
+              onOpenChange={setMoreOpen}
+              width={176}
+            />
+          ) : null}
+          {steps && onOpenMoment ? (
+            <span className="flex items-center">
+              <IconButton
+                data-testid="engine-diff-newer"
+                aria-label="Newer change"
+                aria-keyshortcuts="]"
+                title="Newer change  ]"
+                aria-disabled={!steps.newer || undefined}
+                onClick={() => stepTo("newer")}
+                className={STEP_ARROW}
+              >
+                <ChevronUp size={14} aria-hidden />
+              </IconButton>
+              <IconButton
+                data-testid="engine-diff-older"
+                aria-label="Older change"
+                aria-keyshortcuts="["
+                title="Older change  ["
+                aria-disabled={!steps.older || undefined}
+                onClick={() => stepTo("older")}
+                className={STEP_ARROW}
+              >
+                <ChevronDown size={14} aria-hidden />
+              </IconButton>
+            </span>
+          ) : null}
+        </div>
       </header>
       <div className="min-h-0 overflow-auto overflow-x-hidden">
         {isProtected ? (
@@ -666,27 +669,6 @@ export function EngineMomentDiffPage({
       </div>
       {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
         onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
-      {confirmRestoreOpen ? (
-        <ConfirmDialog
-          title="Restore this file?"
-          confirmLabel="Restore"
-          onCancel={() => setConfirmRestoreOpen(false)}
-          onConfirm={() => void restoreFile()}
-          testId="engine-diff-restore-confirm"
-          cancelTestId="engine-diff-cancel-restore"
-          confirmTestId="engine-diff-confirm-restore"
-        >
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              This only changes this one file and records a new history entry.
-              Any edits you made since are saved into history first.
-            </p>
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              <span className="text-ink">{moment.path}</span>
-              <br />
-              {restoreDetail}
-            </p>
-        </ConfirmDialog>
-      ) : null}
     </section>
   );
 }
