@@ -2577,6 +2577,39 @@ it("activates a retired activation's successor after Resume, which admits edits 
   expect(o.acceptEdit("after")).toMatchObject({journalCursor: tip.journalCursor + 1});
 });
 
+// Proves: a session host may still hold the copy it had at Stop, ready but
+// missing what the owner wrote while live editing was off. After Resume, the
+// successor's pass pulls the hosted feed before it captures, so the successor
+// starts from the feed, never from that copy. The two-daemon e2e can't hold
+// the host's copy ready across Stop since #2103, so it relies on this test.
+it("captures a retired activation's successor only after a hosted pull that started after Resume", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  // Resume waits behind a pass that is pulling, so the next pull is one that started after Resume.
+  const before = o.park("sync.pullHosted");
+  await before.entered.promise;
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  const resumed = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  const after = o.park("sync.pullHosted");
+  before.release.resolve();
+  await resumed;
+  const sent = methods().length;
+  await after.entered.promise;
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(captures);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  after.release.resolve();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const pulled = methods().indexOf("sync.pullHosted", sent);
+  expect(o.client().sendRequest.mock.invocationCallOrder[pulled]).toBeLessThan(o.client().captureOwnerActivation.mock.invocationCallOrder[captures]!);
+});
+
 // Proves: the engine refuses to release a stopped document until it parked.
 // The refusal alone retires nothing: the release is tried again on each pass
 // while a pull that started after it still lists the document departed, and
