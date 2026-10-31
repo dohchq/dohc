@@ -881,7 +881,7 @@ describe("chatDispatchService", () => {
     fixture.spawnCalls[0]!.process.emitExit(exitCode);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.notices).toHaveLength(1);
-    expect(fixture.notices[0]!.body).toBe("");
+    expect(fixture.notices[0]!.body).toBe(exitCode === 0 ? "Its run ended without a reply." : "Its run ended with an error.");
   });
 
   it("shows the missing packaged runtime repair instruction in Notices", async () => {
@@ -890,7 +890,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     expect(fixture.spawnCalls).toHaveLength(0);
     expect(fixture.notices).toEqual([expect.objectContaining({
-      body: "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+      body: "It couldn't start: dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
     })]);
   });
   it.each([
