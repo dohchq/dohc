@@ -469,6 +469,7 @@ export function ChatLane(props: {
         </ComposerNotice>
       ) : (
         <MentionComposer
+          pinned
           testIdPrefix="chats-lane"
           composerId="chats-lane-composer"
           value={composer}
