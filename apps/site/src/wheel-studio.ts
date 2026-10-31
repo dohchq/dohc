@@ -74,7 +74,10 @@ export async function mountWheelStudio(host: HTMLElement) {
     if (document.hidden) { cancelAnimationFrame(frame); frame = 0; } else requestDraw();
   }, { signal });
   motion.addEventListener('change', requestDraw, { signal });
-  function theme() { studio.setDark(document.documentElement.dataset.theme === 'dark'); requestDraw(); }
+  function theme() {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    studio.setDark(dark); model.setEdge(dark ? .35 : 0); requestDraw();
+  }
   const themeObserver = new MutationObserver(theme); themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   fit(); theme();
   function dispose() {

@@ -7,13 +7,20 @@ const spokes = 5;
 
 /** A five-spoke road wheel with one lug nut missing, standing upright with
  * its face toward +z. It turns on its axle once every `period` seconds. */
-export function createWheel(period = 14): DriveModel {
+export function createWheel(period = 14): DriveModel & { setEdge: (strength: number) => void } {
   const w = workshop();
   const { root, metal, silver, bright, steel, dark, cast, brass, mesh, cylinder, ring, bolt } = w;
   const rubber = metal(0x1e2124, .86, 0);
   const sidewall = metal(0x2a2e32, .74, 0);
   const barrel = metal(0x8a939b, .45, .85);
   barrel.side = T.DoubleSide;
+  // A glow at the tire's edges, so a black tire still reads against a dark page.
+  const edge = { value: 0 };
+  for (const material of [rubber, sidewall]) material.onBeforeCompile = shader => {
+    shader.uniforms.edge = edge;
+    shader.fragmentShader = `uniform float edge;\n${shader.fragmentShader.replace('#include <emissivemap_fragment>',
+      '#include <emissivemap_fragment>\ntotalEmissiveRadiance += edge * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0);')}`;
+  };
   // Local +y is the axle; the group turns it toward the viewer.
   const axle = new T.Group(); axle.rotation.x = Math.PI / 2; root.add(axle);
   const wheel = new T.Group(); axle.add(wheel);
@@ -95,5 +102,10 @@ export function createWheel(period = 14): DriveModel {
   batchAssemblies([root, wheel]);
   // At time 0 the bare stud sits at one o'clock, where a still frame shows it best.
   const rest = turn / spokes / 2 + Math.PI / 3;
-  return { root, update: time => { wheel.rotation.y = rest - time / period * turn; }, dispose: w.dispose };
+  return {
+    root,
+    update: time => { wheel.rotation.y = rest - time / period * turn; },
+    setEdge: strength => { edge.value = strength; },
+    dispose: w.dispose,
+  };
 }
