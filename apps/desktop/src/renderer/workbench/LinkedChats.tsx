@@ -458,6 +458,7 @@ export function LinkedChatsPanel(props: {
           <ReadOnlyNotice />
         ) : (
           <ChatComposer
+            pinned
             testIdPrefix="linked-chat"
             composerId="linked-chat-composer"
             value={composer}

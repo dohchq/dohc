@@ -12,6 +12,8 @@ import { DOCUMENT_END } from "./helpers/keys";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
 
+test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
+
 type Api = DohcDesktopBridge;
 const SEED = "# Owner's live note\n\nBase text.\n";
 const editor = (page: Page) => page.getByTestId("markdown-editor");
