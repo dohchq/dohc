@@ -1430,7 +1430,8 @@ describe("About History", () => {
     expect(within(rows[0]!).getByTestId("engine-moment-source").textContent).toBe("Nova");
     expect(rows[0]!.textContent).toContain("Tightened the plan");
     expect(within(rows[1]!).getByTestId("engine-moment-source").textContent).toBe("Live edit");
-    expect(rows[1]!.textContent).toContain("Edited");
+    // "Live edit" already says what happened, so no bare "Edited" follows it.
+    expect(rows[1]!.textContent).not.toContain("Edited");
     expect(screen.getByTestId("about-history-count").textContent).toBe("2+");
     await userEvent.setup().click(rows[0]!);
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
