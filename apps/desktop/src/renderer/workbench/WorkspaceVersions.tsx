@@ -473,7 +473,7 @@ export function VersionMenu(props: {
             aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
             title={`You're working in the ${activeName} version`}
             disabled={busy !== null || props.disabled}
-            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
           >
             <Layers size={12} aria-hidden className="shrink-0" />
             <span data-testid="version-menu-active" className="min-w-0 truncate">

@@ -30,16 +30,16 @@ afterEach(() => {
 
 describe("sidebar views", () => {
   it("shows dohc's views in the person's order, then the rest, without the hidden ones", () => {
-    expect(sidebarViews({ order: ["sites", "search"], hidden: ["graph"] }))
-      .toEqual(["sites", "search", "explorer", "chats", "history"]);
+    expect(sidebarViews({ order: ["history", "search"], hidden: ["graph"] }))
+      .toEqual(["history", "search", "explorer", "chats"]);
     expect(sidebarViews({ order: [], hidden: [] }))
-      .toEqual(["explorer", "chats", "search", "graph", "sites", "history"]);
+      .toEqual(["explorer", "chats", "search", "graph", "history"]);
   });
 
   it("moves the selection to the first view on the rail when its view is hidden or its app unpinned", () => {
     const onSearch = setView(defaultWorkbenchState(), "search");
-    expect(keepActiveViewShown(onSearch, ["sites", "explorer"])).toMatchObject({
-      activeView: "sites",
+    expect(keepActiveViewShown(onSearch, ["graph", "explorer"])).toMatchObject({
+      activeView: "graph",
       sidebarVisible: true,
     });
     expect(keepActiveViewShown(onSearch, ["search"])).toBe(onSearch);
@@ -80,13 +80,13 @@ describe("sidebar views", () => {
     expect(toggleSidebarOnRail(closed, [])).toBe(closed);
     // A hidden view the person opened earlier does not come back with the
     // toggle; the first view on the rail does.
-    expect(toggleSidebarOnRail(closed, ["sites", "explorer"])).toMatchObject({
-      activeView: "sites",
+    expect(toggleSidebarOnRail(closed, ["graph", "explorer"])).toMatchObject({
+      activeView: "graph",
       sidebarVisible: true,
     });
-    expect(toggleSidebarOnRail({ ...closed, activeView: "explorer" }, ["sites", "explorer"]))
+    expect(toggleSidebarOnRail({ ...closed, activeView: "explorer" }, ["graph", "explorer"]))
       .toMatchObject({ activeView: "explorer", sidebarVisible: true });
-    expect(toggleSidebarOnRail(onSearch, ["sites"]).sidebarVisible).toBe(false);
+    expect(toggleSidebarOnRail(onSearch, ["graph"]).sidebarVisible).toBe(false);
   });
 
   it("keeps a pinned app selected across a restart", () => {

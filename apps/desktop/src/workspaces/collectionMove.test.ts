@@ -106,3 +106,32 @@ it("names the server a move is going to when this workspace has no session for i
   await expect(finish()).rejects.toThrow("This Collection is moving to sync.example.test. Sign in to sync.example.test to finish the move.");
   expect(local.transferToShared).not.toHaveBeenCalled();
 });
+
+it("waits for the move another read resumed while this one asked for the session, instead of resuming it again", async () => {
+  let inFlight: Promise<DatasetTransferStatus> | null = null, stop!: (error: Error) => void, session!: () => void;
+  const answered = new Promise<void>(resolve => { session = resolve; });
+  const local = {
+    transferStatus: () => transfer("ready"),
+    transferInFlight: () => inFlight,
+    transferToShared: vi.fn(() => {
+      const task = new Promise<DatasetTransferStatus>((_resolve, reject) => { stop = reject; });
+      inFlight = task;
+      return task.finally(() => { inFlight = null; });
+    }),
+  };
+  const server = async () => {
+    await answered;
+    return { credentials: { serverUrl: "https://account.example.test", relayUrl: "https://sync.example.test", token: "t", userId: "u", email: "u@example.test" }, credentialGeneration: 1 };
+  };
+  const read = () => finishedTransfer({ local, workspaceId: "w", datasetId: "d", server, currentCredentialGeneration: () => 1,
+    relayStream: async () => { throw Error("Nothing streams in this test."); }, signal: new AbortController().signal });
+  const first = read(), second = read();
+  session();
+  await vi.waitFor(() => expect(local.transferToShared).toHaveBeenCalled());
+  expect(local.transferToShared).toHaveBeenCalledTimes(1);
+  const stopped = Error("The server stopped answering.");
+  stop(stopped);
+  await expect(first).rejects.toBe(stopped);
+  await expect(second).rejects.toBe(stopped);
+  expect(local.transferToShared).toHaveBeenCalledTimes(1);
+});

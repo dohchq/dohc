@@ -225,7 +225,7 @@ export function TitlebarUpdateButton(props: { update: DesktopUpdate }) {
       title={step.title}
       aria-disabled={action === null ? true : undefined}
       onClick={action === null ? undefined : () => void props.update.run(action)}
-      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold dohc-focus-visible focus-visible:outline-offset-1 @min-[9.75rem]:px-2.5 ${
+      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold @min-[9.75rem]:px-2.5 ${
         action === null
           ? "cursor-default border border-line text-muted"
           : "cursor-pointer bg-accent text-bg hover:opacity-90"
