@@ -15,12 +15,21 @@ export class LocalAppUnavailableError extends Error {}
 export interface LocalAppLaunchBackend {
   browserPublication(publicationId: string): { authorityRevision: number; files: Parameters<typeof createAppDocument>[0] };
   assertBrowserPublication(publicationId: string, authorityRevision: number): void;
+  checkBrowserPublication?(publicationId: string, authorityRevision: number, signal: AbortSignal): Promise<void>;
   request(publicationId: string, action: LocalAppAction, input: unknown, signal?: AbortSignal): Promise<unknown>;
   readBrowserFile(publicationId: string, input: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown>;
 }
 export interface LocalAppLaunchHost {
   launch(publicationId: string, signal: AbortSignal): Promise<string>;
+  /** keepAlive: dohc's own tab, which renews the session and gates the app frame's navigations in main. */
+  launchSession(publicationId: string, signal: AbortSignal, options?: { keepAlive?: boolean }): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
+}
+export interface LocalAppLaunchSession {
+  url: string;
+  ended: AbortSignal;
+  isAlive(): boolean;
+  stop(): Promise<void>;
 }
 const MAX_SESSIONS = 16, HANDOFF_MS = 30_000, SESSION_MS = 30 * 60_000, IDLE_MS = 90_000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -50,9 +59,10 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
   let closed = false, preparing = 0, staged = 0;
   const close = async () => { closed = true; await Promise.all([...sessions].map(stop => stop())); };
   options.lifetime.addEventListener("abort", () => { void close(); }, { once: true });
-  return {
+  const host: LocalAppLaunchHost = {
     close,
-    async launch(publicationId, signal) {
+    async launch(publicationId, signal) { return (await host.launchSession(publicationId, signal)).url; },
+    async launchSession(publicationId, signal, launchOptions) {
       signal.throwIfAborted(); options.lifetime.throwIfAborted();
       if (closed || sessions.size + preparing >= MAX_SESSIONS || staged >= 2) throw Error("Close another app before opening this one.");
       preparing++; staged++;
@@ -60,9 +70,10 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
       const releaseStage = () => { if (!stageReleased) { stageReleased = true; staged--; } };
       try {
         const { authorityRevision, files } = options.backend.browserPublication(publicationId);
+        await options.backend.checkBrowserPublication?.(publicationId, authorityRevision, AbortSignal.any([signal, options.lifetime, AbortSignal.timeout(15_000)]));
         const document = createAppDocument(files, { maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES, maxDocumentBytes: APP_PUBLICATION_MAX_DOCUMENT_BYTES });
         let stagedHtml: string | undefined = document.html;
-        const handoff = token(), proof = token(), controller = new AbortController();
+        const handoff = token(), proof = token(), controller = new AbortController(), ended = new AbortController();
         const requestSignal = AbortSignal.any([signal, options.lifetime, controller.signal]);
         let handoffDigest: string | null = digest(handoff), origin = "", pending = 0, tokens = 30, updated = Date.now();
         let expires = Date.now() + HANDOFF_MS, hardExpires = expires;
@@ -76,7 +87,8 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           if (Date.now() >= expires) throw Error("The local app session expired.");
           options.backend.assertBrowserPublication(publicationId, authorityRevision);
         };
-                const script = `(()=>{
+        const browserLifetime = launchOptions?.keepAlive ? "" : `const poll=async()=>{if(stopped)return;try{const r=await fetch('/status',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal});if(!r.ok){stop();return;}}catch{stop();return;}setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});`;
+        const script = `(()=>{
           const handoff=location.hash.slice(1),key='dohc-local-app-proof';history.replaceState(null,'','/bootstrap');
           const lifetime=new AbortController();let frame,proof,stopped=false;
           const readProof=()=>{try{return sessionStorage.getItem(key);}catch{return null;}};
@@ -87,15 +99,18 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           proof=handoff?null:readProof();
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
-            frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads';frame.style='display:block;border:0;width:100%;height:100vh';
+            frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
             (${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify(body),signal}),lifetime.signal);
             frame.srcdoc=value.html;document.body.append(frame);document.getElementById('status').textContent='';
-            const poll=async()=>{if(stopped)return;try{const r=await fetch('/status',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal});if(!r.ok){stop();return;}}catch{stop();return;}setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});
+            ${browserLifetime}
           }).catch(()=>{if(!stopped)stop();});
         })();`;
         const scriptHash = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
-        const csp = `default-src 'none'; script-src ${scriptHash} ${document.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http: https: ws: wss:; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
-        const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title></head><body style="margin:0"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
+        // In dohc's tab, main stops every navigation of the app frame and sends an outside link to the browser, so the
+        // frame's navigations must reach main. A browser has no such gate, so there the frame stays on this origin.
+        const frameSources = launchOptions?.keepAlive ? "'self' http: https: mailto:" : "'self'";
+        const csp = `default-src 'none'; script-src ${scriptHash} ${document.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http: https: ws: wss:; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src ${frameSources}; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+        const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title></head><body style="margin:0;background:transparent"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
         const server = createServer(async (request, response) => {
           const abort = new AbortController(), requestAborted = () => abort.abort();
           request.once("aborted", requestAborted);
@@ -115,13 +130,14 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
               pending++; admitted = true;
               const body = await readJson(request, 1024, activeSignal);
               if (!exact(body, ["handoff"]) || typeof body.handoff !== "string" || body.handoff.length !== 43 || digest(body.handoff) !== handoffDigest) return reply(response, 404);
-              current(); handoffDigest = null; hardExpires = Date.now() + SESSION_MS; expires = Date.now() + IDLE_MS;
+              current(); handoffDigest = null; hardExpires = launchOptions?.keepAlive ? Infinity : Date.now() + SESSION_MS;
+              expires = launchOptions?.keepAlive ? Infinity : Date.now() + IDLE_MS;
               const html = stagedHtml; stagedHtml = undefined; releaseStage();
               return reply(response, 200, { proof, html });
             }
             if (handoffDigest !== null || typeof request.headers["x-dohc-app-proof"] !== "string" || digest(request.headers["x-dohc-app-proof"]) !== digest(proof)) return reply(response, 404);
             if (url.pathname === "/close") { response.once("finish", () => { void stop(); }); return reply(response, 204); }
-            expires = Math.min(hardExpires, Date.now() + IDLE_MS);
+            expires = launchOptions?.keepAlive ? Infinity : Math.min(hardExpires, Date.now() + IDLE_MS);
             if (url.pathname === "/status") return reply(response, 204);
             if (url.pathname !== "/backend" && url.pathname !== "/resume") return reply(response, 404);
             const now = Date.now(); tokens = Math.min(30, tokens + (now - updated) / 2000); updated = now;
@@ -177,22 +193,45 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
         server.requestTimeout = 15_000; server.headersTimeout = 10_000; server.maxConnections = 16;
         let stopped: Promise<void> | undefined;
         const stop = () => stopped ??= Promise.resolve().then(async () => {
-          requestSignal.removeEventListener("abort", onAbort); controller.abort(); sessions.delete(stop); clearInterval(expiry); stagedHtml = undefined; releaseStage();
+          if (!ended.signal.aborted) ended.abort("ended");
+          requestSignal.removeEventListener("abort", onAbort); controller.abort(); sessions.delete(stop); clearInterval(expiry); clearInterval(approvalCheck); stagedHtml = undefined; releaseStage();
           server.closeAllConnections();
           await new Promise<void>(resolve => server.close(() => resolve()));
         });
         const onAbort = () => { void stop(); };
-        const expiry = setInterval(() => { if (Date.now() >= expires) void stop(); }, 1000); expiry.unref();
+        const isAlive = () => {
+          if (ended.signal.aborted || requestSignal.aborted) return false;
+          if (Date.now() >= expires) { ended.abort("ended"); void stop(); return false; }
+          try { options.backend.assertBrowserPublication(publicationId, authorityRevision); }
+          catch (error) {
+            if (error instanceof LocalAppUnavailableError) return true;
+            ended.abort("needs-approval"); void stop(); return false;
+          }
+          return true;
+        };
+        const expiry = setInterval(isAlive, 1000); expiry.unref();
+        let checking = false;
+        const approvalCheck = launchOptions?.keepAlive && options.backend.checkBrowserPublication ? setInterval(() => {
+          if (checking || !isAlive()) return;
+          checking = true;
+          void options.backend.checkBrowserPublication!(publicationId, authorityRevision, AbortSignal.any([requestSignal, AbortSignal.timeout(15_000)]))
+            .catch(error => {
+              if (!requestSignal.aborted && !(error instanceof LocalAppUnavailableError) &&
+                  !(error instanceof DOMException && error.name === "TimeoutError")) { ended.abort("needs-approval"); void stop(); }
+            }).finally(() => { checking = false; });
+        }, 15_000) : undefined;
+        approvalCheck?.unref();
         try {
           await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
           const address = server.address(); if (!address || typeof address === "string") throw Error("Could not open the local app.");
           origin = `http://127.0.0.1:${address.port}`;
           sessions.add(stop); requestSignal.addEventListener("abort", onAbort, { once: true });
           if (requestSignal.aborted || closed) { await stop(); throw Error("The local app session ended."); }
-          return origin + "/bootstrap#" + handoff;
+          return { url: origin + "/bootstrap#" + handoff, ended: ended.signal, isAlive, stop };
         } catch (error) { await stop(); throw error; }
       } catch (error) { releaseStage(); throw error; }
       finally { preparing--; }
     },
   };
+  return host;
 }

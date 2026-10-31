@@ -3475,6 +3475,39 @@ export const SitePreviewReplacedEvent = z.object({
 });
 export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
+export const AppViewId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/);
+const AppViewTarget = { workspaceId: WORKSPACE_ID, viewId: AppViewId };
+export const AppViewRequest = z.discriminatedUnion("action", [
+  z.object({ ...AppViewTarget, action: z.literal("open"), appRoot: z.string().min(1).max(4096), colorScheme: z.enum(["light", "dark"]) }).strict(),
+  z.object({ ...AppViewTarget, action: z.literal("close") }).strict(),
+  z.object({ action: z.literal("colorScheme"), workspaceId: WORKSPACE_ID, colorScheme: z.enum(["light", "dark"]) }).strict(),
+]);
+export type AppViewRequest = z.infer<typeof AppViewRequest>;
+export const AppViewResult = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("opened"), viewId: AppViewId, publicationId: z.string(), url: z.string(), partition: z.string() }).strict(),
+  z.object({ kind: z.literal("unapproved"), viewId: AppViewId }).strict(),
+  z.object({ kind: z.literal("closed"), viewId: AppViewId }).strict(),
+  z.object({ kind: z.literal("colorScheme") }).strict(),
+]);
+export type AppViewResult = z.infer<typeof AppViewResult>;
+export const AppViewEvent = z.discriminatedUnion("kind", [
+  z.object({ viewId: AppViewId, kind: z.literal("approval-ended") }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("session-ended") }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("download-blocked"), filename: z.string() }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("external-link"), url: z.string() }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("shortcut"), key: z.string(), code: z.string(),
+    ctrlKey: z.boolean(), shiftKey: z.boolean(), altKey: z.boolean(), metaKey: z.boolean() }).strict(),
+]);
+export type AppViewEvent = z.infer<typeof AppViewEvent>;
+// A window opens, themes and closes apps only in the workspace open in it.
+export const appViewOperations = {
+  appView: {
+    capabilityId: "app.view", channel: "desktop:app-view", payload: AppViewRequest, result: AppViewResult,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "This app does not belong to this window's workspace. Open it from its workspace.",
+  },
+} as const satisfies OperationTable;
+
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
@@ -7305,8 +7338,10 @@ export interface DohcDesktopBridge
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
-    OperationBridge<typeof engineYDocSaveOperations> {
+    OperationBridge<typeof engineYDocSaveOperations>,
+    OperationBridge<typeof appViewOperations> {
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  onAppViewEvent(listener: (event: AppViewEvent) => void): () => void;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: z.input<typeof OwnerRestoreRequest> & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights

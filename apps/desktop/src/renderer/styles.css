@@ -278,6 +278,34 @@ table {
   animation: dohc-reveal-if-slow 120ms ease-out 150ms backwards;
 }
 
+/* An indeterminate progress line: a segment that crosses its track. Reduced
+ * motion holds it still across the whole track. */
+@keyframes dohc-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.dohc-progress-slide {
+  width: 40%;
+  animation: dohc-progress-slide 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-progress-slide) {
+    width: 100% !important;
+    animation: none !important;
+  }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-progress-slide) {
+  width: 100% !important;
+  animation: none !important;
+}
+
 /* A menu enters from its trigger's side: 4px and a fade, no scale. The Menu
  * part's menuEnterFrom sets --dohc-menu-from to -4px under its trigger and
  * 4px over it, or --dohc-menu-from-x beside it. */

@@ -814,6 +814,39 @@ describe("mergeSavedTabs (Restore tabs)", () => {
     expect(paths(merged)).not.toContain("saved-0.md");
     expect(paths(merged).filter((path) => path === "b.md")).toHaveLength(2);
   });
+
+  it("keeps an app open now in its group, so it doesn't reload", () => {
+    const app = siteTabPath("trip");
+    const savedApp: WorkbenchState = {
+      ...saved,
+      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+    };
+    const merged = mergeSavedTabs(savedApp, withTabs(app));
+    expect(merged.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([["b.md", app], ["b.md"]]);
+    expect(merged.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+  });
+
+  it("keeps what each group shows when an app stays in a group out of focus", () => {
+    const app = siteTabPath("trip");
+    const savedApp: WorkbenchState = {
+      ...saved,
+      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+    };
+    const shown: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: app }, { path: "c.md" }], activeTab: "c.md", size: 0.5 },
+        { id: "right", tabs: [{ path: "d.md" }], activeTab: "d.md", size: 0.5 },
+      ],
+      activeEditorGroup: "right",
+    };
+    const merged = mergeSavedTabs(savedApp, shown);
+    expect(merged.editorGroups.map((group) => [group.tabs.map((tab) => tab.path), group.activeTab])).toEqual([
+      [["b.md", app], "b.md"],
+      [["b.md", "c.md", "d.md"], "d.md"],
+    ]);
+    expect(merged.activeEditorGroup).toBe("right");
+  });
 });
 
 describe("views and panels", () => {

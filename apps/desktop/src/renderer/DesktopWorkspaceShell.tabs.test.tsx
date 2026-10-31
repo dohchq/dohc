@@ -153,6 +153,26 @@ describe("shell tab surfaces", () => {
     }
   });
 
+  it("keeps an app mounted while another tab is shown", async () => {
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    const open = async (path: string) => {
+      requested.path = path;
+      fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+    };
+    await open(siteTabPath("apps/trip"));
+    const app = await pane.findByTestId("site-preview-page");
+    await open("notes.txt");
+    await pane.findByTestId("file-inspector");
+    expect(pane.getByTestId("site-preview-page")).toBe(app);
+    expect(app.parentElement?.className).toBe("hidden");
+    await open(siteTabPath("apps/trip"));
+    await waitFor(() => expect(pane.queryByTestId("file-inspector")).toBeNull());
+    expect(pane.getByTestId("site-preview-page")).toBe(app);
+    expect(app.parentElement?.className).not.toBe("hidden");
+  });
+
   it("keeps the empty editor state when no tab is open", async () => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));

@@ -658,17 +658,16 @@ describe("collection folders", () => {
   const DOCUMENT = "Page";
   const DRAWING = FILE_KIND_RECORDS.drawing.name;
   it.each<[string, Workspace, string[]]>([
-    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
+    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING]],
     ["a View share view", SHARE_VIEW, []],
     ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, []],
-    // An app is a folder, and a received share takes no new folder.
     ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, [DOCUMENT, "Collection", DRAWING]],
   ])("offers start tiles in the empty editor of %s only where the palette offers their command", async (_name, workspace, offered) => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     const start = within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
 
-    for (const label of [DOCUMENT, "Collection", DRAWING, "App"]) {
+    for (const label of [DOCUMENT, "Collection", DRAWING]) {
       expect(start.queryByRole("button", { name: label }) !== null).toBe(offered.includes(label));
     }
     if (offered.length === 0) expect(start.getByText("Select a file")).toBeTruthy();
@@ -701,18 +700,6 @@ describe("start surface", () => {
     await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "Untitled.excalidraw" }),
     ));
-  });
-
-  it("creates one app from App, however often it is pressed", async () => {
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
-    const start = await startSurface(bridge);
-    const app = start.getByRole("button", { name: "App" });
-    fireEvent.click(app);
-    fireEvent.click(app);
-    await waitFor(() => expect(bridge.createWorkspaceFolder).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "app" }),
-    ));
-    expect(bridge.createWorkspaceFolder.mock.calls.filter(([payload]) => payload.relativePath === "app")).toHaveLength(1);
   });
 
   it("lists recent files that still exist and opens one", async () => {

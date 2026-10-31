@@ -36,6 +36,10 @@ afterEach(() => {
 });
 
 describe("main-window OS mouse input", () => {
+  it.each(["workspace", "manager"] as const)("enables webview tags only for a workspace window: %s", role => {
+    createMainWindow({ role });
+    expect(vi.mocked(BrowserWindow).mock.calls.at(-1)?.[0]?.webPreferences?.webviewTag).toBe(role === "workspace");
+  });
   it.each(["workspace", "manager"] as const)("ignores OS mouse events before showing an e2e %s window", (role) => {
     vi.stubEnv("DOHC_DESKTOP_TEST", "1");
     vi.stubEnv("DOHC_TEST_IGNORE_MOUSE", "1");

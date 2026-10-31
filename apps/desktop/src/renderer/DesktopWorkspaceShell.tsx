@@ -69,6 +69,7 @@ import {
 } from "./shareSkipNotice";
 import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
+import type { AppViewNotices } from "./AppView";
 import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
@@ -313,7 +314,6 @@ import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
-import { createFirstAppFiles } from "./workbench/createFirstApp";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -1169,6 +1169,11 @@ export function DesktopWorkspaceShell(props: {
     () => ({ report: (failure) => reportShellFailure({ ...failure, repeat: true }), clear: clearIdentity }),
     [clearIdentity, reportShellFailure],
   );
+  // An app's notices: one row per tab and kind, which a later success takes back.
+  const appNotices = useMemo<AppViewNotices>(
+    () => ({ report: reportShellFailure, clear: clearIdentity }),
+    [clearIdentity, reportShellFailure],
+  );
   // What can explain an Access answer that covers nothing. About derives the
   // cause for each file from these facts (accessReasonFor).
   const isShareView = props.workspace.shareView !== undefined;
@@ -1230,7 +1235,11 @@ export function DesktopWorkspaceShell(props: {
     tabLabels: knownTabLabels,
     rememberMomentDiffPath,
     resolveMomentDiffPath,
+    resolveAppTitle,
   } = useTabTitles(workspaceId);
+  // App tabs each editor group has shown. They stay mounted while open, so
+  // switching tabs never reloads an app.
+  const shownAppTabs = useRef(new Map<string, string[]>());
   const anyTabDirty = dirtyPaths.size > 0;
   const focusedTab = parseTab(focusedTabPath);
   const activeDocumentPath = TAB_KINDS[focusedTab?.kind ?? "removed"].virtual
@@ -1552,8 +1561,9 @@ export function DesktopWorkspaceShell(props: {
   );
   // The saved layout replaces the defaults, and tabs opened since stay open
   // beside the saved ones, the one in view still in view. A file open in both
-  // keeps its saved place. Past the tab limit, saved tabs make room. Saving
-  // starts, with what's shown when nothing was saved.
+  // keeps its saved place, and an app open now stays in its group so it
+  // doesn't reload. Past the tab limit, saved tabs make room. Saving starts,
+  // with what's shown when nothing was saved.
   const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
     const shown = wbRef.current;
     if (stored) {
@@ -3906,36 +3916,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
-  const createFirstApp = useCallback(async () => {
-    try {
-      const { root } = await createFirstAppFiles({
-        workspaceId,
-        files,
-        folders,
-        mutations: bridge(),
-      });
-      try {
-        await refreshFiles();
-      } catch (error) {
-        reportShellError(
-          "The app was created, but the workspace could not refresh.",
-          error,
-        );
-        return;
-      }
-      openVirtualTab(siteTabPath(root));
-    } catch (error) {
-      reportShellError("Could not create the app.", error);
-      await refreshFiles().catch(() => undefined);
-    }
-  }, [
-    files,
-    folders,
-    openVirtualTab,
-    refreshFiles,
-    reportShellError,
-    workspaceId,
-  ]);
   // Add an app here… opens the Explorer with its Apps section open and its
   // first row focused. The request belongs to one workspace, like a reveal.
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
@@ -4555,15 +4535,14 @@ export function DesktopWorkspaceShell(props: {
     [commandContext, runCommand],
   );
   // The start surface's tiles: each kind's existing create action, where the
-  // workspace allows it. An app is a folder, so it needs folder creation.
+  // workspace allows it.
   const startActions = useMemo(
     () => ({
       ...(isCommandAvailable("new-file", commandContext) ? { markdown: commandHandlers["new-file"] } : {}),
       ...(isCommandAvailable("new-collection", commandContext) ? { collection: commandHandlers["new-collection"] } : {}),
       ...(isCommandAvailable("new-drawing", commandContext) ? { drawing: createUntitledDrawing } : {}),
-      ...(isCommandAvailable("new-folder", commandContext) ? { app: createFirstApp } : {}),
     }),
-    [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
+    [commandContext, commandHandlers, createUntitledDrawing],
   );
   // Files dropped on the start surface land at the workspace root.
   const importDroppedFiles = useCallback((dropped: File[]) => {
@@ -6004,6 +5983,7 @@ export function DesktopWorkspaceShell(props: {
             selectedAppRoot={selectedAppRoot}
             openAppTab={openAppTab}
             reportShellError={reportShellError}
+            appNotices={appNotices}
             setShareTarget={setShareTarget}
           />
         ) : null}
@@ -6023,6 +6003,10 @@ export function DesktopWorkspaceShell(props: {
                 : null;
               const groupTab = parseTab(tabPath);
               const groupSiteRoot = groupTab?.kind === "site" ? groupTab.siteRoot : null;
+              const openPaths = new Set(editorGroup.tabs.map((candidate) => candidate.path));
+              const keptAppTabs = (shownAppTabs.current.get(editorGroup.id) ?? []).filter((path) => openPaths.has(path));
+              if (groupSiteRoot && tabPath && !keptAppTabs.includes(tabPath)) keptAppTabs.push(tabPath);
+              shownAppTabs.current.set(editorGroup.id, keptAppTabs);
               const groupCollectionPath = groupTab?.kind === "collection" ? groupTab.collectionPath : null;
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
@@ -6244,21 +6228,8 @@ export function DesktopWorkspaceShell(props: {
               )}</SkeletonSlot>
             );
                 case "site": return (
-              groupSiteRoot ? (
-                <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
-                  <LazySitePreviewPage
-                    workspaceId={workspaceId}
-                    reportError={reportShellError}
-                    onOpenApp={openAppTab}
-                    siteRoot={groupSiteRoot}
-                    onShowSource={() => showPathInExplorer(groupSiteRoot, true)}
-                    sharedView={!!shareView}
-                    onShareSite={(target) =>
-                      setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
-                    }
-                  />
-                </Suspense>
-              ) : (
+              // The group's kept app tabs, below, show a valid app.
+              groupSiteRoot ? null : (
                 <InvalidSitePathFallback
                   activeTab={tabPath}
                   onClose={() => {
@@ -6451,6 +6422,35 @@ export function DesktopWorkspaceShell(props: {
               return unhandled;
             })()}
             </ErrorBoundary>
+            {keptAppTabs.map((path) => {
+              const app = parseTab(path);
+              if (app.kind !== "site" || app.siteRoot === null) return null;
+              const siteRoot = app.siteRoot;
+              const visible = path === tabPath;
+              return (
+                <div key={`${workspaceId}:${path}`} className={visible ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                  <ErrorBoundary scope="editor" resetKeys={[workspaceId, versionEpoch]}>
+                    <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
+                      <LazySitePreviewPage
+                        workspaceId={workspaceId}
+                        reportError={reportShellError}
+                        notices={appNotices}
+                        visible={visible}
+                        focused={visible && editorGroup.id === wb.activeEditorGroup}
+                        onTitle={(title) => resolveAppTitle(siteRoot, title)}
+                        onOpenApp={openAppTab}
+                        siteRoot={siteRoot}
+                        onShowSource={() => showPathInExplorer(siteRoot, true)}
+                        sharedView={!!shareView}
+                        onShareSite={(target) =>
+                          setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
+                        }
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
+                </div>
+              );
+            })}
                     </div>
                   </EditorGroupFrame>
                 ),

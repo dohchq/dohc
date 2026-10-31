@@ -222,6 +222,7 @@ export const CHANNELS = {
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   publishOwnerApp: "desktop:publish-owner-app",
+  appViewEvent: "desktop:app-view-event",
   ownerAppResponses: "desktop:owner-app-responses",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",

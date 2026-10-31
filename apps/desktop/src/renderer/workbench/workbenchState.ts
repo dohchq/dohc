@@ -276,8 +276,9 @@ const diffTitle: TabTitle = (_tab, label) => {
   return name ? `Diff: ${name}` : "History change";
 };
 const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
-// An app's folder, as typed. A folder that cannot be decoded keeps its address.
-const appTitle: TabTitle = tab => basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
+// The app's title once its page reads it, and until then its folder, as typed. A folder that cannot be decoded keeps
+// its address. The tooltip names the folder.
+const appTitle: TabTitle = (tab, label) => label ?? basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
 const collectionFolder = (tab: ParsedTab) => tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection";
 export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   file: {
@@ -598,16 +599,31 @@ function makeRoomForTabs(state: WorkbenchState, count: number, keep: ReadonlySet
 }
 
 // The saved layout with every tab open in `shown` beside it, the one in view
-// still in view. A file open in both keeps its saved place. Past the tab
+// still in view. A file open in both keeps its saved place. An app open in
+// `shown` stays in its group, because moving it reloads the app. Past the tab
 // limit, saved tabs close to make room, so no tab in `shown` closes.
 export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): WorkbenchState {
   const holder = (state: WorkbenchState, path: string) =>
     state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
   const shownPaths = new Set(allTabs(shown).map((tab) => tab.path));
-  const adding = [...shownPaths].filter((path) => !holder(saved, path)).length;
-  let next = makeRoomForTabs(saved, adding, shownPaths);
+  const appGroups = new Map<string, string>();
+  for (const group of shown.editorGroups) {
+    if (!saved.editorGroups.some((candidate) => candidate.id === group.id)) continue;
+    for (const { path } of group.tabs) if (parseTab(path).kind === "site") appGroups.set(path, group.id);
+  }
+  let next = saved;
+  for (const [path, groupId] of appGroups) {
+    const savedGroup = holder(next, path);
+    if (savedGroup !== undefined && savedGroup !== groupId) next = closeTab(next, savedGroup, path);
+  }
+  const adding = [...shownPaths].filter((path) => !holder(next, path)).length;
+  next = makeRoomForTabs(next, adding, shownPaths);
   for (const path of shownPaths) {
-    if (!holder(next, path)) next = openTab(next, path);
+    if (holder(next, path)) continue;
+    const groupId = appGroups.get(path);
+    // An app joins its group without taking its place or the focus. Room was made above.
+    next = groupId === undefined ? openTab(next, path) : replaceGroup(next, groupId, (group) =>
+      ({ ...group, tabs: [...group.tabs, { path }], activeTab: group.activeTab ?? path }));
   }
   const active = activeTabPath(shown);
   return active === null ? next : openTab(next, active, holder(next, active));
