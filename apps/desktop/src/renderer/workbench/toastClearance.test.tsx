@@ -43,7 +43,9 @@ it("tells the toast stack when the room changes, and only then", () => {
   const bottom = window.innerHeight;
   const { rerender, unmount } = render(<><Box top={bottom - 60} height={60} /></>);
   expect(changed).toHaveBeenCalledTimes(1);
+  // A lower box comes and goes under the highest one: the room stays.
   rerender(<><Box top={bottom - 60} height={60} /><Box top={bottom - 50} height={50} /></>);
+  rerender(<><Box top={bottom - 60} height={60} /></>);
   expect(changed).toHaveBeenCalledTimes(1);
   unmount();
   expect(changed).toHaveBeenCalledTimes(2);
