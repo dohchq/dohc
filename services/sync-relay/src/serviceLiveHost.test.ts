@@ -2760,7 +2760,8 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
 // `kept` first records an edit the server refused. Unless `stopped` is false,
 // the restore's first step runs before the restart. `pending` has the relay
 // accept an edit after the adoption cut that no activation pass delivers.
-// `admitted` configures restore preparation on the restarted host.
+// `admitted` has the relay admit the restore before the document moves, and
+// configures restore preparation on the restarted host.
 const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true, pending = false, admitted = false} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2777,6 +2778,7 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   }
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
   if (stopped) await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const admission = admitted ? await admitMovedRestore(o) : undefined;
   await o.host.close(); log.mockClear(); o.passes.deliver = true;
   if (admitted) {Object.assign(o.f.config, {restore: RESTORE}); await o.f.save();}
   moveAway(o);
@@ -2794,22 +2796,20 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   expect(leaving(o)).toEqual([]);
   expect(host.retains(o.sibling)).toBe(true);
   expect(host.drained("workspace")).toBe(false);
-  return {o, host, other, log, k, driver: () => driver};
+  return {o, host, other, log, k, admission, driver: () => driver};
 };
 // Restore preparation as liveRestoreDrain.test.ts configures it.
 const RESTORE = {maxBytes: 1_000_000, maxEvents: 10, aggregateBytes: 17_000_000, workingReserveBytes: 1_000_000, maxOperations: 1, validation: restorePolicy};
-// An admitted restore's real end, as liveRestoreDrain.test.ts builds it. The
-// engine commits the restore's native fence, and the owner's host proposes a
+const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
+// The relay admits the restore on the host that fenced it, while the document
+// is still at its path, as liveRestoreDrain.test.ts builds an admitted restore.
+// The engine commits the native fence, and the owner's host proposes a
 // content-valid candidate that restores the selected point, which the relay
-// records. Completing it through `host` then has the relay admit the proposal,
-// which moves the open retirement's accepted-through to the restore's own
-// cursor, and acknowledge the engine's apply, settle and resume, which answer
-// from the admission the relay holds. `publish` appends the restore's
-// settlement, as the retiring host's push does, which the retirement waits for.
-const admittedRestore = async (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>) => {
-  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history), coordinate = host.coordinate;
-  const input = {...stopLookup, host: coordinate, maxBytes: RESTORE.maxBytes, maxEvents: RESTORE.maxEvents};
-  const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
+// records and admits. Admission moves the open retirement's accepted-through
+// to the restore's own cursor; `before` is the retirement's key before it.
+const admitMovedRestore = async (o: Enrolled) => {
+  const before = retirementKey(o), store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  const input = {...stopLookup, host: o.host.coordinate, maxBytes: RESTORE.maxBytes, maxEvents: RESTORE.maxEvents};
   const fence = {operation: store.pendingStopRestoreFence(input).operation, localHeadSequence: 11, recordedAtMs: 100};
   store.acknowledgeStopRestoreFence(input, fence);
   const selected = store.captureStopRestorePoint(input), accepted = store.captureStopRestoreAcceptedCut(input);
@@ -2840,6 +2840,16 @@ const admittedRestore = async (o: Enrolled, host: Awaited<ReturnType<typeof star
     encoded = encodeNativeRestoreProposal(JSON.stringify(receipt), {candidateBytes: candidate, frozenStateBytes: frozen, pointStateBytes: pointBytes, nativeSourceBytes: []}, input);
   } finally {point.destroy(); head.destroy();}
   const {proposalDigest} = await store.recordStopRestoreProposal(input, encoded, restoreValidation, 200);
+  await store.admitStopRestoreProposal(input, proposalDigest, restoreValidation, 201);
+  return {proposalDigest, before};
+};
+// The engine's side of the admitted restore's end, on `host`, after the
+// document moved. It answers apply, settle and resume from the admission the
+// relay holds. `publish` appends the restore's settlement, as the retiring
+// host's push does, which the retirement waits for.
+const restoreEngine = (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>) => {
+  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history), coordinate = host.coordinate;
+  const input = {...stopLookup, host: coordinate, maxBytes: RESTORE.maxBytes, maxEvents: RESTORE.maxEvents};
   const hostCoordinate = {hostId: coordinate.hostId, hostEpoch: coordinate.hostEpoch, instanceId: coordinate.instanceId, connectionId: coordinate.connectionId};
   const admission = () => {
     const lifecycle = store.readStopRestoreLifecycle(input);
@@ -2887,7 +2897,7 @@ const admittedRestore = async (o: Enrolled, host: Awaited<ReturnType<typeof star
     expect(op).toMatchObject({settlementAdmission: {status: "accepted"}});
     expect(o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [op]})).toMatchObject({inserted: 1});
   };
-  return {proposalDigest, sendLiveRestore, publish, before: retirementKey(o)};
+  return {sendLiveRestore, publish};
 };
 
 // Proves: a restarted host keeps the route of a moved document's unfinished
@@ -2916,13 +2926,14 @@ it.each([false, true])("keeps a moved document's restore route after a restart u
 });
 
 // Proves: a moved document's restore that the relay admitted, which no Decline
-// can end, completes through the restarted host's route: the relay admits it
-// and records each engine step through resume. Once the restore's settlement
+// can end, completes through the restarted host's route: the relay admitted it
+// before the move, and the restarted host records each engine step through
+// resume. Once the restore's settlement
 // is published, its retirement runs at the key the admission left, not the one
 // before it, and completes, and the route ends.
 it("completes a moved document's admitted restore through a restarted host, then retires it", async () => {
-  const {o, host} = await movedDuringRestore({admitted: true});
-  const {proposalDigest, sendLiveRestore, publish, before} = await admittedRestore(o, host);
+  const {o, host, admission} = await movedDuringRestore({admitted: true});
+  const {proposalDigest, before} = admission!, {sendLiveRestore, publish} = restoreEngine(o, host);
   const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
   await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
   expect(sendLiveRestore.mock.calls.map(call => call[1])).toEqual(["apply", "settle", "resume"]);
@@ -2974,8 +2985,8 @@ it.each([["liveApplication.reconcileActivation", false], ["liveApplication.relea
 // before its retirement completed, still completes the retirement, at the key
 // the admission left.
 it("completes a moved document's retirement after a restart that follows its admitted restore", async () => {
-  const {o, host} = await movedDuringRestore({admitted: true});
-  const {proposalDigest, publish, before} = await admittedRestore(o, host);
+  const {o, host, admission} = await movedDuringRestore({admitted: true});
+  const {proposalDigest, before} = admission!, {publish} = restoreEngine(o, host);
   const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
   const reached = unansweredAfter(o, "liveApplication.reconcileActivation", 0);
   await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
