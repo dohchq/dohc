@@ -586,6 +586,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   await f.save();
 
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
+  // Each is told the method of every engine request any daemon sends, as it is sent.
+  const requestListeners = new Set<(method: string) => void>();
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
   // With `heldPerPass` and `departedPerPass`, a pass and its commit list at most that many, as when the rest do not fit.
   // `loseCommit` loses the next commit's reply after the commit stood.
@@ -763,6 +765,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
       })});
     client.sendRequest.mockImplementation(async (...args: unknown[]) => {
       const request = args[0] as {id: number; method: string; workspace?: string; params: Record<string, unknown>}, held = parked;
+      for (const listener of [...requestListeners]) listener(request.method);
       if (request.method.startsWith("liveApplication.")) ownerRequests++;
       if (held?.method === request.method) { parked = undefined; held.entered.resolve(); await held.release.promise; }
       const reply = (result: unknown) => ({id: request.id, result}) as never;
@@ -996,7 +999,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
   return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, engine, membership, keptOutbox, keptOutboxes, recoveryStores, recoveryFaults,
-    native, nativeEdits, nativeHeadBytes,
+    native, nativeEdits, nativeHeadBytes, requestListeners,
     spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
@@ -1217,7 +1220,14 @@ async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPe
   // The workspace's pulls so far, for waiting on the next one.
   const pullCount = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
   return {...o, sibling, other, attach, detach, pullCount, passes, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
-    async nextPull() {const seen = pullCount(); await vi.waitFor(() => expect(pullCount()).toBeGreaterThan(seen + 1));}};
+    // Resolves once a pull that began after the current one has been sent, on the second new pull.
+    nextPull() {
+      let seen = 0;
+      return new Promise<void>(resolve => {
+        const listener = (method: string) => {if (method === "sync.pullHosted" && ++seen === 2) {o.requestListeners.delete(listener); resolve();}};
+        o.requestListeners.add(listener);
+      });
+    }};
 }
 const stay = {departing: []};
 
@@ -2990,7 +3000,12 @@ it.each([false, true])("settles what a no-retirement restore route applied befor
   const methods = engineMethods(o.client()), settled = methods.indexOf("liveApplication.settle"), pushed = methods.indexOf("sync.push", settled);
   expect(settled).toBeGreaterThan(-1);
   expect(pushed).toBeGreaterThan(settled);
-  expect(methods.indexOf("liveApplication.unloadDocument", settled)).toBeGreaterThan(pushed);
+  const unloaded = methods.indexOf("liveApplication.unloadDocument", settled);
+  expect(unloaded).toBeGreaterThan(pushed);
+  // The settle covered the edit the route applied, not an older tip.
+  const requests = o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: {terminalReceipt?: unknown}});
+  expect(requests.slice(0, unloaded).filter(request => request.method === "liveApplication.settle").at(-1)!.params.terminalReceipt)
+    .toMatchObject({deliveryId: "edit-pending"});
   expect(host.retains(o.sibling)).toBe(false);
 });
 
