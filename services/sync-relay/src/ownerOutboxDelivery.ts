@@ -60,29 +60,20 @@ export interface OwnerOutboxAdoption {
   applied(): void;
 }
 
-/**
- * Runs within one authenticated device delivery and rechecks standing at every await.
- * Each entry is applied before the queue drops it, except a native service
- * activation's seed under its `seedDelivery`: that is acknowledged first, so
- * the host keeps the relay's receipt for it before applying it.
- */
-export async function drainOwnerOutbox(options: {
-  storage: SyncRelayStorage; admission: OwnerOutboxAdmission; client: EngineClient;
-  workspace: string; host: LiveHostConnectionCoordinate; registrationId: number;
-  binding: LiveObjectBinding; adoption: OwnerOutboxAdoption; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
-  seedDelivery?: ServiceSeedDelivery;
+/** The key under which `adoption` queues its divergent seed. */
+const adoptionSeedKey = (adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">, updateDigest: string) =>
+  `owner-adoption:${createHash("sha256").update(JSON.stringify([adoption.adoptionId,adoption.sequence,updateDigest])).digest("hex")}`;
+
+/** One registration's owner queue, read through the host. Every await rechecks standing. */
+interface OwnerOutboxScope {
+  client: EngineClient; workspace: string; registrationId: number; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
   assertCurrent(): void;
-  applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
-}): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
-  const {storage,admission,client,registrationId,binding,host,signal,adoption} = options;
-  const seedKey = (updateDigest: string) => `owner-adoption:${createHash("sha256")
-    .update(JSON.stringify([adoption.adoptionId,adoption.sequence,updateDigest])).digest("hex")}`;
-  for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
-    if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
-  }
-  const check = () => { signal?.throwIfAborted(); options.assertCurrent(); };
-  const request = () => ({id: options.nextRequestId(),workspace: options.workspace,deadlineMs: options.deadlineMs});
-  check();
+}
+
+function ownerOutboxRequests(scope: OwnerOutboxScope, onRead?: (result: Record<string,unknown>) => void) {
+  const {client,registrationId,signal} = scope;
+  const check = () => { signal?.throwIfAborted(); scope.assertCurrent(); };
+  const request = () => ({id: scope.nextRequestId(),workspace: scope.workspace,deadlineMs: scope.deadlineMs});
   const readStatus = async () => {
     const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
     check();
@@ -94,6 +85,62 @@ export async function drainOwnerOutbox(options: {
     if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
+  const open = (outboxId: unknown) => new OwnerYDocOutbox({sendRequest: async original => {
+    check();
+    const reading = original.method === "ydoc.ownerOutbox.readPending";
+    if (!reading && original.method !== "ydoc.ownerOutbox.acknowledge") throw new Error("Unsupported owner outbox operation.");
+    const params = original.params as Record<string,unknown>;
+    if (params.outboxId !== outboxId) throw new Error("Owner outbox changed.");
+    const response = await client.sendRequest({...request(),method: reading ? "liveApplication.readOwnerOutbox" : "liveApplication.acknowledgeOwnerOutbox",
+      params: {registrationId,...(reading ? (params.cursor === undefined ? {} : {cursor: params.cursor as never}) : {receipts: params.receipts as never})}},signal);
+    check();
+    if (reading) onRead?.(response.result as Record<string,unknown>);
+    return {...response,id: original.id};
+  }},scope.workspace);
+  return {check,request,readStatus,open};
+}
+
+/**
+ * Whether `adoption`'s seed heads the owner queue, by the check
+ * `drainOwnerOutbox` uses. Reads only; it admits and acknowledges nothing.
+ */
+export async function ownerOutboxHeadIsSeed(options: OwnerOutboxScope & {
+  binding: LiveObjectBinding; adoption: Pick<OwnerOutboxAdoption, "adoptionId" | "sequence">;
+}): Promise<boolean> {
+  const {check,readStatus,open} = ownerOutboxRequests(options);
+  check();
+  const status = await readStatus();
+  if (status.pendingBytes === 0 || typeof status.outboxId !== "string") return false;
+  const outbox = open(status.outboxId);
+  try {
+    const {entry} = await outbox.readDeliveryHead(status.outboxId, options.binding); check();
+    return entry !== null && entry.appendKey === adoptionSeedKey(options.adoption, entry.updateDigest);
+  } finally {outbox.dispose();}
+}
+
+/**
+ * Runs within one authenticated device delivery and rechecks standing at every await.
+ * Each entry is applied before the queue drops it, except a native service
+ * activation's seed under its `seedDelivery`: that is acknowledged first, so
+ * the host keeps the relay's receipt for it before applying it.
+ */
+export async function drainOwnerOutbox(options: OwnerOutboxScope & {
+  storage: SyncRelayStorage; admission: OwnerOutboxAdmission; host: LiveHostConnectionCoordinate;
+  binding: LiveObjectBinding; adoption: OwnerOutboxAdoption;
+  seedDelivery?: ServiceSeedDelivery;
+  applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
+}): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
+  const {storage,admission,client,registrationId,binding,host,signal,adoption} = options;
+  for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
+  }
+  let receivedBytes = 0, admittedEntries = 0;
+  const byteBudget = new Error("Owner drain byte budget exceeded.");
+  const {check,request,readStatus,open} = ownerOutboxRequests(options, result => {
+    if (typeof result.bytesBase64 === "string") receivedBytes += result.bytesBase64.length;
+    if (receivedBytes > admission.maxBytesPerDrain) throw byteBudget;
+  });
+  check();
   const status = await readStatus(), outboxId = status.outboxId;
   // Read after the status, which names a fresh adoption's outbox. Acknowledged
   // first, the seed can leave the queue before the host applies it, so neither
@@ -115,24 +162,7 @@ export async function drainOwnerOutbox(options: {
       if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits(queue);
     } finally {refusals.release(held);}
   }
-  let receivedBytes = 0, admittedEntries = 0;
-  const byteBudget = new Error("Owner drain byte budget exceeded.");
-  const outbox = new OwnerYDocOutbox({sendRequest: async original => {
-    check();
-    const reading = original.method === "ydoc.ownerOutbox.readPending";
-    if (!reading && original.method !== "ydoc.ownerOutbox.acknowledge") throw new Error("Unsupported owner outbox operation.");
-    const params = original.params as Record<string,unknown>;
-    if (params.outboxId !== outboxId) throw new Error("Owner outbox changed.");
-    const response = await client.sendRequest({...request(),method: reading ? "liveApplication.readOwnerOutbox" : "liveApplication.acknowledgeOwnerOutbox",
-      params: {registrationId,...(reading ? (params.cursor === undefined ? {} : {cursor: params.cursor as never}) : {receipts: params.receipts as never})}},signal);
-    check();
-    if (reading) {
-      const result = response.result as Record<string,unknown>;
-      if (typeof result.bytesBase64 === "string") receivedBytes += result.bytesBase64.length;
-      if (receivedBytes > admission.maxBytesPerDrain) throw byteBudget;
-    }
-    return {...response,id: original.id};
-  }},options.workspace);
+  const outbox = open(outboxId);
   // The record of a refusal its owner can find, written before the engine's
   // quarantine so no crash leaves a quarantine without one.
   const keep = (outbox: string, refusal: {reason: string; deliveryId: string; key: string}) => {
@@ -189,7 +219,7 @@ export async function drainOwnerOutbox(options: {
       // The seed is the queue's first entry, so a later head proves it applied
       // when entries are applied first. Another adoption's key here means this
       // queue is not the one recorded.
-      const seed = entry.appendKey === seedKey(entry.updateDigest);
+      const seed = entry.appendKey === adoptionSeedKey(adoption, entry.updateDigest);
       if (!seed && entry.appendKey.startsWith("owner-adoption:")) throw new Error("Owner outbox holds another adoption's seed.");
       if (!seed && !receiptFirst) adoption.applied();
       // The engine's entry names the seed's place in its outbox.

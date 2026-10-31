@@ -4,7 +4,7 @@ import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.j
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
-import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
+import {drainOwnerOutbox,ownerOutboxHeadIsSeed,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
 import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
@@ -141,7 +141,11 @@ export class OwnerCommittedDelivery {
             progress = this.#store.ownerDeliveryProgress(latest);
           }
         }
-        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+        // The engine settles nothing before a queued seed is accepted. Applying
+        // that seed below moves the terminal past the cut, so it needs no settle.
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
+          registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
+          assertCurrent: latest.assertCurrent})) {
           const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
             registrationId,terminalReceipt: {...progress.adoptionTerminal},
           }},signal),progress.adoptionTerminal);

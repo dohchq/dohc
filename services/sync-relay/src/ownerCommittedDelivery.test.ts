@@ -6,10 +6,13 @@ import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
-import {drainOwnerOutbox} from "./ownerOutboxDelivery";
+import {drainOwnerOutbox,ownerOutboxHeadIsSeed} from "./ownerOutboxDelivery";
 
-vi.mock("./ownerOutboxDelivery", () => ({drainOwnerOutbox: vi.fn()}));
-beforeEach(() => {vi.mocked(drainOwnerOutbox).mockReset();});
+vi.mock("./ownerOutboxDelivery", () => ({drainOwnerOutbox: vi.fn(),ownerOutboxHeadIsSeed: vi.fn()}));
+beforeEach(() => {
+  vi.mocked(drainOwnerOutbox).mockReset();
+  vi.mocked(ownerOutboxHeadIsSeed).mockReset().mockResolvedValue(false);
+});
 
 const document = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64)};
 const binding = {...document,currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
@@ -594,5 +597,76 @@ it("brings a device host's seed to readiness, applied before it is acknowledged,
   });
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done", terminalReceipt: collaborator});
   expect(order).toEqual(["commit", "apply seed-delivery", "acknowledge", `apply ${collaborator.deliveryId}`]);
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
+});
+
+// A successor whose engine queue still holds its adoption seed cannot settle
+// the handover cut: the engine refuses every settlement before that seed.
+it.each([
+  {head: "its adoption seed", seeded: true, order: ["commit", "apply edit", "acknowledge"]},
+  {head: "an ordinary edit", seeded: false, order: ["settle", "commit", "apply edit", "acknowledge"]},
+])("settles the handover cut only when the queue head is not this adoption's seed ($head)", async ({seeded, order: expected}) => {
+  const f = fixture({prefix: 4, owners: 0, adoptionCursor: 4});
+  const actual = await vi.importActual<typeof import("./ownerOutboxDelivery")>("./ownerOutboxDelivery");
+  vi.mocked(drainOwnerOutbox).mockImplementation(actual.drainOwnerOutbox);
+  vi.mocked(ownerOutboxHeadIsSeed).mockImplementation(actual.ownerOutboxHeadIsSeed);
+  const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const update = Buffer.from([1, 2]), updateDigest = sha(update);
+  const appendKey = seeded ? `owner-adoption:${sha(Buffer.from(JSON.stringify(["adoption", 7, updateDigest])))}` : "owner-edit:1";
+  const entry = {sequence: 1, appendKey, deliveryId: "edit", updateDigest, byteLength: update.length, createdAtMs: 1};
+  const edit = {deliveryId: entry.deliveryId, updateDigest, journalCursor: 5, acceptingHostEpoch: 1} as LiveUpdateReceipt;
+  const host = {mode: "device", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"};
+  let pending = true;
+  const order: string[] = [];
+  Object.assign(f.storage, {
+    resolveCurrentLiveDocumentBinding: () => ({kind: "current", host, binding, authority: {principalKind: "owner", principalId: "owner"}}),
+    readLiveUpdateJournalCut: () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array([0, 0])}, suffix: []}}),
+    commitLiveUpdateJournal: () => {
+      order.push("commit");
+      if (!f.journal.includes(edit)) f.journal.push(edit);
+      return {result: {kind: "accepted", receipt: edit}};
+    },
+  });
+  const at = (part: string, sequence = 0) => ({snapshot: sha(Buffer.from(String(pending))), part, sequence, offset: 0});
+  const page = (part: string, sequence: number, bytes: Uint8Array, nextCursor: ReturnType<typeof at> | null) =>
+    ({kind: "page", ...at(part, sequence), totalBytes: bytes.length, digest: sha(bytes), bytesBase64: Buffer.from(bytes).toString("base64"), nextCursor});
+  const register = f.client.sendRequest.getMockImplementation()!;
+  f.client.sendRequest.mockImplementation(async input => {
+    const params = input.params as Record<string, unknown>;
+    if (input.method === "liveApplication.settle") {
+      order.push("settle");
+      // The engine's refusal at settlement.rs:685.
+      if (seeded && pending) throw new Error("the owner's adoption seed must be accepted before a settlement");
+      return {id: input.id, result: {status: "settled", settlement: {settlementId: null, previousCursor: 4, terminalCursor: 4, applicationCount: 0,
+        localYDocSequence: 1, momentId: "moment-1", markdownDigest: "c".repeat(64), materialized: true, collectionReconcileRequired: false}}};
+    }
+    if (input.method === "liveApplication.ownerOutbox") {
+      return {id: input.id, result: {outboxId: "outbox", pendingBytes: pending ? update.length : 0, state: "active", retryDeliveryId: null}};
+    }
+    if (input.method === "liveApplication.acknowledgeOwnerOutbox") {
+      expect(params.receipts).toEqual([edit]);
+      order.push("acknowledge"); pending = false;
+      return {id: input.id, result: {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null}};
+    }
+    if (input.method === "liveApplication.readOwnerOutbox") {
+      const part = (params.cursor as {part?: string} | undefined)?.part;
+      const result = part === undefined ? page("header", 0, Buffer.from(JSON.stringify({outboxId: "outbox", binding,
+        baseUpdateDigest: binding.lineageClaimId, baseByteLength: 2, state: "active", pendingBytes: pending ? update.length : 0,
+        pendingEntryCount: pending ? 1 : 0, nextSequence: 2, oldestEntryAtMs: pending ? 1 : null, quarantineReason: null, observedBinding: null,
+        retryDeliveryId: null, frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
+        firstEntryCursor: pending ? at("entryHeader", 1) : null})), at("base"))
+        : part === "entryHeader" ? page("entryHeader", 1, Buffer.from(JSON.stringify(entry)), at("update", 1)) : page("update", 1, update, null);
+      return {id: input.id, result: result as never};
+    }
+    return register(input);
+  });
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  f.client.sendLiveApplication.mockImplementation(async (input, event) => {
+    order.push(event.metadata.accepted.receipt.deliveryId === edit.deliveryId ? "apply edit" : `apply ${event.metadata.accepted.receipt.deliveryId}`);
+    return apply(input, event);
+  });
+  const outcome = await f.consumer.drain(document).catch((error: unknown) => error);
+  expect(order).toEqual(expected);
+  expect(outcome).toMatchObject({kind: "done", terminalReceipt: edit});
   expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
 });
