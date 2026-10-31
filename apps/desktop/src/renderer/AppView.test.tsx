@@ -248,8 +248,9 @@ describe("an owner app in its tab", () => {
     render(<Page />);
     await openedView();
     await user.click(screen.getByTestId("app-view-review"));
-    await user.click(await screen.findByRole("button", { name: "Prepare for this device" }));
-    await user.click(await screen.findByRole("button", { name: "Approve for this device" }));
+    const approve = await screen.findByRole("button", { name: "Approve and open" });
+    await waitFor(() => expect((approve as HTMLButtonElement).disabled).toBe(false));
+    await user.click(approve);
     await waitFor(() => expect(publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve" })));
     expect(opens()).toBe(1);
     emit({ viewId: viewIdOf(), kind: "approval-ended" });
