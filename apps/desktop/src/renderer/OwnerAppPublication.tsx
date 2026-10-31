@@ -457,7 +457,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       cancel(localCandidateRef.current); localCandidateRef.current = null; setLocalCandidate(null);
       setCandidateState("failed");
       // After the dialog closes, Try again reopens it so the owner can prepare the app again.
-      reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(cause, "")), () => { if (alive.current) void prepareLocalCandidate(); else props.onReopen(); });
+      reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(cause, "")), () => { if (alive.current) retryPreparation(); else props.onReopen(); });
     } finally {
       // Another action took over, so a later render prepares again if the review still needs it.
       if (alive.current && mine !== request.current && preparing.current === mine) setCandidateState("idle");
@@ -466,6 +466,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   useEffect(() => {
     if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
+  // A retry waits in this effect for any running action, so it never takes over an approval or a removal.
+  const retryPreparation = () => setCandidateState(value => value === "failed" ? "idle" : value);
 
   // Once the dialog has closed, Try again in Notices opens the app itself, as the person asked.
   const openFailedNotice = (publicationId: string, cause: unknown) =>
@@ -685,7 +687,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <SecondaryButton size="row" disabled={!!busy || responsesBusy} onClick={() => void withdraw(row, true)}>Try again</SecondaryButton>
         </div> : null : <p key={row.publicationId} className="m-0 text-[12px] text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>)}
         <AccessBox capabilities={boxCapabilities} approved={changed && approval ? approvedCapability(approval) : null} failed={localReview.status === "failed" || candidateState === "failed"}
-          onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : void prepareLocalCandidate()} />
+          onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : retryPreparation()} />
         {showLinks ? <section aria-labelledby="app-links-title">
           <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">Share links</h3>
           {linksSignedOut && connect ? <div data-testid="app-links-signed-out" data-reason="signed-out" className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[13px]">

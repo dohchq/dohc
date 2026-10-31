@@ -899,6 +899,31 @@ describe("owner app publication", () => {
       expect(actions("prepareLocal")).toHaveLength(2);
     });
 
+    it("lets an approval finish when the failed preparation's Notices row is retried during it", async () => {
+      const reportError = vi.fn();
+      let preparations = 0;
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const answers = local();
+      api.publishOwnerApp.mockImplementation(async request => {
+        if (request.action === "prepareLocal" && ++preparations === 1) throw new Error("Engine connection lost");
+        if (request.action === "approve") await held;
+        return answers(request);
+      });
+      renderLocal({ reportError });
+      await openLocal();
+      await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not prepare this app.", expect.any(Error), expect.any(Function)));
+      await userEvent.setup().click(within(screen.getByTestId("app-access-retry")).getByRole("button", { name: "Try again" }));
+      await ready();
+      await userEvent.setup().click(approveButton());
+      await waitFor(() => expect(actions("approve")).toHaveLength(1));
+      // The Notices row from the first failure is still there. Its retry must not take over the approval.
+      await act(async () => reportError.mock.calls[0]![2]!());
+      expect(actions("prepareLocal")).toHaveLength(2);
+      await act(async () => { release(); });
+      await waitFor(() => expect(dialog()).toBeNull());
+    });
+
     it("refuses and cancels a candidate that is not this app's local one", async () => {
       const reportError = vi.fn();
       const answers = local();
