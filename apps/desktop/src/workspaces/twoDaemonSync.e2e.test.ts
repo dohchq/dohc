@@ -63,6 +63,7 @@ import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { relayShareOperations } from "../ipc/shareOperations";
 import { registerOperations } from "../ipc/operationTable";
 import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
+import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
@@ -1066,16 +1067,23 @@ it.skipIf(engine.missing).each([
       const handlers = new Map<string, (event: {sender: {id: number}}, payload: unknown) => unknown>();
       const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token: relayConnection.token};
       const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
-      let offline = offlineStop;
+      let offline = offlineStop, stopRefusalStatus: number | undefined;
       const ownerHandlers = createRelaySharesIpcHandlers({
         remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
         currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
         relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
           if (offline) throw new Error("offline");
           const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"}});
-          // A refusal's status and body name why, as the relay answered it.
-          const refusal = response.ok ? undefined : `${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${await response.text()}`;
-          expect(response.ok, refusal).toBe(true); return await response.json() as R;
+          if (!response.ok) {
+            const text = await response.text();
+            let data: unknown = null;
+            try {data = JSON.parse(text);} catch {/* Not JSON: fail below with the relay's answer. */}
+            // A Stop refusal reaches Stop as main's relayShareJsonWithCredentials throws it.
+            const stopRefusal = liveStopRelayError(data);
+            if (stopRefusal) {stopRefusalStatus = response.status; throw stopRefusal;}
+            expect(response.ok, `${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${text}`).toBe(true);
+          }
+          return await response.json() as R;
         }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
@@ -1130,13 +1138,11 @@ it.skipIf(engine.missing).each([
           scope: { documents: expect.arrayContaining([{ objectId: document.binding.objectId, path }]) } });
         expect(await hostDocumentState()).toBe("ready");
         const refused = await stop().then(() => {throw new Error("Stop succeeded while the session host was held.");}, (error: unknown) => error);
-        expect(refused).toBeInstanceOf(Error);
-        expect((refused as Error).message).toBe("dohc is waiting for the server to stop live editing and will keep trying.");
-        const answered = String(((refused as Error).cause as Error | undefined)?.message);
-        expect(answered).toContain(`DELETE /sync/${workspaceId}/live-host answered 409: `);
-        expect(answered).toContain(`"code":"edits-pending"`);
-        // The refused Stop stays requested here until a Stop finishes it.
-        expect(await owedStops()).toMatchObject([{state: "requested", binding: document.binding}]);
+        expect(stopRefusalStatus).toBe(409);
+        expect(readLiveStopRefusal(refused)).toEqual({code: "edits-pending"});
+        expect((refused as Error).message).toBe(LIVE_STOP_EDITS_PENDING);
+        // The refusal cleared this computer's Stop, so the next Stop starts afresh.
+        expect(await owedStops()).toEqual([]);
         preStopFeed.release();
         try { await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery"); }
         catch (error) {
