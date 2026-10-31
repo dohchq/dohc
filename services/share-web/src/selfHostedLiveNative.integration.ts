@@ -1365,16 +1365,17 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   return {attemptsBeforeResume: before, reports: proof.reports};
 }), 120000);
 
-// Pause keeps the document's activation, so its owner's ordinary edit made
-// while paused reaches the host's replica as an edit that activation never
-// admitted. The replica keeps the edit queued, holds the document, and
-// capture stops. Resume through the enrollment route then retires the held
-// activation, the edit applies, and a successor holds it.
-it("holds a document its owner edited while paused, and Resume retires the held activation for a successor that holds the edit", () => withSelfHostProof("self-host-held", async proof => {
+// Pause fences live admission and retires the document's activation at once,
+// at its seed, before the document parks. Its owner's ordinary edit made while
+// paused then waits for no activation to admit it. Resume through the
+// enrollment route captures once, and a successor of the retired activation
+// holds the edit.
+it("retires a paused document's activation at once, and Resume starts a successor that holds the edit its owner made while paused", () => withSelfHostProof("self-host-paused", async proof => {
   const saved = proof.activation()!, P = saved.activationId, [seed] = proof.journal() as {journal_cursor: number; delivery_id: string; update_digest: string}[];
   expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
   const completed = {activation_id: P, predecessor_activation_id: null, state_digest: saved.source.fullStateDigest, completed: 1,
     retire_accepted_cursor: null, retired: 0, boundary: null, stateDropped: 0};
+  expect(proof.activations()).toEqual([completed]);
   // The owner's ordinary Y.Doc updates of docs/a.md the relay holds.
   const ownerUpdates = () => proof.relayRead.prepare(`SELECT origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256') AS update_sha256 FROM sync_relay_log
     WHERE workspace_id='workspace' AND op_kind='ydoc.update' AND json_extract(payload_json,'$.objectId')=? AND origin_id NOT LIKE 'service-host:%' ORDER BY origin_id,origin_seq`).all(proof.objectId);
@@ -1384,43 +1385,36 @@ it("holds a document its owner edited while paused, and Resume retires the held 
     FROM ydoc_deferred_updates u JOIN replication_log l USING (workspace_id,origin_id,origin_seq) ORDER BY u.origin_id,u.origin_seq`).all());
   const attempts = () => proof.started("captureOwnerActivation");
 
+  // Pause: the activation retires at its seed, and the relay keeps its owner delivery in history.
   expect(await proof.route("DELETE", {path: "docs/a.md"})).toEqual({status: 200, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "paused"}});
   await vi.waitFor(() => {
     expect(proof.hosted()).toEqual({state: "parked", reason: null});
     expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: "pause", enabled: false, retired: false, hostDrainedAtMs: expect.any(Number)});
   }, {timeout: 30000});
-  expect(proof.activations()).toEqual([completed]);
-  const before = ownerUpdates();
-  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whilePaused", "ordinary-owner"));
-  const edit = ownerUpdates().slice(before.length);
-  expect(edit).toHaveLength(1);
-
-  // Resume: the replica keeps that edit queued and holds the document, and capture stops.
-  const captured = attempts();
-  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing"}});
-  await vi.waitFor(async () => expect(await proof.documents()).toEqual([{path: "docs/a.md", objectId: proof.objectId, status: "unavailable", reason: "live-edit-unadmitted"}]), {timeout: 30000});
-  expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
-  expect(queued()).toEqual(edit.map(row => ({...row, ingress_kind: "hosted"})));
-  expect(refused()).toEqual([]);
-  const held = attempts(), pulls = harness.pulls.length;
-  expect(held).toBeGreaterThan(captured);
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
-  expect(attempts()).toBe(held);
-  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. Its store is kept at ${proof.store}.`]);
-  expect(proof.activations()).toEqual([completed]);
-
-  // Resume again: the enrollment route retires the held activation at its seed, and the relay keeps its owner delivery in history.
-  // Once its binding goes, the replica applies the queued edit, and a successor of the retired activation holds it.
-  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing"}});
   const epoch = (proof.relayRead.prepare("SELECT accepting_host_epoch FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? AND journal_cursor=?")
     .get(proof.objectId, seed!.journal_cursor) as {accepting_host_epoch: number}).accepting_host_epoch;
   const boundary = {terminalReceipt: {deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest, journalCursor: seed!.journal_cursor, acceptingHostEpoch: epoch},
     eventCount: 1, historyEvidenceDigest: expect.stringMatching(/^[0-9a-f]{64}$/)};
   const retired = {...completed, retire_accepted_cursor: seed!.journal_cursor, retired: 1, boundary, stateDropped: 1};
+  expect(proof.activations()).toEqual([retired]);
+  const before = ownerUpdates();
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whilePaused", "ordinary-owner"));
+  const edit = ownerUpdates().slice(before.length);
+  expect(edit).toHaveLength(1);
+
+  // Resume: one capture starts a successor of the retired activation, which holds the edit. Nothing holds the document.
+  const captured = attempts();
+  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing"}});
   await vi.waitFor(async () => {
     expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]);
     expect(proof.activations()).toEqual([retired, expect.objectContaining({predecessor_activation_id: P, completed: 1})]);
   }, {timeout: 30000});
+  expect(attempts()).toBe(captured + 1);
+  // Later passes capture nothing more, while its workspace keeps pulling, and the operator is told of nothing they need to do.
+  const pulls = harness.pulls.length;
+  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  expect(attempts()).toBe(captured + 1);
+  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
   expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
   const successor = proof.activation()!, S = successor.activationId, resumed = await proof.hostState();
   const markdown = "---\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello";
@@ -1468,7 +1462,7 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   expect(proof.activations()).toEqual([retired, current]);
   expect(proof.journal()).toEqual([first, seedRow, journaled(later)]);
   expect(proof.settlement()).toEqual({applied: later.journalCursor, settled: later.journalCursor});
-  return {activationId: P, successor: S, queued: edit, attempts: held, capturesBeforeRestart: captures};
+  return {activationId: P, successor: S, editWhilePaused: edit, capturesBeforeResume: captured, capturesBeforeRestart: captures};
 }), 180000);
 
 // Until the session host starts a document's Y.Doc itself (#2069), a file only
