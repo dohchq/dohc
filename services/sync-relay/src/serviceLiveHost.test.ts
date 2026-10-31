@@ -729,12 +729,17 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // The engine's reason for refusing native capture, as for a document with an open sync conflict, and its reasons for single paths.
   let refusal: Error | undefined, detachFailure: Error | undefined;
   const refusals = new Map<string, Error>();
+  // Completed activations of other documents, by activation ID. Capture resumes one when named, and the owner
+  // state of a registration for one reports its own adoption, with no native queue.
+  const otherActivations = new Map<string, NativeOwnerActivation>();
+  let registeredActivation: unknown;
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
-    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async (_request: unknown, path: string) => {
+    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async (_request: unknown, path: string, _maxBytes?: number,
+      _signal?: AbortSignal, activationId?: string) => {
       const refused = refusals.get(path) ?? refusal;
       if (refused) throw refused;
-      return engine.capture;
+      return (activationId === undefined ? undefined : otherActivations.get(activationId)) ?? engine.capture;
     }),
       sendLiveOwnerAdoption: vi.fn(async (input: {id: number}, cut: {adoptionId: string; terminalReceipt: {journalCursor: number} | null}) => {
         const terminalCursor = cut.terminalReceipt?.journalCursor ?? 0;
@@ -780,10 +785,14 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.register":
           if (Object.keys(request.params).join() !== "binding,activationId") throw new Error("INVALID_PARAMS: invalid-live-registration");
           if (registrationRefusal) throw registrationRefusal;
+          registeredActivation = request.params.activationId;
           if (!registrations) return reply({registrationId: 7});
           registrations.live = ++registrations.next;
           return reply({registrationId: registrations.live});
-        case "liveApplication.ownerState": return reply({adoptionId: engine.adoption.activationId, expectedLocalSequence: 2,
+        case "liveApplication.ownerState":
+          if (otherActivations.has(String(registeredActivation))) return reply({adoptionId: registeredActivation, expectedLocalSequence: 2,
+            throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: "active", retryDeliveryId: null});
+          return reply({adoptionId: engine.adoption.activationId, expectedLocalSequence: 2,
           throughCursor: engine.adoption.throughCursor, outboxId: native.outboxId, pendingBytes: native.outboxId ? nativeBytes() : 0,
           outboxState: native.state, retryDeliveryId: native.retryDeliveryId});
         // As the engine's, a preparation needs every queue of the activation to hold nothing deliverable and no Try again.
@@ -994,6 +1003,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
     refuseCaptureAt(path: string, error: Error) {refusals.set(path, error);},
+    otherActivations,
     refuseRegistration(error: Error | undefined) {registrationRefusal = error;},
     failDetach(error: Error | undefined) {detachFailure = error;},
     applied, lost,
@@ -3004,6 +3014,126 @@ it("keeps a replacement at a moved document's old path apart from the moved docu
   expect(host.retains(other)).toBe(true);
   expect(driver()!.targets.filter(target => target.path === other.path)).toEqual([expect.objectContaining({path: other.path, shareId: other.shareId})]);
   expect(captures()).not.toContain(ACTIVATION);
+});
+
+const REPLACEMENT_ACTIVATION = `ordinary-activation-${"c".repeat(64)}`;
+// A new document at the fixture document's path, with its own lineage and an
+// activation the running host completed: adoption, seed and native application,
+// as for the fixture document. The fake engine resumes it by its activation ID.
+// Its object and activation IDs sort after the fixture document's.
+const replacementActivation = async (o: Enrolled) => {
+  const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
+    maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
+  const path = o.sibling.path, origin = "replacement-origin", doc = markdownToYDoc("Replacement"), baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+  doc.getMap("frontmatter").set("title", "Replaced");
+  const fullState = Buffer.from(Y.encodeStateAsUpdate(doc)); doc.destroy();
+  const document = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: "replacement-object", lineageClaimId: sha256(baselineBytes)};
+  const validated = o.validateJournal({document, currentPath: path, checkpoint: baselineBytes, suffix: [], candidate: fullState});
+  const base = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: path, checkpoint: baselineBytes});
+  if (validated.kind !== "accepted" || base.kind !== "accepted") throw new Error("Invalid replacement fixture.");
+  const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
+  const relaySeq = (originSeq: number) => Number(o.raw.prepare(`SELECT relay_seq FROM sync_relay_log WHERE origin_id='${origin}' AND origin_seq=?`).get(originSeq)!.relay_seq);
+  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: "replacement-moment", path, operation: "write",
+    payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
+  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
+    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 31);
+  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: false,
+    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
+  const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+  o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,'replacement-moment','main',?,?,'text',?,30)")
+    .run(document.objectId, relaySeq(0), path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  const capture: NativeOwnerActivation = {activationId: REPLACEMENT_ACTIVATION, sessionId: "replacement-session", baselineBytes, fullState,
+    source: {version: 1, relayDatabaseNamespace: o.f.history.namespace, ...document, currentPath: path, replicationEpoch: "epoch",
+      streamIdentity: "stream", committedCursor: relaySeq(2), baseOriginId: origin, baseOriginSeq: 1, baseRelaySeq: relaySeq(1),
+      sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", document.objectId, path, origin, "2"].join("\0")))}`,
+      sourceDigest: validated.evidence.projectedMarkdownSha256, sourceByteLength: validated.evidence.projectedMarkdownByteLength,
+      nativeHeadSequence: 2, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
+  const host = o.host.coordinate, actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const store = o.f.storage.createServiceActivationStore(o.f.history);
+  await store.prepare({capture, host, shareId: "share", registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
+    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+  const access = store.pending(document, host), delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
+  const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: REPLACEMENT_ACTIVATION,
+    expectedLocalSequence: 2, maxBytes: 1_000_000, maxEvents: 100, throughCursor: 0});
+  delivery.acknowledgeOwnerAdoption(adoption, {adoptionId: REPLACEMENT_ACTIVATION, localYDocSequence: 2, terminalCursor: 0, adoptionReplayed: false});
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document, actor}, access), cut = o.f.storage.readLiveUpdateJournalCut({document});
+  if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Missing replacement activation authority.");
+  const seed = o.validateJournal({document, currentPath: current.binding.currentPath, checkpoint: cut.cut.checkpoint.bytes,
+    suffix: cut.cut.suffix.map(row => row.bytes), candidate: fullState});
+  o.f.storage.commitLiveUpdateJournal({host, actor, expectedAuthority: current.authority,
+    metadata: {deliveryId: "replacement-seed", updateDigest: sha256(fullState), binding: current.binding}, cutToken: cut.cut, validation: seed,
+    updateBytes: fullState, receivedAtMs: 34}, access);
+  const owner = delivery.openOwnerDelivery({host, document, actor}), event = delivery.nextOwnerApplication(owner)!;
+  delivery.acknowledgeOwnerDeliveryApplication(owner, {...event.metadata.accepted.receipt, localYDocSequence: 2, applicationReplayed: false});
+  store.complete({document, host, access, nativeState: {adoptionId: REPLACEMENT_ACTIVATION, pendingBytes: 0}, guard() {}});
+  o.otherActivations.set(REPLACEMENT_ACTIVATION, capture);
+  return {...o.sibling, objectId: document.objectId};
+};
+
+// Proves: a restarted host's ordinary recovery of a departing document reads
+// only that document's activation, though a moved document's restore keeps its
+// own activation at the same path. The replacement's first resume is refused as
+// not ready, so it parks; the next pull still lists it departed, and it resumes
+// again. Every activation read and engine request of that departure names the
+// replacement's object and activation, never the moved document's, whose
+// restore and activation stay as they were. The departure then settles,
+// publishes and unloads the replacement, as ordinary recovery does.
+it("recovers a departing replacement at a moved document's old path through its own activation across a parking retry", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  anotherEditGrant(o);
+  o.beginRestore();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const replacement = await replacementActivation(o);
+  await o.host.close();
+  const at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input => input.path === o.sibling.path ? replacement.objectId : at(input));
+  const movedRow = () => o.raw.prepare(`SELECT completion_json,state_digest,retire_requested_at_ms,retired_at_ms FROM sync_relay_service_activations
+    WHERE activation_id=?`).get(ACTIVATION);
+  const before = {row: movedRow(), restore: o.f.storage.readStopRestore(stopLookup)};
+  // The activation each read at the shared path names, from the restart on.
+  const read = ServiceActivationStore.prototype.read, reads: (string | undefined)[] = [];
+  vi.spyOn(ServiceActivationStore.prototype, "read").mockImplementation(function (this: ServiceActivationStore, ...args) {
+    if (args[1] === o.sibling.path) reads.push(args[3]);
+    return read.apply(this, args);
+  });
+  // The replacement's replica lists it departed on every pull, so parking never finds it gone.
+  o.replies.pass = {departed: [replacement.objectId]}; o.replies.commit = {departed: [replacement.objectId]};
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  const capture = o.client().captureOwnerActivation, captures = () => capture.mock.calls.map(call => (call as unknown[])[4]);
+  capture.mockRejectedValueOnce(unready());
+  await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling, replacement]});
+  await vi.waitFor(() => expect(captures().length).toBeGreaterThan(0));
+  expect([...new Set(reads)]).toEqual([replacement.objectId]);
+  expect(captures()).toEqual([REPLACEMENT_ACTIVATION]);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its hosted replica to confirm the document parked.")));
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
+  const unloads = () => requests().filter(request => request.method === "liveApplication.unloadDocument").map(request => request.params);
+  await vi.waitFor(() => expect(unloads()).toEqual([{objectId: replacement.objectId, activationId: REPLACEMENT_ACTIVATION}]), {timeout: 10_000});
+  // Once a pull finds it gone, the host lets it go.
+  o.replies.pass = {}; o.replies.commit = {};
+  await vi.waitFor(() => expect(host.retains(replacement)).toBe(false), {timeout: 10_000});
+  expect([...new Set(reads)]).toEqual([replacement.objectId]);
+  expect(captures()).toEqual([REPLACEMENT_ACTIVATION, REPLACEMENT_ACTIVATION]);
+  expect(capture.mock.calls.every(call => (call as unknown[])[1] === o.sibling.path)).toBe(true);
+  expect([...new Set(requests().filter(request => request.method === "liveApplication.register").map(request => request.params.activationId))])
+    .toEqual([REPLACEMENT_ACTIVATION]);
+  expect(unloads()).toEqual([{objectId: replacement.objectId, activationId: REPLACEMENT_ACTIVATION}]);
+  const methods = requests().map(request => request.method), settled = methods.indexOf("liveApplication.settle");
+  expect(settled).toBeGreaterThan(-1);
+  expect(methods.indexOf("sync.push", settled)).toBeGreaterThan(settled);
+  expect(methods.indexOf("liveApplication.unloadDocument")).toBeGreaterThan(methods.indexOf("sync.push", settled));
+  expect(methods.filter(method => ["liveApplication.reconcileActivation", "liveApplication.releaseActivation", "liveApplication.releaseOwnerActivation",
+    "liveApplication.fenceRestore", "liveApplication.cancelRestoreFence"].includes(method))).toEqual([]);
+  // The moved document keeps its restore route, unfinished restore and untouched activation.
+  expect(host.retains(o.sibling)).toBe(true);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect({row: movedRow(), restore: o.f.storage.readStopRestore(stopLookup)}).toEqual(before);
 });
 
 // Proves: reconciliation that names deliveries the engine cannot prove gets the
