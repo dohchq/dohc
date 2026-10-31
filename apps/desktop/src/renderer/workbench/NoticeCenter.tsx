@@ -83,6 +83,8 @@ export interface WorkspaceErrorNotice {
   additionalActionLabels?: string[];
   seen: boolean;
   read?: boolean;
+  // The row has no Dismiss: it stays until its action runs.
+  noDismiss?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -1202,7 +1204,7 @@ export function NoticeCenter(props: {
               }]
             : []),
         ],
-        ...(props.onDismissWorkspaceError
+        ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
         ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)

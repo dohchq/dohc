@@ -53,6 +53,7 @@ import {
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  mergeSavedTabs,
   recordRecentFile,
   setCollectionActiveView,
   remapWorkbenchPaths,
@@ -768,6 +769,50 @@ describe("tabs", () => {
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 5, 0)).toBe(state);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 1, 1)).toBe(state);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 0.5, 1)).toBe(state);
+  });
+});
+
+describe("mergeSavedTabs (Restore tabs)", () => {
+  // A full saved layout: b.md shown on its own on the left, and beside 98
+  // other files on the right.
+  const saved: WorkbenchState = {
+    ...defaultWorkbenchState(),
+    editorGroups: [
+      { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: "b.md" }], activeTab: "b.md", size: 0.5 },
+      {
+        id: "right",
+        tabs: [...Array.from({ length: 98 }, (_, i) => ({ path: `saved-${i}.md` })), { path: "b.md" }],
+        activeTab: "b.md",
+        size: 0.5,
+      },
+    ],
+    activeEditorGroup: "right",
+  };
+  const paths = (state: WorkbenchState) => allTabs(state).map((tab) => tab.path);
+
+  it("keeps every tab open now when they fill the limit", () => {
+    const shown = withTabs(...Array.from({ length: MAX_OPEN_TABS }, (_, i) => newPageTabPath(`typed-${i}`, "")));
+    const merged = mergeSavedTabs(saved, shown);
+    expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
+    expect(activeTabPath(merged)).toBe(activeTabPath(shown));
+  });
+
+  it("closes a second copy of a saved file before a tab open now", () => {
+    const shown = withTabs(...Array.from({ length: 98 }, (_, i) => `saved-${i}.md`), "b.md", newPageTabPath("typed", ""));
+    const merged = mergeSavedTabs(saved, shown);
+    expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
+    expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
+    // b.md stays in the right group, where it was saved beside the others.
+    expect(merged.editorGroups[1].tabs.map((tab) => tab.path)).toContain("b.md");
+  });
+
+  it("closes saved tabs nobody has open before the ones a group shows", () => {
+    const shown = withTabs("a.md", "c.md");
+    const merged = mergeSavedTabs(saved, shown);
+    expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
+    expect(paths(merged)).toEqual(expect.arrayContaining(["a.md", "b.md", "c.md", "saved-97.md"]));
+    expect(paths(merged)).not.toContain("saved-0.md");
+    expect(paths(merged).filter((path) => path === "b.md")).toHaveLength(2);
   });
 });
 
