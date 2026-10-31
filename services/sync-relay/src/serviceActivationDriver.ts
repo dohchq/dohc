@@ -264,13 +264,16 @@ export class ServiceActivationDriver {
   retained(target:ServiceActivationTarget){
     return this.activationId(target)!==undefined;
   }
-  /** The activation the relay retains at the target's path, which an unload of its document names. */
-  activationId(target:ServiceActivationTarget){
-    return this.#read(target)?.activationId;
+  /**
+   * The activation the relay retains at the target's path, which an unload of its document names.
+   * A host that removed the target while its document parks names that document as `objectId`.
+   */
+  activationId(target:ServiceActivationTarget,objectId?:string){
+    return this.#read(target,objectId)?.activationId;
   }
   /** The activation retained at the target's path, its enrolled document's when the target has one. A static target reads by path alone. */
-  #read(target:ServiceActivationTarget){
-    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes,this.#enrolled.get(targetKey(target)));
+  #read(target:ServiceActivationTarget,objectId=this.#enrolled.get(targetKey(target))){
+    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes,objectId);
   }
   /**
    * The owner through which a restore step reaches the document. `moved` is the
@@ -337,10 +340,10 @@ export class ServiceActivationDriver {
   /**
    * The document of the activation the relay retains at the target's path,
    * once this connection has standing for it, whatever its owner's authority.
-   * Undefined when it retains none.
+   * Undefined when it retains none. `objectId` is as for `activationId`.
    */
-  departing(target:ServiceActivationTarget,signal:AbortSignal){
-    const o=this.options,saved=this.#read(target);
+  departing(target:ServiceActivationTarget,signal:AbortSignal,objectId?:string){
+    const o=this.options,saved=this.#read(target,objectId);
     if(!saved)return undefined;
     if(saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     const document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,

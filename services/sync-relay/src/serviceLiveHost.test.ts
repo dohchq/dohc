@@ -2430,7 +2430,9 @@ it("keeps a document that moved while no daemon ran until its owner copies the e
 // Proves: retention for a recovery copy follows the moved document, not its
 // old path. With another document hosted at that path, and after that one
 // leaves too, the moved document's queue stays readable, and its workspace
-// attached, until its owner confirms a copy.
+// attached, until its owner confirms a copy. The fake engine captures only the
+// fixture document, so the replacement's capture is refused: it is attempted
+// at the old path, and never prepares or releases an owner activation.
 it("keeps a moved document's queue readable while a replacement holds its old path, and after the replacement leaves", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2442,8 +2444,10 @@ it("keeps a moved document's queue readable while a replacement holds its old pa
   cleanup.push(() => restarted.close());
   const replacement = {...o.sibling, objectId: "another-object"};
   const readable = async () => expect(await restarted.readKeptEditsPage(k.row()!, undefined, o.workspace.root)).toMatchObject({kind: "page", part: "header"});
+  o.refuseCaptureAt(o.sibling.path, new Error("Replacement capture refused."));
   await restarted.update({workspaces: [o.workspace], documents: [replacement], departing: [o.sibling]});
   await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")), {timeout: 10_000});
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation.mock.calls.map(call => (call as unknown[])[1])).toContain(o.sibling.path), {timeout: 10_000});
   expect(restarted.retains(o.sibling)).toBe(true);
   await readable();
   // The replacement leaves; the moved document still waits for its copy.
@@ -2455,6 +2459,9 @@ it("keeps a moved document's queue readable while a replacement holds its old pa
   expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
   expect(k.row()).toBeNull();
+  expect(o.ownerCalls().map(([method]) => method)).not.toContain("liveApplication.releaseOwnerActivation");
+  const reported = errors.mock.calls.map(call => String((call as unknown[])[1]));
+  expect(reported.filter(message => message.includes("Unexpected engine request") || message.includes("Service activation is retiring."))).toEqual([]);
 });
 
 // Proves: deleting the share ends live authority as Stop does, though the
@@ -2717,16 +2724,28 @@ const retirementKey = (o: Enrolled) => {
     restoreFenceGeneration: open.restoreFenceGeneration, acceptedThrough: open.acceptedThrough};
 };
 
-// The owner's restore opens the document's retirement and fences. The document
-// then moves from its enrolled path, and the host restarts, with `replacement`
-// hosted at the old path when it is given.
-const movedDuringRestore = async ({replacement = false} = {}) => {
-  const o = await enrolledServiceHost();
+// Another Edit grant on the share, which keeps the document covered once the restore revokes the fixture's grant.
+const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,
+  created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('editor-grant','share','user','editor',NULL,'edit',1,'active',0,NULL,NULL)`);
+// The owner's restore fences the document. The document then moves from its
+// enrolled path, and the host restarts, with `replacement` hosted at the old
+// path when it is given. The restore's revocation opens the document's
+// retirement, unless another Edit grant still covers it: then `paused` opens it
+// by the owner's Pause after the restore began, and `covered` leaves none open.
+// `kept` first records an edit the server refused.
+const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false} = {}) => {
+  const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  if (paused || covered) anotherEditGrant(o);
   o.beginRestore();
-  await o.depart();
-  await passed();
+  if (paused) o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
+  // A covered document opens no retirement, so it stays hosted until the restart.
+  if (covered) expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  else {
+    await o.depart();
+    await passed();
+  }
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
   await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
   await o.host.close(); log.mockClear();
@@ -2745,7 +2764,7 @@ const movedDuringRestore = async ({replacement = false} = {}) => {
   expect(leaving(o)).toEqual([]);
   expect(host.retains(o.sibling)).toBe(true);
   expect(host.drained("workspace")).toBe(false);
-  return {o, host, other, driver: () => driver};
+  return {o, host, other, log, k, driver: () => driver};
 };
 // Stands in for an admitted restore's completion through owner delivery. As a
 // real admission does, it moves the open retirement's accepted-through to the
@@ -2772,14 +2791,18 @@ const admittedCompletion = (o: Enrolled) => {
 // The owner's Decline then reaches the engine through that route, and the
 // retirement at the generation it restored settles the document under its
 // retirement key, as a running host does for a document that moved while
-// hosted, then retires it.
-it("keeps a moved document's restore route after a restart until the owner declines it, then retires it", async () => {
-  const {o, host} = await movedDuringRestore();
+// hosted, then retires it. The same holds when another Edit grant left the
+// document covered and the owner's Pause opened the retirement after the
+// restore began.
+it.each([false, true])("keeps a moved document's restore route after a restart until the owner declines it, then retires it, paused: %s", async paused => {
+  const {o, host} = await movedDuringRestore({paused});
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
   const key = retirementKey(o);
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(retiredRow(o).retired).toBe(true);
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({key}));
   expect(leaving(o)).toContain("liveApplication.releaseActivation");
   expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
   expect(retiringSettles(o, 0)).toEqual([["liveApplication.settle", expect.objectContaining({retirement: key})]]);
@@ -2813,10 +2836,11 @@ it("completes a moved document's admitted restore through a restarted host, then
 // retirement completed still completes it. After a Decline the retirement
 // stops at its reconciliation, or at a release the engine never answered, and
 // the restarted host finds the retirement from the restore the relay recorded
-// and completes it at the retirement's current key.
-it.each(["liveApplication.reconcileActivation", "liveApplication.releaseActivation"])(
-  "completes a moved document's retirement after a restart that follows its Decline, stopped at %s", async method => {
-    const {o, host} = await movedDuringRestore();
+// and completes it at the retirement's current key, also when the owner's
+// Pause opened that retirement after the restore began.
+it.each([["liveApplication.reconcileActivation", false], ["liveApplication.releaseActivation", false], ["liveApplication.reconcileActivation", true]] as const)(
+  "completes a moved document's retirement after a restart that follows its Decline, stopped at %s, paused: %s", async (method, paused) => {
+    const {o, host} = await movedDuringRestore({paused});
     const reached = unansweredAfter(o, method, 0);
     expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
     await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
@@ -2850,18 +2874,84 @@ it("completes a moved document's retirement after a restart that follows its adm
   expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
 });
 
+// Proves: a retirement finds its restore by the activation the restore
+// continues, not by when it began. A restore that began before the owner's
+// Pause opened the retirement counts. One whose saved owner origin names an
+// earlier activation of the same lineage does not, so a successor activation
+// with no restore of its own does not keep a moved route.
+it("finds a retirement's restore by the activation it continues", async () => {
+  const o = await enrolledServiceHost();
+  anotherEditGrant(o);
+  o.beginRestore();
+  o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
+  const open = o.f.storage.serviceActivationRetirement(o.document)!;
+  expect(open).toMatchObject({activationId: ACTIVATION, requestedAtMs: 60});
+  expect(o.f.storage.serviceRetirementHadRestore(open)).toBe(true);
+  const basis: {ownerOrigin: string} = JSON.parse(String(o.raw.prepare("SELECT basis_json FROM sync_relay_live_restore_operations").get()!.basis_json));
+  basis.ownerOrigin = JSON.stringify({...JSON.parse(basis.ownerOrigin), adoptionId: "earlier-activation"});
+  o.raw.prepare("UPDATE sync_relay_live_restore_operations SET basis_json=?").run(JSON.stringify(basis));
+  expect(o.f.storage.serviceRetirementHadRestore(open)).toBe(false);
+});
+
+// Proves: a moved document whose retirement waits for a recovery copy of an
+// edit the server refused keeps its restore route after the restore ends. Once
+// the owner saves the copy, its retirement runs through that route and
+// completes, and the kept rows go. Without the route the retirement would
+// never run.
+it("keeps a moved document's restore route while a refused edit waits for its recovery copy, then retires it", async () => {
+  const {o, host, log, k} = await movedDuringRestore({kept: true});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its owner to save a recovery copy of the edits the server kept.")), {timeout: 10_000});
+  expect(host.retains(o.sibling)).toBe(true);
+  expect(retiredRow(o).retired).toBe(false);
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+  o.engine.unproven = ["refused"];
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k!.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true), {timeout: 10_000});
+  expect(leaving(o)).toContain("liveApplication.releaseActivation");
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(host.retains(o.sibling)).toBe(false);
+  expect(k!.row()).toBeNull();
+});
+
+// Proves: a restore that began while another Edit grant still covered the
+// document opens no retirement. A restarted host still keeps the moved
+// document's route while that restore is unfinished, so the restore's steps
+// and the owner's Decline reach the engine through it, and the route ends with
+// the restore. Nothing retires the activation.
+it("keeps a moved document's route for a restore that opened no retirement until the owner declines it", async () => {
+  const {o, host} = await movedDuringRestore({covered: true});
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(retiredRow(o).retired).toBe(false);
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+});
+
 // Proves: a replacement document hosted at a moved document's old path reads
 // only its own activation while the moved document's retirement is open. It
 // captures without naming the moved document's activation, which it would
 // otherwise take, and wait behind its retirement. The moved document's Decline
 // and retirement use that document's activation, and its retirement leaves the
-// replacement's target in place. The replacement's capture is refused here,
-// since the fake engine captures only the fixture document.
+// replacement's target in place. Once a parking retry removed the
+// replacement's target, reads that name it, as the host's departure and unload
+// reads do, still find none of the moved document's activation at the path.
+// The replacement's capture is refused here, since the fake engine captures
+// only the fixture document.
 it("keeps a replacement at a moved document's old path apart from the moved document's restore and retirement", async () => {
   const {o, host, other, driver} = await movedDuringRestore({replacement: true});
   const captures = () => o.client().captureOwnerActivation.mock.calls.map(call => (call as unknown[])[4]);
   await vi.waitFor(() => expect(captures().length).toBeGreaterThan(0));
   expect(captures()).not.toContain(ACTIVATION);
+  driver()!.removeTarget(other);
+  expect(driver()!.activationId(other)).toBe(ACTIVATION);
+  expect(driver()!.activationId(other, other.objectId)).toBeUndefined();
+  expect(driver()!.departing(other, AbortSignal.timeout(1_000), other.objectId)).toBeUndefined();
+  driver()!.addTarget(other, other.objectId);
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
   const key = retirementKey(o);

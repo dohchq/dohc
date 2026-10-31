@@ -83,15 +83,20 @@ export function readServiceActivationRetirementDecision(storage: StorageContext,
 }
 
 /**
- * Whether a restore of the retiring lineage began once the retirement was
- * requested, whatever phase it is in now. A restore's revocation that opens the
- * retirement records both at the same moment. A restore that ended before the
- * request is not counted.
+ * Whether a restore of the retiring activation began, whatever phase it is in
+ * now. The restore saved the owner origin it continues, whose adoption ID is
+ * that activation, so a restore before a later Pause counts and one of an
+ * earlier activation does not.
  */
 export function retirementHadRestore(storage: StorageContext, retirement: ServiceActivationRetirement): boolean {
-  return storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?
-    AND invalidated_at_ms>=? LIMIT 1`).get(retirement.workspaceId, retirement.objectId, retirement.lineageClaimId, retirement.requestedAtMs) !== undefined;
+  return storage.db.prepare(`SELECT basis_json FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=?
+    AND lineage_claim_id=?`).all(retirement.relayDatabaseNamespace, retirement.workspaceId, retirement.objectId, retirement.lineageClaimId)
+    .some(row => restoredActivation(String(row.basis_json)) === retirement.activationId);
 }
+const restoredActivation = (basisJson: string): unknown => {
+  const origin: unknown = JSON.parse(basisJson)?.ownerOrigin;
+  return typeof origin === "string" ? JSON.parse(origin)?.adoptionId : undefined;
+};
 
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {

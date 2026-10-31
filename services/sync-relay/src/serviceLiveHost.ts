@@ -536,7 +536,7 @@ export async function startServiceLiveHost(options: {
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     // The unload names the activation the relay retains, so it cannot end another one's state.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
-      const activationId = activation!.activationId(document.target);
+      const activationId = activation!.activationId(document.target, document.objectId);
       try {
         const result = await membershipRequest("liveApplication.unloadDocument", members.get(document.target.workspaceId)!.handle,
           {objectId: document.objectId, ...(activationId === undefined ? {} : {activationId})}, joined);
@@ -559,6 +559,7 @@ export async function startServiceLiveHost(options: {
         !storage.serviceHostEnrollmentHasEditGrant({workspaceId: target.workspaceId, ownerUserId: share.granterUserId, path: target.path});
     };
     const PARKING = "Waiting for its hosted replica to confirm the document parked.";
+    const RESTORING = "Waiting for its restore to finish.";
     // A departed document whose owner has not saved a recovery copy of edits
     // this host refused stays, with its workspace attached, so the owner can
     // still read them. Once it settled and unloaded, passes only check the copy.
@@ -701,7 +702,7 @@ export async function startServiceLiveHost(options: {
       if (storage.serviceRestoreInProgress(document)) {
         if (!grantsEnded.has(key)) {await endKeptRetries(row, joined, false); grantsEnded.add(key);}
         heldOf.delete(key);
-        return "Waiting for its restore to finish.";
+        return RESTORING;
       }
       let heads = heldOf.get(key);
       if (!heads) {heads = await endKeptRetries(row, joined, false); heldOf.set(key, heads); grantsEnded.add(key);}
@@ -753,7 +754,7 @@ export async function startServiceLiveHost(options: {
       const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
       if (lost) {
         recovering.delete(key);
-        const document = activation!.departing(row.target, joined);
+        const document = activation!.departing(row.target, joined, row.objectId);
         if (document) {
           // Settle, publish, then unload, under the departure's registration.
           // A queue frozen at its owner's adoption seed keeps the document
@@ -815,16 +816,24 @@ export async function startServiceLiveHost(options: {
       }
       return gone(key, row, joined);
     };
-    // Resolves to why a moved document whose activation had a restore stays, or undefined once its retirement retired it.
-    // A retirement that departs as an ordinary unload leaves it as any moved document an earlier daemon left:
-    // unsettled, and kept only while its owner has no recovery copy of edits this host refused.
+    // Resolves to why a moved document whose activation has a restore stays, or undefined once it goes. With no
+    // retirement open, as when another Edit grant still covers the document, it stays while that restore is unfinished.
+    // With one, it stays until the retirement retires it, and while refused edits wait for their recovery copy before
+    // retirement can run. A retirement that departs as an ordinary unload leaves it as any moved document an earlier
+    // daemon left: unsettled, and kept only while its owner has no recovery copy of edits this host refused.
     const keepMovedRestore = async (key: string, joined: AbortSignal) => {
       const row = movedRestores.get(key);
       if (!row) return undefined;
-      const waiting = await retire(key, joined);
-      if (waiting !== null) return waiting;
+      const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
+      if (!storage.serviceActivationRetirement(document)) {
+        if (storage.serviceRestoreInProgress(document)) return RESTORING;
+      } else {
+        const waiting = await retire(key, joined);
+        if (waiting !== null) return waiting;
+        if (uncopied(row)) return KEPT;
+      }
       forgetMovedRestore(key);
-      if (uncopied(row)) retained.set(documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId}), row);
+      if (uncopied(row)) retained.set(documentKey(document), row);
       return undefined;
     };
     // Resolves to why a retained document stays, or undefined once its owner has
@@ -1157,14 +1166,15 @@ export async function startServiceLiveHost(options: {
       // one still at its enrolled path, then publish and unload it. One that
       // moved is not settled there; it stays only for its owner's recovery
       // copy, or, whatever document now holds its old path, until the
-      // retirement of an activation that had a restore completes.
+      // retirement of an activation that had a restore completes, or, with no
+      // retirement open, until its unfinished restore ends.
       if (!updated) {
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
           if (!members.has(workspaceId)) continue;
           if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
             const moved = {workspaceId, objectId: document.objectId}, open = storage.serviceActivationRetirement(moved);
-            if (open && storage.serviceRetirementHadRestore(open)) movedRestores.set(movedRestoreKey(moved), document);
+            if (open ? storage.serviceRetirementHadRestore(open) : storage.serviceRestoreInProgress(moved)) movedRestores.set(movedRestoreKey(moved), document);
             else if (uncopied(document)) retained.set(documentKey(moved), document);
             continue;
           }
@@ -1240,7 +1250,7 @@ export async function startServiceLiveHost(options: {
           if(leaving.has(key) || !checked(row.target.workspaceId))continue;
           await step(async()=>{
             if(await retire(key,passSignal)!==null || unloading.has(key) || !authorityLost(row))return;
-            const document=activation!.departing(row.target,passSignal);
+            const document=activation!.departing(row.target,passSignal,row.objectId);
             if(document)await runDocument(document,passSignal,operation=>activation!.reconcileDeparted(row.target,document,operation));
           });
         }
