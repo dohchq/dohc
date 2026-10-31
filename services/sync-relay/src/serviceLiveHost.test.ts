@@ -4431,6 +4431,31 @@ it.each([
   stillLive(o);
 });
 
+// Proves: a Stop that wakes a dormant document waits when the wake's pull
+// passes its deadline and retires the host connection. It does not fail as an
+// unavailable host, and nothing is prepared or fenced.
+it("waits to stop a dormant document when its wake passes its deadline and retires the host connection", async () => {
+  const o = await idleHost({alone: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const send = o.client().sendRequest, answer = send.getMockImplementation()!;
+  let late = 0;
+  // Every pull from here passes its deadline, whether the wake's or a pass's.
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    if (request.method === "sync.pullHosted") {late++; throw new EngineRequestDeadlineError(request.id, request.method, 1_000);}
+    return answer(request);
+  });
+  const fence = vi.fn();
+  await expect(o.host.stop({workspaceId: "workspace", objectId: "object"}, fence)).resolves.toBe("waiting");
+  expect(late).toBeGreaterThan(0);
+  expect(o.host.invalidated.aborted).toBe(true);
+  expect(fence).not.toHaveBeenCalled();
+  expect(o.methods()).not.toContain("liveApplication.prepareRetirement");
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+});
+
 // Proves: a cancelled Stop releases the block and leaves admission open, and
 // a later Stop prepares again and retires.
 it("releases the block and keeps the document live when Stop is cancelled during preparation", async () => {

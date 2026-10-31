@@ -1454,7 +1454,13 @@ export async function startServiceLiveHost(options: {
           return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence);
         }
         // A dormant document reloads, so its queues can drain.
-        try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
+        // A wake request past its deadline ends this connection. Nothing was
+        // prepared or fenced, so Stop waits, as below.
+        try {await wake(document, callerSignal);} catch {
+          callerSignal?.throwIfAborted();
+          if (signal.aborted) return "waiting";
+          check();
+        }
         const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});
         const current = () => {check(); if (checked(document.workspaceId) !== attached) throw new Error("Service host workspace attachment changed.");};
         // A release that fails ends this connection, which ends the block.
