@@ -431,9 +431,10 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
 
-  const openApproved = async (publicationId: string) => {
-    try { await openLocalApp(api, props.workspaceId, publicationId, () => alive.current); }
-    catch (cause) { reportError("dohc could not open this app in your browser.", cause, () => { if (alive.current) void openApproved(publicationId); else props.onReopen(); }); }
+  // The dialog closes once the app is approved, so Try again in Notices opens the app itself, as the person asked.
+  const openApproved = async (publicationId: string, current = () => alive.current) => {
+    try { await openLocalApp(api, props.workspaceId, publicationId, current); }
+    catch (cause) { reportError("dohc could not open this app in your browser.", cause, () => void openApproved(publicationId, () => true)); }
   };
 
   const approveLocal = async () => {
