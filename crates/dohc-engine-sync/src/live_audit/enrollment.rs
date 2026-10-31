@@ -70,6 +70,7 @@ pub(crate) fn prepare_exports(
     if !queued {
         return Ok(Vec::new());
     }
+    *writer_cache_reset_required = true;
     prepare_pending_exports(
         store,
         workspace,

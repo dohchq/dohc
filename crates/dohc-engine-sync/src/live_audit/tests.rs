@@ -966,6 +966,7 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
     assert_eq!(count(&f.store, "replication_pending_conflict_bundles"), 1);
     let before = operations(&f.store);
+    let mut writer_cache_reset_required = false;
     let fault = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert!(matches!(
         enrollment::prepare_exports(
@@ -974,11 +975,13 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
             fault.as_ref(),
             &crate::NoLiveLeases,
             201,
-            &mut false
+            &mut writer_cache_reset_required
         ),
         Err(SyncError::FaultCrash)
     ));
+    assert!(writer_cache_reset_required);
     assert_eq!(operations(&f.store), before);
+    writer_cache_reset_required = false;
     let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
     assert!(matches!(
         enrollment::prepare_exports(
@@ -987,10 +990,11 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
             fault.as_ref(),
             &crate::NoLiveLeases,
             202,
-            &mut false
+            &mut writer_cache_reset_required
         ),
         Err(SyncError::FaultCrash)
     ));
+    assert!(writer_cache_reset_required);
     assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
     f.store = EngineStore::open(&f.path, 203).unwrap();
