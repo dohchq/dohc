@@ -217,6 +217,10 @@ export function staticPackageSmoke() {
       config.linux?.syncDesktopName === true,
       "Linux launcher filename and StartupWMClass sync to desktopName",
     );
+    check(
+      config.linux?.desktop?.entry?.StartupNotify === "true",
+      "Linux launches can raise the running window on GNOME Wayland",
+    );
     check(config.asar === true, "asar is enabled");
     check(
       config.beforePack === "scripts/require-workspace-engine.mjs",
