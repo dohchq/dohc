@@ -786,11 +786,14 @@ pub(super) fn validate_blob_hash(conn: &Connection, digest: &str) -> Result<(), 
     Ok(())
 }
 
+/// Accepted state through `through`. Each blob it replays is charged to
+/// `budget` before it is read, on top of each record's own bound.
 pub(super) fn read(
     conn: &Connection,
     held: &Registration,
     through: i64,
     policy: NativeHistoryReconstruction,
+    budget: &mut restore_content::Budget,
 ) -> Result<Ydoc, ApplicationError> {
     if policy.working_reserve_bytes == 0 || policy.reservation_bytes().is_none() {
         return Err(ApplicationError::ConfiguredByteBudgetExceeded);
@@ -808,12 +811,9 @@ pub(super) fn read(
     )?;
     let doc = Ydoc::wire();
     {
-        let baseline = restore_content::Budget {
-            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-        }
-        .blob(conn, &c.state_digest)?;
+        let baseline = budget.blob(conn, &c.state_digest)?;
         doc.apply(&baseline)?;
-        doc.validate_public_baseline(&baseline)?;
+        validate_baseline(&doc, &baseline)?;
     }
     let p = parameters(held);
     let mut query=conn.prepare(&format!("SELECT event_count,journal_cursor,update_sha256,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 AND length(CAST(update_sha256 AS BLOB))=64 ORDER BY event_count LIMIT 4096")).map_err(read_sql)?;
@@ -872,10 +872,7 @@ pub(super) fn read(
             ordinal,
         )?;
         {
-            let update = restore_content::Budget {
-                remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-            }
-            .blob(conn, &update)?;
+            let update = budget.blob(conn, &update)?;
             if update.is_empty() {
                 return Err(ApplicationError::Corrupt);
             }

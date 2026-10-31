@@ -23,6 +23,18 @@ use crate::file_search::{
 };
 use crate::{MomentMaterializationChange, ReplicationEnvelope, SyncError};
 
+mod released;
+
+pub use released::{
+    CopyPublication, CopyPublicationState, CopyResolutionOutcome, KeepRetainedVersion,
+    KeptRetainedVersion, RELEASED_COPY_MOMENT_PREFIX, RedundantRecovery, keep_retained_version,
+};
+pub(crate) use released::{
+    ReceivedCreation, equivalent_released_copy_in_tx, record_redundant_publication,
+    record_released_copy_acceptance_in_tx, record_released_copy_echo_in_tx,
+    validate_redundant_recoveries,
+};
+
 const MAX_RECOVERED_NAME_BYTES: usize = 255;
 const MAX_RECOVERED_NAME_UTF16_UNITS: usize = 255;
 const LOCAL_RECOVERY_CORRELATION_PREFIX: &str = "ydoc-local-recovery:v1:";
@@ -90,12 +102,15 @@ enum RecoveryCause {
     RelayArbitration,
     /// A local write replaced text a closed lineage held but never settled.
     LocalUnsettled,
+    /// The owner kept what a hosted replica holds for a released chain
+    /// before a later change could remove it.
+    ReleasedRetained,
 }
 
 impl RecoveryCause {
     fn origin(self) -> &'static str {
         match self {
-            RecoveryCause::RelayArbitration => "sync",
+            RecoveryCause::RelayArbitration | RecoveryCause::ReleasedRetained => "sync",
             RecoveryCause::LocalUnsettled => "ydoc",
         }
     }
@@ -109,6 +124,10 @@ impl RecoveryCause {
             RecoveryCause::LocalUnsettled => (
                 "Recovered unsaved edits from ",
                 " after a later write changed the file.",
+            ),
+            RecoveryCause::ReleasedRetained => (
+                "Kept unsaved edits from ",
+                " before a later change could remove them.",
             ),
         }
     }

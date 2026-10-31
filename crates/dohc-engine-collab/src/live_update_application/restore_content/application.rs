@@ -349,6 +349,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let b = &held.binding;
@@ -403,6 +404,7 @@ impl ApplicationOwner {
                 namespace: held.namespace.clone(),
                 coordinate: held.coordinate.clone(),
                 binding: event.metadata.accepted.binding.clone(),
+                activation_id: held.activation_id.clone(),
                 live: false,
             };
             insert_application(tx, &application_held, &event, sequence)?;

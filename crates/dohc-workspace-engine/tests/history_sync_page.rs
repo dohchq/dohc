@@ -61,7 +61,14 @@ fn an_old_sync_arrival_is_fenced_out_of_the_chain_and_visible_on_refresh() {
         admitted_author_snapshot: None,
         payload: json!({"momentId":"old-import","versionId":"main","objectId":"remote-object","objectCreatedAtMs":1,"path":"remote.md","recordedAtMs":50,"operation":"write","payloadBeforeBlobSha256":null,"payloadBeforePath":null,"payloadAfterBlobSha256":sha,"payloadAfterPath":"remote.md","metadata":{"origin":"sync"},"beforePresent":"absent"}),
     };
-    apply_moment_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases).unwrap();
+    apply_moment_envelope(
+        &mut store,
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+        &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+    )
+    .unwrap();
     let mut ids = vec![first.moment_id];
     loop {
         page = VersionedTextStore::new(&mut store)

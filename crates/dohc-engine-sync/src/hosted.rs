@@ -16,15 +16,24 @@
 //! scope while its row carries the replica's scope generation; one that left
 //! keeps its state until it parks, and keeps what its return needs after.
 
+mod held;
 mod park;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dohc_engine_collab::live_update_application::{ReleasedLineageBinding, ReleasedTails};
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
 
+pub use held::{
+    HeldAnswer, HeldBindingStatus, HeldContributions, HeldDocument, HeldDocumentInspection,
+    HeldDocumentsPage, HeldFreshness, HeldKey, HeldProof, HeldProofAdmission, HeldProofs,
+    HeldRelease, MAX_HELD_DOCUMENTS_PAGE, ProvedHeld, admit_held_proof, check_held_freshness,
+    inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
+    shared_proof_failure,
+};
 #[cfg(test)]
 pub(crate) use park::OCCUPANTS_READ;
 pub use park::{
@@ -53,6 +62,11 @@ pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
 /// A conflict child whose `conflict.resolve` parent the feed withheld. Its
 /// document is held at the child until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
+
+/// A Y.Doc row that could destroy work a released chain's tail retains
+/// ([`crate::SyncError::ReleasedLineageUnsettled`]). Its document waits there
+/// until that work is resolved; nothing arriving later releases it.
+pub(crate) const RELEASED_LINEAGE_UNSETTLED: &str = "released-lineage-unsettled";
 
 /// A moment or Y.Doc row whose path a document outside the scope, or the file
 /// a parked one left, still holds here. It waits until that path is free.
@@ -683,11 +697,52 @@ pub enum HostedHold {
         scope_path: String,
         head_path: Option<String>,
     },
-    /// Its history holds an ordinary edit of its live lineage that this
-    /// replica refused because its session never admitted it, so its content
-    /// here is incomplete. It cannot be edited live here.
+    /// An ordinary edit of its live lineage that its bound session never
+    /// admitted stays queued, so its content here is incomplete. It applies
+    /// once the session's binding goes.
     LiveEditUnadmitted,
+    /// Its next row could destroy work a released chain's tail retains
+    /// ([`crate::SyncError::ReleasedLineageUnsettled`]); `binding` names what
+    /// the row would change. Nothing arriving later releases it.
+    ReleasedLineageUnsettled {
+        binding: Box<ReleasedLineageBinding>,
+        continuation: ReleasedHoldContinuation,
+        /// The document changed since `binding` was derived, so it describes
+        /// the hold no longer; the next pass derives it again from the row.
+        binding_stale: bool,
+    },
 }
+
+/// How a document held for released retained work continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleasedHoldContinuation {
+    /// Nothing more of it applies.
+    Frozen,
+    /// Its head waits for dependencies, so later rows the gate admits still
+    /// apply while the held row waits.
+    DependencyDrain,
+}
+
+impl ReleasedHoldContinuation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Frozen => "frozen",
+            Self::DependencyDrain => "dependency-drain",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "frozen" => Some(Self::Frozen),
+            "dependency-drain" => Some(Self::DependencyDrain),
+            _ => None,
+        }
+    }
+}
+
+/// What a hold stores of a released lineage: its binding's canonical JSON
+/// and digest, its continuation, and whether the binding is stale.
+type StoredRelease = (Option<(String, String)>, Option<&'static str>, bool);
 
 impl HostedHold {
     /// The reason code a hold is stored and reported under.
@@ -698,15 +753,17 @@ impl HostedHold {
             Self::WorkWaiting => "hosted-backfill-work-waiting",
             Self::ScopePathMismatch { .. } => SCOPE_PATH_MISMATCH,
             Self::LiveEditUnadmitted => LIVE_EDIT_UNADMITTED,
+            Self::ReleasedLineageUnsettled { .. } => RELEASED_LINEAGE_UNSETTLED,
         }
     }
 
     fn held_path(&self) -> Option<&str> {
         match self {
             Self::PathHeld { path, .. } => Some(path),
-            Self::ConflictParentWithheld { .. } | Self::WorkWaiting | Self::LiveEditUnadmitted => {
-                None
-            }
+            Self::ConflictParentWithheld { .. }
+            | Self::WorkWaiting
+            | Self::LiveEditUnadmitted
+            | Self::ReleasedLineageUnsettled { .. } => None,
             Self::ScopePathMismatch { head_path, .. } => head_path.as_deref(),
         }
     }
@@ -717,7 +774,8 @@ impl HostedHold {
             Self::ConflictParentWithheld { .. }
             | Self::WorkWaiting
             | Self::ScopePathMismatch { .. }
-            | Self::LiveEditUnadmitted => None,
+            | Self::LiveEditUnadmitted
+            | Self::ReleasedLineageUnsettled { .. } => None,
         }
     }
 
@@ -727,51 +785,168 @@ impl HostedHold {
             Self::PathHeld { .. }
             | Self::WorkWaiting
             | Self::ScopePathMismatch { .. }
-            | Self::LiveEditUnadmitted => None,
+            | Self::LiveEditUnadmitted
+            | Self::ReleasedLineageUnsettled { .. } => None,
         }
     }
+
+    /// This hold, claiming no currency for a released-lineage binding: its
+    /// document changed, or may change, since the binding was derived.
+    pub(crate) fn stale(self) -> Self {
+        match self {
+            Self::ReleasedLineageUnsettled {
+                binding,
+                continuation,
+                ..
+            } => Self::ReleasedLineageUnsettled {
+                binding,
+                continuation,
+                binding_stale: true,
+            },
+            hold => hold,
+        }
+    }
+
+    /// The binding's canonical JSON and digest, continuation and staleness a
+    /// released-lineage hold stores; none and fresh for any other.
+    fn released(&self) -> Result<StoredRelease, SyncError> {
+        Ok(match self {
+            Self::ReleasedLineageUnsettled {
+                binding,
+                continuation,
+                binding_stale,
+            } => (
+                Some((stored_binding(binding)?, binding.digest())),
+                Some(continuation.as_str()),
+                *binding_stale,
+            ),
+            Self::PathHeld { .. }
+            | Self::ConflictParentWithheld { .. }
+            | Self::WorkWaiting
+            | Self::ScopePathMismatch { .. }
+            | Self::LiveEditUnadmitted => (None, None, false),
+        })
+    }
+}
+
+/// `binding`'s canonical JSON, once it reads back as the same binding. A
+/// stored hold that does not read back would report the replica damaged.
+fn stored_binding(binding: &ReleasedLineageBinding) -> Result<String, SyncError> {
+    let json = binding.canonical_json();
+    if ReleasedLineageBinding::from_canonical_json(&json).as_ref() != Some(binding) {
+        return Err(crate::error::local_corruption(
+            "a released-lineage binding does not read back",
+        ));
+    }
+    Ok(json)
 }
 
 const SCOPE_PATH_MISMATCH: &str = "hosted-scope-path-mismatch";
 const LIVE_EDIT_UNADMITTED: &str = "hosted-live-edit-unadmitted";
 
-/// A `hosted_documents` row's state, held reason, held path, held-by and
-/// held conflict columns, with `scope_path` its `path`.
-fn decode_status(
-    scope_path: &str,
-    state: &str,
-    reason: Option<&str>,
+/// The `hosted_documents` columns that say what holds a document, in the
+/// order [`HeldColumns::read`] takes them.
+const HELD_COLUMNS: &str = "held_reason,held_path,held_by,held_conflict_id,\
+    released_hold_binding_json,released_hold_continuation,released_hold_binding_stale";
+
+/// A `hosted_documents` row's [`HELD_COLUMNS`].
+struct HeldColumns {
+    reason: Option<String>,
     held_path: Option<String>,
     held_by: Option<String>,
     held_conflict_id: Option<String>,
+    binding: Option<String>,
+    continuation: Option<String>,
+    binding_stale: bool,
+}
+
+impl HeldColumns {
+    /// The columns `row` holds from index `at`.
+    fn read(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            reason: row.get(at)?,
+            held_path: row.get(at + 1)?,
+            held_by: row.get(at + 2)?,
+            held_conflict_id: row.get(at + 3)?,
+            binding: row.get(at + 4)?,
+            continuation: row.get(at + 5)?,
+            binding_stale: row.get(at + 6)?,
+        })
+    }
+}
+
+/// A `hosted_documents` row's state and [`HELD_COLUMNS`], with `scope_path`
+/// its `path`.
+fn decode_status(
+    scope_path: &str,
+    state: &str,
+    held: HeldColumns,
 ) -> Result<HostedDocumentStatus, SyncError> {
+    let malformed = || crate::error::local_corruption("a hosted document's state is malformed");
+    let HeldColumns {
+        reason,
+        held_path,
+        held_by,
+        held_conflict_id,
+        binding,
+        continuation,
+        binding_stale,
+    } = held;
+    let released = match (binding, continuation) {
+        (None, None) if !binding_stale => None,
+        (Some(binding), Some(continuation)) => Some((binding, continuation, binding_stale)),
+        _ => return Err(malformed()),
+    };
     Ok(
-        match (state, reason, held_path, held_by, held_conflict_id) {
-            ("backfilling", None, None, None, None) => HostedDocumentStatus::Backfilling,
-            ("ready", None, None, None, None) => HostedDocumentStatus::Ready,
-            ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by), None) => {
+        match (
+            state,
+            reason.as_deref(),
+            held_path,
+            held_by,
+            held_conflict_id,
+            released,
+        ) {
+            ("backfilling", None, None, None, None, None) => HostedDocumentStatus::Backfilling,
+            ("ready", None, None, None, None, None) => HostedDocumentStatus::Ready,
+            ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by), None, None) => {
                 HostedDocumentStatus::Held(HostedHold::PathHeld { path, held_by })
             }
-            ("held", Some("hosted-conflict-parent-withheld"), None, None, Some(conflict_id)) => {
-                HostedDocumentStatus::Held(HostedHold::ConflictParentWithheld { conflict_id })
-            }
-            ("held", Some("hosted-backfill-work-waiting"), None, None, None) => {
+            (
+                "held",
+                Some("hosted-conflict-parent-withheld"),
+                None,
+                None,
+                Some(conflict_id),
+                None,
+            ) => HostedDocumentStatus::Held(HostedHold::ConflictParentWithheld { conflict_id }),
+            ("held", Some("hosted-backfill-work-waiting"), None, None, None, None) => {
                 HostedDocumentStatus::Held(HostedHold::WorkWaiting)
             }
-            ("held", Some("hosted-scope-path-mismatch"), head_path, None, None) => {
+            ("held", Some("hosted-scope-path-mismatch"), head_path, None, None, None) => {
                 HostedDocumentStatus::Held(HostedHold::ScopePathMismatch {
                     scope_path: scope_path.to_owned(),
                     head_path,
                 })
             }
-            ("held", Some(LIVE_EDIT_UNADMITTED), None, None, None) => {
+            ("held", Some(LIVE_EDIT_UNADMITTED), None, None, None, None) => {
                 HostedDocumentStatus::Held(HostedHold::LiveEditUnadmitted)
             }
-            _ => {
-                return Err(crate::error::local_corruption(
-                    "a hosted document's state is malformed",
-                ));
-            }
+            (
+                "held",
+                Some(RELEASED_LINEAGE_UNSETTLED),
+                None,
+                None,
+                None,
+                Some((binding, continuation, binding_stale)),
+            ) => HostedDocumentStatus::Held(HostedHold::ReleasedLineageUnsettled {
+                binding: Box::new(
+                    ReleasedLineageBinding::from_canonical_json(&binding).ok_or_else(malformed)?,
+                ),
+                continuation: ReleasedHoldContinuation::parse(&continuation)
+                    .ok_or_else(malformed)?,
+                binding_stale,
+            }),
+            _ => return Err(malformed()),
         },
     )
 }
@@ -795,10 +970,10 @@ pub fn read_hosted_replica(
             return Ok(None);
         };
         let mut statement = conn
-            .prepare(
-                "SELECT object_id,path,state,held_reason,held_path,held_by,held_conflict_id, \
-                 backfill_cursor FROM hosted_documents WHERE workspace_id=?1 AND scope_generation=?2",
-            )
+            .prepare(&format!(
+                "SELECT object_id,path,state,backfill_cursor,{HELD_COLUMNS} \
+                 FROM hosted_documents WHERE workspace_id=?1 AND scope_generation=?2"
+            ))
             .map_err(SyncError::corrupt)?;
         let rows = statement
             .query_map(params![workspace_id, scope_generation], |row| {
@@ -806,11 +981,8 @@ pub fn read_hosted_replica(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
+                    row.get(3)?,
+                    HeldColumns::read(row, 4)?,
                 ))
             })
             .map_err(SyncError::corrupt)?
@@ -818,26 +990,17 @@ pub fn read_hosted_replica(
             .map_err(SyncError::corrupt)?;
         let documents = rows
             .into_iter()
-            .map(
-                |(object_id, path, state, reason, held_path, held_by, conflict_id, cursor)| {
-                    let status = decode_status(
-                        &path,
-                        &state,
-                        reason.as_deref(),
-                        held_path,
-                        held_by,
-                        conflict_id,
-                    )?;
-                    Ok((
-                        object_id,
-                        HostedDocumentState {
-                            path,
-                            status,
-                            backfill_cursor: cursor,
-                        },
-                    ))
-                },
-            )
+            .map(|(object_id, path, state, cursor, held)| {
+                let status = decode_status(&path, &state, held)?;
+                Ok((
+                    object_id,
+                    HostedDocumentState {
+                        path,
+                        status,
+                        backfill_cursor: cursor,
+                    },
+                ))
+            })
             .collect::<Result<_, SyncError>>()?;
         Ok(Some(HostedReplicaState {
             scope_token,
@@ -901,6 +1064,14 @@ pub(crate) fn adopt_scope(
                  held_path=CASE WHEN scope_generation=?3 THEN held_path END, \
                  held_by=CASE WHEN scope_generation=?3 THEN held_by END, \
                  held_conflict_id=CASE WHEN scope_generation=?3 THEN held_conflict_id END, \
+                 released_hold_binding_json=CASE WHEN scope_generation=?3 \
+                   THEN released_hold_binding_json END, \
+                 released_hold_binding_digest=CASE WHEN scope_generation=?3 \
+                   THEN released_hold_binding_digest END, \
+                 released_hold_continuation=CASE WHEN scope_generation=?3 \
+                   THEN released_hold_continuation END, \
+                 released_hold_binding_stale=CASE WHEN scope_generation=?3 \
+                   THEN released_hold_binding_stale ELSE 0 END, \
                  backfill_cursor=CASE WHEN scope_generation=?3 THEN backfill_cursor ELSE 0 END, \
                  scope_generation=excluded.scope_generation",
                 params![workspace_id, object_id, previous, generation, path],
@@ -986,9 +1157,14 @@ pub struct HostedCommit {
 
 /// Commit a hosted pass's position. Commits nothing when the scope moved since
 /// the pass fetched, since its page may hold rows the current scope
-/// withholds, or when another pass committed since it read the replica, since
-/// it read from a position and states that one replaced: its caller pulls
-/// again. Each document read is settled in the same transaction: held where
+/// withholds, when another pass committed since it read the replica, since
+/// it read from a position and states that one replaced, or when a binding a
+/// released-lineage hold of the pass names no longer describes what its row
+/// would change: its caller pulls again. `tails` keeps the tails the actor
+/// validated; while a hold's tails wait for validation the transaction rolls
+/// back with [`SyncError::ValidationPending`], committing nothing and
+/// claiming nothing stale, and the caller commits the same cursor again
+/// once validation completes. Each document read is settled in the same transaction: held where
 /// its read stopped, ready once its read completes with nothing of it waiting
 /// in deferred work and its head at its scope's path, both when the pass read
 /// it and now, and still backfilling otherwise. So readiness never precedes
@@ -998,6 +1174,7 @@ pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
     cursor: &HostedCursor,
+    tails: &ReleasedTails,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<HostedCommit>, SyncError> {
     crate::model::bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
@@ -1026,11 +1203,26 @@ pub fn commit_hosted_cursor(
         })?;
         // Only a scope change or a commit changes the scope's documents, so
         // the pass's reads still name documents in the states it read.
-        if generation != cursor.scope_generation || commits != cursor.cursor_commits {
-            return Ok(HostedCommit {
+        let stale = || {
+            Ok(HostedCommit {
                 committed: false,
                 has_more: false,
-            });
+            })
+        };
+        if generation != cursor.scope_generation || commits != cursor.cursor_commits {
+            return stale();
+        }
+        // A stale-marked binding claims nothing current to check.
+        for read in cursor.reads.values() {
+            if let Some(HostedHold::ReleasedLineageUnsettled {
+                binding,
+                binding_stale: false,
+                ..
+            }) = &read.stopped
+                && !crate::ydoc_apply::released_binding_current(tx, binding, tails)?
+            {
+                return stale();
+            }
         }
         let commits = commits
             .checked_add(1)
@@ -1082,9 +1274,15 @@ pub fn commit_hosted_cursor(
                 });
             }
             let position = released.map_or(read.cursor, |first| read.cursor.min(first - 1));
+            let (binding, continuation, binding_stale) = hold
+                .as_ref()
+                .map_or(Ok((None, None, false)), HostedHold::released)?;
+            let (binding, binding_digest) = binding.unzip();
             tx.execute(
                 "UPDATE hosted_documents SET backfill_cursor=?3,state=?4, \
-                 held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8 \
+                 held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8, \
+                 released_hold_binding_json=?9,released_hold_continuation=?10, \
+                 released_hold_binding_stale=?11,released_hold_binding_digest=?12 \
                  WHERE workspace_id=?1 AND object_id=?2",
                 params![
                     workspace_id,
@@ -1094,7 +1292,11 @@ pub fn commit_hosted_cursor(
                     hold.as_ref().map(HostedHold::reason),
                     hold.as_ref().and_then(HostedHold::held_path),
                     hold.as_ref().and_then(HostedHold::held_by),
-                    hold.as_ref().and_then(HostedHold::held_conflict_id)
+                    hold.as_ref().and_then(HostedHold::held_conflict_id),
+                    binding,
+                    continuation,
+                    binding_stale,
+                    binding_digest
                 ],
             )
             .map_err(SyncError::persist)?;
@@ -1132,6 +1334,9 @@ pub(crate) fn stopped_hold(
         return Ok(hold);
     }
     let conn = occupancy.conn;
+    if live_edit_unadmitted(conn, occupancy.workspace_id, object_id)? {
+        return Ok(HostedHold::LiveEditUnadmitted);
+    }
     let unready = BTreeSet::from([object_id.to_owned()]);
     if let Some(hold) = backfill_path_held(conn, &unready, op)? {
         return Ok(hold);
@@ -1145,9 +1350,11 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: heads still parked, retained work of it still waiting, a live edit
-/// it refused, or a head away from the path its scope names. `None` once
-/// nothing does.
+/// ready: heads still parked, a released hold whose row still stands, a
+/// live edit its bound session never admitted, retained work of it still
+/// waiting, a head away from the path its scope names, or queued work it
+/// still owes, in that order. A reason it stored before counts only where
+/// it still holds. `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1156,11 +1363,17 @@ fn completed_hold(
     if let Some(hold) = park::parked_hold(occupancy, object_id)? {
         return Ok(Some(hold));
     }
-    if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
-        return stopped_hold(occupancy, object_id, &waiting).map(Some);
+    // A released hold stands only while the queued row its binding names
+    // does. Once that row is gone the reason is obsolete, and the queued
+    // work the drain held behind it only waits.
+    if let Some(hold) = queued_released_hold(conn, workspace_id, object_id)? {
+        return Ok(Some(hold));
     }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
+    }
+    if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
+        return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
     let scope_path: String = conn
         .query_row(
@@ -1170,14 +1383,25 @@ fn completed_hold(
         )
         .map_err(SyncError::corrupt)?;
     let head_path = head_path(conn, workspace_id, object_id)?;
-    Ok(
-        (head_path.as_deref() != Some(scope_path.as_str())).then_some(
-            HostedHold::ScopePathMismatch {
-                scope_path,
-                head_path,
-            },
-        ),
-    )
+    if head_path.as_deref() != Some(scope_path.as_str()) {
+        return Ok(Some(HostedHold::ScopePathMismatch {
+            scope_path,
+            head_path,
+        }));
+    }
+    // Queued Y.Doc work it still owes keeps it waiting, whatever held it
+    // before; the end-of-pass drain takes that work up again.
+    let waiting: bool = conn
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
+                 WHERE u.workspace_id=?1 AND u.object_id=?2 AND {OUTSTANDING_YDOC_UPDATE})"
+            ),
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(waiting.then_some(HostedHold::WorkWaiting))
 }
 
 /// A write of each head `object_id` has, for the pass whose commit can make
@@ -1255,36 +1479,190 @@ pub(crate) fn redelivered_unready(
     Ok(standing)
 }
 
-/// Hold the ready document whose ordinary `ydoc.update` at this coordinate
-/// was just refused because its live session never admitted it, when the
-/// update is of its current lineage. Its content here is now incomplete, so
-/// it is no longer ready, in the refusal's own transaction. Its own read
-/// starts where the main feed is, which applied everything of it before, and
-/// only [`completed_hold`] clears the hold. A document that is not ready
-/// meets the refusal there when its read completes.
+/// Hold the document `object_id` for an ordinary `ydoc.update` of its
+/// current lineage that its bound session never admitted, in the
+/// transaction that keeps that update queued. Its content here would miss
+/// the edit. Only this records the hold, so [`completed_hold`] keeps it only
+/// for an edit the direct path or a drain kept. A ready document's own read
+/// starts where the main feed is, as with [`hold_waiting_in_tx`]; one
+/// backfilling, or held for work waiting, keeps its read. A document held
+/// for another reason meets the queued edit once a drain decides it again.
 pub(crate) fn hold_unadmitted_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
-    origin_id: &str,
-    origin_seq: i64,
+    object_id: &str,
 ) -> Result<(), SyncError> {
     tx.execute(
-        "UPDATE hosted_documents SET state='held',held_reason=?4,held_path=NULL,held_by=NULL, \
-           held_conflict_id=NULL,backfill_cursor=MAX(backfill_cursor, \
-             (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
-         WHERE workspace_id=?1 AND state='ready' \
-           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1) \
-           AND object_id=(SELECT d.object_id FROM replication_log l JOIN ydoc_docs d \
-             ON d.workspace_id=l.workspace_id \
-             AND d.version_id=json_extract(l.payload_json,'$.versionId') \
-             AND d.object_id=json_extract(l.payload_json,'$.objectId') \
-             AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
-             WHERE l.workspace_id=?1 AND l.origin_id=?2 AND l.origin_seq=?3 \
-               AND l.op_kind='ydoc.update')",
-        params![workspace_id, origin_id, origin_seq, LIVE_EDIT_UNADMITTED],
+        "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
+           held_conflict_id=NULL,backfill_cursor=CASE WHEN state='ready' \
+             THEN MAX(backfill_cursor,(SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+             ELSE backfill_cursor END \
+         WHERE workspace_id=?1 AND object_id=?2 \
+           AND (state IN ('ready','backfilling') OR held_reason=?4) \
+           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1)",
+        params![
+            workspace_id,
+            object_id,
+            LIVE_EDIT_UNADMITTED,
+            HostedHold::WorkWaiting.reason()
+        ],
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+/// Hold the ready document `object_id` for queued work it owes that no
+/// binding can name, in the transaction that keeps that work queued. As
+/// with [`hold_unadmitted_in_tx`], its own read starts where the main feed
+/// is, and only [`completed_hold`] clears the hold, once nothing it owes is
+/// queued. A document that is not ready keeps the hold it has.
+pub(crate) fn hold_waiting_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
+           held_conflict_id=NULL,backfill_cursor=MAX(backfill_cursor, \
+             (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+         WHERE workspace_id=?1 AND object_id=?2 AND state='ready' \
+           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1)",
+        params![workspace_id, object_id, HostedHold::WorkWaiting.reason()],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// Hold the document `binding` names for released retained work, outside a
+/// cursor commit. A pass pending now read it in another state, so the same
+/// transaction counts a commit and that pass's commit no longer stands. A
+/// ready document's own read starts where the main feed is, as for
+/// [`hold_unadmitted_in_tx`]. A parked document is no longer hosted. Answers
+/// whether a hosted document stores the hold.
+pub(crate) fn hold_released_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &ReleasedLineageBinding,
+    continuation: ReleasedHoldContinuation,
+    binding_stale: bool,
+) -> Result<bool, SyncError> {
+    let held = tx
+        .execute(
+            "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
+               held_conflict_id=NULL,released_hold_binding_json=?4,released_hold_continuation=?5, \
+               released_hold_binding_stale=?6,released_hold_binding_digest=?7, \
+               backfill_cursor=CASE WHEN state='ready' \
+                 THEN MAX(backfill_cursor,(SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+                 ELSE backfill_cursor END \
+             WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked'",
+            params![
+                binding.workspace_id,
+                binding.object_id,
+                RELEASED_LINEAGE_UNSETTLED,
+                stored_binding(binding)?,
+                continuation.as_str(),
+                binding_stale,
+                binding.digest()
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    if held == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE hosted_replicas SET cursor_commits=cursor_commits+1 WHERE workspace_id=?1",
+        [&binding.workspace_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(true)
+}
+
+/// SQL that holds while a native live session binds the document
+/// `object_id` names in version `version_id` of `workspace_id`, whatever
+/// lineage it binds. Each argument is a column or parameter of the query
+/// that uses it.
+pub(crate) fn live_bound(workspace_id: &str, version_id: &str, object_id: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM live_device_application_bindings b \
+           WHERE b.workspace_id={workspace_id} AND b.main_version_id={version_id} \
+             AND b.object_id={object_id}) \
+         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings b \
+           WHERE b.workspace_id={workspace_id} AND b.main_version_id={version_id} \
+             AND b.object_id={object_id}))"
+    )
+}
+
+/// Whether the hosted document `d` is held for its queued update `u` that a
+/// drain takes up again: released retained work, work still waiting, or a
+/// live edit whose session's binding is gone. A drain would stop at that
+/// edit again while the binding stands.
+pub(crate) fn held_for_drain() -> String {
+    format!(
+        "(d.state='held' AND (d.held_reason IN \
+           ('released-lineage-unsettled','hosted-backfill-work-waiting') \
+         OR (d.held_reason='hosted-live-edit-unadmitted' AND NOT {})))",
+        live_bound("d.workspace_id", "u.version_id", "d.object_id")
+    )
+}
+
+/// Whether the queued Y.Doc update `u` is application work this replica
+/// still owes: a base, or an update of a document whose lineage a base
+/// established. An update of a document with no base yet waits for that
+/// base, which arrives as its own row, and owes nothing until then.
+pub(crate) const OUTSTANDING_YDOC_UPDATE: &str = "(EXISTS(SELECT 1 FROM ydoc_docs o \
+     WHERE o.workspace_id=u.workspace_id AND o.version_id=u.version_id \
+       AND o.object_id=u.object_id AND o.lineage_claim_id IS NOT NULL) \
+   OR EXISTS(SELECT 1 FROM replication_log l WHERE l.workspace_id=u.workspace_id \
+     AND l.origin_id=u.origin_id AND l.origin_seq=u.origin_seq \
+     AND json_extract(l.payload_json,'$.isBaseState')))";
+
+/// The released-lineage hold `object_id`'s row records, while the queued
+/// Y.Doc update its binding names is still queued: a drain's hold, which
+/// only a drain that decides that row again changes.
+pub(crate) fn queued_released_hold(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<HostedHold>, SyncError> {
+    queued_released_hold_besides(conn, workspace_id, object_id, &[])
+}
+
+/// [`queued_released_hold`], where a drain whose cleanup has not run yet
+/// consumed the queued rows at `consumed`.
+pub(crate) fn queued_released_hold_besides(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    consumed: &[(String, i64)],
+) -> Result<Option<HostedHold>, SyncError> {
+    let Some(hold @ HostedHold::ReleasedLineageUnsettled { .. }) =
+        recorded_hold(conn, workspace_id, object_id)?
+    else {
+        return Ok(None);
+    };
+    let HostedHold::ReleasedLineageUnsettled { binding, .. } = &hold else {
+        return Ok(None);
+    };
+    let named = (
+        binding.incoming.origin_id.clone(),
+        binding.incoming.origin_seq,
+    );
+    if consumed.contains(&named) {
+        return Ok(None);
+    }
+    let queued: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND object_id=?2 AND origin_id=?3 AND origin_seq=?4)",
+            params![
+                workspace_id,
+                object_id,
+                binding.incoming.origin_id,
+                binding.incoming.origin_seq
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(queued.then_some(hold))
 }
 
 /// What holds `object_id` as its row records it now, or `None` when its row
@@ -1296,57 +1674,55 @@ pub(crate) fn recorded_hold(
 ) -> Result<Option<HostedHold>, SyncError> {
     let row = conn
         .query_row(
-            "SELECT path,state,held_reason,held_path,held_by,held_conflict_id \
-             FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2 AND state='held'",
+            &format!(
+                "SELECT path,state,{HELD_COLUMNS} FROM hosted_documents \
+                 WHERE workspace_id=?1 AND object_id=?2 AND state='held'"
+            ),
             params![workspace_id, object_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
+                    HeldColumns::read(row, 2)?,
                 ))
             },
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let Some((path, state, reason, held_path, held_by, conflict_id)) = row else {
+    let Some((path, state, held)) = row else {
         return Ok(None);
     };
-    Ok(
-        match decode_status(
-            &path,
-            &state,
-            reason.as_deref(),
-            held_path,
-            held_by,
-            conflict_id,
-        )? {
-            HostedDocumentStatus::Held(hold) => Some(hold),
-            _ => None,
-        },
-    )
+    Ok(match decode_status(&path, &state, held)? {
+        HostedDocumentStatus::Held(hold) => Some(hold),
+        _ => None,
+    })
 }
 
-/// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
-/// current lineage because its live session never admitted it. The refusal
-/// keeps the row journaled, so no later read applies it.
+/// Whether `object_id` stays held for an ordinary `ydoc.update` of its
+/// current lineage that [`hold_unadmitted_in_tx`] recorded the direct path
+/// or a drain kept: its row records the hold, and such an update is still
+/// queued while a live session binds its document. Once the binding goes, a
+/// drain applies it. An echo the session admitted holds nothing: a drain
+/// consumes it.
 fn live_edit_unadmitted(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<bool, SyncError> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs r \
-         JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
-         JOIN ydoc_docs d ON d.workspace_id=l.workspace_id \
-           AND d.version_id=json_extract(l.payload_json,'$.versionId') \
-           AND d.object_id=json_extract(l.payload_json,'$.objectId') \
-           AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
-         WHERE r.workspace_id=?1 AND d.object_id=?2)",
-        params![workspace_id, object_id],
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2 \
+               AND state='held' AND held_reason=?3) \
+             AND EXISTS(SELECT 1 FROM ydoc_deferred_updates u \
+             JOIN ydoc_docs d ON d.workspace_id=u.workspace_id AND d.version_id=u.version_id \
+               AND d.object_id=u.object_id AND d.lineage_claim_id=u.lineage_claim_id \
+             JOIN replication_log l ON l.workspace_id=u.workspace_id AND l.origin_id=u.origin_id \
+               AND l.origin_seq=u.origin_seq \
+             WHERE u.workspace_id=?1 AND u.object_id=?2 \
+               AND NOT COALESCE(json_extract(l.payload_json,'$.isBaseState'),0) AND {})",
+            live_bound("u.workspace_id", "u.version_id", "u.object_id")
+        ),
+        params![workspace_id, object_id, LIVE_EDIT_UNADMITTED],
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)

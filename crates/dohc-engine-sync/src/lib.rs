@@ -15,6 +15,7 @@ mod conflict_outbox;
 mod conflict_resolve_v1;
 mod cursor;
 mod deferred;
+mod drain_report;
 mod enrolment;
 mod error;
 mod file_search;
@@ -68,12 +69,17 @@ pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
-    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HostedCommit, HostedCursor,
+    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HeldAnswer, HeldBindingStatus,
+    HeldContributions, HeldDocument, HeldDocumentInspection, HeldDocumentsPage, HeldFreshness,
+    HeldKey, HeldProof, HeldProofAdmission, HeldProofs, HeldRelease, HostedCommit, HostedCursor,
     HostedDocumentState, HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState,
-    PASSIVE_STORE_CANNOT_HOST, RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor,
-    departed_hosted_documents, departed_hosted_materialization, departed_hosted_object_ids,
-    forget_retired_hosted_file, hosted_document_parkable, is_hosted_replica, park_hosted_document,
-    read_hosted_replica, retired_hosted_files,
+    MAX_HELD_DOCUMENTS_PAGE, PASSIVE_STORE_CANNOT_HOST, ProvedHeld, ReleasedHoldContinuation,
+    RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, admit_held_proof, check_held_freshness,
+    commit_hosted_cursor, departed_hosted_documents, departed_hosted_materialization,
+    departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
+    inspect_held_document, is_hosted_replica, list_held_documents, park_hosted_document,
+    prove_held_document, read_hosted_replica, release_held_proof, retired_hosted_files,
+    shared_proof_failure,
 };
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
@@ -111,8 +117,8 @@ pub use relay::{
     HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
-    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
-    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
+    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, ProbeRequest, ProbeResponse, PullContinuation,
+    PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
     RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
     ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
     ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
@@ -131,14 +137,16 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    AlwaysLive, LeaseProbe, LocalHeadReconcile, NoLiveLeases, PreparedLocalYdocLineage,
-    ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement,
-    apply_ydoc_envelope, complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
-    drain_deferred_ydoc_for_key, drain_deferred_ydoc_for_key_holding_cleanup,
-    drain_deferred_ydoc_for_live_session, ensure_no_adopted_owner_under_path,
-    fold_resolution_into_ydoc_in_tx, live_session_has_drainable_deferred_ydoc,
-    open_sync_conflict_for_object, prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx,
-    project_ydoc_with_store, reconcile_imported_resulting_head_in_tx, reconcile_local_head_in_tx,
+    AlwaysLive, CaptureLineage, LeaseProbe, LocalHeadReconcile, NoLiveLeases,
+    PreparedLocalYdocLineage, ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult,
+    YdocLineageReplacement, admit_capture_in_tx, apply_ydoc_envelope,
+    complete_deferred_ydoc_drain_cleanup, current_ydoc_content_matches_in_tx,
+    deferred_ydoc_opened_conflict, drain_deferred_ydoc_for_key,
+    drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
+    ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
+    live_session_has_drainable_deferred_ydoc, open_sync_conflict_for_object,
+    prepare_local_ydoc_lineage_in_tx, project_and_write_in_tx, project_ydoc_with_store,
+    reconcile_imported_resulting_head_in_tx, reconcile_local_head_in_tx,
     reconcile_local_resulting_head_in_tx, reconcile_prepared_local_head_in_tx,
     retire_ydoc_lineage_in_tx, retry_markdown_projection_in_tx, validate_scene_asset_with_store,
     workspace_has_ydoc_state_in_tx,
@@ -147,7 +155,11 @@ pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, lineage_originated_here, originate_appended_ydoc_base_in_tx,
     originate_ydoc_base_in_tx, ydoc_update_payload,
 };
-pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
+pub use ydoc_recovery::{
+    CopyPublication, CopyPublicationState, CopyResolutionOutcome, KeepRetainedVersion,
+    KeptRetainedVersion, RELEASED_COPY_MOMENT_PREFIX, RedundantRecovery,
+    YdocRecoveryMaterialization, keep_retained_version, repair_conflicted_ydoc_recoveries,
+};
 
 pub use dohc_engine_collab::WriterDocCache;
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

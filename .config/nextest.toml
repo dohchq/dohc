@@ -36,3 +36,8 @@ retries = 1
 [[profile.default.overrides]]
 filter = 'test(two_thousand_members_bound_store_work_and_ydoc_wait)'
 threads-required = "num-test-threads"
+
+# Run the WAL-pressure held-proof test alone: it grows the WAL past the write limit, and other tests slow the checkpoints it waits for (#2960).
+[[profile.default.overrides]]
+filter = 'binary_id(=dohc-engine-runtime::owner_publication) & test(=held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
+threads-required = "num-test-threads"

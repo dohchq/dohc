@@ -1,8 +1,34 @@
+import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import type {EngineClient, NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
+import type {LiveHostConnectionCoordinate} from "./storage/types";
+
+/**
+ * Permission to acknowledge one native service activation's adoption seed
+ * before the host applies it. Only a service owner transport issues one, from
+ * the activation it captured and the adoption the engine confirmed. Its fields
+ * name it; copying or rebuilding them grants nothing.
+ */
+export interface ServiceSeedDelivery { readonly activationId: string }
+interface SeedScope {
+  storage: object; transport: object; activationId: string; binding: LiveObjectBinding; host: LiveHostConnectionCoordinate;
+}
+const seedDeliveries = new WeakMap<ServiceSeedDelivery, SeedScope & {deliveryId(sequence: number): string | undefined; updateDigest: string}>();
+
+/**
+ * The seed `capability` lets this transport acknowledge first, when it was
+ * issued for exactly this scope. Its delivery is the one native gives its
+ * outbox's entry at `sequence`, the place the engine reports for the seed.
+ */
+export function receiptFirstSeed(capability: ServiceSeedDelivery | undefined, scope: SeedScope) {
+  const held = capability && seedDeliveries.get(capability);
+  if (!held || held.storage !== scope.storage || held.transport !== scope.transport || held.activationId !== scope.activationId ||
+    !isDeepStrictEqual(held.binding, scope.binding) || !isDeepStrictEqual(held.host, scope.host)) return undefined;
+  return {deliveryId: (sequence: number) => held.deliveryId(sequence), updateDigest: held.updateDigest};
+}
 
 /**
  * Adapts one real imported native session to the existing owner delivery consumer.
@@ -10,7 +36,7 @@ import {authorityInteger} from "./storage/liveDocumentAuthority";
  */
 export function serviceOwnerTransport(options: {
   client: EngineClient; workspace: string; capture(signal?: AbortSignal): Promise<NativeOwnerActivation>; binding: LiveObjectBinding;
-  nextRequestId(): number; assertCurrent(): void;
+  storage: object; host: LiveHostConnectionCoordinate; nextRequestId(): number; assertCurrent(): void;
 }) {
   const {client,workspace,nextRequestId,assertCurrent}=options;
   const binding=parseLiveObjectBinding(options.binding);
@@ -54,7 +80,9 @@ export function serviceOwnerTransport(options: {
         captured={activationId:capture.activationId,sessionId:capture.sessionId,source:{...capture.source}};
       }
       if(params.resumeAdoptionId!==undefined && params.resumeAdoptionId!==captured.activationId)throw new Error("Service owner binding changed.");
-      const response=await client.sendRequest({...request,params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]}}},signal);
+      // Naming the activation tags the registration, so retiring it ends this registration too.
+      const response=await client.sendRequest({...request,params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},
+        activationId:captured.activationId}},signal);
       check(signal);
       registrationId=authorityInteger(configRecord(response.result,["registrationId"]).registrationId,1);
       if(params.resumeAdoptionId!==undefined) {
@@ -99,9 +127,14 @@ export function serviceOwnerTransport(options: {
   };
   const sendLiveOwnerAdoption:EngineClient["sendLiveOwnerAdoption"]=async(request,cut,bounds,signal)=>{
     check(signal);registration(request.registrationId);
-    const capture=session();
+    const capture=session(),prefix=cut.retainedPrefix;
+    // A first activation adopts at an empty journal. A successor adopts at the boundary its captured predecessor released,
+    // or at an empty journal when that chain never adopted.
+    const boundary=prefix===null?cut.terminalReceipt===null
+      :capture.source.predecessorActivationId!==undefined && prefix.predecessorActivationId===capture.source.predecessorActivationId &&
+        isDeepStrictEqual(cut.terminalReceipt,prefix.terminalReceipt);
     if(request.workspace!==workspace || request.sessionId!==capture.sessionId || cut.adoptionId!==capture.activationId ||
-      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || cut.terminalReceipt!==null) {
+      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || !boundary) {
       throw new Error("Service owner adoption cut changed.");
     }
     const response=await client.sendLiveOwnerAdoption(request,cut,bounds,signal);
@@ -115,7 +148,19 @@ export function serviceOwnerTransport(options: {
     const value=Reflect.get(target,property,target);
     return typeof value==="function"?value.bind(target):value;
   }});
-  return {client:facade,async state(request:Omit<Parameters<EngineClient["sendRequest"]>[0],"method"|"params">,signal?:AbortSignal){
+  // A divergent adoption queues the captured full state in its outbox, after
+  // any entries a released predecessor left there, so the engine names its
+  // sequence. A fresh adoption names that outbox only when the drain reads it.
+  const seedDelivery=():ServiceSeedDelivery|undefined=>{
+    if(!adopted || !captured)return undefined;
+    const updateDigest=captured.source.fullStateDigest,delivery=Object.freeze({activationId:captured.activationId});
+    seedDeliveries.set(delivery,{storage:options.storage,transport:facade,activationId:captured.activationId,updateDigest,
+      deliveryId:(sequence:number)=>outboxId===undefined || !Number.isSafeInteger(sequence) || sequence<1?undefined
+        :`owner-delivery-${createHash("sha256").update(`${outboxId}\0${sequence}\0${updateDigest}`).digest("hex")}`,
+      binding:structuredClone(binding),host:{...options.host}});
+    return delivery;
+  };
+  return {client:facade,seedDelivery,async state(request:Omit<Parameters<EngineClient["sendRequest"]>[0],"method"|"params">,signal?:AbortSignal){
     const state=await readState({...request,method:"liveApplication.ownerState",params:{registrationId:registration(registrationId)}},signal);
     if(!adopted)throw new Error("Native service adoption is unavailable.");
     return {adoptionId:session().activationId,pendingBytes:state.pendingBytes};

@@ -19,6 +19,9 @@ const requiredSteps = [
   "fmt --check",
   "clippy -D warnings",
   "test --workspace",
+  // The workspace run skips the ignored reader regressions. Without this row
+  // a verdict reads green while no reader regression ran.
+  "reader tests",
   // The workspace test run is nextest, which runs no doctests by design.
   // Without this row a runner swap silently drops every doctest the
   // workspace has, and the verdict still reads green.

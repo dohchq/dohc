@@ -372,7 +372,8 @@ impl Drop for OpenGuard {
             return;
         }
         let supervisor = self.supervisor;
-        let closing = identity.and_then(|identity| supervisor.begin_close_identity(&identity));
+        let closing =
+            identity.and_then(|identity| supervisor.begin_close_identity(&identity).ok().flatten());
         // Detached + blocking: never run the actor join on a runtime worker
         // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
@@ -1061,12 +1062,27 @@ impl EngineService {
                 let held = actor.location();
                 let removed = supervisor.begin_close_identity(actor.identity());
                 drop(actor);
-                if let Some(closing) = removed {
-                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
-                }
+                let closed = match removed {
+                    Ok(Some(closing)) => {
+                        matches!(
+                            tokio::task::spawn_blocking(move || closing.finish()).await,
+                            Ok(Ok(()))
+                        )
+                    }
+                    Ok(None) => true,
+                    Err(_) => false,
+                };
                 open_guard.disarm();
-                // A delete that fails leaves the store the next open refuses
-                // as a mismatch. The refusal stands; the path says why.
+                // A delete that fails, or a close that left the store open,
+                // leaves the store the next open refuses as a mismatch. The
+                // refusal stands; the path says why.
+                if !closed {
+                    eprintln!(
+                        "engine: kept the orphaned store {}: it did not close",
+                        held.database_path().display()
+                    );
+                    return Err(map_root_binding(error));
+                }
                 for suffix in ["", "-wal", "-shm"] {
                     let mut path = held.database_path().to_path_buf().into_os_string();
                     path.push(suffix);
@@ -1138,7 +1154,8 @@ impl EngineService {
                         map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
                     })?;
                     let mismatch: bool = store.read_with(|conn| conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                    &format!("SELECT EXISTS(SELECT 1 FROM {} a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                        dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![budget_workspace_id,owner_outbox.max_pending_bytes,owner_outbox.max_pending_age_ms],|row|row.get(0)
                 )).map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-read-failed"))?;
                     Ok::<_, WireError>(mismatch)
@@ -1440,7 +1457,9 @@ impl EngineService {
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
-            let closing = supervisor.begin_close_identity(open.actor.identity());
+            let closing = supervisor
+                .begin_close_identity(open.actor.identity())
+                .map_err(map_runtime)?;
             let (removed, attached_handles) = {
                 let mut handles = lock(&self.handles);
                 let removed = handles.remove(&handle);
@@ -4457,6 +4476,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 reconcile_collections: false,
+                departed_after: None,
                 issue: 1,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     bootstrap_complete: true,

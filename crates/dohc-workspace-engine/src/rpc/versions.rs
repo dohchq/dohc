@@ -198,6 +198,7 @@ fn version_fence_session_view(
         regime: session.regime,
         lineage_claim_id: session.lineage_claim_id.clone(),
         restore_generation: session.restore_generation,
+        activation_id: session.activation_id.clone(),
         lineage_absent: session.lineage_absent,
         first_update_pending: session.first_update_pending,
         last_settled_sha: session.last_settled_sha.clone(),

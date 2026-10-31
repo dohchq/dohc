@@ -27,6 +27,7 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
+import type { HeldDocumentHost } from "./heldDocumentRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
 import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
@@ -373,8 +374,10 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   ownerRestoreHost: () => ownerRestoreHost?.(),
+  heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -634,6 +637,8 @@ ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
 };
+// Only a session service keeps hosted replicas, so only it holds documents for released retained work.
+heldDocumentHost = () => storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
 if (publicEditRelease) {
   const mode = storage.getLiveHostControl()?.configuredMode;
   if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? (!configuredServiceHost && !selfHost) : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {

@@ -188,6 +188,19 @@ pub(super) fn origin_stamp_in(
     Ok(hex_sha256(json.as_bytes()))
 }
 
+/// Check `bytes`, the state `doc` holds, as accepted state: a note the
+/// engine's reader built by the reader's rule, any other by the strict public
+/// rule. Initialization, native replay and every checkpoint use it, so a
+/// lineage whose baseline the reader built replays and checkpoints too.
+fn validate_baseline(doc: &Ydoc, bytes: &[u8]) -> Result<(), ApplicationError> {
+    if doc.has_reader_source() {
+        doc.validate_reader_baseline(bytes)?;
+    } else {
+        doc.validate_public_baseline(bytes)?;
+    }
+    Ok(())
+}
+
 pub(super) fn initialize(
     tx: &Transaction<'_>,
     held: &Registration,
@@ -198,11 +211,7 @@ pub(super) fn initialize(
     }
     let doc = Ydoc::wire();
     doc.apply(baseline)?;
-    if doc.has_reader_source() {
-        doc.validate_reader_baseline(baseline)?;
-    } else {
-        doc.validate_public_baseline(baseline)?;
-    }
+    validate_baseline(&doc, baseline)?;
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         restore_operation_id: None,
@@ -803,11 +812,7 @@ fn append_inner(
         if reconstruction.is_none() {
             budget.charge(state.len())?;
         }
-        if restored.is_some() && doc.has_reader_source() {
-            doc.validate_reader_baseline(&state)?;
-        } else {
-            doc.validate_public_baseline(&state)?;
-        }
+        validate_baseline(doc, &state)?;
         insert_checkpoint(
             tx,
             held,
@@ -942,7 +947,42 @@ pub(super) fn read_state(
     through: i64,
     policy: NativeHistoryReconstruction,
 ) -> Result<Ydoc, ApplicationError> {
-    native_state::read(conn, held, through, policy)
+    native_state::read(
+        conn,
+        held,
+        through,
+        policy,
+        &mut restore_content::Budget {
+            remaining: usize::MAX,
+        },
+    )
+}
+
+/// [`read_state`] for a reader no registration serves: the lineage's history
+/// in `namespace` selected by its durable identity alone, through a view that
+/// is never registered or live. `binding` and `coordinate` are the ones a
+/// durable record kept; only the document and lineage select the history.
+/// The blobs it replays are charged to `budget`.
+pub(super) fn read_state_by_identity(
+    conn: &Connection,
+    namespace: &str,
+    binding: LiveObjectBinding,
+    coordinate: ApplicationHostCoordinate,
+    through: i64,
+    budget: &mut restore_content::Budget,
+) -> Result<Ydoc, ApplicationError> {
+    let view = Registration {
+        workspace_id: binding.workspace_id.clone(),
+        namespace: namespace.to_owned(),
+        coordinate,
+        binding,
+        activation_id: None,
+        live: false,
+    };
+    let policy = NativeHistoryReconstruction {
+        working_reserve_bytes: budget.remaining,
+    };
+    native_state::read(conn, &view, through, policy, budget)
 }
 
 pub(super) fn read(
@@ -1291,6 +1331,7 @@ mod tests {
                     connection_id: "connection".into(),
                 },
                 binding,
+                activation_id: None,
                 live: true,
             };
             let initial = initial_digest(&held.namespace, &held.binding).unwrap();

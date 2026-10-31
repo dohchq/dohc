@@ -676,15 +676,9 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
         grantId: link.grant.grantId, grantGeneration: link.grant.generation });
     } else {
-      const owned = storage.getShare(actor.shareId);
-      if (!owned || owned.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(owned.workspaceId, actor.userId)) {
-        return { kind: "refused", reason: "not-authorized" };
-      }
-      share = owned;
-      const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
-      const effective = parsed && effectiveShareSelector(parsed, "edit");
-      if (!effective || !isLiveEditShareSelector(effective)) return { kind: "refused", reason: "stale-selector" };
-      selector = effective;
+      const owned = ownerLiveEditShare(storage, actor);
+      if (owned.kind === "refused") return owned;
+      ({share, selector} = owned);
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
         grantId: null, grantGeneration: null });
     }
@@ -695,6 +689,30 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
     if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
     return { kind: "current", binding, authority, host: coordinate };
+  }
+
+function ownerLiveEditShare(storage: StorageContext, actor: {userId: string; shareId: string}):
+  { kind: "share"; share: SyncRelayShareRow; selector: ShareSelector } | Extract<CurrentLiveBindingResult, { kind: "refused" }> {
+    const share = storage.getShare(actor.shareId);
+    if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) {
+      return { kind: "refused", reason: "not-authorized" };
+    }
+    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector = parsed && effectiveShareSelector(parsed, "edit");
+    if (!selector || !isLiveEditShareSelector(selector)) return { kind: "refused", reason: "stale-selector" };
+    return { kind: "share", share, selector };
+  }
+
+/**
+ * The binding the owner's share gives the document before any service
+ * activation decides admission: the binding a successor's pending row keeps,
+ * which `currentLiveDocumentBinding` then authorizes in full with its access.
+ */
+export function ownerLiveDocumentBinding(storage: StorageContext, document: LiveDocumentKey, actor: {userId: string; shareId: string}): LiveObjectBinding | null {
+    const owned = ownerLiveEditShare(storage, actor);
+    if (owned.kind === "refused") return null;
+    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), owned.share, owned.selector);
+    return bound.kind === "bound" ? bound.binding : null;
   }
 
 function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey,

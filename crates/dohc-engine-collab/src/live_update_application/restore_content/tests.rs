@@ -1300,6 +1300,7 @@ fn native_resume_generation_preserves_historical_selector_scope() {
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: held.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: held.live,
     };
     current.binding.selector_paths.push("z.md".into());
@@ -3162,6 +3163,7 @@ fn restore_predecessor_refuses_before_reading_the_restore_candidate() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     f.store
@@ -3220,6 +3222,7 @@ fn fence_replay_charges_first_seen_children_before_reading_them() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let (json, children): (String, i64) = f
@@ -3280,6 +3283,7 @@ fn bootstrap_origin_stamp_is_bounded_before_reading_and_keeps_its_bytes() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let stamp = |remaining: usize| {
@@ -3346,6 +3350,7 @@ fn bootstrap_origin_stamp_consumes_raw_whitespace_padded_json() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let stamp = |remaining: &mut usize| {
@@ -3408,6 +3413,7 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let b = &f.binding;
@@ -3444,6 +3450,10 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
                 "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES ('namespace','adoption','workspace','main','object',?1,?2,'adopted-source',?3,?4,0,1,?3,?3,0,0,0,'null','{}',1,1)",
                 params![b.lineage_claim_id, binding, digest, text.len() as i64],
             )?;
+            conn.execute(
+                crate::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                params!["namespace", "adoption", None::<String>],
+            )?;
             conn.execute_batch("PRAGMA foreign_keys=ON")
         })
         .unwrap();
@@ -3470,10 +3480,26 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
         origin(cost(&binding) - 1).0,
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
+    // The activation's other metadata is never read. Padded to a megabyte,
+    // and unreadable as text, it changes neither the origin nor its cost.
     f.store
         .read_with(|conn| {
             conn.execute(
-                "UPDATE live_owner_adoptions SET binding_json=?1",
+                "UPDATE live_owner_activations SET
+                   host_coordinate_json='{}'||replace(hex(zeroblob(500000)),'00',' '),
+                   evidence_digest=replace(hex(zeroblob(500000)),'00','e')||CAST(x'ff' AS TEXT),
+                   coverage_digest=replace(hex(zeroblob(500000)),'00','c')||CAST(x'ff' AS TEXT)",
+                [],
+            )
+        })
+        .unwrap();
+    let (padded, left) = origin(cost(&binding));
+    assert!(matches!(padded, Ok(Some(_))), "{:?}", padded.err());
+    assert_eq!(left, 0);
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_activations SET binding_json=?1",
                 [&redirected],
             )
         })
@@ -3499,6 +3525,7 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
             object_id: object.into(),
             ..f.binding.clone()
         },
+        activation_id: None,
         live: false,
     };
     let stamp = |held: &Registration, remaining: usize| {
@@ -3908,7 +3935,7 @@ fn prove(f: &Fixture, reader: ProofReader, remaining: &mut usize) -> Result<(), 
 /// smaller budget refuses before reading it; enough budget reaches the damage.
 #[test]
 fn publication_proof_charges_each_raw_row_before_reading_it() {
-    use ProofReader::{Accepted, Predecessor};
+    use self::ProofReader::{Accepted, Predecessor};
     let pad = "replace(hex(zeroblob(1000000)),'00','x')";
     let cases = [
         // Registration, before anything else is read.

@@ -365,39 +365,21 @@ pub fn release_in_tx(
             if bytes.len() as i64 != length {
                 return Err(OwnerOutboxError::Corrupt);
             }
-            let (actor, attribution) = if let Some(json) = native {
-                let source: OwnerOutboxSource =
-                    serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
-                let source = source.native().ok_or(OwnerOutboxError::Corrupt)?;
-                if source.binding != *binding || source.update_digest != digest {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
-                source.native_author()?.unwrap_or((None, None))
-            } else {
-                let agent = stored_declaration(agent)?;
-                let automation = stored_automation_declaration(automation)?;
-                if agent.is_some() && automation.is_some() {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
-                if let Some(a) = automation {
-                    (Some(a.automation_id), Some(a.attribution))
-                } else if let Some(a) = agent {
-                    (Some(a.agent_id.clone()), Some(a.attribution()))
-                } else if person == Some(1) {
-                    (
-                        Some("local-person".into()),
-                        Some(dohc_engine_domain::ChangeAttribution {
-                            actor_kind: dohc_engine_domain::ChangeActorKind::Human,
-                            on_behalf_of: None,
-                            depth: 0,
-                            run: None,
-                        }),
-                    )
-                } else {
-                    (None, None)
-                }
-            };
-            credited.push(((actor, attribution), bytes));
+            let source = native
+                .map(
+                    |json| -> Result<OwnerOutboxNativeSource, OwnerOutboxError> {
+                        let source: OwnerOutboxSource =
+                            serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
+                        let source = source.native().cloned().ok_or(OwnerOutboxError::Corrupt)?;
+                        if source.binding != *binding || source.update_digest != digest {
+                            return Err(OwnerOutboxError::Corrupt);
+                        }
+                        Ok(source)
+                    },
+                )
+                .transpose()?;
+            let credit = super::entry_credit(source.as_ref(), agent, automation, person)?;
+            credited.push((credit, bytes));
         }
     }
     if contains_pending_in(

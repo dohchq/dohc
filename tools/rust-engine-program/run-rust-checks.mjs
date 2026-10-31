@@ -8,7 +8,8 @@
 //
 // Steps: native target (see below), fixture drift, cargo fmt --check, cargo
 // clippy -D warnings, the workspace test run including crash recovery (cargo
-// nextest), the doctest run (nextest runs no doctests by design), the
+// nextest), the Markdown reader regressions over a built reader, the doctest
+// run (nextest runs no doctests by design), the
 // shipping-default daemon build, then cargo-deny / cargo-audit IF
 // installed (skip-with-warning when absent, never fail on a missing tool).
 //
@@ -191,6 +192,9 @@ const required = [
     name: "test --workspace",
     cmd: `${stagesReaderNode ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
   },
+  // The reader regressions are ignored above because they need a real
+  // reader. This builds one and runs exactly them, over the same build.
+  { name: "reader tests", cmd: "node tools/rust-engine-program/reader-tests.mjs" },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   // Test builds enable fault hooks through testkit. Finish with the shipping
   // daemon so desktop preparation sees the default production features.

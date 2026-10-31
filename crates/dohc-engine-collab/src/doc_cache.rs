@@ -269,9 +269,29 @@ pub struct WriterDocCache {
     removes: u64,
     max_entries: Option<usize>,
     max_total_bytes: Option<usize>,
+    /// Kept by the store's own generations, so [`Self::clear`] leaves it.
+    released_tails: crate::live_update_application::ReleasedTails,
+    /// Not cached state: [`Self::clear`] leaves it too.
+    retirement_preparations: crate::live_update_application::RetirementPreparations,
 }
 
 impl WriterDocCache {
+    /// The Stop preparations whose activations refuse local appends on this writer.
+    pub fn retirement_preparations(
+        &self,
+    ) -> crate::live_update_application::RetirementPreparations {
+        self.retirement_preparations.clone()
+    }
+
+    /// The protected tails the actor validated on `store`, shared with every
+    /// synced row it decides there.
+    pub fn released_tails(
+        &self,
+        store: &dohc_engine_storage::EngineStore,
+    ) -> crate::live_update_application::ReleasedTails {
+        self.released_tails.bound_to(store)
+    }
+
     pub(crate) fn take_owner_draft(
         &mut self,
         key: &DocKey,
@@ -293,6 +313,17 @@ impl WriterDocCache {
 
     pub fn new() -> Self {
         WriterDocCache::default()
+    }
+
+    /// A cache whose synced rows decide protection on `released_tails`,
+    /// which its owner closes.
+    pub fn with_released_tails(
+        released_tails: crate::live_update_application::ReleasedTails,
+    ) -> Self {
+        WriterDocCache {
+            released_tails,
+            ..WriterDocCache::default()
+        }
     }
 
     /// A cache with tiny limits so tests can exercise eviction without

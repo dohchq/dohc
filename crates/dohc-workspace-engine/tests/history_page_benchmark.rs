@@ -267,7 +267,14 @@ async fn history_page_benchmark() {
     for (batch, envelopes) in envelopes.chunks(import_batch_size as usize).enumerate() {
         let start = Instant::now();
         for envelope in envelopes {
-            apply_moment_envelope(&mut store, envelope, &NoFaults, &NoLiveLeases).unwrap();
+            apply_moment_envelope(
+                &mut store,
+                envelope,
+                &NoFaults,
+                &NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+            )
+            .unwrap();
         }
         if batch > 0 {
             import_per_moment

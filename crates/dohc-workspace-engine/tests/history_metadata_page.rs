@@ -223,7 +223,7 @@ async fn old_sync_arrival_waits_for_refresh_on_rpc_pages() {
     apply_moment_envelope(&mut store,&ReplicationEnvelope {
         workspace_id:"history-object".into(),origin_id:"peer".into(),origin_seq:0,op_kind:"moment.append".into(),recorded_at_ms:50,relay_seq:None,settlement_admission:None,admitted_author_snapshot:None,
         payload:json!({"momentId":"old-import","versionId":"main","objectId":"remote-object","objectCreatedAtMs":1,"path":"remote.md","recordedAtMs":50,"operation":"write","payloadBeforeBlobSha256":null,"payloadBeforePath":null,"payloadAfterBlobSha256":sha,"payloadAfterPath":"remote.md","metadata":{"origin":"sync"},"beforePresent":"absent"}),
-    },&NoFaults,&NoLiveLeases).unwrap();
+    },&NoFaults,&NoLiveLeases,&dohc_engine_collab::live_update_application::ReleasedTails::default()).unwrap();
     drop(store);
     assert_eq!(
         collect(&transport, &handle, first, 1).await.0,

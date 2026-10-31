@@ -1049,11 +1049,8 @@ impl EngineService {
             let limits = adoption.owner_outbox.clone();
             let mismatch = tokio::task::spawn_blocking(move || {
                 let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|invalid("owner adoption budget read failed"))?;
-                store.read_with(|conn|conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
-                     ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
-                     AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
-                    rusqlite::params![workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms],|row|row.get::<_,bool>(0)))
+                store.read_with(|conn| dohc_engine_collab::live_update_application::owner_activations::retained_limits_exceed(
+                    conn,&workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms))
                     .map_err(|_|invalid("owner adoption budget read failed"))
             }).await.map_err(|_|invalid("owner adoption budget read interrupted"))??;
             if mismatch {
@@ -1088,6 +1085,14 @@ impl EngineService {
         discovery_json(&discovery.namespace, &discovery.host, workspaces)
     }
 
+    /// The relay namespace the configured host serves, if one is configured.
+    /// With one, only its own connection reaches the ordinary methods.
+    pub(super) fn configured_relay_namespace(&self) -> Option<String> {
+        self.configured_live_host
+            .get()
+            .map(|host| host.namespace.clone())
+    }
+
     pub(super) fn configured_ordinary_namespace(
         &self,
         ctx: &RequestContext,
@@ -1096,9 +1101,7 @@ impl EngineService {
         if !self.configured_ordinary_request(ctx, request) {
             return Err(invalid("ordinary service connection unavailable"));
         }
-        self.configured_live_host
-            .get()
-            .map(|host| host.namespace.clone())
+        self.configured_relay_namespace()
             .ok_or_else(|| invalid("ordinary service namespace unavailable"))
     }
 
@@ -1151,6 +1154,27 @@ impl EngineService {
         })
     }
 
+    /// The configured host's own current connection is the caller, and
+    /// `workspace` is one of the ordinary workspaces it attached. A handler
+    /// checks this again after each wait, since either can end meanwhile.
+    pub(super) fn configured_ordinary_workspace(
+        &self,
+        ctx: &RequestContext,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if !lock(&self.live_applications).hosts_current(&discovery.connection) {
+            return Err(WireError::new(
+                ErrorCode::SessionExpired,
+                "live host connection is not current",
+            ));
+        }
+        if !discovery.is_ordinary(workspace) {
+            return Err(super::error::workspace_unavailable());
+        }
+        Ok(())
+    }
+
     pub(super) fn configured_live_hosts(
         &self,
         ctx: &RequestContext,
@@ -1185,6 +1209,27 @@ impl EngineService {
         let result = self.configured_discovery(discovery);
         validate_discovery(&result, request.id, ctx.max_frame_bytes)?;
         Ok(result)
+    }
+
+    /// The namespace and budgets one retirement step runs under, from the
+    /// host's own configuration. A page holds what one settlement may cover.
+    pub(super) fn configured_retirement_scope(
+        &self,
+        ctx: &RequestContext,
+        max_applications: usize,
+    ) -> Result<dohc_engine_runtime::actor::OwnedRetirementScope, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        let (max, _) = discovery.settlement.as_ref().ok_or_else(|| {
+            WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
+        })?;
+        if !(1..=*max).contains(&max_applications) {
+            return Err(invalid("invalid-live-reconciliation"));
+        }
+        Ok(dohc_engine_runtime::actor::OwnedRetirementScope {
+            namespace: discovery.namespace.clone(),
+            max_deliveries: *max,
+            max_applications,
+        })
     }
 
     pub(super) fn configured_settlement_limit(&self) -> Option<usize> {
@@ -2465,8 +2510,10 @@ mod tests {
             .execute_batch(
                 "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='invalid-update'; \
                  UPDATE owner_ydoc_outbox_entries SET native_source_json='{\"origin\":{\"kind\":\"adoptionSeed\"}}'; \
-                 INSERT INTO live_device_application_bindings SELECT 'namespace',workspace_id,main_version_id,object_id,\
-                 lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,'host',1,'instance','connection',0 \
+                 INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,\
+                 object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,\
+                 instance_id,connection_id,available,activation_id) SELECT 'namespace',workspace_id,main_version_id,object_id,\
+                 lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,'host',1,'instance','connection',0,NULL \
                  FROM owner_ydoc_outboxes;",
             )
             .unwrap();
@@ -2581,17 +2628,19 @@ mod tests {
     /// binding and hosted identity of the detached store at `reference`. Its
     /// schema comes from the genuine migration prefix.
     fn earlier_copy_of(reference: &Path, earlier: &Path) {
-        older_copy_of(reference, earlier, 1);
+        older_copy_of(reference, earlier, |db| {
+            dohc_engine_storage::recovery::create_earlier_store_for_test(db, 1).unwrap()
+        });
     }
 
-    /// The same, from a build that lacked this build's last `missing` migrations.
-    fn older_copy_of(reference: &Path, earlier: &Path, missing: usize) {
+    /// The same, from the older build whose store `create` makes at the path
+    /// it is given.
+    fn older_copy_of(reference: &Path, earlier: &Path, create: impl FnOnce(&Path)) {
         let token = crate::root_binding::read_root_binding(reference)
             .unwrap()
             .unwrap();
         crate::root_binding::write_root_binding(earlier, &token).unwrap();
-        dohc_engine_storage::recovery::create_earlier_store_for_test(&database(earlier), missing)
-            .unwrap();
+        create(&database(earlier));
         let conn = rusqlite::Connection::open(database(earlier)).unwrap();
         conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
         conn.execute(
@@ -2946,11 +2995,19 @@ mod tests {
                 .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
-        earlier_store(&service, &ctx, reference.path(), store.path()).await;
-        // The migration this build adds then fails on the copy.
+        detached_store(&service, &ctx, reference.path()).await;
+        host_identity(reference.path(), "epoch");
+        older_copy_of(reference.path(), store.path(), |db| {
+            dohc_engine_storage::recovery::create_store_before_migration_for_test(
+                db,
+                "v2-live-owner-activations",
+            )
+            .unwrap()
+        });
+        // That migration creates an index of this name, so it fails on the copy.
         rusqlite::Connection::open(database(store.path()))
             .unwrap()
-            .execute_batch("CREATE TABLE live_empty_settlements (planted INTEGER)")
+            .execute_batch("CREATE TABLE live_owner_adoptions_lineage (planted INTEGER)")
             .unwrap();
         let before = store_files(store.path());
         let handle = open_prepared(
@@ -3266,7 +3323,9 @@ mod tests {
         ctx.connection = Some(owner.handle());
         detached_store(&service, &ctx, reference.path()).await;
         host_identity(reference.path(), "epoch");
-        older_copy_of(reference.path(), store.path(), 10);
+        older_copy_of(reference.path(), store.path(), |db| {
+            dohc_engine_storage::recovery::create_earlier_store_for_test(db, 10).unwrap()
+        });
         let daemon = service
             .configured_live_host
             .get()

@@ -183,10 +183,11 @@ fn inband_settled_content(content: String) -> Option<String> {
     (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
+/// Where a close writes the files its drain changed.
 #[derive(Clone)]
-struct YdocCloseMaterialization {
-    root_dir: PathBuf,
-    self_writes: Arc<dyn SelfWriteRecorder>,
+pub struct YdocCloseMaterialization {
+    pub root_dir: PathBuf,
+    pub self_writes: Arc<dyn SelfWriteRecorder>,
 }
 
 impl ActorHandle {
@@ -224,6 +225,7 @@ impl ActorHandle {
                 let Some((version,object))=found.into_iter().next() else {return Ok(Err(OwnerOutboxError::NotFound));};
                 DocKey::new(&workspace,&version,&object)?
             };
+            let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
                 "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
@@ -233,7 +235,7 @@ impl ActorHandle {
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
                     release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
-                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
+                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
                     }).map(|row|vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
@@ -813,7 +815,7 @@ impl ActorHandle {
         seed_from_artifact: bool,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_open_state_on_store(
                 store,
                 cache,
@@ -1042,7 +1044,7 @@ impl ActorHandle {
         restore_generation: Option<i64>,
         conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -1122,7 +1124,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocResyncState, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_resync_on_store(
                 store,
                 cache,
@@ -1254,6 +1256,9 @@ impl ActorHandle {
         .await
     }
 
+    /// Close the session, then drain what it deferred. The close commits
+    /// once; only the drain, its materialization and its cleanup run again
+    /// after a validation they wait for.
     async fn ydoc_close_session_inner(
         &self,
         key: DocKey,
@@ -1262,8 +1267,68 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
+        let root_dir = materialization
+            .as_ref()
+            .map(|materialization| materialization.root_dir.clone());
+        let (outcome, drains) = self
+            .ydoc_close_commit(
+                key.clone(),
+                root_dir,
+                now_ms,
+                Arc::clone(&faults),
+                token.clone(),
+            )
+            .await?;
+        let record_facts = if drains {
+            self.ydoc_close_drain(key, materialization, now_ms, faults, token)
+                .await?
+        } else {
+            Vec::new()
+        };
+        Ok(YdocCloseSessionOutcome {
+            outcome,
+            record_facts,
+        })
+    }
+
+    /// Commit the close of the session on `key`: its outcome, and whether
+    /// what it deferred drains next through [`Self::ydoc_close_drain`]. A
+    /// failure here committed nothing; the session still stands.
+    pub async fn ydoc_close_commit(
+        &self,
+        key: DocKey,
+        root_dir: Option<PathBuf>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(Option<CloseOutcome>, bool), RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
             ydoc_close_session_on_store(
+                store,
+                cache,
+                &key,
+                root_dir.as_deref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
+    }
+
+    /// Drain, materialize and clean up what the committed close of `key`
+    /// deferred, and answer the record facts it committed. Runs again after
+    /// each validation it waits for; never closes again.
+    pub async fn ydoc_close_drain(
+        &self,
+        key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, RuntimeError> {
+        self.run_draining(token.clone(), move |store, cache| {
+            ydoc_close_drain_on_store(
                 store,
                 cache,
                 &key,
@@ -1274,6 +1339,50 @@ impl ActorHandle {
             )
         })
         .await
+    }
+
+    /// Run `stage` on the actor until no drain in it waits for released-tail
+    /// validation. A drain that waits leaves what it committed queued and
+    /// ends its transaction; the actor is free while the store's worker
+    /// validates, and the next run of `stage` checks its conditions again,
+    /// then drains and reports those rows once. A stage that waits for the
+    /// Markdown reader runs again once it answers, as
+    /// [`Self::run_with_reader_retry`] does.
+    async fn run_draining<R: Send + 'static>(
+        &self,
+        token: CancellationToken,
+        stage: impl Fn(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
+        + Clone
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        let mut reader_attempt = 0;
+        loop {
+            let attempt = stage.clone();
+            match self.run(move |store, cache| attempt(store, cache)).await {
+                Err(RuntimeError::DrainWaiting(pending)) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        validated = pending.validate() => {
+                            validated.map_err(super::relay::validation_failed)?;
+                        }
+                    }
+                }
+                outcome => {
+                    if !super::wait_for_reader(
+                        &outcome,
+                        reader_attempt,
+                        self.markdown_recovery.clone(),
+                    )
+                    .await
+                    {
+                        return outcome;
+                    }
+                    reader_attempt += 1;
+                }
+            }
+        }
     }
 
     /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
@@ -1911,22 +2020,31 @@ pub(super) fn ydoc_open_state_on_store(
     // with the same reason the settle freeze uses; resolution lifts both.
     // Refuse an existing conflict before changing the lineage or draining.
     // If the drain opens a conflict, return its record facts with the refusal.
-    if expected_key_matches
-        && store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-conflict-open",
+    // A conflict a queued row opened before its drain waited is that drain's
+    // own, so this open checks it after the drain and reports it the same way.
+    let conflict_open = |store: &EngineStore| {
+        store.read_with(|conn| {
+            dohc_engine_sync::open_sync_conflict_for_object(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+            )
+            .map(|conflict| conflict.is_some())
+        })
+    };
+    let mut conflict_after_drain = false;
+    if expected_key_matches && conflict_open(store)? {
+        conflict_after_drain = drain_deferred
+            && restore_generation.is_none()
+            && store
+                .read_with(|conn| dohc_engine_sync::deferred_ydoc_opened_conflict(conn, &key))?;
+        if !conflict_after_drain {
+            return Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-conflict-open",
+            }
+            .into());
         }
-        .into());
     }
     // Retired artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
@@ -1990,7 +2108,7 @@ pub(super) fn ydoc_open_state_on_store(
     // behind its active editor with no event or resync signal. The RPC layer
     // rejects the mismatched open right after; skipping the drain keeps this
     // read side-effect-free for the foreign key.
-    let mut record_facts = Vec::new();
+    let mut drained = None;
     if drain_deferred
         && restore_generation.is_none()
         && expected_key_matches
@@ -2000,30 +2118,35 @@ pub(super) fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+        let (result, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
             store, doc_cache, &key, &NoFaults,
         )?;
+        // Its rows stay queued; once validation completes, the open runs
+        // its checks again and this drain reports them.
+        if let Some(pending) = result.waiting {
+            return Err(RuntimeError::DrainWaiting(pending));
+        }
         dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
-        if store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-        {
-            return Err(RuntimeError::YdocOpenConflict {
-                record_facts: drained.record_facts,
-            });
-        }
-        for declined in &drained.sharing_declined {
-            eprintln!("engine: {declined}");
-        }
-        record_facts = drained.record_facts;
+        drained = Some(result);
     }
+    // A conflict the earlier check left to the drain is refused here even
+    // when nothing drained.
+    if (drained.is_some() || conflict_after_drain) && conflict_open(store)? {
+        return Err(RuntimeError::YdocOpenConflict {
+            record_facts: drained
+                .map(|drained| drained.record_facts)
+                .unwrap_or_default(),
+        });
+    }
+    let record_facts = match drained {
+        Some(drained) => {
+            for declined in &drained.sharing_declined {
+                eprintln!("engine: {declined}");
+            }
+            drained.record_facts
+        }
+        None => Vec::new(),
+    };
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
     // correctness).
@@ -2247,6 +2370,7 @@ pub(super) fn ydoc_record_update_on_store(
     let mut sharing_declined: Option<SharingDeclined> = None;
     let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
     let reader_resolver = doc_cache.reader_resolver.clone();
+    let preparations = doc_cache.retirement_preparations();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -2312,6 +2436,7 @@ pub(super) fn ydoc_record_update_on_store(
                 attribution.as_ref(),
                 seed_source.as_ref(),
                 reader_resolver.as_deref(),
+                &preparations,
                 &mut sharing_declined,
                 outcome,
                 now_ms,
@@ -3760,6 +3885,7 @@ pub(super) fn refresh_markdown_witnesses_on_store(
     key: &DocKey,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
+    let preparations = cache.retirement_preparations();
     let pending = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
     for owed in pending
         .into_iter()
@@ -3896,6 +4022,7 @@ pub(super) fn refresh_markdown_witnesses_on_store(
                     None,
                     None,
                     resolver.as_deref(),
+                    &preparations,
                     &mut None,
                     outcome,
                     now_ms,
@@ -4181,15 +4308,17 @@ pub(super) fn ydoc_unload_pending(
     Ok((!covered).then_some(UnloadPending::Settlement))
 }
 
+/// Close the session on `key`: its outcome, and whether its deferred work
+/// drains next ([`ydoc_close_drain_on_store`]).
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     key: &DocKey,
-    materialization: Option<&YdocCloseMaterialization>,
+    root_dir: Option<&std::path::Path>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<YdocCloseSessionOutcome, RuntimeError> {
+) -> Result<(Option<CloseOutcome>, bool), RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -4204,19 +4333,11 @@ fn ydoc_close_session_on_store(
         dohc_engine_collab::live_update_application::restore_generation(conn, key)
     }) {
         Ok(generation) => generation,
-        Err(dohc_engine_collab::CollabError::RestoreFenced) => {
-            return Ok(YdocCloseSessionOutcome {
-                outcome: None,
-                record_facts: Vec::new(),
-            });
-        }
+        Err(dohc_engine_collab::CollabError::RestoreFenced) => return Ok((None, false)),
         Err(error) => return Err(error.into()),
     };
     let Some(mut marker) = dohc_engine_collab::read_marker(store, key)? else {
-        return Ok(YdocCloseSessionOutcome {
-            outcome: None,
-            record_facts: Vec::new(),
-        });
+        return Ok((None, false));
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
     // same workspace-file artifact rule (close_session refuses a dirty local
@@ -4229,7 +4350,7 @@ fn ydoc_close_session_on_store(
             store,
             key,
             &marker,
-            materialization.map(|materialization| materialization.root_dir.as_path()),
+            root_dir,
             doc_cache.reader_resolver.as_deref(),
         )?
     } else {
@@ -4276,32 +4397,62 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Committed(outcome) => outcome,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    let mut record_facts = Vec::new();
-    if marker.regime == Regime::Replicated && restore_generation.is_none() {
-        // The drain projects internally now (idempotent-by-sha, dependency-
-        // gated): drained remote content reaches the visible head with no
-        // session left to settle it. The drain holds its queue-row cleanup
-        // until materialization succeeded: a failed materialization would
-        // otherwise error out of this close after the rows — and the record
-        // facts persisted on them — were already deleted, and no retry could
-        // ever emit the events. With the rows kept, the retried
-        // close re-drains content-deduped and reads the facts back.
-        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
-            store, doc_cache, key, faults,
-        )?;
-        for declined in &drained.sharing_declined {
-            eprintln!("engine: {declined}");
-        }
-        if let Some(materialization) = materialization {
-            materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
-        }
-        let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
-        record_facts = drained.record_facts;
+    Ok((
+        Some(outcome),
+        marker.regime == Regime::Replicated && restore_generation.is_none(),
+    ))
+}
+
+/// Drain what a closed session on `key` deferred, and answer the record
+/// facts it committed. The drain projects internally (idempotent-by-sha,
+/// dependency-gated): drained remote content reaches the visible head with
+/// no session left to settle it. It holds its queue-row cleanup until
+/// materialization succeeded: a failed materialization would otherwise
+/// error out of this close after the rows — and the record facts persisted
+/// on them — were already deleted, and no retry could ever emit the events.
+/// With the rows kept, the retried close re-drains content-deduped and reads
+/// the facts back. A drain that waits for validation keeps its rows the
+/// same way. A restore that fenced the document since drains nothing.
+fn ydoc_close_drain_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    key: &DocKey,
+    materialization: Option<&YdocCloseMaterialization>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
     }
-    Ok(YdocCloseSessionOutcome {
-        outcome: Some(outcome),
-        record_facts,
-    })
+    match store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, key)
+    }) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(dohc_engine_collab::CollabError::RestoreFenced) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if !dohc_engine_collab::read_marker(store, key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        return Ok(Vec::new());
+    }
+    let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+        store, doc_cache, key, faults,
+    )?;
+    if let Some(pending) = drained.waiting {
+        return Err(RuntimeError::DrainWaiting(pending));
+    }
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    if let Some(materialization) = materialization {
+        materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
+    }
+    let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+    Ok(drained.record_facts)
 }
 
 fn materialize_ydoc_drain(
@@ -4402,6 +4553,11 @@ fn drain_deferred_ydoc_for_live_session_rpc(
         expected_lineage_claim_id,
         faults,
     )?;
+    // Its rows stay queued; once validation completes, the operation runs
+    // its checks again and this drain reports them.
+    if let Some(pending) = drained.waiting {
+        return Err(RuntimeError::DrainWaiting(pending));
+    }
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -5163,6 +5319,7 @@ fn journal_local_append_in_tx(
     attribution: Option<&ChangeAttribution>,
     seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     sharing_declined: &mut Option<SharingDeclined>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
@@ -5174,6 +5331,7 @@ fn journal_local_append_in_tx(
         path,
         outcome.seq,
         update,
+        preparations,
         now_ms,
     )?;
     if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
@@ -5280,6 +5438,7 @@ pub(super) fn journal_recovery_append_in_tx(
     update: &[u8],
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     outcome: &mut AppendOutcome,
     now_ms: i64,
 ) -> Result<bool, CollabError> {
@@ -5296,6 +5455,7 @@ pub(super) fn journal_recovery_append_in_tx(
         attribution,
         None,
         None,
+        preparations,
         &mut None,
         outcome,
         now_ms,

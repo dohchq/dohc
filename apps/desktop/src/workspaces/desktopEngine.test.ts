@@ -1055,10 +1055,42 @@ describe("server owner peer lifecycle", () => {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
       expect(documents).toHaveBeenCalled();
-      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([{path: "broken.md", detail: "owner-stop-corrupt"}]);
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([{objectId: "broken", path: "broken.md", detail: "owner-stop-corrupt"}]);
       f.engine.clearOwnerLiveStopFailure("owner",{objectId:"broken"});
       expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+  it("reports a requested Stop its release finished in the background as stopped", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-stop-released-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "stopped", lineageClaimId: "a".repeat(64),
+      currentPath: "stopped.md", selectorPaths: ["stopped.md"], restoreFenceGeneration: 1};
+    const row = {binding, document: {mainVersionId: "main", objectId: "stopped", currentPath: "stopped.md"},
+      retirementOwed: true, relayDatabaseNamespace: "namespace", state: "requested" as const};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    const client = f.client as unknown as EngineClient;
+    vi.spyOn(client, "ownerYDocStopList").mockResolvedValue([row]);
+    vi.spyOn(client, "ownerYDocStopRequest").mockResolvedValue(row);
+    const release = vi.spyOn(client, "ownerYDocRelease").mockResolvedValue({...row, state: "released" as const, materialized: false});
+    const documents = vi.fn(async () => ({ok: true, documents: []}));
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits, documents})};
+    // Main sends this uncoalesced, so the renderer's waiting notice for the document goes.
+    const stopped = vi.fn((_workspaceId: string, _objectId: string) => {});
+    f.dependencies.notifyOwnerLiveStopped = stopped;
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(documents).toHaveBeenCalled());
+      expect(release).toHaveBeenCalledOnce();
+      expect(stopped).toHaveBeenCalledExactlyOnceWith("owner", "stopped");
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
+    } finally {credentials.abort(); await f.close();}
   });
   it("keeps local work available when optional owner ingress preparation fails", async () => {
     const f = fixture();

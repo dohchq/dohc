@@ -6,6 +6,7 @@ import type {LinkAppCollectionRoute} from "./appCollectionRoutes";
 import type {OwnerAppPublicationRoute} from "./ownerAppPublicationRoutes";
 import type {OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import type {OwnerRestoreRoute} from "./ownerRestoreRoutes";
+import {MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute} from "./heldDocumentRoutes";
 import type {LinkChatRoute} from "./linkChatRoutes";
 import type {LinkReadRoute} from "./linkReadRoutes";
 import type {NoticeRoute} from "./noticeRoutes";
@@ -34,6 +35,7 @@ type SyncRelayRoute =
   | OwnerAppPublicationRoute
   | OwnerAppResponseRoute
   | OwnerRestoreRoute
+  | HeldDocumentRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
   | { route: "link-handoff" }
@@ -263,6 +265,14 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {
       return {route:"app-backend",workspaceId,publicationId,action:"blob",sha256:parts[6]};
+    }
+    throw notFound();
+  }
+  if (parts[2] === "held-documents") {
+    if (parts.length === 3) return {route: "held-documents", workspaceId};
+    if (parts.length === 4) return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS)};
+    if (parts.length === 5 && (parts[4] === "markdown" || parts[4] === "contributions")) {
+      return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS), read: parts[4]};
     }
     throw notFound();
   }

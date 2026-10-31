@@ -40,7 +40,8 @@ pub use actor::{
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
     TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
+    YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome,
+    YdocSettlement,
 };
 #[cfg(unix)]
 pub use actor::{

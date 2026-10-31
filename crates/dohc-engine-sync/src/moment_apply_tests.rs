@@ -1,3 +1,4 @@
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind as YdocContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, RollbackTextFileMutation, VersionedTextStore,
@@ -29,7 +30,34 @@ fn apply_moment_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn dohc_engine_storage::FaultInjector,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
-    crate::apply_moment_envelope(store, envelope, faults, &NoLiveLeases)
+    apply_leased(store, envelope, faults, &NoLiveLeases)
+}
+
+/// [`crate::apply_moment_envelope`] on fresh released tails: none of these
+/// documents has a released window.
+fn apply_leased(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+) -> Result<ApplyOutcome<i64>, SyncError> {
+    crate::apply_moment_envelope(store, envelope, faults, leases, &ReleasedTails::default())
+}
+
+/// [`crate::apply_moment_envelope_detailed`] on fresh released tails.
+fn apply_detailed(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+) -> Result<ApplyOutcome<crate::MomentApplyResult>, SyncError> {
+    crate::apply_moment_envelope_detailed(
+        store,
+        envelope,
+        faults,
+        leases,
+        &ReleasedTails::default(),
+    )
 }
 
 fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> ReplicationEnvelope {
@@ -674,9 +702,7 @@ fn moment_only_record_write_and_undo_each_keep_their_field_history() {
         ),
     );
     for op in [&write, &undo] {
-        let result =
-            crate::apply_moment_envelope_detailed(&mut store, op, &NoFaults, &NoLiveLeases)
-                .unwrap();
+        let result = apply_detailed(&mut store, op, &NoFaults, &NoLiveLeases).unwrap();
         let ApplyDisposition::Applied(result) = result.primary else {
             panic!("moment-only field change must apply")
         };
@@ -1105,8 +1131,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
             )
         })
         .unwrap();
-    let old_result =
-        crate::apply_moment_envelope_detailed(&mut store, &old, &NoFaults, &NoLiveLeases).unwrap();
+    let old_result = apply_detailed(&mut store, &old, &NoFaults, &NoLiveLeases).unwrap();
     assert!(
         matches!(old_result.primary, ApplyDisposition::Applied(ref result) if result.materialization_changes.is_empty() && result.conflicts_opened == 0)
     );
@@ -1147,15 +1172,13 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         ),
     );
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
+        apply_leased(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
             .unwrap()
             .primary,
         ApplyDisposition::Refused(_)
     ));
     assert_eq!(snapshot(&store, "object"), before);
-    let latest_result =
-        crate::apply_moment_envelope_detailed(&mut store, &latest, &NoFaults, &crate::AlwaysLive)
-            .unwrap();
+    let latest_result = apply_detailed(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap();
     assert!(
         matches!(latest_result.primary, ApplyDisposition::Applied(ref result)
         if result.conflicts_opened == 0 && result.record_facts.is_none())
@@ -1269,13 +1292,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
                 &restored_text,
             ),
         );
-        let result = crate::apply_moment_envelope_detailed(
-            &mut store,
-            &restore,
-            &NoFaults,
-            &crate::AlwaysLive,
-        )
-        .unwrap();
+        let result = apply_detailed(&mut store, &restore, &NoFaults, &crate::AlwaysLive).unwrap();
         assert!(
             matches!(result.primary, ApplyDisposition::Applied(ref result)
             if result.record_facts.is_none())
@@ -1343,7 +1360,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     );
     // Any other change to an open document still waits for its editor.
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
+        apply_leased(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -1405,7 +1422,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         ..unrelated.clone()
     };
     assert!(matches!(
-        crate::apply_moment_envelope(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
+        apply_leased(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -1447,7 +1464,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         1
     );
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
     assert!(!waiting.has_more);
@@ -1499,13 +1516,9 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     };
     // The parked settlement no longer waits for the owner's open editor. It
     // writes accepted state only; the pending draft stays out of the file.
-    let leased = crate::moment_apply::pending::drain_and_claim(
-        &mut store,
-        "ws",
-        &NoFaults,
-        &crate::AlwaysLive,
-    )
-    .unwrap();
+    let leased =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &crate::AlwaysLive)
+            .unwrap();
     assert_eq!(leased.changes.len(), 1);
     assert_eq!(leased.changes[0].path, "tasks/owner.md");
     assert!(leased.report_id.is_some());
@@ -1565,7 +1578,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     drop(store);
     let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 9).unwrap();
     let replay =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert_eq!(replay.changes, settled_changes);
     assert_ne!(replay.report_id, applied_cursor.settlement_report_id);
@@ -1735,7 +1748,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     assert_eq!(parked, vec![serde_json::to_string(&next).unwrap(); 2]);
     assert_eq!(snapshot(&store, "object"), before);
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
     assert!(waiting.changes.is_empty());
@@ -1751,7 +1764,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     // The replay repeats every check against the authenticated binding: the
     // restore reaches the file, and audit alone never authorizes content.
     let settled =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert_eq!(settled.changes.len(), 1);
     assert_eq!(settled.changes[0].path, "owner.md");
@@ -1817,7 +1830,7 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
         (generation(2), 2)
     );
     let report =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(report.changes.is_empty());
     assert!(report.report_id.is_some());
@@ -1960,7 +1973,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
         1
     );
     let waiting =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(waiting.report_id.is_none());
 
@@ -2050,13 +2063,9 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
     let mut next = observed.binding.clone();
     if later_generation {
-        let waiting = crate::moment_apply::pending::drain_and_claim(
-            &mut store,
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
+        let waiting =
+            crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+                .unwrap();
         assert!(
             waiting.report_id.is_none(),
             "rename still waits for the cursor"
@@ -2067,7 +2076,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
     let before = snapshot(&store, "object");
     let mut report =
-        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
             .unwrap();
     assert!(
         report.report_id.is_some(),
@@ -2107,13 +2116,9 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
                 )
             })
             .unwrap();
-        report = crate::moment_apply::pending::drain_and_claim(
-            &mut store,
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
+        report =
+            crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+                .unwrap();
         assert!(report.report_id.is_some());
         assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
         assert!(
@@ -2220,14 +2225,456 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
 }
 
+/// Sol's ruling 1 drain fixture: an owner observed at restore generation 0
+/// queues the restore's settlement ("host") and one the host never accepted
+/// ("later") until its feed reaches generation 1, with two more ("a-moved",
+/// "z-moved") whose queued binding the owner has since left. A capture of
+/// the lineage was released without adopting, its binding still the
+/// owner's, so no activation is current and the lineage's first decision
+/// waits for validation. The drain reads a-moved, host, later, z-moved.
+struct DrainWindow {
+    owner: RestoreOwner,
+    restore_id: String,
+    restored_text: String,
+}
+
+fn drain_window() -> DrainWindow {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    let mut owner = restore_owner();
+    let next = LiveObjectBinding {
+        restore_fence_generation: 1,
+        ..owner.observed.binding.clone()
+    };
+    let (restored, restored_text) = restored_host(&owner.checkpoint, "restored by the owner");
+    let forged_text = "a restore the host never accepted";
+    hydrate_texts(&mut owner.store, &[&restored_text, forged_text]);
+    let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
+    for (origin, digit, text) in [
+        ("a-moved", "c", forged_text),
+        ("host", "b", restored_text.as_str()),
+        ("later", "d", forged_text),
+        ("z-moved", "e", forged_text),
+    ] {
+        let id = format!("moment-ydoc-{}", digit.repeat(64));
+        retain_restore_audit(&owner.store, &next, "relay", &id, text, 1);
+        let settlement = restore_settlement(
+            origin,
+            &id,
+            &owner.initial_text,
+            &owner.initial_moment,
+            text,
+        );
+        assert_eq!(
+            apply_moment_envelope(&mut owner.store, &settlement, &NoFaults).unwrap(),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{origin} waits for the restore generation"
+        );
+    }
+    owner
+        .store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE owner_pending_settlements \
+                 SET binding_json=json_set(binding_json,'$.selectorPaths',json_array('owner.md','moved.md')) \
+                 WHERE origin_id IN ('a-moved','z-moved')",
+                [],
+            )
+        })
+        .unwrap();
+    enroll_restore(
+        &mut owner.store,
+        &next,
+        &restored,
+        1,
+        &owner.observed.limits,
+    );
+    owner
+        .store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,\
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,\
+                   source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
+                   released_at_ms,released_restore_generation,released_accepted_cursor,\
+                   released_boundary_json,carried_manifest_json) \
+                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',20,1,1,'null','[]')",
+                params![
+                    next.lineage_claim_id,
+                    serde_json::to_string(&next).unwrap(),
+                    owner.initial_moment,
+                    text_sha(&owner.initial_text),
+                    owner.initial_text.len() as i64
+                ],
+            )
+        })
+        .unwrap();
+    DrainWindow {
+        owner,
+        restore_id,
+        restored_text,
+    }
+}
+
+/// Each queued settlement in drain order: its origin, whether it was
+/// scheduled, whether it applied, and the report that owns it.
+fn drain_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<String>)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_id,checked_sequence>0,applied,report_id FROM owner_pending_settlements \
+                 ORDER BY checked_sequence,terminal_cursor,origin_id,origin_seq",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect()
+        })
+        .unwrap()
+}
+
+/// One attempt of the drain into `report`, on `tails`.
+fn drain_once(
+    store: &mut EngineStore,
+    tails: &ReleasedTails,
+    report: &mut crate::moment_apply::pending::PendingSettlementReport,
+) -> Result<(), SyncError> {
+    crate::moment_apply::pending::drain_and_claim(
+        store,
+        "ws",
+        tails,
+        report,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+}
+
+/// The drain's first attempt, which waits at the host settlement: the
+/// pending validation and the report that owns a-moved.
+fn drain_to_host(
+    store: &mut EngineStore,
+    tails: &ReleasedTails,
+    report: &mut crate::moment_apply::pending::PendingSettlementReport,
+) -> (
+    Box<dohc_engine_collab::live_update_application::PendingValidation>,
+    String,
+) {
+    let Err(SyncError::ValidationPending(pending)) = drain_once(store, tails, report) else {
+        panic!("the host settlement's decision waits for validation");
+    };
+    let report_id = report.report_id.clone().expect("a-moved's report");
+    (pending, report_id)
+}
+
+fn commit_settlement_report(store: &mut EngineStore, report_id: Option<String>) {
+    let committed = crate::commit_relay_cursor(
+        store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 0,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report_id,
+            ordinary_pull: None,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        10,
+    )
+    .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+}
+
+fn refusal_message(store: &EngineStore, origin: &str) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id=?1",
+                [origin],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Sol's ruling 1: at the drain's first decision that waits for validation,
+/// the waiting settlement rolls back with its scheduling, the one before it
+/// commits with its report, and nothing after it is read. Once validation
+/// completes the drain goes on from the settlement that waited, in the same
+/// report: every row it completes, before and after the wait, carries one
+/// id, and its change is reported once.
+#[test]
+fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        restore_id,
+        restored_text,
+    } = drain_window();
+    let before = snapshot(&store, "object");
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, report_id) = drain_to_host(&mut store, &tails, &mut report);
+    let owned = Some(report_id.clone());
+    assert_eq!(
+        drain_queue(&store),
+        [
+            ("host".into(), false, false, None),
+            ("later".into(), false, false, None),
+            ("z-moved".into(), false, false, None),
+            ("a-moved".into(), true, true, owned.clone()),
+        ],
+        "only a-moved committed; host rolled back its scheduling"
+    );
+    assert_eq!(disposition(&store, "a-moved").as_deref(), Some("refused"));
+    assert_eq!(
+        refusal_message(&store, "a-moved"),
+        crate::moment_apply::pending::BINDING_CHANGED
+    );
+    for origin in ["host", "later", "z-moved"] {
+        assert_eq!(
+            disposition(&store, origin).as_deref(),
+            Some("applied"),
+            "{origin} is still queued"
+        );
+    }
+    assert_eq!(snapshot(&store, "object"), before, "host wrote nothing");
+    assert!(report.changes.is_empty());
+    assert_eq!(
+        tails.validation_requests(),
+        0,
+        "nothing asked the worker yet"
+    );
+
+    pending.validate().wait().unwrap();
+    drain_once(&mut store, &tails, &mut report).unwrap();
+    assert_eq!(report.report_id, owned);
+    assert_eq!(
+        drain_queue(&store),
+        [
+            ("a-moved".into(), true, true, owned.clone()),
+            ("host".into(), true, true, owned.clone()),
+            ("later".into(), true, true, owned.clone()),
+            ("z-moved".into(), true, true, owned.clone()),
+        ]
+    );
+    assert_eq!(
+        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
+        Some((text_sha(&restored_text), restore_id))
+    );
+    assert_eq!(report.changes.len(), 1, "{:?}", report.changes);
+    assert_eq!(report.changes[0].path, "owner.md");
+    assert!(!report.has_more);
+    for origin in ["later", "z-moved"] {
+        assert_eq!(
+            disposition(&store, origin).as_deref(),
+            Some("refused"),
+            "{origin}"
+        );
+    }
+    assert_eq!((tails.validation_requests(), tails.validations()), (1, 1));
+    commit_settlement_report(&mut store, owned);
+    assert!(
+        drain_queue(&store).is_empty(),
+        "the report released every row"
+    );
+}
+
+/// Sol's ruling 1, the retry: a completed validation authorizes nothing by
+/// itself. The owner's binding moves while the drain waits, so the
+/// settlement that waited is refused when the drain goes on; and a tail input
+/// that changes after validation completes makes it wait again for the
+/// generation it then reads.
+#[test]
+fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        ..
+    } = drain_window();
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, _) = drain_to_host(&mut store, &tails, &mut report);
+    pending.validate().wait().unwrap();
+    // The capture's release record changes: the generation moves past the
+    // one just validated.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_activations SET released_at_ms=21 WHERE activation_id='capture'",
+                [],
+            )
+        })
+        .unwrap();
+    let Err(SyncError::ValidationPending(again)) = drain_once(&mut store, &tails, &mut report)
+    else {
+        panic!("the moved generation waits for its own validation");
+    };
+    assert_eq!(
+        drain_queue(&store)[0],
+        ("host".into(), false, false, None),
+        "host rolled back again"
+    );
+    again.validate().wait().unwrap();
+    assert_eq!(tails.validation_requests(), 2);
+    let before = snapshot(&store, "object");
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE ydoc_owner_bindings \
+                 SET binding_json=json_set(binding_json,'$.selectorPaths',json_array('owner.md','renamed.md'))",
+                [],
+            )
+        })
+        .unwrap();
+    drain_once(&mut store, &tails, &mut report).unwrap();
+    assert_eq!(disposition(&store, "host").as_deref(), Some("refused"));
+    assert_eq!(
+        refusal_message(&store, "host"),
+        crate::moment_apply::pending::BINDING_CHANGED
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    assert!(report.changes.is_empty());
+}
+
+/// Sol's ruling 1, cancellation and crash: a request that stops waiting
+/// leaves its committed prefix for the next pull, which reclaims it under a
+/// report of its own. Rows a report applied stay reclaimable, with their
+/// materialization, until a cursor naming that report commits: an older
+/// report releases nothing.
+#[test]
+fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_next_pull() {
+    let DrainWindow {
+        owner:
+            RestoreOwner {
+                _scratch: scratch,
+                mut store,
+                ..
+            },
+        ..
+    } = drain_window();
+    let tails = ReleasedTails::default().bound_to(&store);
+    let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
+    let (pending, abandoned) = drain_to_host(&mut store, &tails, &mut report);
+    // The request is cancelled, and the engine stops before anything goes on.
+    drop((pending, report));
+    let path = engine_db_path(&scratch).unwrap();
+    drop(store);
+    let mut store = EngineStore::open(&path, 5).unwrap();
+    let next =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    let reclaimed = next.report_id.clone().expect("the next pull's report");
+    assert_ne!(reclaimed, abandoned);
+    assert!(
+        drain_queue(&store)
+            .iter()
+            .all(|(_, _, applied, owner)| *applied && owner.as_deref() == Some(reclaimed.as_str())),
+        "the next pull owns the abandoned prefix and the rest"
+    );
+    assert_eq!(next.changes.len(), 1, "{:?}", next.changes);
+    // That pull is lost too, after its writes and before its cursor commits.
+    drop(store);
+    let mut store = EngineStore::open(&path, 6).unwrap();
+    let last =
+        crate::moment_apply::pending::drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert_eq!(
+        last.changes, next.changes,
+        "the materialization is reclaimed"
+    );
+    commit_settlement_report(&mut store, Some(abandoned));
+    commit_settlement_report(&mut store, Some(reclaimed));
+    assert_eq!(
+        drain_queue(&store).len(),
+        4,
+        "older reports release nothing"
+    );
+    commit_settlement_report(&mut store, last.report_id);
+    assert!(drain_queue(&store).is_empty());
+}
+
+/// Sol's ruling 1, the pass: a pull whose drain waits keeps what it fetched
+/// and the drain's report. Its next run fetches nothing again and goes on
+/// with the same report, so the cursor it returns owns the settlement that
+/// committed before the wait, with that settlement's refusal.
+#[test]
+fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
+    let DrainWindow {
+        owner: RestoreOwner {
+            _scratch,
+            mut store,
+            ..
+        },
+        ..
+    } = drain_window();
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![],
+        next_cursor: 0,
+        has_more: false,
+    });
+    let mut cache = dohc_engine_collab::WriterDocCache::default();
+    let Err(crate::RelayError::ValidationPending(pending)) =
+        client.pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 7)
+    else {
+        panic!("the pull's drain waits");
+    };
+    let committed = drain_queue(&store)
+        .into_iter()
+        .find_map(|(origin, _, _, report)| (origin == "a-moved").then_some(report))
+        .flatten()
+        .expect("a-moved committed before the wait");
+    // A second fetch fails the pass.
+    *client.transport().pull.lock().unwrap() = None;
+    pending.validate().wait().unwrap();
+    let crate::SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        changed_paths,
+        refusals,
+        ..
+    } = client
+        .pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 8)
+        .unwrap()
+    else {
+        panic!("the pass completes");
+    };
+    assert_eq!(
+        cursor.settlement_report_id.as_deref(),
+        Some(committed.as_str())
+    );
+    assert_eq!(
+        changed_paths
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        ["owner.md"]
+    );
+    let mut refused: Vec<_> = refusals
+        .iter()
+        .map(|refusal| refusal.origin_id.as_str())
+        .collect();
+    refused.sort_unstable();
+    assert_eq!(refused, ["a-moved", "later", "z-moved"]);
+    crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &NoLiveLeases, 9).unwrap();
+    assert!(drain_queue(&store).is_empty());
+}
+
 /// An owner observed at restore generation 0 and accepted cursor 0.
 struct RestoreOwner {
-    _scratch: ScratchDir,
     store: EngineStore,
     observed: dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding,
     checkpoint: Vec<u8>,
     initial_text: String,
     initial_moment: String,
+    _scratch: ScratchDir,
 }
 
 fn restore_owner() -> RestoreOwner {
@@ -2312,6 +2759,14 @@ fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> Restor
         initial_text: initial_text.into(),
         initial_moment,
     }
+}
+
+#[test]
+fn restore_owner_drop_removes_scratch() {
+    let owner = restore_owner();
+    let path = owner._scratch.path().to_owned();
+    drop(owner);
+    assert!(!path.exists(), "scratch cleanup left {}", path.display());
 }
 
 #[test]
@@ -2716,12 +3171,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
                 }))
             })
             .unwrap();
-        let result = crate::apply_moment_envelope_detailed(
-            &mut owner.store,
-            &settlement,
-            &NoFaults,
-            &crate::AlwaysLive,
-        );
+        let result = apply_detailed(&mut owner.store, &settlement, &NoFaults, &crate::AlwaysLive);
         owner
             .store
             .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
@@ -2733,13 +3183,8 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         assert_eq!(owner.store.table_row_count("replication_log").unwrap(), log);
         assert_pending_status(&owner);
     }
-    let result = crate::apply_moment_envelope_detailed(
-        &mut owner.store,
-        &settlement,
-        &NoFaults,
-        &crate::AlwaysLive,
-    )
-    .unwrap();
+    let result =
+        apply_detailed(&mut owner.store, &settlement, &NoFaults, &crate::AlwaysLive).unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
     if let Some(mut fields) = draft_fields {
         // Accepted `.nan` takes its parse flag. Draft values keep their index.
@@ -2770,7 +3215,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         );
         apply_test_owner_frame(&mut owner, update, cursor);
         assert_pending_status(&owner);
-        let drained = super::moment_apply::pending::drain_and_claim(
+        let drained = super::moment_apply::pending::drain_to_end(
             &mut owner.store,
             "ws",
             &NoFaults,
@@ -5434,12 +5879,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                     absent_text_payload("foreign-artifact", "object", "head.md", "artifact"),
                 );
                 assert!(matches!(
-                    crate::apply_moment_envelope_detailed(
-                        &mut store,
-                        &foreign,
-                        &NoFaults,
-                        &crate::AlwaysLive
-                    ),
+                    apply_detailed(&mut store, &foreign, &NoFaults, &crate::AlwaysLive),
                     Err(SyncError::RetryableState {
                         reason: "ydoc-session-live"
                     })
@@ -5499,9 +5939,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 ),
             );
             let faults = ScriptedFaults::crash_at(point);
-            let result =
-                crate::apply_moment_envelope_detailed(&mut store, &op, faults.as_ref(), &leases)
-                    .unwrap();
+            let result = apply_detailed(&mut store, &op, faults.as_ref(), &leases).unwrap();
             assert!(matches!(result.primary, ApplyDisposition::Crashed { .. }));
             assert!(faults.fired());
             drop(store);
@@ -5520,8 +5958,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 read_replication_acked_seq(&store, "ws", "peer").unwrap(),
                 if durable { seq } else { seq - 1 }
             );
-            let result =
-                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+            let result = apply_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
             if let ApplyDisposition::Applied(applied) = result.primary {
                 assert_eq!(applied.conflicts_opened, 0);
                 assert!(applied.materialization_changes.is_empty());
@@ -5547,7 +5984,7 @@ fn assert_covered_artifact_crash_replay(changed: bool) {
                 "SELECT COUNT(*) FROM moments WHERE moment_id='moment-ydoc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND sync_record_only=1", [], |r|r.get(0))).unwrap();
             assert_eq!(rows, 1);
             assert!(matches!(
-                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases)
+                apply_detailed(&mut store, &op, &NoFaults, &leases)
                     .unwrap()
                     .primary,
                 ApplyDisposition::Skipped
@@ -5847,7 +6284,7 @@ fn assert_open_document_exclusion(case: &str) {
     let ack = read_replication_acked_seq(&store, "ws", &op.origin_id).unwrap();
     assert!(
         matches!(
-            crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+            apply_detailed(&mut store, &op, &NoFaults, &leases),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -5902,7 +6339,7 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     let leases = LeaseRegistry::new();
     let held = leases.acquire(&key).unwrap();
     assert!(matches!(
-        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+        apply_detailed(&mut store, &op, &NoFaults, &leases),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
@@ -5914,8 +6351,7 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     assert_eq!(store.table_row_count("moments").unwrap(), 1);
 
     drop(held);
-    let result =
-        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+    let result = apply_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
     assert!(matches!(
         result.primary,
         ApplyDisposition::Refused(ReplicationRefusal {
@@ -7918,7 +8354,7 @@ pub(crate) fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc
             "before remote",
         ),
     );
-    crate::apply_moment_envelope_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
+    apply_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
     drop(held);
     (scratch, store, key, doc, claim)
 }
@@ -7931,6 +8367,151 @@ fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, Sy
         &NoLiveLeases,
         &NoFaults,
     )
+}
+
+/// Opus's fourth finding on 3409694c7: a document whose artifact is already
+/// written gets no recovery-failure notice while an unrelated queued row
+/// keeps its pending-artifact mark.
+#[test]
+fn recovery_posts_no_failure_for_a_written_artifact_while_other_rows_stay_queued() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TEMP TABLE kept_marks AS SELECT * FROM ydoc_pending_artifacts; \
+                 CREATE TEMP TABLE kept_rows AS SELECT * FROM ydoc_deferred_updates;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        store.table_row_count("ydoc_pending_artifacts").unwrap(),
+        0,
+        "recovery wrote the artifact"
+    );
+    // A row no drain of the document takes stays queued, its mark comes
+    // back with it, and the file is written.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "UPDATE kept_rows SET origin_seq=2; \
+                 INSERT INTO ydoc_deferred_updates SELECT * FROM kept_rows; \
+                 INSERT INTO ydoc_pending_artifacts SELECT * FROM kept_marks; \
+                 UPDATE materialization_jobs SET status='complete',completed_at_ms=0 \
+                   WHERE status='pending'; \
+                 DROP TABLE kept_rows; DROP TABLE kept_marks;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    let left: (i64, i64, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM replication_pending_refusals WHERE reason_code=?1), \
+                   (SELECT COUNT(*) FROM ydoc_pending_artifacts), \
+                   (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                [crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(left, (0, 1, 1), "no notice; the row and its mark stay");
+}
+
+/// Sol's third and Opus's first findings on 3409694c7: recovery in a pass
+/// writes what the rows of a document it completes committed as drain
+/// reports, in the transaction that removes them, so a later op's wait, an
+/// abandoned pass or a restart still reports them once, with no recovery
+/// failure. The direct recovery API answers the same results at once.
+#[test]
+fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
+    type Reported = (
+        Vec<(String, &'static str)>,
+        Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        i64,
+    );
+    fn paths(changes: &[crate::MomentMaterializationChange]) -> Vec<(String, &'static str)> {
+        changes
+            .iter()
+            .map(|change| (change.path.clone(), change.operation))
+            .collect()
+    }
+    fn marks(store: &EngineStore) -> (i64, i64) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM replication_pending_refusals WHERE reason_code=?1), \
+                       (SELECT COUNT(*) FROM ydoc_pending_artifacts)",
+                    [crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    let direct = recover_ended(&mut store).unwrap();
+    assert_eq!(store.table_row_count("ydoc_drain_reports").unwrap(), 0);
+    let expected: Reported = (
+        paths(&direct.changes),
+        direct.record_facts.clone(),
+        direct.conflicts_opened,
+    );
+    let direct_marks = marks(&store);
+    assert_eq!(direct_marks.0, 0, "no recovery failure");
+
+    for restart in [false, true] {
+        let (scratch, mut store, _, _, _) = ended_recovery_fixture();
+        let recovered = crate::moment_apply::open_artifacts::drain_open_document_artifacts_durably(
+            &mut store,
+            &mut Default::default(),
+            "ws",
+            &NoLiveLeases,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(recovered.waiting.is_none());
+        assert!(
+            recovered.changes.is_empty()
+                && recovered.record_facts.is_empty()
+                && recovered.conflicts_opened == 0,
+            "restart={restart}: the drain reports carry them"
+        );
+        assert_eq!(marks(&store), direct_marks, "restart={restart}");
+
+        // A later op of the pass waits and the pass is abandoned, or the
+        // store restarts; the next pass claims the reports.
+        let mut store = if restart {
+            drop(store);
+            EngineStore::open(&engine_db_path(&scratch).unwrap(), 3_000).unwrap()
+        } else {
+            store
+        };
+        let mut first = None;
+        let claimed = crate::drain_report::claim(&mut store, "ws", &mut first, &NoFaults).unwrap();
+        let reported: Reported = (
+            paths(&claimed.extras.changes),
+            claimed.record_facts,
+            claimed.extras.conflicts_opened,
+        );
+        assert_eq!(reported, expected, "restart={restart}");
+        let mut second = None;
+        let again = crate::drain_report::claim(&mut store, "ws", &mut second, &NoFaults).unwrap();
+        assert_eq!(paths(&again.extras.changes), expected.0);
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::cursor::release_settlement_report_in_tx(
+                    tx,
+                    "ws",
+                    second.as_deref().expect("a report token"),
+                )
+            })
+            .unwrap();
+        assert_eq!(store.table_row_count("ydoc_drain_reports").unwrap(), 0);
+        assert_eq!(marks(&store), direct_marks, "restart={restart}");
+    }
 }
 
 #[test]

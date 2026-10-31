@@ -700,10 +700,11 @@ fn parkable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<bo
                    WHERE workspace_id=?1 AND object_id=?2) \
                  AND NOT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources a \
                    WHERE a.workspace_id=?1 AND a.object_id=?2 \
-                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions o \
+                     AND NOT EXISTS(SELECT 1 FROM live_owner_activations o \
                        WHERE o.workspace_id=a.workspace_id AND o.main_version_id=a.version_id \
                          AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id \
-                         AND o.relay_database_namespace=a.relay_database_namespace))"
+                         AND o.relay_database_namespace=a.relay_database_namespace \
+                         AND o.activation_id=a.activation_id))"
             ),
             params![workspace_id, object_id],
             |row| row.get(0),
@@ -745,7 +746,9 @@ const PARK: [&str; 9] = [
     "DELETE FROM capture_file_holds WHERE workspace_id=?1 AND object_id=?2",
     "DELETE FROM share_direct_write_marks WHERE workspace_id=?1 AND object_id=?2",
     "UPDATE hosted_documents SET state='parked',held_reason=NULL,held_path=NULL,held_by=NULL, \
-     held_conflict_id=NULL,unmaterialized_seq=NULL WHERE workspace_id=?1 AND object_id=?2",
+     held_conflict_id=NULL,released_hold_binding_json=NULL,released_hold_binding_digest=NULL, \
+     released_hold_continuation=NULL,released_hold_binding_stale=0,unmaterialized_seq=NULL \
+     WHERE workspace_id=?1 AND object_id=?2",
 ];
 
 /// The documents of the scope whose heads are parked. `?1` is the workspace.
