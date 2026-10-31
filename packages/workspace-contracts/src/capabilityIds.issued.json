@@ -263,5 +263,6 @@
   "agent.run.retry",
   "settings.agents.order",
   "device.update.download",
-  "app.view"
+  "app.view",
+  "app.local.check"
 ]

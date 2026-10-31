@@ -1038,6 +1038,10 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     ],
   },
   listLocal: { summary: "List an app's publications on this computer." },
+  checkLocal: {
+    summary: "Read an app's current source revision on this computer.",
+    notes: ["Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval."],
+  },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
     notes: ["Review the source and the Collection access it asks for, then approve."],
@@ -1046,7 +1050,10 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     summary: "Get a local URL for an approved app.",
     notes: ["The URL works on this computer while dohc is open. It is not a share link."],
   },
-  list: { summary: "List an app's shared publications." },
+  list: {
+    summary: "List an app's shared publications.",
+    notes: ["listUnavailable means the server does not publish apps for this workspace."],
+  },
   prepare: {
     summary: "Prepare an app for a share link.",
     take: [

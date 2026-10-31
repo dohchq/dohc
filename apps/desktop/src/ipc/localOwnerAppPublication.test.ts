@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
+import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
 import { createLocalOwnerAppPublicationHandler } from "./localOwnerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTestScratch } from "../workspaces/testTemp";
 
-vi.mock("../workspaces/ownerAppPublication", () => ({ prepareLocalAppPublication: vi.fn() }));
+vi.mock("../workspaces/ownerAppPublication", () => ({ prepareLocalAppPublication: vi.fn(), readLocalAppSource: vi.fn() }));
 const hash = "a".repeat(64);
 const capability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: hash,
   operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "list", access: "owner" as const, readOnly: true }] };
@@ -25,15 +25,16 @@ function harness() {
   const local = { approvedArtifacts: vi.fn(), apps: { activate, has, withdraw, list: vi.fn(() => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, datasetCapability: capability, approved: true, active: true }]) } } as unknown as Pick<LocalDatasetHost, "approvedArtifacts" | "apps">;
   const datasetForWorkspace = vi.fn(async () => local);
   const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
+  const flushCapture = vi.fn(async () => ({ deferredWrites: ["app/draft.ts"] }));
   const handler = createLocalOwnerAppPublicationHandler({ datasetForWorkspace, launchLocalDataset,
-    flushCapture: vi.fn(async () => ({ deferredWrites: [] })), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
+    flushCapture, withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
   const prepare = async () => {
     const result = await handler({ action: "prepareLocal", workspaceId: "w", appRoot: "app" }, "caller", operation);
     if (result?.kind !== "prepared") throw new Error("Expected preparation.");
     return result;
   };
-  return { controller, operation, activate, has, withdraw, datasetForWorkspace, launchLocalDataset, handler, prepare };
+  return { controller, operation, activate, has, withdraw, datasetForWorkspace, flushCapture, launchLocalDataset, handler, prepare };
 }
 afterEach(() => vi.clearAllMocks());
 describe("local app publication review", () => {
@@ -72,6 +73,28 @@ describe("local app publication review", () => {
     const review = await h.prepare();
     expect(await h.handler({ action: "cancel", workspaceId: "w", approvalId: review.approvalId }, "caller", h.operation)).toEqual({ kind: "cancelled" });
     expect(h.activate).not.toHaveBeenCalled();
+  });
+  it("reads an app's current source revision after flushing waiting edits, without preparing it", async () => {
+    const h = harness();
+    vi.mocked(readLocalAppSource).mockResolvedValue({ sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
+    expect(await h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation))
+      .toEqual({ kind: "localChecked", appRoot: "app", sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
+    expect(h.flushCapture).toHaveBeenCalledWith(h.operation.workspace);
+    expect(readLocalAppSource).toHaveBeenCalledWith({ action: "checkLocal", workspaceId: "w", appRoot: "app" },
+      expect.objectContaining({ signal: h.controller.signal, deferredWrites: ["app/draft.ts"] }));
+    expect(prepareLocalAppPublication).not.toHaveBeenCalled();
+  });
+  it.each(["shared-with-me/app", "../app", ".dohc/app"])("refuses to read the source of %s, which is outside the workspace's own files", async appRoot => {
+    const h = harness();
+    await expect(h.handler({ action: "checkLocal", workspaceId: "w", appRoot }, "caller", h.operation)).rejects.toThrow("Choose an app in your workspace.");
+    await expect(h.handler({ action: "listLocal", workspaceId: "w", appRoot }, "caller", h.operation)).rejects.toThrow("Choose an app in your workspace.");
+    expect(h.flushCapture).not.toHaveBeenCalled();
+    expect(readLocalAppSource).not.toHaveBeenCalled();
+  });
+  it("refuses a source revision read after its operation ended", async () => {
+    const h = harness();
+    vi.mocked(readLocalAppSource).mockImplementation(async () => { h.controller.abort(); return { sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: true }; });
+    await expect(h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation)).rejects.toThrow();
   });
   it("launches only a loopback approved publication and refuses a late result", async () => {
     const h = harness();

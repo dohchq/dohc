@@ -4,7 +4,7 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
+import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 
@@ -20,7 +20,7 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
   const preparing = new Set<string>();
   return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution?: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null> => {
     const agent = parseApprovalAgent(attribution);
-    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" &&
+    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "checkLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" &&
       input.action !== "withdraw" && input.action !== "revokeCollection") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
@@ -58,6 +58,15 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
     if (input.action === "listLocal") {
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
       return OwnerAppPublicationResult.parse({ kind: "localListed", publications: local.apps.list(input.appRoot) });
+    }
+    if (input.action === "checkLocal") {
+      const capture = await deps.flushCapture(operation.workspace); current();
+      const source = await deps.withAdapter(operation.workspace, adapter => readLocalAppSource(input, {
+        adapter, signal: operation.signal, assertCurrent: current, deferredWrites: capture.deferredWrites,
+      }));
+      current();
+      if (!source) throw new Error("dohc could not read this app's source. Restart dohc and try again.");
+      return OwnerAppPublicationResult.parse({ kind: "localChecked", appRoot: input.appRoot, ...source });
     }
     if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
     for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();

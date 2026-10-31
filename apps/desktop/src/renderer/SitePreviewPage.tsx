@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
@@ -234,6 +234,8 @@ export function SitePreviewPage(props: {
   focused?: boolean;
   // The app's title, for its tab.
   onTitle?: (title: string) => void;
+  // The workspace's server connection, for Review app's Share links.
+  access?: ComponentProps<typeof OwnerAppPublication>["access"];
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -728,8 +730,8 @@ export function SitePreviewPage(props: {
     !props.sharedView &&
     site?.authority.kind === "workspace" &&
     !!props.onShareSite;
-  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0
-    && site.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const declaresApp = !!site?.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
@@ -820,7 +822,8 @@ export function SitePreviewPage(props: {
             </IconButton>
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
-            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
+            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} title={site.title} reportError={props.reportError} access={props.access}
+              localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
               testId={needsPublication ? "app-view-review" : "site-preview-review"} open={reviewOpen} onOpenChange={setReviewOpen}
               onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
