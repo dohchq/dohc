@@ -233,6 +233,7 @@ export function ChatLane(props: {
     setSending(false);
     setDispatch(null);
     setStopping(false);
+    setRetrying(false);
     setFirstUnreadMessageId(null);
     paintedRevision.current = null;
     setLoading(true);

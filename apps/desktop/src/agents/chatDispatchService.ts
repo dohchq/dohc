@@ -1625,7 +1625,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
-    const pendingRead = dispatch.listPending(workspaceId);
+    const pendingRead = Promise.resolve(dispatch.listPending(workspaceId));
     const [pauseState, pending, failed] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
       pendingRead,

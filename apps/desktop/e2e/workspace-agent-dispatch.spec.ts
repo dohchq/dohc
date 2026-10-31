@@ -293,6 +293,20 @@ test("a runner that exits silently says why under the message and posts a notice
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `thread-run-failed-${theme}.png`) });
       }
     }
+
+    // A post in a group says the same under its opening message.
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `post-run-failed-${theme}.png`) });
+      }
+    }
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
