@@ -5,6 +5,7 @@ import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   fatal,
@@ -101,6 +102,20 @@ if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)
 const automationsOn = automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
 if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
   fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
+}
+// A live host without the Markdown reader starts, but its Edit shares never go live.
+if ((selfHostedLive || process.env.DOHC_RELAY_SERVICE_HOST_CONFIG) && !readerConfigured(process.env.DOHC_ENGINE_READER_CONFIG)) {
+  fatal("FATAL: Edit shares need the Markdown reader, and DOHC_ENGINE_READER_CONFIG does not name one. The self-host image sets it from /opt/dohc-reader/engine-reader/startup.json. If that file is missing, the image was built without the reader.");
+}
+
+function readerConfigured(value: string | undefined): boolean {
+  try {
+    const config: unknown = JSON.parse(value ?? "");
+    return typeof config === "object" && config !== null &&
+      ["node", "bundle", "manifest"].every(key => { const path: unknown = Reflect.get(config, key); return typeof path === "string" && existsSync(path); });
+  } catch {
+    return false;
+  }
 }
 
 function isLoopbackHostname(hostname: string): boolean {
