@@ -333,9 +333,18 @@ async function shutdown(runDir, instance) {
   void instance.browser.close().catch(() => {});
   active = null;
 }
+// A workspace's Explorer opens on Home, which has no tree rows. The steps that read rows switch it to
+// Files, outside their timings, and the choice stays for that workspace.
+async function showExplorerFiles(page) {
+  const files = page.getByTestId('explorer-mode-files');
+  if (!(await files.count()) || (await files.getAttribute('aria-selected')) === 'true') return;
+  await files.click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="file-tree"]')?.dataset.mode === 'files');
+}
 // A large fixture's virtualized tree renders only the rows in view. Scroll the tree, outside the
 // timed open, until the document's row exists.
 async function revealTreeRow(page, name) {
+  await showExplorerFiles(page);
   const row = page.getByTestId('file-tree').getByRole('treeitem', { name, exact: true });
   for (let step = 0; !(await row.count()); step++) {
     if (step > 400) throw Error(`Explorer never rendered ${name}`);
@@ -553,6 +562,7 @@ async function armSurface(page, observer, surfaceOptions) {
   };
 }
 async function filesListed(page, rootEntries) {
+  await showExplorerFiles(page);
   const started = performance.now();
   await page.waitForFunction(expected => Number(document.querySelector('[data-testid="file-tree"] [data-testid="tree-row"][aria-level="1"]')?.getAttribute('aria-setsize')) >= expected, rootEntries, { timeout: 120000, polling: 100 });
   return { rootEntries, waitObservedMs: performance.now() - started };
