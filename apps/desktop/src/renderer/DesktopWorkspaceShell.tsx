@@ -183,7 +183,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -1073,17 +1073,20 @@ export function DesktopWorkspaceShell(props: {
   // A refused read or action becomes the shell's own notice, which outlives
   // the dialog. Its Try again runs the dialog's retry while the dialog is
   // open, and reopens the dialog once it is not — but only for the workspace
-  // the failure belonged to.
+  // the failure belonged to. A waiting Stop's notice is one per document,
+  // apart from that document's recovery row.
   const reportLiveDocumentsError = useCallback(
-    (message: string, error: unknown, retry: () => boolean, title?: string) => {
+    (message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => {
       const failedFor = workspaceIdRef.current;
       const again = () => {
         if (workspaceIdRef.current !== failedFor) return;
         if (retry()) return;
         openLiveDocuments(failedFor);
       };
-      if (title) reportShellFailure({title, message, retry: again});
-      else reportShellError(message, error, again);
+      if (waiting) {
+        reportShellFailure({title: waiting.title, message, retry: again,
+          identity: `live-stop-waiting:${failedFor}:${waiting.objectId}`});
+      } else reportShellError(message, error, again);
     },
     [reportShellError, reportShellFailure, openLiveDocuments],
   );

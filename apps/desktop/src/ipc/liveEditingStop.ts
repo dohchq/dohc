@@ -1,6 +1,8 @@
 export const LIVE_STOP_EDITS_PENDING = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
 /** A Stop with no answer, which dohc keeps and sends again. The cause stays out of the words. */
 export const LIVE_STOP_WAITING = "dohc is waiting for the server to stop live editing and will keep trying.";
+/** A server-only document's Stop that a restore on the server holds. */
+export const LIVE_STOP_RESTORING = "A restore is still running on the server. dohc will stop live editing when it finishes.";
 export const LIVE_STOP_EDITS_PENDING_RESUME = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
 
 export const HOST_STOP_REFUSALS = {

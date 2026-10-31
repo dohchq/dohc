@@ -13,6 +13,7 @@ import {
   type LiveDocumentStopResult,
   type LiveRefusalPage,
   type LiveRefusalRow,
+  type LiveStopWaitingNotice,
 } from "./LiveDocumentsDialog";
 
 // The server names each row's document; here, after its path.
@@ -49,7 +50,7 @@ function harness() {
     ),
     retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
-    onError: vi.fn((message: string, error: unknown, retry: () => boolean, title?: string) => {}),
+    onError: vi.fn((message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => {}),
     saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
     readKeptEdits: vi.fn(async (workspaceId: string, objectId: string, incident: string) => {}),
   };
@@ -317,7 +318,7 @@ describe("LiveDocumentsDialog", () => {
     fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
     await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
   });
-  it("reports a Stop with no answer through Notices by its error name, with its title, and keeps its retry available", async () => {
+  it("reports a Stop with no answer through Notices by its error name, with its title and document, and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     // As it crosses Electron's IPC, which keeps only the name and message.
     const error = new Error(`Error invoking remote method 'stopOwnerLiveDocument': ${String(liveStopWaitingError(new Error("fetch failed")))}`);
@@ -325,20 +326,23 @@ describe("LiveDocumentsDialog", () => {
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
     await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
-    const [message, reported, retry, title] = h.onError.mock.calls[0]!;
-    expect([message, reported, title]).toEqual(["dohc is waiting for the server to stop live editing and will keep trying.", error, "Stopping live editing for a.md"]);
+    const [message, reported, retry, waiting] = h.onError.mock.calls[0]!;
+    expect([message, reported, waiting]).toEqual(["dohc is waiting for the server to stop live editing and will keep trying.", error,
+      {title: "Stopping live editing for a.md", objectId: "object:a.md"}]);
     expect(retry()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });
-  it("reports a server-only document's Stop that a restore holds through Notices and keeps its retry available", async () => {
+  it("reports a server-only document's Stop that a restore holds through Notices by its words, with its title and document, and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     const error = new Error("Stop live editing is waiting. You can keep editing.");
     h.stop.mockRejectedValueOnce(error);
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
     await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
-    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting for a connection or restore.", error]);
-    expect(h.onError.mock.calls[0]![2]()).toBe(true);
+    const [message, reported, retry, waiting] = h.onError.mock.calls[0]!;
+    expect([message, reported, waiting]).toEqual(["A restore is still running on the server. dohc will stop live editing when it finishes.", error,
+      {title: "Stopping live editing for a.md", objectId: "object:a.md"}]);
+    expect(retry()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });
   it("stands lines in for the first page, and keeps the words while a Reload keeps the list", async () => {

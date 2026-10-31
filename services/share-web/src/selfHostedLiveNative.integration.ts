@@ -1034,7 +1034,7 @@ function expectParkedWith(proof: SelfHostProof, cursor: number, markdown: string
 // reached the relay when the owner stops. Stop delivers before it fences, so
 // it waits for that reply, which arrives once Stop reaches the daemon. A reply
 // that arrives after the fence, too late to be recorded, is no longer covered.
-it("settles a live edit whose application reply Stop waited for, then parks (no reply after the fence)", () => withSelfHostProof("self-host-stop-held", async proof => {
+it("settles a live edit whose application reply was held when Stop reached the host, then parks (no reply after the fence)", () => withSelfHostProof("self-host-stop-held", async proof => {
   const markdown = await proof.markdownWith("heldAtStop", "live");
   const held = proof.holdApplication();
   const edit = proof.liveEdit("heldAtStop", "live").then(() => "accepted", () => "refused");

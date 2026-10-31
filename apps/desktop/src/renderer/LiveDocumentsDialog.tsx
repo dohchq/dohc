@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_RESTORING, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -75,8 +75,15 @@ export type LiveDocumentsDialogProps = {
   /** Reported to the shell, which owns the toast and the Notices row. The
    * retry returns false once this workspace scope is gone, so the shell can
    * offer to reopen the dialog instead of running work nobody can see. With
-   * `title`, `message` is the whole body, without the error's words. */
-  onError: (message: string, error: unknown, retry: () => boolean, title?: string) => void;
+   * `waiting`, the Stop of that document is waiting, and `message` is the
+   * whole body, without the error's words. */
+  onError: (message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => void;
+};
+
+/** A waiting Stop's notice: its title, and the document whose notice it replaces. */
+export type LiveStopWaitingNotice = {
+  title: string;
+  objectId: string;
 };
 
 type Work =
@@ -436,8 +443,10 @@ export function LiveDocumentsDialog({
         };
         // A server-only document's Stop gets the relay's restore-in-progress words, without its code.
         const restoring = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        if (work.kind === "stop" && isLiveStopWaiting(error)) onError(LIVE_STOP_WAITING, error, retry, `Stopping live editing for ${work.path}`);
-        else onError(restoring ? `Stop live editing for ${work.path} is waiting for a connection or restore.` : failureMessage(work, mutated), error, retry);
+        if (work.kind === "stop" && (restoring || isLiveStopWaiting(error))) {
+          onError(restoring ? LIVE_STOP_RESTORING : LIVE_STOP_WAITING, error, retry,
+            {title: `Stopping live editing for ${work.path}`, objectId: work.objectId});
+        } else onError(failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
           running.current = false;
