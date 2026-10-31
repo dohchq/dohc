@@ -1026,13 +1026,8 @@ describe("graph view", () => {
     const pageGraph = (await screen.findAllByTestId("graph-view")).find(
       (view) => view.dataset.variant === "page",
     )!;
-    const graphNodes = await within(pageGraph).findAllByTestId("graph-node");
-    expect(
-      graphNodes.find((node) => node.dataset.path === "b.md")?.dataset.active,
-    ).toBe("true");
-    expect(
-      graphNodes.find((node) => node.dataset.path === "a.md")?.dataset.active,
-    ).toBe("false");
+    const graphCanvas = await within(pageGraph).findByTestId("graph-canvas");
+    await waitFor(() => expect(graphCanvas.dataset.activePath).toBe("b.md"));
   });
 
   it("opens as a side panel first, then opens the full graph in an editor tab", async () => {
