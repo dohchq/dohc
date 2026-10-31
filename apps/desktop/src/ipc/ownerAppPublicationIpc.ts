@@ -17,8 +17,12 @@ import { datasetColumnFields, type AppDatasetBinding, type DatasetRevision } fro
 import { resolveAppDatasetCapability, verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
-/** A relay status that means the server does not publish apps for this workspace and account: not found or forbidden. */
-export const publicationListUnavailable = (status: number) => status === 404 || status === 403;
+/**
+ * The relay's own refusal of the publication list: a 404 with its not_found body. A 403, or a 404 from something in
+ * front of the relay, says nothing about whether links are live, so it stays a failure.
+ */
+export const publicationListUnavailable = (status: number, body: { ok?: unknown; code?: unknown } | null) =>
+  status === 404 && body?.ok === false && body.code === "not_found";
 
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
   workspace: Workspace; signal: AbortSignal; scope?: string; assertCurrent(): void;
@@ -31,7 +35,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
-  /** Like relayJson, but a relay 404 or 403 resolves to unavailable instead of throwing. */
+  /** Like relayJson, but the relay's not_found 404 resolves to unavailable instead of throwing. */
   relayJsonOrUnavailable(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null>;

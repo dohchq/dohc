@@ -1290,7 +1290,7 @@ type RelayShareRetainedNotFoundResult<T> =
   // opposed to a share it does not know.
   | { kind: "missing"; removed: boolean };
 
-// `unavailable`: the relay answered 404 or 403, so it does not publish apps for this workspace and account.
+// `unavailable`: the relay itself answered not found, so it does not publish apps for this workspace and account.
 type RelayShareRetainedUnavailableResult<T> = { kind: "success"; body: T } | { kind: "unavailable" };
 
 type RelayShareJsonOptions =
@@ -1435,7 +1435,7 @@ async function relayShareJsonWithCredentials<T>(
     ) {
       return { kind: "missing", removed: data.code === "share_access_removed" };
     }
-    if (options && "retainUnavailable" in options && publicationListUnavailable(response.status)) {
+    if (options && "retainUnavailable" in options && publicationListUnavailable(response.status, data)) {
       return { kind: "unavailable" };
     }
     throw new Error(relayShareErrorCopy(response.status, data));

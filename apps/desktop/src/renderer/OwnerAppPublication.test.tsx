@@ -998,7 +998,7 @@ describe("owner app publication", () => {
 
     it.each([
       ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false })],
-      // main answers listUnavailable for a relay 404 or 403.
+      // main answers listUnavailable for the relay's not_found 404.
       ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request))],
       ["the sync status says the server is disconnected", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));

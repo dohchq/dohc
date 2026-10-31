@@ -338,11 +338,18 @@ describe("owner app publication", () => {
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
   });
-  it("counts only a relay 404 or 403 as a list the server does not publish", () => {
-    expect([404, 403].map(publicationListUnavailable)).toEqual([true, true]);
-    expect([400, 401, 409, 429, 500, 502, 503, 504].map(publicationListUnavailable)).toEqual(Array(8).fill(false));
+  it("counts only the relay's not_found 404 as a list the server does not publish", () => {
+    const notFound = { ok: false, error: "Not found.", code: "not_found" };
+    expect(publicationListUnavailable(404, notFound)).toBe(true);
+    // A proxy in front of a self-hosted relay can answer 403 or a bare 404 while links stay live.
+    expect(publicationListUnavailable(403, { ok: false, code: "forbidden" })).toBe(false);
+    expect(publicationListUnavailable(403, notFound)).toBe(false);
+    expect(publicationListUnavailable(404, null)).toBe(false);
+    expect(publicationListUnavailable(404, { error: "Not found" })).toBe(false);
+    expect(publicationListUnavailable(404, { ok: false, code: "share_access_removed" })).toBe(false);
+    expect([400, 401, 409, 429, 500, 502, 503, 504].map(status => publicationListUnavailable(status, notFound))).toEqual(Array(8).fill(false));
   });
-  it("answers listUnavailable when the server says not found or forbidden, and throws any other failure", async () => {
+  it("answers listUnavailable when the relay says not found, and throws any other failure", async () => {
     const h = harness();
     h.relayOrUnavailable.mockResolvedValueOnce({ kind: "unavailable" });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listUnavailable" });
