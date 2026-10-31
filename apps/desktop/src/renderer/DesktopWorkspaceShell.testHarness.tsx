@@ -9,6 +9,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
@@ -873,6 +874,13 @@ export function makeBridge(
       async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
         timelinePage([], { workspaceId: payload.workspaceId }),
     ),
+    // About opens Access with each file: by default only its owner has it.
+    getObjectAccess: vi.fn(async (input: { ref: AccessObjectRef }): Promise<AccessAnswer> => ({
+      ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+      coverage: { kind: "granted", complete: true, observation: "interval" },
+      checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+    })),
+    requestAccessRefresh: vi.fn(async () => undefined),
     // About's per-file History still reads moments directly.
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({

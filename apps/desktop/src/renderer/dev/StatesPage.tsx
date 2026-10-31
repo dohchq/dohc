@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, SearchX } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -87,6 +87,7 @@ import {
   AboutHistoryView,
   AboutLinksView,
   AboutSection,
+  AboutSectionAction,
   type AccessSetup,
   type AccessView,
   type ChatLinksView,
@@ -695,6 +696,8 @@ const TIMELINE_COLLECTIONS = new Map([
 
 // The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
+// The Comments head's one action.
+const ABOUT_COMMENT_ACTION = <AboutSectionAction testId="linked-chat-new" label="Comment on this file" icon={Plus} onClick={noop} />;
 const ABOUT_THREADS: ChatThreadRecord[] = [
   { id: "thread-scope", title: "Launch scope", createdAtMs: new Date(2026, 6, 6, 14, 5).getTime(), updatedAtMs: new Date(2026, 6, 8, 9, 12).getTime() },
   { id: "thread-pricing", title: "Pricing questions", createdAtMs: new Date(2026, 6, 2, 11, 0).getTime(), updatedAtMs: new Date(2026, 6, 7, 16, 40).getTime() },
@@ -710,10 +713,21 @@ const ABOUT_MOMENTS: EngineMomentRecord[] = [
   aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list",
     authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
     authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-agent-2", recordedAtMs: new Date(2026, 6, 8, 9, 20).getTime(), momentOrder: 12, agentAuthorName: "Nova", summary: "Added the venue",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-agent-3", recordedAtMs: new Date(2026, 6, 8, 9, 5).getTime(), momentOrder: 11, agentAuthorName: "Nova", summary: "Drafted the plan",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
   aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" },
     authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
   aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
 ];
+// A person's edits in one sitting, as Ice's Untitled.md shows them.
+const ABOUT_SITTING: EngineMomentRecord[] = [0, 1, 2, 3, 4].map((step) => aboutMoment({
+  id: `about-sitting-${step}`, path: "Untitled.md", recordedAtMs: new Date(2026, 9, 27, 16, 40 - step * 4).getTime(), momentOrder: 20 - step,
+  personAuthorName: "Ice", authors: [{ kind: "human", humanId: "ice" }], authorPresentations: [{ group: "states-ice", hue: null, self: true }],
+}));
 const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
   kind: "share",
   shareId: "share-plan",
@@ -735,6 +749,8 @@ const ABOUT_ACCESS: AccessAnswer = {
   rows: [
     aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
     aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    // A long name truncates before its level.
+    aboutGrant({ grantId: "grant-rivera", recipientUserId: "rivera", recipientEmail: "alexandra.rivera-montgomery@example.com", access: "comment" }),
     aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
   ],
   visibility: "visible",
@@ -998,7 +1014,7 @@ const aboutLink = (source: string, title: string, line: number, snippet: string,
 };
 const ABOUT_LINK_ROWS = [
   aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
-  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan|the plan]].", 1),
   aboutLink("research/competitors.md", "Competitor landscape", 7,
     "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
 ];
@@ -2158,10 +2174,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="about" title="About">
-        <Specimen label="a document: chats, history, access checked">
+        <Specimen label="a document: access checked, comments, history, links">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="2" expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
               <ul className="m-0 list-none p-0">
                 {ABOUT_THREADS.map((thread) => (
                   <li key={thread.id}>
@@ -2175,15 +2193,46 @@ function Pane(props: { theme: "light" | "dark" }) {
               expanded
               onToggle={noop}
               onOpenMoment={noop}
+              onOpenHistory={noop}
             />
-            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
-              onMore={noop} setup={ACCESS_UNEXPLAINED} />
+            <AboutLinksView links={{ ...ABOUT_LINKS, next: null }} chats={ABOUT_CHAT_LINKS} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a new document: only its heads, and only you">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: "4.md" }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+              {null}
+            </AboutSection>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS.slice(-1), more: false }} expanded
+              onToggle={noop} onOpenMoment={noop} onOpenHistory={noop} />
+            <AboutLinksView links={{ status: "ready", rows: [], next: null, gathering: 0 }}
+              chats={{ status: "ready", rows: [], next: null, gathering: 0 }} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a person's sitting of edits">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: "Untitled.md" }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+              {null}
+            </AboutSection>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_SITTING, more: true }} expanded
+              onToggle={noop} onOpenMoment={noop} onOpenHistory={noop} />
+            <AboutLinksView links={{ status: "ready", rows: [], next: null, gathering: 0 }}
+              chats={{ status: "ready", rows: [], next: null, gathering: 0 }} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="access may be out of date">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
         </Specimen>
-        <Specimen label="no share within its coverage">
+        <Specimen label="only you: no share from this workspace">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
         </Specimen>
         <Specimen label="unknown: the workspace does not sync">
@@ -2204,8 +2253,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="the first read: lines after 150 ms until it answers">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
-              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
             </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
           </AboutPanelSpecimen>
@@ -2213,15 +2262,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="while the workspace is read in: no deadline">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
-              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
             </AboutSection>
             <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="failed reads: words in Notices">
           <AboutPanelSpecimen>
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
               <RetryRow testId="linked-chats-failed" onRetry={noop} />
             </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />

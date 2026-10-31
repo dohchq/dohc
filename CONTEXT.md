@@ -119,6 +119,10 @@ The canonical server URL that distinguishes account identities from different se
 A named space with members where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
 
+**Comment**:
+A chat about one file, started from the file's About. Its first message is the comment and its replies continue as chat. The share's discussion, which Comment share access adds, is separate.
+_Avoid_: linked chat, file chat (in the interface)
+
 ### Sharing
 
 **Share**:

@@ -12,7 +12,7 @@ import { ipcWireError } from "../../ipc/errorWords";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
-import { formatShortTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
 import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
@@ -102,7 +102,7 @@ function contextFor(facts: AccessFacts) {
   return context;
 }
 
-function Access(props: { workspaceId?: string; path?: string; open?: boolean; facts?: AccessFacts }) {
+function Access(props: { workspaceId?: string; path?: string; open?: boolean; facts?: AccessFacts; sharing?: boolean }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
     <AboutAccess
@@ -111,7 +111,7 @@ function Access(props: { workspaceId?: string; path?: string; open?: boolean; fa
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       notices={notices}
-      context={contextFor(props.facts ?? SYNCED)}
+      context={{ ...contextFor(props.facts ?? SYNCED), sharing: props.sharing ?? false }}
     />
   );
 }
@@ -189,7 +189,7 @@ describe("About Access", () => {
     expect(screen.queryByTestId("about-access-empty")).toBeNull();
     expect(screen.queryByTestId("about-access-count")).toBeNull();
     await act(async () => pending.resolve(answer()));
-    expect(screen.getByTestId("about-access-answer")).toBeTruthy();
+    expect(screen.getByTestId("about-access-empty")).toBeTruthy();
   });
 
   it("lists each grant with its person or link and its level, and counts only active grants", async () => {
@@ -207,26 +207,57 @@ describe("About Access", () => {
     const result = await screen.findByTestId("about-access-answer");
     expect(result.dataset.freshness).toBe("fresh");
     expect(result.dataset.coverage).toBe("granted");
-    expect(screen.getByTestId("about-access-freshness").textContent).toBe("Checked");
-    expect(within(result).getByText(formatShortTime(CHECKED_AT))).toBeTruthy();
+    // A fresh answer keeps when it was checked in its head's tooltip.
+    expect(screen.queryByTestId("about-access-freshness")).toBeNull();
+    expect(screen.getByTitle(`Checked ${formatChatTime(CHECKED_AT).label}`)).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
     expect(rows.map((row) => row.textContent)).toEqual([
-      "Anyone with the link", "Ssam@example.com", "Kkim@example.comended", "Llee@example.comended",
+      "Anyone with the linkCan view", "Ssam@example.comCan edit", "Kkim@example.comended", "Llee@example.comended",
     ]);
-    expect(within(rows[0]!).getByRole("img", { name: "View" })).toBeTruthy();
-    expect(within(rows[1]!).getByRole("img", { name: "Edit" })).toBeTruthy();
+    expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
+    expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
+    // A level is information, so it takes secondary ink, not decorative.
+    expect(within(rows[1]!).getByText("Can edit").classList.contains("text-muted")).toBe(true);
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
-    // Two grants give access now; the two ended ones stay listed.
+    // Two grants give access now; the two ended ones stay listed, their names a step down from ink.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
+    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual([true, true, false, false]);
   });
 
-  it("says an empty answer covers only what it checked, never that nobody has access", async () => {
+  it("reads again when the Share dialog closes, so Only you follows a new share", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValueOnce(answer()).mockResolvedValue(answer({ rows: [share()] }));
+    const view = render(<Access sharing />);
+    await screen.findByTestId("about-access-empty");
+    bridgeMock.requestAccessRefresh.mockClear();
+    view.rerender(<Access sharing={false} />);
+    await waitFor(() => expect(screen.getAllByTestId("about-access-row")).toHaveLength(1));
+    expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+  });
+
+  it("shows Only you when a complete answer finds no share from this workspace", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(answer());
     render(<Access />);
-    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this file.",
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
+    expect(screen.queryByTestId("about-access-count")).toBeNull();
+  });
+
+  it("claims nothing for a listing that did not finish, and shows only its freshness", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({ coverage: { kind: "granted", complete: false, observation: "interval" } }),
     );
-    expect(screen.getByTestId("about-access-count").textContent).toBe("0");
+    render(<Access />);
+    expect(await screen.findByTestId("about-access-freshness")).toBeTruthy();
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByTestId("about-access-row")).toBeNull();
+  });
+
+  it("says no share to you includes a received file it finds nothing for", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({ unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" } }),
+    );
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("No share to you includes this file.");
   });
 
   it("names a received file's own grant within its coverage", async () => {
@@ -240,7 +271,7 @@ describe("About Access", () => {
     const row = await screen.findByTestId("about-access-row");
     expect(row.textContent).toContain("You");
     expect(row.getAttribute("title")).toBe("Shared by Ice de Vera");
-    expect(within(row).getByRole("img", { name: "Comment" })).toBeTruthy();
+    expect(within(row).getByText("Can comment")).toBeTruthy();
   });
 
   it("keeps a stale list and marks it settled but old", async () => {
@@ -444,7 +475,7 @@ describe("About Access", () => {
     expect((await screen.findByTestId("about-access-row")).textContent).toContain("b@example.com");
 
     await act(async () => forA.resolve(answer({ rows: [share({ recipientEmail: "a@example.com" })] })));
-    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.com"]);
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.comCan edit"]);
   });
 
   it("reads a newly opened file without asking main to refresh again", async () => {
@@ -465,9 +496,7 @@ describe("About Access", () => {
     bridgeMock.getObjectAccess.mockResolvedValueOnce(answer({ ref: { kind: "chat", channelWireId: "wire-general" } }))
       .mockRejectedValueOnce(new Error("disk is busy"));
     const { rerender } = render(<ChatAccess channelWireId="wire-general" received={false} />);
-    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this chat.",
-    );
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
     expect(bridgeMock.getObjectAccess).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
       ref: { kind: "chat", channelWireId: "wire-general" },
@@ -696,7 +725,7 @@ describe("About Links", () => {
     openChat.mockReset();
   });
 
-  it("reads one page of links, draws each with its file and line, and opens the file at the linking line", async () => {
+  it("reads one page of links, draws each on one line with its file in the tooltip, and opens the file at the linking line", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2), link("notes/alpha.md", 9, 1), link("notes/beta.md", 5)]));
     render(<Links />);
 
@@ -704,17 +733,41 @@ describe("About Links", () => {
     expect(bridgeMock.linksIn).toHaveBeenCalledOnce();
     expect(bridgeMock.linksIn).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
     expect(screen.getByTestId("about-links-count").textContent).toBe("3");
-    // A file's next link leaves out its chip, and still names it to a screen reader.
+    // Each row is the linking file's title, then what it says; its path is in the tooltip.
     const rows = linkRows();
     expect(rows.map((row) => row.textContent)).toEqual([
-      "alphanotesnotes/alpha.mdalpha cites [[plan]] here.",
-      "alpha notes/alpha.mdalpha cites [[plan]] here.",
-      "betanotesnotes/beta.mdbeta cites [[plan]] here.",
+      "alphaalpha cites plan here.",
+      "alphaalpha cites plan here.",
+      "betabeta cites plan here.",
     ]);
-    expect(rows[0]!.querySelector("mark")?.textContent).toBe("[[plan]]");
+    expect(rows.map((row) => row.getAttribute("title"))).toEqual([
+      "alpha cites [[plan]] here.\nnotes/alpha.md",
+      "alpha cites [[plan]] here.\nnotes/alpha.md",
+      "beta cites [[plan]] here.\nnotes/beta.md",
+    ]);
+    // The link reads as its words, not its syntax.
+    expect(rows[0]!.querySelector("mark")?.textContent).toBe("plan");
 
     await userEvent.setup().click(rows[1]!);
     expect(openLink).toHaveBeenCalledWith("notes/alpha.md", 9);
+  });
+
+  it("shows a link's alias or label, and starts a line a few words before a link far into it", async () => {
+    const at = (snippet: string, literal: string, line: number): LinkRecord => {
+      const start = snippet.indexOf(literal);
+      return { ...link("notes/alpha.md", line), snippet, highlightStart: start, highlightEnd: start + literal.length };
+    };
+    bridgeMock.linksIn.mockResolvedValue(linksPage([
+      at("We agreed in last week's long meeting to ship from [[product-plan|the plan]] on Friday.", "[[product-plan|the plan]]", 1),
+      at("See [the plan](product-plan.md) first.", "[the plan](product-plan.md)", 2),
+    ]));
+    render(<Links />);
+
+    await waitFor(() => expect(linkRows()).toHaveLength(2));
+    expect(linkRows().map((row) => row.querySelector("mark")!.parentElement!.textContent)).toEqual([
+      "…to ship from the plan on Friday.",
+      "See the plan first.",
+    ]);
   });
 
   it("asks nothing while closed, reads when opened, and keeps its rows while it reads again on opening", async () => {
@@ -1085,7 +1138,6 @@ describe("About Links", () => {
       await act(async () => {});
       expect(screen.getByRole("status").textContent).toBe("Gathering links");
       expect(screen.getByTestId("about-links-count").textContent).toBe("0+");
-      expect(screen.queryByTestId("about-links-empty")).toBeNull();
       await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(linkRows()).toHaveLength(1);
       expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(1);
@@ -1111,7 +1163,6 @@ describe("About Links", () => {
       await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(screen.queryByRole("status")).toBeNull();
       expect(screen.getByTestId("about-chat-links-failed")).toBeTruthy();
-      expect(screen.queryByTestId("about-links-empty")).toBeNull();
       expect(notices.report).toHaveBeenCalledOnce();
       expect(notices.report.mock.calls[0]![0]).toMatchObject({ identity: "about-chat-links:docs/plan.md" });
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
@@ -1151,14 +1202,14 @@ describe("About Links", () => {
     }
   });
 
-  it("says when nothing links here, and how to add a link", async () => {
+  it("draws only the head, with a 0 and no chevron, when nothing links here", async () => {
     bridgeMock.linksIn.mockResolvedValue(linksPage([]));
     bridgeMock.chatFileMentionsPage.mockResolvedValue(chatPage([]));
     render(<Links chats />);
-    expect((await screen.findByTestId("about-links-empty")).textContent).toBe(
-      "No links to this file yet. Type [[ in another file to add one.",
-    );
+    await waitFor(() => expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalled());
+    await act(async () => {});
     expect(screen.getByTestId("about-links-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
   it("reads nothing for a file under shared-with-me/, and says dohc does not list its links yet", async () => {
@@ -1214,7 +1265,8 @@ describe("About Links", () => {
     bridgeMock.linksIn.mockReturnValueOnce(old.promise).mockResolvedValueOnce(linksPage([]));
     const view = render(<Links path="docs/plan.md" />);
     view.rerender(<Links path="docs/other.md" />);
-    await screen.findByTestId("about-links-empty");
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
+    await act(async () => {});
     notices.clear.mockReset();
     await act(async () => old.reject(new Error("late")));
     expect(notices.report).not.toHaveBeenCalled();
@@ -1230,7 +1282,7 @@ describe("About Links", () => {
     render(<Links chats />);
     const rows = await screen.findAllByTestId("chat-file-mention");
     expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
-    // Where it was said, when, then who said what.
+    // Where it was said and when, then who said what.
     const when = formatShortTime(CHECKED_AT);
     expect(rows.map((row) => row.textContent)).toEqual([
       `general${when}Sam See docs/plan.md general`,
@@ -1341,6 +1393,7 @@ function HistorySection(props: {
   revision?: number;
   paused?: boolean;
   onOpenMoment?: (id: string, path: string) => void;
+  onOpenHistory?: () => void;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -1353,6 +1406,7 @@ function HistorySection(props: {
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       onOpenMoment={props.onOpenMoment ?? (() => undefined)}
+      {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
       notices={notices}
     />
   );
@@ -1372,12 +1426,14 @@ describe("About History", () => {
     );
     const onOpenMoment = vi.fn();
     render(<HistorySection onOpenMoment={onOpenMoment} />);
-    const rows = await screen.findAllByTestId("about-history-open");
-    expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 5 });
+    const rows = await screen.findAllByTestId("engine-moment-open");
+    expect(bridgeMock.listEngineMoments).toHaveBeenCalledWith({ workspaceId: "workspace-a", objectId: "object-1", limit: 20 });
+    // Who made the change and when, then what it changed.
+    expect(within(rows[0]!).getByTestId("engine-moment-source").textContent).toBe("Nova");
     expect(rows[0]!.textContent).toContain("Tightened the plan");
-    expect(rows[0]!.getAttribute("title")).toBe("Nova");
-    expect(rows[1]!.textContent).toContain("Edited plan.md");
-    expect(rows[1]!.getAttribute("title")).toBe("Live edit");
+    expect(within(rows[1]!).getByTestId("engine-moment-source").textContent).toBe("Live edit");
+    // "Live edit" already says what happened, so no bare "Edited" follows it.
+    expect(rows[1]!.textContent).not.toContain("Edited");
     expect(screen.getByTestId("about-history-count").textContent).toBe("2+");
     await userEvent.setup().click(rows[0]!);
     expect(onOpenMoment).toHaveBeenCalledWith("moment-1", "docs/plan.md");
@@ -1408,16 +1464,15 @@ describe("About History", () => {
     expect(bridgeMock.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  it("shows loading lines, then says when the file has no changes", async () => {
+  it("shows loading lines, then only the head when the file has no changes", async () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
     expect(loadingLines("history")).toHaveLength(2);
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
-    expect(screen.getByTestId("about-history-empty").textContent).toBe("History has no changes to this file yet.");
     expect(screen.getByTestId("about-history-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-history-toggle")).toBeNull();
   });
 
   it("reports a failed read to the shell and reads again on Try again", async () => {
@@ -1433,7 +1488,7 @@ describe("About History", () => {
       retry: expect.any(Function),
     });
     await userEvent.setup().click(within(failed).getByText("Try again"));
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
     expect(notices.clear).toHaveBeenLastCalledWith("about-history:docs/plan.md");
   });
 
@@ -1446,7 +1501,6 @@ describe("About History", () => {
     const line = await screen.findByTestId("about-history-updating");
     expect(line.textContent).toBe("Adding recent changes to History");
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(notices.report).not.toHaveBeenCalled();
     await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId("about-history-updating")).toBe(line);
@@ -1454,7 +1508,7 @@ describe("About History", () => {
       next.resolve(page([moment()]));
       await next.promise;
     });
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
   });
 
   // A paused History may be missing changes: its line replaces taking in
@@ -1466,14 +1520,14 @@ describe("About History", () => {
     expect(line.textContent).toBe("History paused");
     expect(screen.queryByTestId("about-history-updating")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-    const [row] = await screen.findAllByTestId("about-history-open");
+    const [row] = await screen.findAllByTestId("engine-moment-open");
     const heading = screen.getByTestId("about-history-paused");
     expect(heading.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(notices.report).not.toHaveBeenCalled();
     // History recovers: the rows stay and the line goes.
     rerender(<HistorySection paused={false} />);
     expect(screen.queryByTestId("about-history-paused")).toBeNull();
-    expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
   });
 
   it("keeps a real failure's Try again while History is paused", async () => {
@@ -1482,7 +1536,7 @@ describe("About History", () => {
     const failed = await screen.findByTestId("about-history-failed");
     expect(screen.queryByTestId("about-history-paused")).toBeNull();
     await userEvent.setup().click(within(failed).getByText("Try again"));
-    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(await screen.findAllByTestId("engine-moment-open")).toHaveLength(1);
     expect(screen.getByTestId("about-history-paused")).toBeTruthy();
   });
 
@@ -1490,7 +1544,7 @@ describe("About History", () => {
     bridgeMock.listEngineMoments.mockResolvedValue(page([]));
     render(<HistorySection paused />);
     expect(await screen.findByTestId("about-history-paused")).toBeTruthy();
-    expect(screen.queryByTestId("about-history-empty")).toBeNull();
+    expect(sectionBody("history").textContent).toBe(screen.getByTestId("about-history-paused").textContent);
   });
 
   // A read History's growth starts replaces the one an updating answer
@@ -1513,7 +1567,7 @@ describe("About History", () => {
         grown.resolve(page([moment()]));
         await grown.promise;
       });
-      expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+      expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1551,21 +1605,50 @@ describe("About History", () => {
     const { rerender } = render(<HistorySection objectId="object-1" />);
     await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(1));
     rerender(<HistorySection objectId="object-2" />);
-    expect((await screen.findByTestId("about-history-open")).textContent).toContain("Second file");
+    expect((await screen.findByTestId("engine-moment-open")).textContent).toContain("Second file");
     await act(async () => forFirst.resolve(page([moment({ summary: "First file" })])));
-    expect(screen.getAllByTestId("about-history-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+  });
+
+  it("folds an agent's run into one row and shows the three latest rows", async () => {
+    const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
+    const run = ["run-1", "run-2", "run-3"].map((id) =>
+      moment({ id, agentAuthorName: "Nova", authors: [agent], authorPresentations: [{ group: "agent:nova", hue: null, self: false }] }));
+    const edits = ["edit-1", "edit-2", "edit-3"].map((id) => moment({ id }));
+    bridgeMock.listEngineMoments.mockResolvedValue(page([...run, ...edits]));
+    render(<HistorySection />);
+    const rows = await screen.findAllByTestId("engine-moment-open");
+    expect(rows.map((row) => row.dataset.momentId)).toEqual(["run-1", "edit-1", "edit-2"]);
+    const fold = screen.getByTestId("engine-moment-run-toggle");
+    expect(fold.getAttribute("aria-label")).toBe("3 changes");
+    // The head counts changes, not rows.
+    expect(screen.getByTestId("about-history-count").textContent).toBe("6");
+    // The run opens in place, its earlier edits under its newest.
+    await userEvent.setup().click(fold);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId))
+      .toEqual(["run-1", "run-2", "run-3", "edit-1", "edit-2"]);
+  });
+
+  it("opens the full History from its head", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue(page([moment()]));
+    const onOpenHistory = vi.fn();
+    const { rerender } = render(<HistorySection onOpenHistory={onOpenHistory} />);
+    await userEvent.setup().click(screen.getByTestId("about-history-all"));
+    expect(onOpenHistory).toHaveBeenCalledTimes(1);
+    rerender(<HistorySection />);
+    expect(screen.queryByTestId("about-history-all")).toBeNull();
   });
 
   it("keeps its rows while it reads again after History grows", async () => {
     bridgeMock.listEngineMoments.mockResolvedValueOnce(page([moment({ summary: "Older" })]));
     const { rerender } = render(<HistorySection revision={1} />);
-    await screen.findByTestId("about-history-open");
+    await screen.findByTestId("engine-moment-open");
     const next = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValueOnce(next.promise);
     rerender(<HistorySection revision={2} />);
-    expect(screen.getByTestId("about-history-open").textContent).toContain("Older");
+    expect(screen.getByTestId("engine-moment-open").textContent).toContain("Older");
     await act(async () => next.resolve(page([moment({ id: "moment-new", summary: "Newer" }), moment({ summary: "Older" })])));
-    expect(screen.getAllByTestId("about-history-open")).toHaveLength(2);
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(2);
   });
 });
 
@@ -1574,7 +1657,7 @@ describe("About History authors", () => {
   function row(fields: Partial<EngineMomentRecord>) {
     render(<AboutHistoryView view={{ status: "ready", moments: [moment(fields)], more: false }}
       expanded onToggle={() => undefined} onOpenMoment={() => undefined} />);
-    return screen.getByTestId("about-history-open");
+    return screen.getByTestId("engine-moment-open");
   }
   afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS));
 
@@ -1599,7 +1682,7 @@ describe("About History authors", () => {
       authorPresentations: [token("teal")] }).querySelector('[title="Sam"]')?.className).toContain("text-hue-teal");
   });
 
-  it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the file mark", () => {
+  it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the origin mark", () => {
     setChosenColors(settingsWithAgent({ hue: "teal" }));
     const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
     expect(row({ agentAuthorName: "Nova", authors: [agent], authorPresentations: [token(null, true)] }).querySelector('[title="Nova"]')?.className).toContain("text-hue-teal");
@@ -1620,8 +1703,8 @@ describe("About History authors", () => {
     }
     const several = row({ authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }, agent],
       authorLabels: ["Sam", "Nova"], authorPresentations: [token("plum"), token(null, true)] });
-    expect(several.querySelector("span[title]")).toBeNull();
-    expect(several.querySelector(".lucide-file-text")).not.toBeNull();
+    expect(several.querySelector('[title="Sam"], [title="Nova"]')).toBeNull();
+    expect(several.querySelector(".lucide-pen-line")).not.toBeNull();
   });
 });
 
