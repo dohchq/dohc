@@ -1152,8 +1152,6 @@ function AccessRowView(props: { row: AccessRow }) {
         ? "You"
         : (row.recipientEmail ?? row.recipientUserId ?? "Unnamed person");
   const level = row.access === null ? null : LEVELS[row.access];
-  // Beside a mark, "Edit" alone reads like a button.
-  const can = level ? `Can ${level.label.toLowerCase()}` : undefined;
   const sharer = row.via === "received" ? (row.sharerName ?? row.granterEmail) : null;
   return (
     <div
@@ -1175,9 +1173,7 @@ function AccessRowView(props: { row: AccessRow }) {
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
-        <span role="img" aria-label={can} title={can} className="shrink-0 text-subtle">
-          <level.icon size={13} aria-hidden />
-        </span>
+        <span className="shrink-0 text-[11px] text-subtle">Can {level.label.toLowerCase()}</span>
       ) : null}
     </div>
   );

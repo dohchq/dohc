@@ -212,10 +212,10 @@ describe("About Access", () => {
     expect(screen.getByTitle(`Checked ${formatChatTime(CHECKED_AT).label}`)).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
     expect(rows.map((row) => row.textContent)).toEqual([
-      "Anyone with the link", "Ssam@example.com", "Kkim@example.comended", "Llee@example.comended",
+      "Anyone with the linkCan view", "Ssam@example.comCan edit", "Kkim@example.comended", "Llee@example.comended",
     ]);
-    expect(within(rows[0]!).getByRole("img", { name: "Can view" })).toBeTruthy();
-    expect(within(rows[1]!).getByRole("img", { name: "Can edit" })).toBeTruthy();
+    expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
+    expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
     // Two grants give access now; the two ended ones stay listed, their names quieter.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
@@ -269,7 +269,7 @@ describe("About Access", () => {
     const row = await screen.findByTestId("about-access-row");
     expect(row.textContent).toContain("You");
     expect(row.getAttribute("title")).toBe("Shared by Ice de Vera");
-    expect(within(row).getByRole("img", { name: "Can comment" })).toBeTruthy();
+    expect(within(row).getByText("Can comment")).toBeTruthy();
   });
 
   it("keeps a stale list and marks it settled but old", async () => {
@@ -473,7 +473,7 @@ describe("About Access", () => {
     expect((await screen.findByTestId("about-access-row")).textContent).toContain("b@example.com");
 
     await act(async () => forA.resolve(answer({ rows: [share({ recipientEmail: "a@example.com" })] })));
-    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.com"]);
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.comCan edit"]);
   });
 
   it("reads a newly opened file without asking main to refresh again", async () => {
