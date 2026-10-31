@@ -460,15 +460,15 @@ export class LiveCommittedDeliveryStore {
     return row.admitted;
   }
   /**
-   * Whether `value` is the seed the journal admitted for the pending service
-   * activation this delivery adopted for. It reads only relay rows.
+   * Whether the journal admitted a seed for the pending service activation
+   * this delivery adopted for. It reads only relay rows.
    */
-  isPendingActivationSeed(capture: OwnerDeliveryCapture,value: LiveUpdateReceipt): boolean {
+  hasPendingActivationSeed(capture: OwnerDeliveryCapture): boolean {
     const {document} = this.#ownerDelivery(capture), {adoptionId} = this.ownerDeliveryProgress(capture);
     return this.#storage.readTx(() => {
       const row = readServiceActivation(this.#storage,document);
       return serviceActivationState(row) === "pending" && row!.activation_id === adoptionId && row!.relay_database_namespace === this.#history.namespace &&
-        sameReceipt(serviceActivationSeed(this.#storage,row!),value);
+        serviceActivationSeed(this.#storage,row!) !== null;
     });
   }
   acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {

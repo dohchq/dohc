@@ -142,11 +142,12 @@ export class OwnerCommittedDelivery {
           }
         }
         // The engine refuses the cut settle while this adoption's seed is
-        // queued, or acknowledged first and still unapplied as the journal's
-        // next row. Applying that seed below moves the terminal past the cut,
-        // so it needs no settle.
+        // queued, or admitted and unapplied. Any admitted seed is unapplied
+        // here: it follows F, and the terminal is still the cut at B <= F.
+        // applyPending applies the predecessor's rows after B and then the
+        // seed, moving the terminal past the cut without a settle.
         if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) &&
-          !(next && this.#store.isPendingActivationSeed(latest, next.metadata.accepted.receipt)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
+          !(next && this.#store.hasPendingActivationSeed(latest)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
           registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
           assertCurrent: latest.assertCurrent})) {
           const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {

@@ -43,7 +43,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0, adoptionCu
       expect(ack).toMatchObject(next.metadata.accepted.receipt);
       terminal = next.metadata.accepted.receipt;
     }),
-    isPendingActivationSeed: vi.fn((_value: ReturnType<typeof capture>, _receipt: LiveUpdateReceipt) => false),
+    hasPendingActivationSeed: vi.fn((_value: ReturnType<typeof capture>) => false),
   };
   const storage = {createLiveCommittedDeliveryStore: () => store,
     getShare: () => ({workspaceId: document.workspaceId,shareId: "share",granterUserId: "owner"})};
@@ -673,18 +673,23 @@ it.each([
 });
 
 // A native service seed is acknowledged before it is applied. When its
-// application waits, the engine queue no longer holds it, but the journal's
-// next row does, and the relay's rows name it this pending activation's seed.
-// A later pass, on this consumer or one rebuilt after a restart, applies it
-// without the cut settle the engine refuses. A row that is not the seed still
-// settles the cut first.
+// application waits, the engine queue no longer holds it, but the relay's rows
+// hold it as this pending activation's admitted seed. With `behind`, the
+// successor adopted at B below its predecessor's F, so that many predecessor
+// rows come before the seed, and the first of them has no ACK. A later pass,
+// on this consumer or one rebuilt after a restart, applies those rows and then
+// the seed without the cut settle the engine refuses. Without an admitted seed
+// the cut still settles first.
 it.each([
-  {consumer: "this", rebuilt: false, seed: true, settles: []},
-  {consumer: "a rebuilt", rebuilt: true, seed: true, settles: []},
-  {consumer: "a rebuilt", rebuilt: true, seed: false, settles: ["liveApplication.settle"]},
-])("applies an acknowledged row whose application waited on $consumer consumer, settling the cut only when it is not the seed (seed=$seed)",
-  async ({rebuilt, seed: seeded, settles}) => {
-    const f = fixture({prefix: 4, owners: 1, adoptionCursor: 4}), seed = f.ownerEntries[0]!;
+  {consumer: "this", rebuilt: false, seed: true, behind: 0, settles: []},
+  {consumer: "a rebuilt", rebuilt: true, seed: true, behind: 0, settles: []},
+  {consumer: "this", rebuilt: false, seed: true, behind: 2, settles: []},
+  {consumer: "a rebuilt", rebuilt: true, seed: true, behind: 2, settles: []},
+  {consumer: "a rebuilt", rebuilt: true, seed: false, behind: 0, settles: ["liveApplication.settle"]},
+])("applies an acknowledged row whose application waited on $consumer consumer behind $behind predecessor rows, settling the cut only without an admitted seed (seed=$seed)",
+  async ({rebuilt, seed: seeded, behind, settles}) => {
+    const f = fixture({prefix: 4 + behind, owners: 1, adoptionCursor: 4}), seed = f.ownerEntries[0]!;
+    const rows = [...Array.from({length: behind}, (_, index) => receipt(5 + index)), seed];
     // Receipt first: the queue drops the entry before the host applies it.
     vi.mocked(drainOwnerOutbox).mockImplementation(async options => {
       const entry = f.retained.shift();
@@ -694,7 +699,7 @@ it.each([
     });
     vi.mocked(ownerOutboxHeadIsSeed).mockImplementation(async () => f.retained.length > 0);
     // The relay's durable rows, which every consumer reads alike.
-    f.store.isPendingActivationSeed.mockImplementation((_value, value) => seeded && isDeepStrictEqual(value, seed));
+    f.store.hasPendingActivationSeed.mockImplementation(() => seeded && f.journal.some(row => row.deliveryId === seed.deliveryId));
     const methods: string[] = [];
     const register = f.client.sendRequest.getMockImplementation()!;
     f.client.sendRequest.mockImplementation(async input => {
@@ -705,14 +710,16 @@ it.each([
       return {id: input.id, result: {status: "settled", settlement: {settlementId: null, previousCursor: 4, terminalCursor: 4, applicationCount: 0,
         localYDocSequence: 4, momentId: "moment-1", markdownDigest: "c".repeat(64), materialized: true, collectionReconcileRequired: false}}};
     });
+    // The first row after B waits: the pass ends with the seed acknowledged and unapplied.
     f.client.sendLiveApplication.mockResolvedValueOnce({id: 0, result: {status: "pending", reason: "application-pending"}});
     expect(await f.consumer.drain(document)).toMatchObject({kind: "pending", continueDrain: false});
     expect(f.outboxAcks).toEqual([seed]);
+    expect(f.retained).toEqual([]);
     expect(f.nativeTerminal()).toEqual(receipt(4));
     const consumer = rebuilt ? f.reconnect() : f.consumer;
     methods.length = 0;
     expect(await consumer.drain(document)).toMatchObject({kind: "done", terminalReceipt: seed});
     expect(methods.filter(method => method === "liveApplication.settle")).toEqual(settles);
-    expect(f.client.sendLiveApplication.mock.calls.map(([, event]) => event.metadata.accepted.receipt)).toEqual([seed, seed]);
-    expect(f.store.isPendingActivationSeed).toHaveBeenCalledWith(expect.anything(), seed);
+    expect(f.client.sendLiveApplication.mock.calls.map(([, event]) => event.metadata.accepted.receipt)).toEqual([rows[0], ...rows]);
+    expect(f.store.hasPendingActivationSeed).toHaveBeenCalled();
   });

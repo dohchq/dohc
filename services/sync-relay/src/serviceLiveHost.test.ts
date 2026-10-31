@@ -3,7 +3,6 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
-import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
@@ -2286,27 +2285,24 @@ it("records a departed application only as the next accepted row, for its adopti
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
 });
 
-// Proves: whether a row is a pending activation's admitted seed comes from
-// relay rows alone, so a store rebuilt on a later connection reads the same
-// answer. Only the activation's own seed counts, and only while it is pending.
-it("names a pending activation's admitted seed from relay rows alone, on any store", async () => {
-  const o = await enrolledServiceHost();
-  const seed: LiveUpdateReceipt = o.tip(), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+// Proves: whether a pending activation holds an admitted seed comes from relay
+// rows alone, so a store rebuilt on a later connection reads the same answer.
+// It counts only while the activation is pending.
+it("finds a pending activation's admitted seed from relay rows alone, on any store", async () => {
+  const o = await enrolledServiceHost(), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
   await o.host.close();
   const host = {...o.host.coordinate, connectionId: "rebuilt"};
   expect(o.f.storage.registerLiveHost({...host, updatedAtMs: Date.now(), guard: o.f.storage.captureStanding()}).ok).toBe(true);
-  const isSeed = (value: LiveUpdateReceipt, pending: boolean) => {
+  const hasSeed = (pending: boolean) => {
     const access = pending ? o.f.storage.createServiceActivationStore(o.f.history).pending(o.document, host) : undefined;
     const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
-    return store.isPendingActivationSeed(store.openOwnerDelivery({host, document: o.document, actor}), value);
+    return store.hasPendingActivationSeed(store.openOwnerDelivery({host, document: o.document, actor}));
   };
-  expect(isSeed(seed, false)).toBe(false);
+  expect(hasSeed(false)).toBe(false);
   // As before the host applied it: the activation has not completed.
   o.raw.prepare("UPDATE sync_relay_service_activations SET completion_json=NULL WHERE activation_id=?").run(ACTIVATION);
-  expect(isSeed(seed, true)).toBe(true);
-  expect(isSeed(seed, true)).toBe(true);
-  expect(isSeed({...seed, deliveryId: "another"}, true)).toBe(false);
-  expect(isSeed({...seed, journalCursor: seed.journalCursor + 1}, true)).toBe(false);
+  expect(hasSeed(true)).toBe(true);
+  expect(hasSeed(true)).toBe(true);
 });
 
 // Proves: a daemon that starts after Stop retires a stopped document it never
