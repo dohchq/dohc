@@ -1166,10 +1166,10 @@ function AccessRowView(props: { row: AccessRow }) {
       ) : (
         <ChatAvatar presentation={row.via === "received" ? ownPresentation : neutralPresentation} name={who} kind="human" size="strip" />
       )}
-      {/* An ended or damaged grant is listed but not counted, so it reads quieter. */}
-      <span className={`min-w-0 flex-1 truncate ${row.status === "active" ? "" : "text-subtle"}`}>{who}</span>
+      {/* An ended or damaged grant is listed but not counted, so its name steps down from ink. */}
+      <span className={`min-w-0 flex-1 truncate ${row.status === "active" ? "text-ink" : ""}`}>{who}</span>
       {row.status !== "active" ? (
-        <span className="shrink-0 text-[11px] text-subtle">
+        <span className="shrink-0 text-[11px] text-muted">
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (

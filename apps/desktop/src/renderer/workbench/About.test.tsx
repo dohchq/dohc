@@ -219,9 +219,9 @@ describe("About Access", () => {
     // A level is information, so it takes secondary ink, not decorative.
     expect(within(rows[1]!).getByText("Can edit").classList.contains("text-muted")).toBe(true);
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
-    // Two grants give access now; the two ended ones stay listed, their names quieter.
+    // Two grants give access now; the two ended ones stay listed, their names a step down from ink.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
-    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-subtle"))).toEqual([false, false, true, true]);
+    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual([true, true, false, false]);
   });
 
   it("reads again when the Share dialog closes, so Only you follows a new share", async () => {
