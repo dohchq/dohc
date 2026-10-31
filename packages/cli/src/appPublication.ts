@@ -56,6 +56,8 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   // The source revision prepareLocal would capture now. It differs from an approval's sourceRevision once the app's source changed.
   z.object({ kind: z.literal("localChecked"), appRoot: z.string().min(1).max(1024), sourceRevision: hash, sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512) }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
+  // The server answered not found or forbidden: it does not publish apps for this workspace and account.
+  z.object({ kind: z.literal("listUnavailable") }).strict(),
   z.object({ kind: z.literal("prepared"), approvalId: z.string().uuid(), candidateDigest: hash,
     appRoot: z.string().min(1).max(1024), versionId: id, sourceRevision: hash,
     audience: z.object({shareId:id,grantId:id,selector:z.object({paths:z.array(z.string()),versionId:id.nullable()}).strict(),access}).strict().optional(),

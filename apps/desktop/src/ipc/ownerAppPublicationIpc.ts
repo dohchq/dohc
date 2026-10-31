@@ -28,6 +28,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
+  /** Like relayJson, but a relay 404 or 403 resolves to unavailable instead of throwing. */
+  relayJsonOrUnavailable(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null>;
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
@@ -150,8 +152,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
         const query = new URLSearchParams({ appRoot: input.appRoot });
         if (input.cursor) query.set("cursor", input.cursor);
-        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+        const answer = await session.run(() => dependencies.relayJsonOrUnavailable(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications?${query}`, { signal: operation.signal }));
+        // The server does not publish apps for this workspace and account.
+        if (answer.kind === "unavailable") return OwnerAppPublicationResult.parse({ kind: "listUnavailable" });
+        const raw = answer.body;
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("dohc could not read app publications.");
         const result = OwnerAppPublicationResult.parse({ ...raw, kind: "listed" });
         if (result.kind !== "listed" || result.publications.some(row => !row.manifestUnavailable && row.appRoot !== input.appRoot)) throw new Error("The publication list belongs to another app.");

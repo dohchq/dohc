@@ -1050,7 +1050,10 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     summary: "Get a local URL for an approved app.",
     notes: ["The URL works on this computer while dohc is open. It is not a share link."],
   },
-  list: { summary: "List an app's shared publications." },
+  list: {
+    summary: "List an app's shared publications.",
+    notes: ["listUnavailable means the server does not publish apps for this workspace."],
+  },
   prepare: {
     summary: "Prepare an app for a share link.",
     take: [

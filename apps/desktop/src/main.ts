@@ -1290,9 +1290,13 @@ type RelayShareRetainedNotFoundResult<T> =
   // opposed to a share it does not know.
   | { kind: "missing"; removed: boolean };
 
+// `unavailable`: the relay answered 404 or 403, so it does not serve this request to this account.
+type RelayShareRetainedUnavailableResult<T> = { kind: "success"; body: T } | { kind: "unavailable" };
+
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
   | { retainNotFound: true }
+  | { retainUnavailable: true }
   | { retainRestoreConflict: true };
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
@@ -1346,12 +1350,19 @@ async function relayShareJsonWithCredentials<T>(
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
+  init: RequestInit | undefined,
+  options: { retainUnavailable: true },
+): Promise<RelayShareRetainedUnavailableResult<T>>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
   init?: RequestInit,
   options?: RelayShareJsonOptions,
 ): Promise<
   | T
   | RelayShareRetainedDependentSetResult<T>
   | RelayShareRetainedNotFoundResult<T>
+  | RelayShareRetainedUnavailableResult<T>
 > {
   if (!credentials.relayUrl) {
     throw new Error("Reconnect your server to refresh its connection settings, then try again.");
@@ -1423,6 +1434,9 @@ async function relayShareJsonWithCredentials<T>(
       (data.code === "not_found" || data.code === "share_access_removed")
     ) {
       return { kind: "missing", removed: data.code === "share_access_removed" };
+    }
+    if (options && "retainUnavailable" in options && (response.status === 404 || response.status === 403)) {
+      return { kind: "unavailable" };
     }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
@@ -6667,6 +6681,7 @@ function registerIpcHandlers(): void {
         maxInputBytes: 192 * 1024 * 1024, maxOutputBytes: 48 * 1024 * 1024, maxErrorBytes: 64 * 1024 }, signal);
     },
     relayJson: relayShareJsonWithCredentials,
+    relayJsonOrUnavailable: (credentials, path, init) => relayShareJsonWithCredentials<unknown>(credentials, path, init, { retainUnavailable: true }),
     upload: async (credentials, workspaceId, sha256, bytes, signal) => {
       const result = await relayShareJsonWithCredentials<{ workspaceId: string; sha256: string; byteLength: number }>(credentials,
         `/sync/${encodeURIComponent(workspaceId)}/blobs/${sha256}`, { method: "PUT", signal, body: Uint8Array.from(bytes).buffer,

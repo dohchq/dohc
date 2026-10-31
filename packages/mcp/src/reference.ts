@@ -88,7 +88,7 @@ export const APP_RESULTS: Record<AppAction, AppKind[]> = {
   checkLocal: ["localChecked"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],
-  list: ["listed"],
+  list: ["listed", "listUnavailable"],
   prepare: ["prepared"],
   approve: ["published"],
   cancel: ["cancelled"],
