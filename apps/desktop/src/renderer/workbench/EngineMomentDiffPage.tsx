@@ -501,7 +501,7 @@ export function EngineMomentDiffPage({
                 type="button"
                 data-testid="engine-diff-title-open-file"
                 onClick={() => onOpenFile(moment.path)}
-                className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent"
                 title={`Open ${moment.path}`}
               >
                 <MomentPath path={moment.path} />

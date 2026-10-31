@@ -945,6 +945,11 @@
                       "discover"
                     ],
                     "additionalProperties": false
+                  },
+                  "moveToServer": {
+                    "type": "boolean",
+                    "const": true,
+                    "description": "Agree to move a Collection that is only on this computer to the workspace's server for good."
                   }
                 },
                 "required": [
@@ -2214,7 +2219,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4094,7 +4099,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4881,7 +4886,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5668,7 +5673,7 @@
     },
     {
       "name": "dohc_links_edges",
-      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "description": "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
       "inputSchema": {
         "type": "object",
         "properties": {

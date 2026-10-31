@@ -97,6 +97,7 @@ export interface ShellError {
   details?: ReadonlyArray<ErrorDetailField>;
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
+  retryBusy?: boolean;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
@@ -883,10 +884,19 @@ export function useShellError(workspaceId: string) {
     });
   }, []);
 
+  const setShellRetryBusy = useCallback((identity: string, busy: boolean): boolean => {
+    if (currentWorkspace.current !== workspaceId) return false;
+    const target = shellErrorsRef.current.find(error => error.identity === identity);
+    if (!target || (busy && target.retryBusy)) return false;
+    if (!!target.retryBusy === busy) return true;
+    shellErrorsRef.current = shellErrorsRef.current.map(error => error === target ? {...error, retryBusy: busy} : error);
+    setShellErrors(current => current.map(error => error.id === target.id ? {...error, retryBusy: busy} : error));
+    return true;
+  }, [workspaceId]);
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     // A retry that could not run leaves every row where it stands.
-    if (target?.retry?.() === false) return;
+    if (target?.retryBusy || target?.retry?.() === false) return;
     // Clearing is what shows the control took: the read is on its way, and
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
@@ -936,6 +946,7 @@ export function useShellError(workspaceId: string) {
     hideShellError,
     dismissShellError,
     retryShellError,
+    setShellRetryBusy,
     runShellErrorAction,
     privacySettingsAction,
     keepCollectionsHere,

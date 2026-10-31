@@ -15,10 +15,15 @@ export async function runProbe(executable: string, args: readonly string[], sign
 export function detectAgentTools(workspaceRoot: string, signal: AbortSignal, resourcesRoot: string) {
   return probeAgentTools({
     platform: process.platform, env: process.env, home: homedir(), workspaceRoot, signal,
+    stat: statSync,
     run: (executable, args, probeSignal) => runProbe(executable, args, probeSignal, resourcesRoot),
     codexMayRunWithoutLogin: () => codexMayRunWithoutLogin(process.env, codexConfigFiles(process.env, process.platform)),
     realPath: (path) => {
-      try { return realpathSync(path); } catch { return null; }
+      // Native realpath returns stored names on Windows and macOS. The JavaScript
+      // form still resolves on drives where the native call fails.
+      try { return realpathSync.native(path); } catch {
+        try { return realpathSync(path); } catch { return null; }
+      }
     },
     isExecutable: (path) => {
       try {

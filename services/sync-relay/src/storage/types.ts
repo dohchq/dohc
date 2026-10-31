@@ -627,6 +627,7 @@ export interface SyncRelayStorage {
   };
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
@@ -668,6 +669,8 @@ export interface SyncRelayStorage {
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** Whether the document has a restore that has neither resumed nor been declined. */
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}): boolean;
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
+    import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** The prepared activation a new Stop of the document would retire, once no retirement is open. */
   retirableServiceActivation(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").RetirableServiceActivation | null;
   /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */

@@ -1,5 +1,11 @@
+import { HOST_STOP_CASES } from "../testing/liveStopHost.test-helper";
+import { liveStopError, liveStopHostCopy } from "./liveEditingStop";
+import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
+import { readFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { relayShareOperations } from "./shareOperations";
 import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
+import {closeTestStorages, interceptStorage, request as relayRequest, testHandler, testStorage} from "../../../../services/sync-relay/src/testing";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
@@ -84,6 +90,7 @@ function harness() {
     if (event.sender.id < 0) throw new Error("untrusted sender");
   });
   const warm = vi.fn(async () => undefined);
+  const sendRendererActivity = vi.fn();
   const sharesChanged = vi.fn<(workspaceId: string | null) => void>();
   const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   let enrolled=true;
@@ -125,6 +132,7 @@ function harness() {
     retryOwnerLiveRelease,
     saveOwnerLiveRecoveryCopy,
     sharesChanged,
+    sendRendererActivity,
     reconcileReceivedShares,
   };
   const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>(ownerHandlersDependencies);
@@ -145,7 +153,7 @@ function harness() {
     return handler({ sender: { id: senderId } }, payload);
   };
   return {
-    workspace, workspaceOperations, credentials, remote, request, accountRequest, polls, handlers, warm, invoke, sharesChanged,
+    workspace, workspaceOperations, credentials, remote, request, accountRequest, polls, handlers, warm, invoke, sharesChanged, sendRendererActivity,
     reconcileReceivedShares,
     unenrolled:() => {enrolled=false;},
     localStops,
@@ -293,6 +301,23 @@ describe("sync before live hosting", () => {
 });
 
 describe("owner live document enrollment", () => {
+  it("offers Resume after a half success and clears the deferred Stop on retry", async () => {
+    const h=harness();
+    const saved={state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"live.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}};
+    h.localStops.mockResolvedValue([saved]);
+    h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",objectId:"object",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",objectId:"object",status:"ready"}]});
+    h.ownerLiveStop.mockRejectedValueOnce(new Error("local clear failed"));
+    await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"})).rejects.toThrow("local clear failed");
+    const listed=await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId});
+    expect(listed).toMatchObject({documents:[{path:"live.md",status:"ready",canResume:true,deferredStop:saved.deferred}]});
+    h.ownerLiveStop.mockImplementationOnce(async (_workspace,action) => {
+      expect(action).toBe("clear");h.localStops.mockResolvedValue([]);return undefined;
+    });
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"live.md"});
+    expect(h.request.mock.calls.filter(([, ,init])=>init?.method==="POST")).toHaveLength(2);
+    expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md",{mainVersionId:"main",objectId:"object",currentPath:"live.md"});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).toEqual({documents:[{path:"live.md",objectId:"object",status:"ready",canResume:false}],nextCursor:null});
+  });
   it("keeps the local Stop until Resume's POST succeeds", async () => {
     const h=harness(),posting=deferred<unknown>();
     h.request.mockReturnValueOnce(posting.promise);
@@ -333,6 +358,25 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"})).rejects.toThrow();
     expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
   });
+  it("adds only deferred counts and editability to a stopped row",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"old.md",selectorPaths:["old.md"],restoreFenceGeneration:0},document:{mainVersionId:"main",objectId:"object",currentPath:"old.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:65,editable:false}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",objectId:"object",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
+  });
+  // Proves: a document stopped on a diverged server copy keeps the reason and
+  // offers no Resume, whether its Stop finished or waits on this computer.
+  it("offers no Resume for a document stopped on a diverged server copy, deferred or not",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"deferred.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:2,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[{path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
+      : {ok:true,diverged:true,documents:[]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
+      {path:"deferred.md",objectId:"object",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
+      {path:"stopped.md",objectId:"stopped",status:"retired",reason:"session-host-diverged",canResume:false},
+    ],nextCursor:null});
+  });
   it("offers no Resume after the real relay retires a held document and forgets its running hold", async () => {
     const f = await heldDocumentFixture(workspaceId);
     try {
@@ -349,6 +393,19 @@ describe("owner live document enrollment", () => {
     } finally {await f.close();}
   });
 
+  // Proves: a deferred Stop offers Resume on a document whose server copy
+  // is missing an owner edit, since a Resume retries it, but not on one whose
+  // conflict parent is withheld.
+  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[],nextCursor:null}
+      : {ok:true,documents:[{path:"edited.md",objectId:"object",status:"unavailable",reason}]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
+      {path:"edited.md",objectId:"object",status:"unavailable",reason,canResume,deferredStop:{unsentEdits:1,editable:true}},
+    ],nextCursor:null});
+  });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {
@@ -1296,6 +1353,33 @@ describe("registered account share handlers", () => {
     expect(h.request.mock.calls[0]?.[3]).toEqual({ retainNotFound: true });
   });
 
+  it.each([
+    {invite: "a Group", channelKind: "channel" as const, selector: {kind: "group", channelWireId: "wire-orders", paths: ["orders"], versionId: null}},
+    {invite: "a message request", channelKind: "dm" as const, selector: {kind: "chat", channelWireId: "wire-dm"}},
+  ])("answers $invite from the relay as a Chats invitation", async ({channelKind, selector}) => {
+    const storage = await testStorage();
+    try {
+      storage.claimWorkspace({workspaceId: "workspace-a", ownerUserId: "owner", createdAtMs: 1});
+      storage.createShare({
+        share: {shareId: "invite", workspaceId: "workspace-a", granterUserId: "owner", createdAtMs: 1, selectorJson: JSON.stringify(selector)},
+        grant: {grantId: "grant-invite", shareId: "invite", principalKind: "user", principalUserId: "teammate", principalEmail: null,
+          access: "read-write", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
+      });
+      const relay = testHandler(interceptStorage(storage, {findChannelCreateKind: () => channelKind}));
+      const response = await relay(relayRequest("teammate", "/sync/shares/invite"));
+      expect(response.status).toBe(200);
+      const h = harness();
+      h.request.mockResolvedValue({kind: "success", body: await response.json()});
+      await expect(h.invoke(relayShareOperations.getRelayReceivedShare.channel, {shareId: "invite"}))
+        .resolves.toEqual({found: true, chats: true});
+      h.request.mockResolvedValue({kind: "success", body: {...(await (await relay(relayRequest("teammate", "/sync/shares/invite"))).json()), shareId: "other"}});
+      await expect(h.invoke(relayShareOperations.getRelayReceivedShare.channel, {shareId: "invite"}))
+        .rejects.toThrow("Invalid exact received share response");
+    } finally {
+      await closeTestStorages();
+    }
+  });
+
   it("rejects an exact received-share result after the credential generation changes", async () => {
     const h = harness();
     const started = deferred();
@@ -1553,4 +1637,116 @@ describe("owner operation admission", () => {
     expect(h.remote).not.toHaveBeenCalled();
     expect(h.request).not.toHaveBeenCalled();
   });
+});
+
+it("keeps a Stop request on a failure other than edits-pending", async () => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  h.relay.mockRejectedValueOnce(new Error("connection lost"));
+  await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Stop live editing is waiting. Reconnect or wait for the restore to finish.");
+  expect(h.recorded()?.state).toBe("requested");
+  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
+});
+it.each(HOST_STOP_CASES)("relayShareErrorCopy maps %s and %s to the desktop's copy and detail", (code, sessionHost, words) => {
+  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function relayShareErrorCopy(");
+  const end = source.indexOf("\ntype RelayShareRetainedDependentSetResult", start);
+  const js = stripTypeScriptTypes(source.slice(start, end));
+  const hostCopy = vi.fn(liveStopHostCopy);
+  const copy = new Function("liveStopHostCopy", `${js}; return relayShareErrorCopy;`)(hostCopy) as
+    (status: number, data: {code: string; error?: string; sessionHost: string; path?: string}) => string;
+  expect(copy(409, {code, sessionHost, path: code === "host-moved" ? "old/plan.md" : undefined, error: "arbitrary server wording"})).toBe(`${words}\nSession host: ${sessionHost}`);
+  expect(hostCopy).toHaveBeenCalledExactlyOnceWith(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined);
+});
+
+it("relayShareErrorCopy safely handles host-moved without path", () => {
+  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function relayShareErrorCopy(");
+  const end = source.indexOf("\ntype RelayShareRetainedDependentSetResult", start);
+  const js = stripTypeScriptTypes(source.slice(start, end));
+  const copy = new Function("liveStopHostCopy", `${js}; return relayShareErrorCopy;`)(liveStopHostCopy) as
+    (status: number, data: {code: string}) => string;
+  expect(copy(409, {code: "host-moved"})).toBe("The server sent an answer dohc could not read. Try again later.");
+});
+it("does not read the live list for a dialog's pending Stop", async () => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+  expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
+});
+
+it("reads the agent's live list only after its editors reopen", async () => {
+  let closed = false;
+  const readsWhileClosed: boolean[] = [];
+  const h = pendingStopHarness("workspace", "live.md", "object", {withoutEditors: async (_workspace, _path, change) => {
+    closed = true;
+    try { return await change(); } finally { closed = false; }
+  }});
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+    readsWhileClosed.push(closed);
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "paused"}]};
+  });
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.");
+  expect(readsWhileClosed).toEqual([false]);
+  expect(h.relay.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE", "GET"]);
+  expect(closed).toBe(false);
+});
+
+it.each(["workspace-changed", "document-unavailable", "session-host-diverged"])(
+  "keeps the agent's server pending Stop answer when %s cannot Resume", async reason => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable", reason}]};
+  });
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"},
+    {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toThrow("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+});
+
+it("main names the document in an agent Stop success notification", async () => {
+  const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("ownerLiveStopAgainForCli = async (operation, kept) => {");
+  const end = source.indexOf("\n  const relayShareHandlers", start);
+  const js = stripTypeScriptTypes(source.slice(start, end));
+  const result = {keptEdits: "none" as const};
+  const stop = vi.fn(async () => result), send = vi.fn();
+  const agentStop = new Function("agentOwnerLiveDocuments", "sendRendererActivity", "notifyRenderer",
+    `let ownerLiveStopAgainForCli; ${js}; return ownerLiveStopAgainForCli;`)({stop, stopForAgent: stop}, send, send) as
+    (operation: {workspace: {workspaceId: string}}, kept: {path: string; objectId: string; recovery: "stopping"}) => Promise<typeof result>;
+  const kept = {path: "live.md", objectId: "object", recovery: "stopping" as const};
+  expect(await agentStop({workspace: {workspaceId: "workspace"}}, kept)).toEqual(result);
+  expect(send).toHaveBeenCalledExactlyOnceWith({workspaceId: "workspace", liveDocumentStopped: "object"});
+  stop.mockRejectedValueOnce(new Error("refused"));
+  await expect(agentStop({workspace: {workspaceId: "workspace"}}, kept)).rejects.toThrow("refused");
+  expect(send).toHaveBeenCalledTimes(1);
+});
+
+
+it.each(["conflict-parent-withheld", "quarantine"] as const)("gives the agent the %s pending Stop answer", async reason => {
+  const h = pendingStopHarness("workspace", "live.md", "object", reason === "quarantine" ? {ownerLiveQuarantines: () => [
+    {objectId: "object", path: "live.md", reason: "invalid-update", storedOn: "this-computer", incident: "kept", recovery: "paused"}]} : {});
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "unavailable",
+      reason: reason === "quarantine" ? "workspace-changed" : reason}]};
+  });
+  const words = reason === "quarantine"
+    ? "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."
+    : "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+  await expect(h.actions.stopForAgent({workspaceId: "workspace", path: "live.md", objectId: "object"},
+    {workspace: {workspaceId: "workspace"}, assertCurrent() {}})).rejects.toThrow(words);
+});
+it.each(["objectId", "again", "path"] as const)("broadcasts a dialog Stop success by %s, and never a refusal", async target => {
+  const h = harness();
+  h.request.mockResolvedValue({ok: true, objectId: "object", path: "live.md", status: "retired", acceptedCursor: 1});
+  const input = {workspaceId, path: "live.md", ...(target === "objectId" ? {objectId: "object"}
+    : target === "again" ? {again: {objectId: "object", recovery: "stopping"}} : {})};
+  await h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, input);
+  expect(h.sendRendererActivity).toHaveBeenCalledExactlyOnceWith({workspaceId, liveDocumentStopped: "object"});
+  h.request.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+  await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, input)).rejects.toThrow("Live editing didn't stop.");
+  expect(h.sendRendererActivity).toHaveBeenCalledTimes(1);
 });

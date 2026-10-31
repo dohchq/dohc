@@ -402,6 +402,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
   }
+  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string) {
+    return serviceHostEnrollmentStorage.readServiceHostEnrollmentByObjectId(this, workspaceId, objectId);
+  }
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
@@ -497,6 +500,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}) {
     return serviceHostEnrollmentStorage.restoreInProgress(this, document.workspaceId, document.objectId);
+  }
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: serviceActivationRetirementStorage.RetirableServiceActivation) {
+    return serviceActivationRetirementStorage.readServiceActivationRetirementDecision(this, document, activation);
   }
   retirableServiceActivation(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.retirableServiceActivation(this, document);

@@ -12,6 +12,7 @@ import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments, isServi
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {relayError} from "./errors";
+import {stopWithoutSessionHost} from "./sessionHostStop";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
@@ -54,7 +55,8 @@ async function fixture() {
     pending, prepared, running: true,
     async stop<T>(document: {workspaceId: string; objectId: string}, fence: (preparation?: ServiceHostRetirementPreparation) => T): Promise<T | "waiting"> {
       if (pending.has(document.objectId)) return "waiting";
-      const candidate = host.running ? f.storage.retirableServiceActivation(document) : null;
+      if (!host.running) return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "starting"}, fence);
+      const candidate = f.storage.retirableServiceActivation(document);
       if (candidate) prepared.push(candidate);
       return fence(candidate ? {...candidate, assertCurrent() {}} : undefined);
     },
@@ -863,7 +865,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
   f.host.pending.add(binding.objectId);
   const waiting = await stop();
   expect(waiting.status).toBe(409);
-  expect(await waiting.json()).toMatchObject({ok: false, code: "edits-pending"});
+  expect(await waiting.json()).toEqual({ok: false, code: "edits-pending", error: "Live editing didn't stop. Recent edits haven't reached the server yet."});
   expect(retirement()).toBeNull();
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, retired: false, ownerStop: null});
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
@@ -909,7 +911,7 @@ it("waits to stop a retained activation that no running host can prepare", async
   retainServiceActivation(f.raw, namespace, true);
   const waiting = await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true}));
   expect(waiting.status).toBe(409);
-  expect(await waiting.json()).toEqual({ok: false, code: "edits-pending", error: "Live editing didn't stop. Recent edits haven't reached the server yet."});
+  expect(await waiting.json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "starting", error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
 });

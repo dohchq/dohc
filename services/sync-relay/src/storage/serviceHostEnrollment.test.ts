@@ -664,10 +664,10 @@ it("retires a prepared activation only with its host's preparation and replays t
     expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
     expect(f.storage.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, retired: false, ownerStop: null});
   };
-  expect(() => retire()).toThrow(expect.objectContaining({code: "edits-pending"}));
+  expect(() => retire()).toThrow(expect.objectContaining({code: "host-not-loaded"}));
   unchanged();
-  expect(() => retire({...candidate, activationId: "another-activation", assertCurrent() {}})).toThrow(expect.objectContaining({code: "edits-pending"}));
-  expect(() => retire({...candidate, lineageClaimId: "c".repeat(64), assertCurrent() {}})).toThrow(expect.objectContaining({code: "edits-pending"}));
+  expect(() => retire({...candidate, activationId: "another-activation", assertCurrent() {}})).toThrow(expect.objectContaining({code: "conflict"}));
+  expect(() => retire({...candidate, lineageClaimId: "c".repeat(64), assertCurrent() {}})).toThrow(expect.objectContaining({code: "conflict"}));
   // The generation changed after the host prepared.
   expect(() => retire({...candidate, restoreFenceGeneration: 6, assertCurrent() {}})).toThrow(ServiceHostRetirementConflict);
   // The connection that prepared it was replaced.

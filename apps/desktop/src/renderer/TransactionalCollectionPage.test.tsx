@@ -118,6 +118,11 @@ it("keeps an empty multi-select visible and editable", async () => {
   expect(screen.getByRole("checkbox", { name: "Reviewed" })).toBeTruthy();
 });
 
+it("names the server that holds an owner's Collection beside its copy on this device", async () => {
+  setup({copy:{offline:false,savedAtMs:1,host:"sync.example.test"}}); await screen.findByText("Alice");
+  expect(screen.getByText(`On sync.example.test · Saved on this device · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
+});
+
 it("labels saved-page coverage without implying the entire Collection is downloaded", async () => {
   const copy = {offline:true,savedAtMs:1,coverage:"saved-pages" as const};
   setup({copy}); await screen.findByText("Alice");
@@ -305,9 +310,9 @@ describe("transactional Collection page", () => {
   });
   it("shows saved offline records without mutation controls and refreshes the copy", async () => {
     const onRefresh = vi.fn();
-    setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000 }, onRefresh, confirmDelete: async () => true });
+    setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000, host: "sync.example.test" }, onRefresh, confirmDelete: async () => true });
     await screen.findByText("Alice");
-    expect(screen.getByText(/Offline copy · Read-only/)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe(`Offline copy · Read-only until sync.example.test is reachable · ${new Date(1_700_000_000_000).toLocaleString()}`);
     expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit Name for record 1" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete record 1" })).toBeNull();

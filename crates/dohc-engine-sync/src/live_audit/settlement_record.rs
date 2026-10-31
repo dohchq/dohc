@@ -822,10 +822,10 @@ mod tests {
             Ok::<_, SyncError>(())
         }).unwrap();
     }
-    /// The first settlement after an adoption starts at that activation's own
-    /// source, released or current. A cut two sources adopted names neither.
+    /// A positive cut keeps the settlement moment's recorded before-image,
+    /// regardless of released, current, or competing activation sources.
     #[test]
-    fn a_settlement_starts_at_the_source_of_the_activation_whose_cut_it_follows() {
+    fn a_positive_cut_keeps_the_settlement_moments_recorded_before_image() {
         let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
         let mut text = VersionedTextStore::new(&mut store);
         text.ensure_main_version("ws", "main", 1, &NoFaults)
@@ -915,22 +915,202 @@ mod tests {
         };
         activate(&mut store, "first", None, 0, 5);
         activate(&mut store, "second", Some("first"), 1, 9);
-        let digest = |source: usize| Some(hex_sha256(SOURCES[source].1.as_bytes()));
         assert_eq!(
             before(&mut store, &binding, 5).unwrap(),
-            digest(0),
-            "the released predecessor still proves its source"
+            None,
+            "the released predecessor does not override the before-image"
         );
         assert_eq!(
             before(&mut store, &binding, 9).unwrap(),
-            digest(1),
-            "the successor proves its own source"
+            None,
+            "the current activation does not override the before-image"
         );
         assert_eq!(before(&mut store, &binding, 7).unwrap(), None);
         activate(&mut store, "third", Some("second"), 2, 9);
-        assert!(
-            before(&mut store, &binding, 9).is_err(),
-            "two sources adopted at one cut name no before-image"
+        assert_eq!(
+            before(&mut store, &binding, 9).unwrap(),
+            None,
+            "competing activation sources do not override the before-image"
         );
+    }
+
+    fn cursor_zero_store(
+        sources: &[usize],
+    ) -> (
+        dohc_engine_testkit::ScratchDir,
+        EngineStore,
+        LiveObjectBinding,
+    ) {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let mut text = VersionedTextStore::new(&mut store);
+        text.ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        for (moment, body) in SOURCES {
+            text.write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: moment.into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+        ))
+        .unwrap();
+        let base_bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
+        let lineage = store
+            .write_with(&NoFaults, |tx| {
+                Ok::<_, SyncError>(dohc_engine_storage::put_binary_blob(tx, &base_bytes)?)
+            })
+            .unwrap();
+        let TxnOutcome::Committed(lineage) = lineage else {
+            panic!("no fault was injected")
+        };
+        let binding = LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: lineage,
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        };
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        // `source` indexes SOURCES; a released activation keeps its cut.
+        let activate = |store: &mut EngineStore,
+                        id: &str,
+                        predecessor: Option<&str>,
+                        source: usize,
+                        cursor: i64| {
+            let (moment, body) = SOURCES[source];
+            store
+                .write_with(&NoFaults, |tx| {
+                    if let Some(predecessor) = predecessor {
+                        tx.execute(
+                            "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,
+                                released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',
+                                released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),
+                                  'eventCount',0,'historyEvidenceDigest',evidence_digest)
+                             WHERE activation_id=?1",
+                            [predecessor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    } else {
+                        tx.execute(
+                            "INSERT INTO live_owner_adoptions VALUES ('relay',?1,'ws','main','object',?2,?3,?4,?5,?6,1,1,
+                                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,?7,'null','{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1,1)",
+                            params![id, binding.lineage_claim_id, binding_json, moment,
+                                hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    }
+                    tx.execute(
+                        "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,
+                            main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,
+                            binding_json,source_moment_id,source_digest,source_byte_length,
+                            baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,
+                            evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                            terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+                         VALUES ('relay',?1,'ws','main','object',?2,'activation-0',?3,?4,?5,?6,?7,1,1,'{}',
+                            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,?8,'null',1,1)",
+                        params![id, binding.lineage_claim_id, predecessor, binding_json, moment,
+                            hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+        };
+        for (index, source) in sources.iter().enumerate() {
+            let id = format!("activation-{index}");
+            let predecessor = index.checked_sub(1).map(|i| format!("activation-{i}"));
+            activate(&mut store, &id, predecessor.as_deref(), *source, 0);
+        }
+        crate::journal_local_replication_op(
+            &mut store,
+            "ws",
+            "origin",
+            "epoch",
+            "stream",
+            "workspace.init",
+            &serde_json::json!({}),
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            let key = DocKey::new("ws", "main", "object").unwrap();
+            let base_sequence = journal_local_op_in_tx(tx, "ws", "ydoc.update",
+                &crate::ydoc_update_payload(&key, "note.md", ContentKind::Richdoc,
+                    &binding.lineage_claim_id, &binding.lineage_claim_id, None, None, true), 1)?;
+            let origin = origin_record::read(tx, "relay", &binding)?;
+            let base = BaseRecord {
+                relay_database_namespace: "relay".into(),
+                checkpoint: NativeAcceptedCheckpoint {
+                    canonical_version: None,
+                    restore_operation_id: None,
+                    event_count: 0,
+                    terminal: None,
+                    binding: binding.clone(),
+                    state_digest: binding.lineage_claim_id.clone(),
+                    evidence_digest: hex_sha256(&serde_json::to_vec(&(
+                        "accepted-history-v1", scope("relay", &binding),
+                    )).unwrap()),
+                },
+                origin_stamp: origin.stamp(tx, &binding)?,
+                origin,
+                base_byte_length: base_bytes.len(),
+                base_coordinate: super::super::BaseCoordinate {
+                    origin_id: "origin".into(),
+                    origin_seq: base_sequence,
+                },
+            };
+            base.validate("ws")?;
+            let sequence = journal_local_op_in_tx(tx, "ws", BASE_OP, &base.payload()?, 1)?;
+            tx.execute("INSERT INTO live_audit_base_publications
+                (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,
+                 record_json,base_blob_sha256,origin_id,origin_seq)
+                VALUES ('relay','ws','main','object',?1,?2,?1,'origin',?3)",
+                params![binding.lineage_claim_id, base.canonical_json()?, sequence])
+                .map_err(SyncError::persist)?;
+            let imported: bool = tx.query_row(
+                "SELECT imported FROM replication_log WHERE workspace_id='ws' AND origin_id='origin' AND origin_seq=?1",
+                [base_sequence], |row| row.get(0)).map_err(SyncError::corrupt)?;
+            assert!(!imported, "event zero was published locally");
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        (scratch, store, binding)
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_takes_its_before_image_from_the_activation_source() {
+        let (_scratch, mut store, binding) = cursor_zero_store(&[1]);
+        assert_eq!(
+            before(&mut store, &binding, 0).unwrap(),
+            Some(hex_sha256(SOURCES[1].1.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_rejects_activations_with_different_sources() {
+        let (_scratch, mut store, binding) = cursor_zero_store(&[0, 1]);
+        assert!(matches!(
+            before(&mut store, &binding, 0),
+            Err(SyncError::InvalidInput {
+                reason: "settlement follows activations with different sources",
+            })
+        ));
     }
 }

@@ -914,8 +914,24 @@ fn quarantine(f: &mut Fixture, reason: &str) {
 /// `dependent`, an owner write that built on that update follows it, and the
 /// refusal ends it too.
 fn refused_root(dependent: bool) -> Fixture {
+    refused_root_setup(dependent, false).0
+}
+
+/// A refused root whose retirement can cover a separate accepted remote edit.
+fn refused_root_with_accepted_prefix() -> (Fixture, LiveUpdateReceipt) {
+    let (f, covered) = refused_root_setup(false, true);
+    (f, covered.unwrap())
+}
+
+fn refused_root_setup(dependent: bool, accepted_prefix: bool) -> (Fixture, Option<LiveUpdateReceipt>) {
     let mut f = imported_fixture();
     adopt_root(&mut f);
+    let covered = accepted_prefix.then(|| {
+        let remote = remote_event(&mut f, 3);
+        let receipt = remote.metadata.accepted.receipt.clone();
+        applies(&mut f, remote);
+        receipt
+    });
     let refused = native_tail_edit(&mut f, "# Refused\n", 11);
     if dependent {
         let update = f
@@ -937,7 +953,7 @@ fn refused_root(dependent: bool) -> Fixture {
         .unwrap();
     }
     refuse(&mut f, &refused.delivery_id, "terminal-source-refused");
-    f
+    (f, covered)
 }
 
 /// Release the root once parked, and bring its document back with its file

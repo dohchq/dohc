@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, DmRecord } from "../../ipc/bridgeContract";
 import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
+import { inputCount } from "../ui/inputCount";
 import {
   ChatsView,
   channel,
@@ -20,6 +21,59 @@ import {
 // zero-bloat rule — and the DM conversation is one running thread whose
 // composer sends on Enter (anti-forum).
 describe("ChatsView direct messages", () => {
+  it("marks the message request a notice's Open names and focuses its Accept, until the next click", async () => {
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
+      declined: [],
+    });
+    const onInvitationRevealed = vi.fn();
+    renderView(vi.fn(), vi.fn(), {
+      variant: "panel",
+      revealInvitation: { shareId: "share-dm-request", inputs: inputCount() },
+      onInvitationRevealed,
+    });
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const accept = screen.getByTestId("chats-dm-request-accept");
+    expect(document.activeElement).toBe(accept);
+    const row = screen.getByTestId("chats-dm-request-item");
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.className).toContain("bg-selected");
+    act(() => {
+      fireEvent.pointerDown(window);
+    });
+    expect(row.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("bg-selected");
+  });
+
+  it("pulls message requests for a request a notice's Open names that arrived while a conversation tab held the polls", async () => {
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [], pending: [], declined: [] });
+    const props = {
+      workspaceId: "workspace-a",
+      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+      variant: "panel" as const,
+      suspendPolling: true,
+    };
+    const { rerender } = render(<ChatsView {...props} />);
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
+    await act(async () => undefined);
+    bridgeMock.syncDms.mockClear();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [],
+      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
+      declined: [],
+    });
+    const onInvitationRevealed = vi.fn();
+    rerender(<ChatsView {...props} revealInvitation={{ shareId: "share-dm-request", inputs: inputCount() }} onInvitationRevealed={onInvitationRevealed} />);
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", poll: true });
+    expect(document.activeElement).toBe(screen.getByTestId("chats-dm-request-accept"));
+  });
+
   it("accepts a message request elsewhere without navigating this workspace", async () => {
     const user = userEvent.setup();
     const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
@@ -479,6 +533,23 @@ describe("ChatsView direct messages", () => {
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
     expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+  });
+
+  it("opens a focused reply's thread and highlights the reply there", async () => {
+    const root = message({ id: "message-root", threadId: "thread-dm-1", body: "Where should we eat?" });
+    const reply = message({ id: "message-focus", threadId: "thread-dm-1", body: "Prado at 8:30", parentMessageId: root.id });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [root, reply] });
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "dm", dm: dm(), focusMessageId: reply.id },
+    });
+
+    const panel = await screen.findByTestId("chats-dm-thread-panel");
+    await waitFor(() => {
+      const row = within(panel).getByText("Prado at 8:30").closest("[data-message-id]");
+      expect(row?.className).toContain("ring-2");
+    });
   });
 
   it("clears focused-message state and refs when a DM is opened normally", async () => {

@@ -93,6 +93,7 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  EXPLORER_MODES,
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
@@ -470,6 +471,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,
@@ -1429,7 +1431,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
-  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
+  ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
@@ -3518,6 +3520,7 @@ export const WorkspaceActivityEvent = z
     paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
     pathSetChanged: z.boolean().optional(),
     summaryChanged: z.literal(true).optional(),
+    liveDocumentStopped: z.string().min(1).optional(),
   })
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
@@ -3798,7 +3801,7 @@ export type GetRelayReceivedSharePayload = z.infer<
   typeof GetRelayReceivedSharePayload
 >;
 
-export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
+export const GetRelayReceivedShareResult = z.union([
   z
     .object({
       found: z.literal(false),
@@ -3816,6 +3819,14 @@ export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
     .object({
       found: z.literal(true),
       share: RelayShareReceivedRow,
+    })
+    .strict(),
+  // A Group or a direct message. It opens in Chats, where the person joins
+  // it into a workspace of their own, rather than as a share of files.
+  z
+    .object({
+      found: z.literal(true),
+      chats: z.literal(true),
     })
     .strict(),
 ]);
@@ -5778,6 +5789,8 @@ export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
+  // The message the live run answers, so its working line sits under it.
+  liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   // The conversation's latest run, when dohc's restart or quit stopped it.
@@ -6066,6 +6079,8 @@ export const WorkspaceUiState = z.object({
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
   // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+  // Which view the Explorer shows: Home, or the folder tree.
+  explorerMode: z.enum(EXPLORER_MODES).optional().catch(undefined),
   // Which view each collection tab shows, keyed by the collection folder path.
   collectionViews: z
     .record(PATH_STRING, z.string().min(1).max(4096))

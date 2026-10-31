@@ -2846,7 +2846,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                     faults,
                 )
-                .map_err(local)?;
+                .map_err(|error| self.local(error))?;
             for change in recovered.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
@@ -2994,7 +2994,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
                 leases,
             )
-            .map_err(local)?;
+            .map_err(|error| self.local(error))?;
             p.pass.replace_drain_holds(released.holds);
             for change in released.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);

@@ -517,11 +517,11 @@ describe("EditorTabs strip scrolling", () => {
     const active = screen.getByRole("menuitem", { name: "a.md" });
     const current = screen.getByRole("menuitem", { name: "b.md" });
     expect(document.activeElement).toBe(active);
-    // The current row keeps its fill; focus adds the outline only to the
-    // active one.
+    // Both rows can hold the selected fill, so the keyboard's row line marks
+    // the active one.
     expect(current.classList).toContain("bg-selected");
-    expect(current.classList).not.toContain("outline-accent");
-    expect(active.classList).toContain("focus:outline-accent");
+    expect(active.classList).toContain("focus:bg-selected");
+    expect(active.classList).toContain("dohc-focus-row");
   });
 
   it("keeps the overflow menu clear of the window's right edge", async () => {

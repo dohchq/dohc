@@ -15,25 +15,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("ChatAvatar initials", () => {
+describe("ChatAvatar initial", () => {
   it.each([
     ["  ice", "I"],
-    ["ice de vera", "ID"],
-    ["👩🏽‍💻 Dev", "👩🏽‍💻D"],
+    ["ice de vera", "I"],
+    ["👩🏽‍💻 Dev", "👩🏽‍💻"],
     ["émilie", "É"],
     ["  ", "?"],
-  ])("renders the first letter of the first two words of %s", (name, initial) => {
+  ])("renders the first letter of %s", (name, initial) => {
     render(<ChatAvatar presentation={neutralPresentation} name={name} kind="human" />);
     expect(screen.getByTitle(name, { normalizer: (value) => value }).textContent).toBe(initial);
   });
 
-  it("shows one initial at the strip size and two at the others", () => {
+  it("shows one initial at every size", () => {
     render(<ChatAvatar presentation={neutralPresentation} name="William White" kind="human" size="strip" />);
-    render(<ChatAvatar presentation={neutralPresentation} name="Wren Webb" kind="link" size="strip" />);
-    render(<ChatAvatar presentation={neutralPresentation} name="Walt Wise" kind="human" size="comment" />);
+    render(<ChatAvatar presentation={neutralPresentation} name="Wren Webb" kind="link" size="post" />);
     expect(screen.getByTitle("William White").textContent).toBe("W");
     expect(screen.getByTitle("Wren Webb").textContent).toBe("W");
-    expect(screen.getByTitle("Walt Wise").textContent).toBe("WW");
   });
 
   it("keeps an emoji code point intact when Segmenter is unavailable", async () => {
@@ -41,7 +39,7 @@ describe("ChatAvatar initials", () => {
     vi.resetModules();
     const { ChatAvatar: FallbackAvatar } = await import("./ChatAvatar");
     render(<FallbackAvatar presentation={neutralPresentation} name="😀 Reader" kind="human" />);
-    expect(screen.getByTitle("😀 Reader").textContent).toBe("😀R");
+    expect(screen.getByTitle("😀 Reader").textContent).toBe("😀");
   });
 });
 

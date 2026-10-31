@@ -185,7 +185,7 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
-import { isLiveStopEditsPending } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -207,6 +207,7 @@ import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
+import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
@@ -216,6 +217,7 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
+import { countInput } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -246,6 +248,7 @@ import {
 } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
+  ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
@@ -288,6 +291,7 @@ import {
   siteTabPath,
   setCollectionActiveView,
   setFolderExpanded,
+  setExplorerMode,
   setOpenEditorsHeight,
   setView,
   showView,
@@ -298,6 +302,7 @@ import {
   SHARING_VIEW_ID,
   type ActivityViewId,
   type EditorGroup,
+  type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
@@ -909,6 +914,7 @@ export function DesktopWorkspaceShell(props: {
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
+    setShellRetryBusy,
     runShellErrorAction,
     clearIdentity,
     privacySettingsAction,
@@ -972,11 +978,23 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
+  const readLiveStopRefusalForRow = useCallback(async (id: string, objectId: string, refusal: LiveStopRefusal) => {
+    if (refusal.code !== "edits-pending") return {refusal};
+    try {
+      const page = await loadLiveDocuments(id);
+      const row = page.documents.find(row => !row.saveOnly && row.objectId === objectId);
+      return {refusal: liveStopRefusalForRow(refusal, row), path: row?.path};
+    } catch {
+      return {refusal};
+    }
+  }, [loadLiveDocuments]);
   // A Stop names the row's document. A Try again closes that document's
   // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
-      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) clearIdentity(`live-stop-edits-pending:${objectId}`);
+      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
+        clearIdentity(`live-stop-edits-pending:${objectId}`);
+      }
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
@@ -985,29 +1003,58 @@ export function DesktopWorkspaceShell(props: {
     },
     [clearIdentity, workspaceAdmission],
   );
-  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string) => {
+  // Refused edits a Stop wrote into the file. Edits it kept stay in their
+  // own notice, which the sync status carries.
+  const liveDocumentStopped = useCallback(
+    (path: string, keptEdits: "recovered" | "kept") => {
+      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
+    },
+    [showSuccessNotice],
+  );
+  const resumeLiveDocument = useCallback(
+    (id: string, path: string) => bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
+    [],
+  );
+  const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string, refusal: LiveStopRefusal, listPath = path) => {
     const current = () => workspaceIdRef.current === id && !workspaceAdmission.superseded;
     const identity = `live-stop-edits-pending:${objectId}`;
     const report = () => {
       if (!current()) return;
-      reportShellFailure({identity, title: `Live editing didn't stop for ${path}`,
-        message: "Recent edits haven't reached the server yet.", retry});
+      const needsResume = liveStopOffersResume(refusal);
+      const withheld = refusal.code === "edits-pending" && refusal.pending === "conflict-parent-withheld";
+      reportShellFailure({identity,
+        ...(!withheld ? {title: `Live editing didn't stop for ${path}`} : {}),
+        message: withheld ? `Live editing didn't stop for ${path}.`
+          : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
+        ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
+        ...(withheld
+          ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, listPath);}}}
+          : needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
+    };
+    const resume = () => {
+      if (!current()) return;
+      void resumeLiveDocument(id, listPath).then(() => {
+        if (!current()) return;
+        clearIdentity(identity);
+      }).catch(error => {
+        if (current()) reportShellError(`dohc could not resume live editing for ${path}.`, error, resume, undefined, identity);
+      });
     };
     const retry = () => {
-      if (!current()) return false;
-      void stopLiveDocument(id, path, objectId).catch(error => {
+      if (!current()) return;
+      void stopLiveDocument(id, path, objectId).then(result => {
+        if (current() && result.keptEdits === "recovered") liveDocumentStopped(path, "recovered");
+      }).catch(error => {
         if (!current()) return;
-        if (isLiveStopEditsPending(error)) report();
-        else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
+        const next = readLiveStopRefusal(error);
+        if (next) {
+          refusal = next;
+          report();
+        } else reportShellError(`dohc could not stop live editing for ${path}.`, error, retry, undefined, identity);
       });
     };
     report();
-  }, [workspaceAdmission, stopLiveDocument, reportShellFailure, reportShellError]);
-  const resumeLiveDocument = useCallback(
-    (id: string, path: string) =>
-      bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
-    [],
-  );
+  }, [workspaceAdmission, stopLiveDocument, resumeLiveDocument, reportShellFailure, reportShellError, clearIdentity, liveDocumentStopped, openLiveDocuments]);
   // The dialog maps refusal codes to app-owned copy and filters diagnostics.
   const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
     const page = await bridge().listOwnerLiveRefusals({
@@ -1038,14 +1085,6 @@ export function DesktopWorkspaceShell(props: {
       });
     },
     [reportShellError, openLiveDocuments],
-  );
-  // Refused edits a Stop wrote into the file. Edits it kept stay in their
-  // own notice, which the sync status carries.
-  const liveDocumentStopped = useCallback(
-    (path: string, keptEdits: "recovered" | "kept") => {
-      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
-    },
-    [showSuccessNotice],
   );
   // Save recovery copy, from a notice or the Live documents dialog, of the
   // kept edits the row's incident names. Set once the shell can open the copy it wrote.
@@ -1718,15 +1757,6 @@ export function DesktopWorkspaceShell(props: {
       );
   }, [onManageWorkspaces, reportShellError]);
 
-  const refreshSites = useCallback(() => {
-    // refreshFiles's own settle bumps listingsSettled, which AppsView
-    // already keys its refetch off of (as filesSettledRevision) — nothing
-    // else needs to signal that refresh separately.
-    void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
-    );
-  }, [refreshFiles, reportShellError]);
-
   // A shared view has no recorder: the share's open installs no capture, so
   // it records nothing and restores nothing. Capability identity comes from
   // main's registry summary. This gates the versions surface and collections,
@@ -1787,7 +1817,14 @@ export function DesktopWorkspaceShell(props: {
       quiet,
     }),
   });
-  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
+  const workspaceApps = useApps(workspaceId, listingsSettled, aboutNotices, workspaceIsReady && !shareViewEnded);
+  // Every app folder: the listed apps, and any read before the list arrives.
+  const appFolders = useMemo(() => {
+    const folders = new Set(folderApps.keys());
+    const listed = workspaceApps.state;
+    if (listed.status === "ready" && listed.workspaceId === workspaceId) for (const app of listed.apps) folders.add(app.root);
+    return folders;
+  }, [folderApps, workspaceApps.state, workspaceId]);
   // The app folder of each entry file, so a file view shows Run.
   const appEntries = useMemo(() => {
     const entries = new Map<string, string>();
@@ -1864,17 +1901,25 @@ export function DesktopWorkspaceShell(props: {
       const identity=`owner-stop:${workspaceId}:${failure.path}`;
       if (shownStopFailures.current.get(identity)===failure.detail) continue;
       shownStopFailures.current.set(identity,failure.detail);
-      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
-        if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
+      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path,objectId:failure.objectId});}).catch(async error => {
+        if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+        const refusal=readLiveStopRefusal(error);
+        if (refusal) {
+          const answer=await readLiveStopRefusalForRow(workspaceId,failure.objectId,refusal);
+          if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+          clearIdentity(identity);
+          reportPendingLiveStop(workspaceId,failure.path,failure.objectId,answer.refusal,answer.path);
+        } else reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
       });};
       reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
     }
-  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,reportPendingLiveStop,readLiveStopRefusalForRow]);
   // One notice per document whose edits the server refused, once per
   // incident and recovery step: a refusal after a Try again is a new
   // incident. Dismissing the row hides it and leaves the edits kept. While a
   // Try again or a Stop waits, the row stays quiet. Save recovery copy is on
   // every row, including one whose Stop took the edits but could not write them.
+  const runningQuarantineStops=useRef(new Set<string>());
   const shownQuarantines=useRef({workspaceId,shown:new Map<string,string>()});
   useEffect(() => {
     if (captureDecidedFor!==workspaceId || syncStatus===null) return;
@@ -1890,6 +1935,7 @@ export function DesktopWorkspaceShell(props: {
     }
     for (const row of rows) {
       const identity=identityOf(row), incident=`${row.recovery}${row.earlier ? " earlier" : ""}\n${row.incident}`;
+      if (!runningQuarantineStops.current.has(identity)) setShellRetryBusy(identity,false);
       if (shown.get(identity)===incident) continue;
       shown.set(identity,incident);
       const onServer=row.storedOn==="server";
@@ -1916,14 +1962,32 @@ export function DesktopWorkspaceShell(props: {
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
       // Its editors close wherever the document is now, since a record keeps the path it had.
       const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
-      const stopAgain=() => {
+      const stopAgain=(): false => {
+        if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded || runningQuarantineStops.current.has(identity) || !setShellRetryBusy(identity,true)) return false;
+        runningQuarantineStops.current.add(identity);
         let result:LiveDocumentStopResult={keptEdits:"none"};
         void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
-          .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
-            (error: unknown) => {
+          .then(() => {
+            if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+            clearIdentity(`live-stop-edits-pending:${row.objectId}`);
+            if (result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");
+          },
+            async (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
-              reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
+              const refusal=readLiveStopRefusal(error);
+              if (refusal) {
+                const answer=await readLiveStopRefusalForRow(workspaceId,row.objectId,refusal);
+                if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+                reportPendingLiveStop(workspaceId,row.path,row.objectId,answer.refusal,answer.path);
+              } else {
+                reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
+              }
+            }).finally(() => {
+              runningQuarantineStops.current.delete(identity);
+              if (workspaceIdRef.current===workspaceId && !workspaceAdmission.superseded) setShellRetryBusy(identity,false);
             });
+        // The snapshot keeps the recovery row until the engine releases these edits.
+        return false;
       };
       // An earlier Stop's edits: the document may be live again, so the row names only the edits.
       if (row.recovery==="not-written") {
@@ -1977,7 +2041,7 @@ export function DesktopWorkspaceShell(props: {
         message:`The server could not accept your edits. dohc kept them ${onServer ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`,
         details,retry,action:save,identity});
     }
-  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped]);
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped,reportPendingLiveStop,readLiveStopRefusalForRow,setShellRetryBusy]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -2702,7 +2766,7 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string) => {
+    (path: string, recent = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
@@ -2719,7 +2783,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       clearTabLimitError();
-      mutateWb(() => next);
+      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
     },
     [
       clearTabLimitError,
@@ -2739,7 +2803,7 @@ export function DesktopWorkspaceShell(props: {
   // other dohc surface — MAX_OPEN_TABS refusal included.
   const openCollectionTab = useCallback(
     (path: string) => {
-      openVirtualTab(collectionTabPath(path));
+      openVirtualTab(collectionTabPath(path), true);
     },
     [openVirtualTab],
   );
@@ -2808,6 +2872,17 @@ export function DesktopWorkspaceShell(props: {
     },
     [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
+  // The chat list lives in the left side panel's Chats view.
+  const openChatsNavigator = useCallback(() => {
+    mutateWb((state) => showView(state, "chats"));
+  }, [mutateWb]);
+  // A notice's Open shows Chats at the invitation it names.
+  const [revealedInvitation, setRevealedInvitation] = useState<ChatsInvitation | null>(null);
+  const openChatsInvitation = useCallback((invitation: ChatsInvitation) => {
+    setRevealedInvitation(invitation);
+    openChatsNavigator();
+  }, [openChatsNavigator]);
+  const clearRevealedInvitation = useCallback(() => setRevealedInvitation(null), []);
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
@@ -2819,6 +2894,10 @@ export function DesktopWorkspaceShell(props: {
       openFile(open);
       return;
     }
+    if ("chatsInvitation" in open) {
+      openChatsInvitation(open.chatsInvitation);
+      return;
+    }
     const openSwitch = () => {
       void openAutomationControls(open.automationControls, { sharedFile: open.sharedFile }).then(
         (note) => {
@@ -2828,7 +2907,7 @@ export function DesktopWorkspaceShell(props: {
       );
     };
     openSwitch();
-  }, [openAutomationControls, openFile, reportShellError, workbenchRestored]);
+  }, [openAutomationControls, openChatsInvitation, openFile, reportShellError, workbenchRestored]);
   // Files the OS opened with dohc. Main sends each once this window has opened
   // this workspace, and they open in order when the workspace is ready.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
@@ -2861,7 +2940,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
     },
     [openVirtualTab],
   );
@@ -2919,10 +2998,6 @@ export function DesktopWorkspaceShell(props: {
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
-  // The chat list lives in the left side panel's Chats view.
-  const openChatsNavigator = useCallback(() => {
-    mutateWb((state) => showView(state, "chats"));
-  }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
@@ -3744,11 +3819,11 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
   );
 
-  // Reveal-then-create: the inline editbox lives in the explorer view, so
-  // make that view visible first (never setView — re-selecting the active
+  // Reveal-then-create: the inline editbox lives in the explorer's Files
+  // tree, so make it visible first (never setView — re-selecting the active
   // view toggles the panel).
   const requestExplorerFolder = useCallback(() => {
-    mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+    mutateWb((state) => setExplorerMode({ ...state, activeView: "explorer", sidebarVisible: true }, "files"));
     setNewFolderRequest((current) => (current ?? 0) + 1);
   }, [mutateWb]);
 
@@ -3761,8 +3836,17 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
     [mutateWb],
   );
+  // An app folder's pin is its sidebar pin, kept in the settings file.
+  // Anything else is pinned in Home, in the workspace's ui-state.
   const toggleExplorerPin = useCallback(
-    (path: string) => mutateWb((state) => togglePinned(state, path)),
+    (path: string) => {
+      if (appFolders.has(path)) void setAppPinned(path, !pinnedRoots.includes(path));
+      else mutateWb((state) => togglePinned(state, path));
+    },
+    [appFolders, mutateWb, pinnedRoots, setAppPinned],
+  );
+  const setExplorerModeInWb = useCallback(
+    (mode: ExplorerMode) => mutateWb((state) => setExplorerMode(state, mode)),
     [mutateWb],
   );
   const collapseExplorerFolders = useCallback(() => {
@@ -3887,6 +3971,24 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     workspaceId,
   ]);
+  // Add an app here… opens the Explorer with its Apps section open and its
+  // first row focused. The request belongs to one workspace, like a reveal.
+  const [appsReveal, setAppsReveal] = useState<string | null>(null);
+  const clearAppsReveal = useCallback(() => setAppsReveal(null), []);
+  const showAppsInExplorer = useCallback(() => {
+    mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
+    setAppsReveal(workspaceId);
+  }, [mutateWb, workspaceId]);
+  const explorerApps = useMemo<ExplorerApps>(
+    () => ({
+      ...workspaceApps,
+      pinnedApps: pinnedRoots,
+      onSetPinned: setAppPinned,
+      reveal: appsReveal === workspaceId,
+      onRevealed: clearAppsReveal,
+    }),
+    [appsReveal, clearAppsReveal, pinnedRoots, setAppPinned, workspaceApps, workspaceId],
+  );
   // Stable identities for the memoized explorer and inspector (D2#2/#5).
   // Inline arrows here handed every shell render a fresh prop set, which
   // re-rendered every TreeRow and re-ran FileInspector for renders that
@@ -4336,6 +4438,10 @@ export function DesktopWorkspaceShell(props: {
     });
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
+        if (event.liveDocumentStopped && event.workspaceId === workspaceId &&
+          workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded) {
+          clearIdentity(`live-stop-edits-pending:${event.liveDocumentStopped}`);
+        }
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
         if (event.workspaceId === workspaceId &&
@@ -4374,6 +4480,7 @@ export function DesktopWorkspaceShell(props: {
     hasCommittedListing,
     invalidateVisibility,
     readCloudStatusAgainIfBusy,
+    clearIdentity,
   ]);
 
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
@@ -4437,7 +4544,6 @@ export function DesktopWorkspaceShell(props: {
       "show-chats": () => mutateWb((state) => showView(state, "chats")),
       "show-search": () => mutateWb((state) => showView(state, "search")),
       "show-graph": () => mutateWb((state) => showView(state, "graph")),
-      "show-sites": () => mutateWb((state) => showView(state, "sites")),
       "show-history": () => mutateWb((state) => showView(state, "history")),
       "connect-cloud": openCloud,
       "settings": () => openSettings(),
@@ -4565,6 +4671,7 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
+      countInput();
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
@@ -4985,9 +5092,11 @@ export function DesktopWorkspaceShell(props: {
     openAutomation: openNoticeAutomation,
     openAutomationControls,
     openChat: openChatsNavInTab,
+    openChatsInvitation,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
+    clearShellError: clearIdentity,
   });
   const shareChangeNotices = useMemo(
     () =>
@@ -5113,6 +5222,10 @@ export function DesktopWorkspaceShell(props: {
     <>
       <Explorer
         workspaceId={workspaceId}
+        mode={wb.explorerMode}
+        onModeChange={setExplorerModeInWb}
+        listed={fileListingCommit !== null}
+        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}
@@ -5120,6 +5233,7 @@ export function DesktopWorkspaceShell(props: {
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         tabLabels={tabLabels}
+        tabGlyphs={chatEditors.glyphs}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -5140,6 +5254,7 @@ export function DesktopWorkspaceShell(props: {
         collectionFolders={collectionFolders}
         appFolders={appFolders}
         onOpenCollection={openCollectionTab}
+        apps={explorerApps}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
         onIncludeArchivedCollections={shareView || !collectionsListed ? undefined : setIncludeArchived}
@@ -5236,6 +5351,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceFiles: files,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
+    ...(revealedInvitation === null ? {} : { revealInvitation: revealedInvitation, onInvitationRevealed: clearRevealedInvitation }),
     agentSetup,
     onSetupAgent: openAgentSettings,
     userSettings: props.userSettings?.settings ?? null,
@@ -5307,6 +5423,7 @@ export function DesktopWorkspaceShell(props: {
         ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
+        retryBusy: error.retryBusy,
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
@@ -5893,14 +6010,13 @@ export function DesktopWorkspaceShell(props: {
             openHistoryTab={openHistoryTab}
             openGraphTab={openGraphTab}
             openChatsTab={openChatsTab}
-            refreshSites={refreshSites}
+            showAppsInExplorer={hasApps(workspaceApps) ? showAppsInExplorer : null}
             explorerView={explorerView}
             search={search}
             openSearchResult={openSearchResult}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
             focusedTabPath={focusedTabPath}
-            appsNotices={aboutNotices}
             graphKey={graphKey}
             openPathWithHeading={openPathWithHeading}
             openGraphChatThread={openGraphChatThread}
@@ -5908,10 +6024,7 @@ export function DesktopWorkspaceShell(props: {
             captureDecided={captureDecided}
             syncStatus={syncStatus}
             chatsNavigatorProps={chatsNavigatorProps}
-            pinnedRoots={pinnedRoots}
             setAppPinned={setAppPinned}
-            listingsSettled={listingsSettled}
-            createFirstApp={createFirstApp}
             shareView={shareView}
             historyTimeline={historyTimeline}
             sharing={{
@@ -5972,6 +6085,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      tabGlyphs={chatEditors.glyphs}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
@@ -6959,6 +7073,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceReady={props.onSwitchWorkspace}
             onBack={() => props.onDismissShareHandoff?.()}
             onOpened={() => props.onShareHandoffOpened?.()}
+            ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}

@@ -71,6 +71,16 @@ export function readServiceActivationRetirement(storage: StorageContext, documen
   return value ? retirement(value) : null;
 }
 
+/** The exact activation's durable retirement decision, including a completed retirement. */
+export function readServiceActivationRetirementDecision(storage: StorageContext, document: {workspaceId: string; objectId: string},
+  activation: RetirableServiceActivation): ServiceActivationRetirement | null {
+  const value = storage.db.prepare(`SELECT ${COLUMNS} FROM ${SERVICE_ACTIVATIONS}
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND activation_id=? AND lineage_claim_id=?
+      AND retire_restore_generation=? AND retire_requested_at_ms IS NOT NULL AND ${currentIdentity(SERVICE_ACTIVATIONS)}`)
+    .get(document.workspaceId, document.objectId, activation.activationId, activation.lineageClaimId, activation.restoreFenceGeneration);
+  return value ? retirement(value) : null;
+}
+
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
   return storage.db.prepare(`SELECT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS}

@@ -144,7 +144,7 @@ export function CloudAccountRow(props: {
           data-testid="cloud-delete-account"
           disabled={busy}
           onClick={() => props.onDelete?.({ email: props.email, server })}
-          className="flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line px-3 text-[13px] text-danger hover:bg-hover dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
+          className="flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line px-3 text-[13px] text-danger hover:bg-hover disabled:cursor-wait disabled:opacity-50"
         >
           <Trash2 size={12} aria-hidden />
           Delete account…
