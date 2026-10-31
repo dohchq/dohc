@@ -103,7 +103,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   const activity = vi.fn(async (_value: RegistryEntry) => { events.push("activity"); });
   const dispatch = {
     stopAgentRun: vi.fn<ChatDispatchService["stopAgentRun"]>(async () => true),
-    dispatchStateForThread: vi.fn<ChatDispatchService["dispatchStateForThread"]>(async () => ({ liveRunId: "run-1", pendingCount: 2, paused: true })),
+    dispatchStateForThread: vi.fn<ChatDispatchService["dispatchStateForThread"]>(async () => ({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: true })),
     resumeThreadDispatch: vi.fn<ChatDispatchService["resumeThreadDispatch"]>(async () => { events.push("resume"); }),
     retryStoppedRun: vi.fn<ChatDispatchService["retryStoppedRun"]>(async () => { events.push("retry"); return true; }),
     runnerSelfTest: vi.fn<ChatDispatchService["runnerSelfTest"]>(async () => { events.push("self-test"); return { ok: true, detail: "Ready" }; }),
@@ -428,7 +428,7 @@ describe("agent run IPC registrations", () => {
 
   it("requires capture for dispatch state and writable admission for resume", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", pendingCount: 2, paused: true });
+    await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: true });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
     expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1");
     h.events.length = 0;
@@ -466,7 +466,7 @@ describe("agent run IPC registrations", () => {
 
   it("rejects malformed dispatch results at their bridge schemas", async () => {
     const h = await harness();
-    h.dispatch.dispatchStateForThread.mockResolvedValue({ liveRunId: null, pendingCount: -1, paused: false });
+    h.dispatch.dispatchStateForThread.mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: -1, paused: false });
     h.dispatch.runnerSelfTest.mockResolvedValue({ ok: true, detail: "" });
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).rejects.toThrow();
     await expect(h.invoke(CHANNELS.runnerSelfTest, selfTestPayload)).rejects.toThrow();

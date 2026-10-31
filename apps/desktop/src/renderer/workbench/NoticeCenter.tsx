@@ -2,6 +2,7 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
+import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
@@ -194,7 +195,7 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
-  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 dohc-focus-row";
 // A row's first line is as tall as its tallest control, so a title that
 // wraps leaves its controls where they were. It holds only icon controls;
 // worded actions get a line under the text, so they never squeeze the title.
@@ -516,10 +517,11 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 // clear of them with scroll room (Overlay), and F6 reaches them from the
 // dialog's focus trap (modalFocus). Their rows stay in Notices, which opens
 // on the same layer.
+// A chat's message box raises them above it (toastClearance).
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
+  rail: "fixed bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)] right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
+  corner: "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -874,8 +876,11 @@ export function NoticeCenter(props: {
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(stack);
+    // A chat's message box moves the stack without resizing it.
+    const stopRoom = onComposerRoomChange(measure);
     return () => {
       observer?.disconnect();
+      stopRoom();
       root.style.removeProperty("--dohc-toast-room");
     };
   }, [open]);
@@ -2173,7 +2178,7 @@ export function NoticeCenter(props: {
                       type="button"
                       data-testid="sent-notices-more"
                       onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                     >
                       Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
                     </button>

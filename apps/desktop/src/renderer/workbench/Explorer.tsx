@@ -5,18 +5,16 @@ import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
+import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
-  Database,
   FilePlus2,
   Folder,
   FolderPlus,
   FolderOpen,
   Laptop,
-  Pin,
   RefreshCw,
   TriangleAlert,
   X,
@@ -49,9 +47,13 @@ import {
   parseTab,
   TAB_KINDS,
   type EditorGroup,
+  type ExplorerMode,
   clampOpenEditorsHeight,
 } from "./workbenchState";
 import { TabGlyph, tabMark } from "./tabGlyph";
+import type { ExplorerApps } from "./AppsSection";
+import { ExplorerHome } from "./ExplorerHome";
+import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
@@ -77,6 +79,13 @@ export type TreeChangeOperation = {
 
 export interface ExplorerProps {
   workspaceId: string;
+  // Which view the Explorer shows: Home, by kind, or Files, the folder tree.
+  mode: ExplorerMode;
+  onModeChange: (mode: ExplorerMode) => void;
+  // Whether the workspace's first listing has landed. Home waits for it.
+  listed: boolean;
+  // Opened paths and tabs, most recent first, for Home's Recent.
+  recentFiles: readonly string[];
   files: WorkspaceFileEntry[];
   folders: string[];
   editorGroups: EditorGroup[];
@@ -87,6 +96,7 @@ export interface ExplorerProps {
   recoveryPaths: ReadonlySet<string>;
   /** Display names for virtual paths that cannot carry a useful file name. */
   tabLabels?: ReadonlyMap<string, string>;
+  tabGlyphs?: ReadonlyMap<string, ObjectKind>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -121,6 +131,9 @@ export interface ExplorerProps {
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
+  // The workspace's apps, for Home's Apps section. Without it Home has no
+  // Apps section.
+  apps?: ExplorerApps;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
@@ -209,7 +222,7 @@ type DropPreview = {
   targetIsFolder: boolean;
 };
 
-type RowDropPreview = {
+export type RowDropPreview = {
   kind: DropPreview["kind"];
   role: "target" | "contained";
 };
@@ -370,14 +383,12 @@ export const TreeRow = memo(function TreeRow(props: {
         // alone is medium weight so it still reads inside a multi-selection
         // once the tree loses focus. An attenuated fill for the
         // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the accent focus
-        // outline inset, inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. It holds 3:1 against
-        // every fill. The
-        // drag drop-target is a filled tint with a solid bar (list.drop-
+        // to either to read. The keyboard-focused row draws the row's 1px
+        // accent line inside its own rounded box, so the tree's scroller
+        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
         // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -442,6 +453,8 @@ export const TreeRow = memo(function TreeRow(props: {
 });
 
 let editIdCounter = 0;
+const EMPTY_TREE: TreeNode = { segment: "", fullPath: "", file: null, children: [] };
+
 function nextChangeId(): string {
   editIdCounter += 1;
   return `pending-${editIdCounter}`;
@@ -500,10 +513,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
   const renameFocus = useRef<{ from: string; to: string } | null>(null);
+  // A rename in Home returns focus to Home's row for the path.
+  const rowFor = useCallback((path: string) => rowRefs.current.get(path) ??
+    [...fileTreeRef.current?.querySelectorAll<HTMLElement>("[data-home-key]") ?? []].find((row) => row.dataset.path === path), []);
   useFocusSurface(fileTreeRef, () => {
     const paths = renameFocus.current;
     renameFocus.current = null;
-    return paths ? rowRefs.current.get(paths.to) ?? rowRefs.current.get(paths.from) : null;
+    return paths ? rowFor(paths.to) ?? rowFor(paths.from) : null;
   });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
@@ -609,21 +625,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return map;
   }, [projected.files]);
 
-  // Same glyph rule as TreeRow, driven by the memoized lookup so pinned rows
-  // don't rescan projected.files. A pinned row has no selected fill.
-  function fileGlyph(path: string) {
-    const file = fileByPath.get(path);
-    return <FileGlyph kind={listedFileKind(path, file?.kind)} icon={file?.icon} size={GLYPH_SIZE} className={glyphTone(false)} />;
-  }
-
   const expandedSet = useMemo(
     () => new Set(props.expandedFolders),
     [props.expandedFolders],
   );
 
+  // Home draws no folder tree, so it builds none.
+  const home = props.mode === "home";
   const tree = useMemo(
-    () => buildTree(projected.files, projected.folders),
-    [projected],
+    () => (home ? EMPTY_TREE : buildTree(projected.files, projected.folders)),
+    [home, projected],
   );
 
   const rows = useMemo(() => {
@@ -733,7 +744,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     openEditorsExpanded,
     openEditorsHeight,
     openEditorCount,
-    props.pinned.length,
   ]);
 
   useEffect(() => {
@@ -950,7 +960,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           try {
             return await bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath });
           } catch (cause) {
-            if (document.activeElement === rowRefs.current.get(toPath)) {
+            if (document.activeElement === rowFor(toPath)) {
               renameFocus.current = { from: toPath, to: path };
             }
             throw cause;
@@ -960,7 +970,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         () => setEditing(current => current === edit ? null : current),
       );
     },
-    [runChanges, workspaceId],
+    [rowFor, runChanges, workspaceId],
   );
 
   const commitCreateFolder = useCallback(
@@ -1019,23 +1029,55 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setFocusedPath(path);
   }, []);
 
+  // A selection belongs to the view it was made in.
+  const [selectionMode, setSelectionMode] = useState(props.mode);
+  if (selectionMode !== props.mode) {
+    setSelectionMode(props.mode);
+    setSelection(new Set());
+    setAnchorPath(null);
+    setFocusedPath(null);
+  }
+
+  // Home's Show in Files asks for a reveal of its own; the shell's comes in
+  // revealPaths. Either one switches to Files first.
+  const [homeReveal, setHomeReveal] = useState<readonly string[] | null>(null);
+  const reveal = revealPaths ?? homeReveal;
+  const { onModeChange } = props;
   useEffect(() => {
-    if (!revealPaths) return;
-    // A path the tree does not list never gets a row; drop the request so it
-    // cannot take focus later when that path appears.
-    if (!revealPaths.some((path) => fileByPath.has(path) || isFolderPath(path))) {
-      onRevealed?.();
+    if (!reveal) return;
+    if (home) {
+      onModeChange("files");
       return;
     }
-    const shown = revealPaths.filter((path) => renderIndexByPath.has(path));
+    const done = () => {
+      setHomeReveal(null);
+      onRevealed?.();
+    };
+    // A path the tree does not list never gets a row; drop the request so it
+    // cannot take focus later when that path appears.
+    if (!reveal.some((path) => fileByPath.has(path) || isFolderPath(path))) {
+      done();
+      return;
+    }
+    const shown = reveal.filter((path) => renderIndexByPath.has(path));
     if (shown.length === 0) return;
     const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
     setFilesExpanded(true);
     setSelection(new Set(shown));
     setAnchorPath(first);
     focusRow(first);
-    onRevealed?.();
-  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPaths]);
+    done();
+  }, [fileByPath, focusRow, home, isFolderPath, onModeChange, onRevealed, renderIndexByPath, reveal]);
+
+  const showInFiles = useCallback(
+    (path: string | null) => {
+      onModeChange("files");
+      if (path === null) return;
+      for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
+      setHomeReveal([path]);
+    },
+    [onModeChange, onSetFolderExpanded],
+  );
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
@@ -1089,6 +1131,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // ---- context menu (native, main-owned over the closed tuple) ----
 
+  const modeRef = useRef(props.mode);
+  modeRef.current = props.mode;
+  // An app folder's pin is its sidebar pin; anything else is pinned in Home.
+  const pinnedApps = props.apps?.pinnedApps;
+  const isPinned = useCallback(
+    (path: string) => props.pinned.includes(path) || (pinnedApps?.includes(path) ?? false),
+    [pinnedApps, props.pinned],
+  );
+
   const dispatchMenu = useCallback(
     async (
       kind: "file" | "folder" | "root",
@@ -1109,6 +1160,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           props.onNewPage(targetDir);
           break;
         case "new-folder":
+          // The name field is a row in the folder tree.
+          if (modeRef.current === "home") onModeChange("files");
           beginCreateFolder(targetDir);
           break;
         case "new-collection":
@@ -1151,6 +1204,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       workspaceId,
       beginCreateFolder,
       beginRename,
+      onModeChange,
       onTogglePin,
       exportZip,
       props.onImportFiles,
@@ -1168,9 +1222,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       event.stopPropagation();
       if (!selectionRef.current.has(path)) selectSingle(path);
       const isFolder = isFolderPath(path);
-      void dispatchMenu(isFolder ? "folder" : "file", path, props.pinned.includes(path));
+      void dispatchMenu(isFolder ? "folder" : "file", path, isPinned(path));
     },
-    [selectSingle, isFolderPath, dispatchMenu, props.pinned],
+    [selectSingle, isFolderPath, dispatchMenu, isPinned],
   );
 
   const onContainerContextMenu = useCallback(
@@ -1328,6 +1382,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     clearDragPreview();
   }, [clearDragPreview]);
 
+  // Home's Pages drag as Files' rows do.
+  const homeDrag = useMemo(
+    () => ({ start: onRowDragStart, over: onRowDragOver, drop: onRowDrop, leave: onRowDragLeave, end: onRowDragEnd }),
+    [onRowDragEnd, onRowDragLeave, onRowDragOver, onRowDragStart, onRowDrop],
+  );
+  const onHomeMenu = useCallback(
+    (kind: "file" | "folder", path: string) => void dispatchMenu(kind, path, isPinned(path)),
+    [dispatchMenu, isPinned],
+  );
+
   const onContainerDragOver = useCallback(
     (event: DragEvent) => {
       const preview = previewForDrop(event, null, "", false);
@@ -1363,6 +1427,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onTreeKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (editing) return;
+      // The tree's keys belong to the tree and the frame around it. A row in
+      // another section, such as Open editors or Apps, keeps its own Enter,
+      // Space and arrows.
+      if (
+        event.target !== event.currentTarget &&
+        !workspaceTreeRef.current?.contains(event.target as Node)
+      ) {
+        return;
+      }
       if (event.key === "F2") {
         event.preventDefault();
         const target = focusedPath ?? [...selection][0];
@@ -1528,14 +1601,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }
 
   const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
-  const dropPreviewForRow = (row: VisibleRow): RowDropPreview | null => {
+  const dropPreviewFor = (path: string): RowDropPreview | null => {
     if (!dropPreview || dropPreview.targetPath === null) return null;
-    if (dropPreview.targetPath === row.fullPath) {
+    if (dropPreview.targetPath === path) {
       return { kind: dropPreview.kind, role: "target" };
     }
     if (
       dropPreview.targetIsFolder &&
-      row.fullPath.startsWith(`${dropPreview.targetPath}/`)
+      path.startsWith(`${dropPreview.targetPath}/`)
     ) {
       return { kind: dropPreview.kind, role: "contained" };
     }
@@ -1598,7 +1671,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
-          dropPreview={dropPreviewForRow(row)}
+          dropPreview={dropPreviewFor(row.fullPath)}
           registerRef={registerRef}
           onRowFocus={setFocusedPath}
           onRowClick={onRowClick}
@@ -1633,13 +1706,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         ref={fileTreeRef}
         tabIndex={-1}
         data-focus-surface="tree"
+        id={EXPLORER_PANEL_ID}
         data-testid="file-tree"
-        aria-label="Files"
+        data-mode={props.mode}
+        aria-label={home ? "Home" : "Files"}
         onKeyDown={onTreeKeyDown}
-        onScroll={updateVirtualRange}
-        onDragOver={onContainerDragOver}
-        onDrop={onContainerDrop}
-        onDragLeave={onContainerDragLeave}
+        onScroll={home ? undefined : updateVirtualRange}
+        onDragOver={home ? undefined : onContainerDragOver}
+        onDrop={home ? undefined : onContainerDrop}
+        onDragLeave={home ? undefined : onContainerDragLeave}
         onContextMenu={onContainerContextMenu}
         className={`min-h-0 flex-1 overflow-y-auto py-2 ${
           rootDropPreview
@@ -1649,35 +1724,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
-          <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
-          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
-            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
-          </button>)}
-          {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
-          {props.collectionsElsewhere && <CollectionsElsewhereRow elsewhere={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
-          {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
-          </>}
-        </section>}
+        {home ? (
+          <ExplorerHome
+            explorer={props}
+            files={projected.files}
+            fileByPath={fileByPath}
+            folders={folderPathSet}
+            activePath={activeTab}
+            scrollerRef={fileTreeRef}
+            editingPath={editing?.mode === "rename" ? editing.path : null}
+            renderEditRow={editRow}
+            onMenu={onHomeMenu}
+            onRename={beginRename}
+            onDelete={setConfirmDelete}
+            onShowInFiles={showInFiles}
+            drag={homeDrag}
+            dropPreviewFor={dropPreviewFor}
+          />
+        ) : (
+        <>
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
-          className="relative mt-4 first:mt-0"
+          className="relative"
         >
           <header
             data-testid="open-editors-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
               <span className="min-w-0 truncate">Open editors</span>
               {openEditorCount > 0 ? (
@@ -1764,9 +1844,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             data-group-id={group.id}
                             data-path={tab.path}
                             data-active={active}
-                            // The open button spans the row, so its inset
-                            // focus outline follows the row's rounded fill;
-                            // the close button sits on top at the right.
+                            // The open button spans the row, so its keyboard
+                            // focus follows the row's rounded fill; the close
+                            // button sits on top at the right.
                             className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
                                 ? "bg-selected text-ink"
@@ -1777,10 +1857,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
+                              className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
                               <TabGlyph
-                                {...tabMark(tab.path, fileByPath)}
+                                {...tabMark(tab.path, fileByPath, props.tabGlyphs?.get(tab.path))}
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />
@@ -1869,14 +1949,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
               <span className="min-w-0 truncate">Files</span>
               <ChevronRight
@@ -1909,54 +1989,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
           {filesExpanded ? (
             <>
-              {props.pinned.length > 0 ? (
-                <section
-                  data-testid="explorer-pinned"
-                  aria-label="Pinned"
-                  className="mb-2"
-                >
-                  <SectionLabel as="header" className="flex h-6 items-center gap-2 px-3">
-                    <Pin size={10} aria-hidden />
-                    Pinned
-                  </SectionLabel>
-                  <ul className="m-0 list-none px-1 py-0">
-                    {props.pinned.map((path) => (
-                      <li key={path}>
-                        <button
-                          type="button"
-                          data-testid="pinned-row"
-                          data-path={path}
-                          onClick={() =>
-                            isFolderPath(path)
-                              ? onSetFolderExpanded(path, true)
-                              : onOpenFile(path)
-                          }
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void dispatchMenu(
-                              isFolderPath(path) ? "folder" : "file",
-                              path,
-                              true,
-                            );
-                          }}
-                          className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
-                        >
-                          {props.appFolders?.has(path) ? (
-                            <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphTone(false)} />
-                          ) : isFolderPath(path) ? (
-                            <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
-                          ) : (
-                            fileGlyph(path)
-                          )}
-                          <span className="truncate">{basenameOf(path)}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
-
               {empty ? (
                 <button
                   type="button"
@@ -1979,6 +2011,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             </>
           ) : null}
         </section>
+        </>
+        )}
       </nav>
 
       {confirmDelete ? (

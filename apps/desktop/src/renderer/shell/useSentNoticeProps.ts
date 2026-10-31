@@ -13,6 +13,7 @@ import { inputCount } from "../ui/inputCount";
 import type { ShellErrorKind } from "./useShellError";
 import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice } from "./sentNoticePlace";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
+import { chatOnScreen } from "../workbench/chatsOnScreen";
 
 export const ACCESS_ENDED_NOTE =
   "Your access to this ended. Ask the person who shared it to share it again.";
@@ -101,7 +102,7 @@ export function useSentNoticeProps(input: {
     onOpenShare, reportShellError, clearShellError,
   } = input;
 
-  // A run's thread is in an agent's chat, whichever agent ran it, or in a
+  // A run's thread is in an agent's DM, whichever agent ran it, or in a
   // group's posts where a message named the agent. A failed lookup throws.
   const openRunThread = useCallback(
     async (threadId: string, signal: AbortSignal): Promise<string | null> => {
@@ -111,7 +112,8 @@ export function useSentNoticeProps(input: {
         ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
       for (const { channel, threads } of places) {
         const thread = threads.find((candidate) => candidate.id === threadId);
-        if (thread) nav = { level: "thread", channel, thread };
+        // An agent DM is one conversation: its threads open inside it.
+        if (thread) nav = channel.kind === "agent" ? { level: "channel", channel } : { level: "thread", channel, thread };
       }
       if (signal.aborted) return null;
       if (!nav) return RUN_THREAD_NOT_HERE_NOTE;
@@ -186,9 +188,25 @@ export function useSentNoticeProps(input: {
     () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
+  // An agent's reply the person can already see needs no notice: no toast,
+  // and no row once the dismiss lands. A notice names its reply only when the
+  // run finished with one; a failed run still tells the person.
+  const seenReply = useMemo(() => {
+    const notice = sentNotices?.toast;
+    const run = notice ? agentRunOfNotice(notice, workspaceId) : null;
+    return notice && run && notice.target?.message !== undefined && chatOnScreen(run.threadId) ? notice : null;
+  }, [sentNotices?.toast, workspaceId]);
+  const dismissNotice = sentNotices?.dismiss;
+  const hideToast = sentNotices?.hideToast;
+  useEffect(() => {
+    if (!seenReply || !dismissNotice || !hideToast) return;
+    hideToast();
+    // A dismiss that fails leaves the row in Notices, which is harmless.
+    dismissNotice(sentNoticeRef(seenReply)).catch(() => undefined);
+  }, [dismissNotice, hideToast, seenReply]);
   const toast = useMemo(
-    () => (sentNotices?.toast && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
-    [describe, sentNotices?.toast, workspaceId],
+    () => (sentNotices?.toast && sentNotices.toast !== seenReply && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    [describe, seenReply, sentNotices?.toast, workspaceId],
   );
 
   // A list main could not read is a failure with a way to ask again.

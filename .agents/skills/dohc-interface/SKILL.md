@@ -198,7 +198,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `text-ink` | Primary text |
 | `text-muted` | Secondary text, such as labels and inactive items |
 | `text-subtle` | Decorative text only: hints, timestamps, kbd |
-| `bg-accent`, `text-accent` | The brand accent: primary buttons, checked and active states, focus rings |
+| `bg-accent`, `text-accent` | The brand accent: primary buttons, checked and active states, keyboard focus |
 | `bg-agent`, `text-agent` | The default agent color |
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
@@ -310,13 +310,18 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
-- Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
-- Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
+- Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
+- `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
+- So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape leaves the mark as it was.
+- Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
+- Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
+- Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
+- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`.
 - In a panel, give the parent `px-1`.
-- A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its focus outline.
+- A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
-It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.
+It draws the selected fill on the active option, where Enter acts, whether the keyboard or the pointer moved it. A list that also marks its current row with the fill, such as the tab overflow menu, Turn into and the callout type menu, adds the row's accent line while the keyboard moves. Compose `MENU_ACTIVE_OPTION_BESIDE_CURRENT` for it. A picker you type into, such as Go to, the command palette, / and [[, shows the fill only.
 
 Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-6` and `dohc-elevated`.
 
@@ -354,8 +359,8 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`, with two exceptions, each explained in a comment. Where a ring would clip, opt out only if the frame shows focus another way, as the command palette's `focus-within:border-ink` does. A dialog's panel never wears the ring: it holds focus only until Tab reaches its controls, which show their own.
-- Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
+- Keep the global halo and `dohc-focus-row`, and draw no focus ring of your own. Add `outline-none` only where the part shows focus another way, and name that way in a comment. The command palette's frame shows it with `focus-within:border-ink`, and a menu row with its fill, plus its line beside a current row. A dialog's panel never wears the halo: it holds focus only until Tab reaches its controls, which show their own.
+- Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface. Keep every focus mark at 3:1 or more against the surface under it.
 
 ## Before you finish
 

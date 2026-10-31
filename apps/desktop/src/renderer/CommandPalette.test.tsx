@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette, type Command } from "./CommandPalette";
@@ -115,6 +115,12 @@ describe("CommandPalette keyboard selection", () => {
     expect(selectedLabel()).toBe("gamma");
     await userEvent.keyboard("{Enter}");
     expect(ran).toEqual(["gamma"]);
+  });
+
+  it("selects the result Tab reaches, so its fill shows focus", async () => {
+    setup();
+    act(() => screen.getByRole("button", { name: "beta" }).focus());
+    expect(selectedLabel()).toBe("beta");
   });
 
   it("Escape from the input closes it once, through the overlay", async () => {

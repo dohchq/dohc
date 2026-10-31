@@ -2529,7 +2529,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut completed = Vec::new();
         let recovered =
             crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
-                .map_err(local)?;
+                .map_err(|error| self.local(error))?;
         for change in recovered.changes {
             insert_changed_path(&mut pass.changed_paths, change);
         }
