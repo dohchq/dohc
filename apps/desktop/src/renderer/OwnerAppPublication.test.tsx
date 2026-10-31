@@ -776,13 +776,16 @@ describe("owner app publication", () => {
       await waitFor(() => expect(reportError).toHaveBeenCalledTimes(1));
       expect(reportError).toHaveBeenCalledWith("dohc removed this app's approval but has not confirmed whether 2 responses were saved.", undefined, expect.any(Function));
       // One response settled meanwhile. A Collection row says nothing about Dataset moves.
-      const pending = await screen.findByText("1 response not yet confirmed");
+      await screen.findByText("1 response not yet confirmed");
+      const rowRetry = () => within(screen.getByText("1 response not yet confirmed").parentElement!).getByRole("button", { name: "Try again" }) as HTMLButtonElement;
       expect(screen.queryByText(/Its data is not active here/)).toBeNull();
       // Both the error's Try again and the row's retry at the revision the removal ended at.
       await act(async () => reportError.mock.calls[0]![2]!());
       await waitFor(() => expect(actions("withdraw")).toHaveLength(2));
       expect(actions("withdraw").at(-1)).toEqual({ action: "withdraw", workspaceId: "ws-trip", publicationId: collectionRow.publicationId, expectedAuthorityRevision: 2 });
-      await userEvent.setup().click(within(pending.parentElement!).getByRole("button", { name: "Try again" }));
+      // The row's Try again waits until that retry settles.
+      await waitFor(() => expect(rowRetry().disabled).toBe(false));
+      await userEvent.setup().click(rowRetry());
       await waitFor(() => expect(actions("withdraw")).toHaveLength(3));
       expect(actions("withdraw").at(-1)).toEqual({ action: "withdraw", workspaceId: "ws-trip", publicationId: collectionRow.publicationId, expectedAuthorityRevision: 2 });
     });
