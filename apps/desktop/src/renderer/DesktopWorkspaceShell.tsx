@@ -989,15 +989,17 @@ export function DesktopWorkspaceShell(props: {
   }, [loadLiveDocuments]);
   // A Stop names the row's document. A Try again closes that document's
   // editors wherever they opened it, and no other document's at its old path.
+  // The document's waiting row stays until a Stop succeeds: one that waits
+  // again replaces it, even when no dialog is left to report the wait.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
-      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
-        clearIdentity(`live-stop-edits-pending:${objectId}`); clearIdentity(`live-stop-waiting:${id}:${objectId}`);
-      }
+      const current = () => id === workspaceIdRef.current && !workspaceAdmission.superseded;
+      if (current()) clearIdentity(`live-stop-edits-pending:${objectId}`);
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
       });
+      if (current()) clearIdentity(`live-stop-waiting:${id}:${objectId}`);
       return result;
     },
     [clearIdentity, workspaceAdmission],
@@ -4437,6 +4439,7 @@ export function DesktopWorkspaceShell(props: {
         if (event.liveDocumentStopped && event.workspaceId === workspaceId &&
           workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded) {
           clearIdentity(`live-stop-edits-pending:${event.liveDocumentStopped}`);
+          clearIdentity(`live-stop-waiting:${workspaceId}:${event.liveDocumentStopped}`);
         }
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
