@@ -232,7 +232,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const [reactivating, setReactivating] = useState(false);
   const [linkReads, setLinkReads] = useState<NonNullable<AppDatasetCapability["linkReads"]>>([]);
   const [preparedLink, setPreparedLink] = useState("");
-  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | "open" | null>(null);
   const [busyPublicationId, setBusyPublicationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -271,6 +271,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const [localCandidate, setLocalCandidate] = useState<Prepared | null>(null);
   const [candidateState, setCandidateState] = useState<"idle" | "loading" | "failed">("idle");
   const [approveFailed, setApproveFailed] = useState<string | null>(null);
+  // Opening an approved app in the browser failed. It shows here while the dialog is open, and goes to Notices when it closes.
+  const [openFailed, setOpenFailed] = useState<string | null>(null);
+  const openFailure = useRef<{ publicationId: string; cause: unknown } | null>(null);
   const [filesOpen, setFilesOpen] = useState(false);
   // Links and publications need this workspace synced; approval for this device does not. A failed check counts as
   // synced, so the link loaders still report their own errors.
@@ -306,6 +309,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       request.current += 1;
       cancel(candidate.current);
       cancel(localCandidateRef.current);
+      const failure = openFailure.current;
+      if (failure) openAgain.current(failure.publicationId, failure.cause);
     };
   }, []);
 
@@ -431,10 +436,26 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
 
-  // The dialog closes once the app is approved, so Try again in Notices opens the app itself, as the person asked.
+  // Once the dialog has closed, Try again in Notices opens the app itself, as the person asked.
+  const openFailedNotice = (publicationId: string, cause: unknown) =>
+    report.current("dohc could not open this app in your browser.", cause, () => void openApproved(publicationId, () => true));
+  const openAgain = useRef(openFailedNotice);
+  openAgain.current = openFailedNotice;
   const openApproved = async (publicationId: string, current = () => alive.current) => {
     try { await openLocalApp(api, props.workspaceId, publicationId, current); }
-    catch (cause) { reportError("dohc could not open this app in your browser.", cause, () => void openApproved(publicationId, () => true)); }
+    catch (cause) { openFailedNotice(publicationId, cause); }
+  };
+  // Open in browser while the dialog is open: a failure stays in place above the button that retries.
+  const openInBrowser = async (publicationId: string) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("open"); setOpenFailed(null); setError(null); openFailure.current = null;
+    try { await openLocalApp(api, props.workspaceId, publicationId, () => alive.current && mine === request.current); }
+    catch (cause) {
+      if (!alive.current || mine !== request.current) return;
+      openFailure.current = { publicationId, cause };
+      setOpenFailed(ipcErrorMessage(cause, "dohc could not open this app in your browser."));
+    } finally { if (alive.current && mine === request.current) setBusy(null); }
   };
 
   const approveLocal = async () => {
@@ -537,6 +558,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     if (busy || responsesBusy) return;
     const mine = ++request.current;
     setBusy("withdraw"); setBusyPublicationId(publication.publicationId); setError(null); setApproveFailed(null);
+    setOpenFailed(null); openFailure.current = null;
     try {
       const result = await api.publishOwnerApp({ action: "withdraw", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
       if (!alive.current || mine !== request.current) return;
@@ -597,7 +619,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   return <><Overlay onClose={committing ? undefined : props.onClose}>
     <section role="dialog" aria-modal="true" aria-labelledby="app-publication-title" data-testid="app-publication-dialog"
-      className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(520px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5 text-left">
+      className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(520px,calc(100vw-32px))] flex-col gap-6 overflow-y-auto rounded-xl border border-line bg-panel p-6 text-left">
       {/* The title, then Close, then the files toggle, so Tab follows the header the way it reads. */}
       <header className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3">
         <span className="row-span-2 grid size-9 place-items-center rounded-lg bg-panel-2 text-muted"><AppWindow size={18} aria-hidden /></span>
@@ -647,15 +669,21 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </section> : null}
         {status}
-        {approveFailed !== null ? <p role="alert" title={approveFailed} className="m-0 text-right text-[13px] text-danger">dohc could not approve this app. Try again.</p> : null}
-        <footer className="flex items-center gap-2">
-          {approval ? <SecondaryButton disabled={!!busy || responsesBusy} aria-busy={busy === "withdraw" && busyPublicationId === approval.publicationId} onClick={() => void withdraw(approval, true)}>Remove approval</SecondaryButton> : null}
-          <span className="flex-1" />
-          {approval && review ? null : <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
-          {approval && !changed ? <PrimaryButton disabled={committing} onClick={props.onClose}>Done</PrimaryButton> :
-            <PrimaryButton data-testid="app-publication-approve" aria-busy={localReview.status === "loading" || approving} disabled={!review || !canApprove} onClick={() => void approveLocal()}>
+        {/* A failed action shows right above the button that retries it, so the two stay one part. */}
+        <div className="flex flex-col gap-2">
+          {approveFailed !== null ? <p role="alert" title={approveFailed} className="m-0 text-right text-[13px] text-danger">dohc could not approve this app. Try again.</p> : null}
+          {openFailed !== null && approval && !changed ? <p role="alert" title={openFailed} className="m-0 text-right text-[13px] text-danger">dohc could not open this app in your browser. Try again.</p> : null}
+          <footer className="flex items-center gap-2">
+            {approval ? <SecondaryButton disabled={!!busy || responsesBusy} aria-busy={busy === "withdraw" && busyPublicationId === approval.publicationId} onClick={() => void withdraw(approval, true)}>Remove approval</SecondaryButton> : null}
+            <span className="flex-1" />
+            {approval && review ? null : <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
+            {approval && !changed ? <>
+              <SecondaryButton disabled={!!busy || responsesBusy} aria-busy={busy === "open"} onClick={() => void openInBrowser(approval.publicationId)}>Open in browser</SecondaryButton>
+              <PrimaryButton disabled={committing} onClick={props.onClose}>Done</PrimaryButton>
+            </> : <PrimaryButton data-testid="app-publication-approve" aria-busy={localReview.status === "loading" || approving} disabled={!review || !canApprove} onClick={() => void approveLocal()}>
               {approval ? "Approve changes" : "Approve and open"}</PrimaryButton>}
-        </footer>
+          </footer>
+        </div>
       </> : prepared ? <>
         {status}
         <h3 ref={reviewHeading} tabIndex={-1} className="m-0 text-[13px] font-medium text-ink">Review app publication</h3>

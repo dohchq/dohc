@@ -576,6 +576,7 @@ describe("owner app publication", () => {
         if (request.action === "prepareLocal") return { ...prepared, local: true, capabilities: options.capabilities ?? [approvedAccess] };
         if (request.action === "approve") return { ...published, publicationId: localRow.publicationId, local: true };
         if (request.action === "withdraw") return { kind: "withdrawn", publicationId: request.publicationId, authorityRevision: request.expectedAuthorityRevision + 1 };
+        if (request.action === "launchLocal") return { kind: "localLaunched", publicationId: request.publicationId, url: "http://127.0.0.1:43123/" };
         return answer(request);
       };
     }
@@ -924,6 +925,8 @@ describe("owner app publication", () => {
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove approval" }));
       await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open in browser" }));
+      await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Done" }));
     });
 
@@ -1024,6 +1027,97 @@ describe("owner app publication", () => {
       await act(async () => candidate.resolve({ ...prepared, local: true, capabilities: [approvedAccess] }));
       expect(dialog()).toBeNull();
       expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
+    });
+
+    it("lays out a first review with Share links after the access box and one primary button, at the dialog spacing", async () => {
+      api.publishOwnerApp.mockImplementation(local());
+      renderLocal();
+      await openLocal();
+      await ready();
+      const links = (await screen.findByRole("heading", { name: "Share links" })).closest("section")!;
+      const access = screen.getByRole("heading", { name: "What it can reach" }).closest("section")!;
+      const footer = screen.getByTestId("app-publication-dialog").querySelector("footer")!;
+      // What it can reach, then Share links, then the buttons, which end the dialog.
+      expect(access.compareDocumentPosition(links) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(links.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(footer.closest("[data-testid=app-publication-dialog] > *")?.nextElementSibling).toBeNull();
+      const primaries = [...screen.getByTestId("app-publication-dialog").querySelectorAll("button")].filter(button => button.className.includes("bg-accent"));
+      expect(primaries.map(button => button.textContent)).toEqual(["Approve and open"]);
+      expect(within(links).getByRole("button", { name: "Publish on a link" }).className).not.toContain("bg-accent");
+      // The skill's dialog: p-6, gap-6 between parts, labels 8 px over their boxes, buttons gap-2 apart, 520 px wide.
+      const panel = screen.getByTestId("app-publication-dialog");
+      expect(panel.className.split(" ")).toEqual(expect.arrayContaining(["p-6", "gap-6", "w-[min(520px,calc(100vw-32px))]"]));
+      for (const label of [within(links).getByRole("heading"), within(access).getByRole("heading")]) expect(label.className.split(" ")).toContain("mb-2");
+      expect(footer.className.split(" ")).toContain("gap-2");
+    });
+
+    it("offers Open in browser left of Done only while the approval matches the source", async () => {
+      api.publishOwnerApp.mockImplementation(local([localRow]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      const open = screen.getByRole("button", { name: "Open in browser" });
+      const done = screen.getByRole("button", { name: "Done" });
+      expect(open.nextElementSibling).toBe(done);
+      expect(open.className).not.toContain("bg-accent");
+      expect(screen.getByTestId("app-publication-dialog").querySelector("footer")!.firstElementChild?.textContent).toBe("Remove approval");
+      await userEvent.setup().click(open);
+      await waitFor(() => expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" }));
+      expect(actions("launchLocal")).toEqual([{ action: "launchLocal", workspaceId: "ws-trip", publicationId: localRow.publicationId }]);
+      expect(dialog()).toBeTruthy();
+      cleanup();
+      api.publishOwnerApp.mockImplementation(local([localRow], { revision: "e".repeat(64) }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
+      cleanup();
+      api.publishOwnerApp.mockImplementation(local());
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
+    });
+
+    it("shows a failed Open in browser in place, and sends it to Notices only once the dialog closes", async () => {
+      const reportError = vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
+      const answers = local([localRow]);
+      api.publishOwnerApp.mockImplementation(async request => request.action === "launchLocal"
+        ? { kind: "localLaunched", publicationId: localRow.publicationId, url: "http://localhost:43123/" } : answers(request));
+      renderLocal({ reportError });
+      await openLocal();
+      await stateText();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Open in browser" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toBe("dohc could not open this app in your browser. Try again.");
+      expect(alert.className).toContain("text-right");
+      expect(alert.nextElementSibling?.tagName).toBe("FOOTER");
+      expect(api.openExternalUrl).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Done" }));
+      expect(dialog()).toBeNull();
+      expect(reportError).toHaveBeenCalledExactlyOnceWith("dohc could not open this app in your browser.", expect.any(Error), expect.any(Function));
+      // Try again in Notices opens the app itself, now through a good address.
+      api.publishOwnerApp.mockImplementation(local([localRow]));
+      await act(async () => reportError.mock.calls[0]![2]!());
+      await waitFor(() => expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" }));
+    });
+
+    it("sends nothing to Notices after a successful retry in place", async () => {
+      const reportError = vi.fn();
+      let launches = 0;
+      const answers = local([localRow]);
+      api.publishOwnerApp.mockImplementation(async request => request.action === "launchLocal" && ++launches === 1 ? { kind: "cancelled" } : answers(request));
+      renderLocal({ reportError });
+      await openLocal();
+      await stateText();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Open in browser" }));
+      await screen.findByRole("alert");
+      await userEvent.setup().click(screen.getByRole("button", { name: "Open in browser" }));
+      await waitFor(() => expect(api.openExternalUrl).toHaveBeenCalledOnce());
+      expect(screen.queryByRole("alert")).toBeNull();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Done" }));
+      expect(reportError).not.toHaveBeenCalled();
     });
 
     describe("an app that opens in the browser", () => {
