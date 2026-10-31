@@ -585,9 +585,10 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const boxCapabilities = !review ? null : !needsCandidate && approval ? [approvedCapability(approval)] : localCandidate?.capabilities ?? null;
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
-  // A link publication here moves a Collection app's data off this device, so its links show even after that ends the approval.
+  // Share links show once the server answers for this app's publications. A server that does not allow publishing
+  // refuses that list, so the box stays hidden there. Publishing on a link never needs approval on this device.
   const linkRows = publications.filter(publication => publication.active || publication.operatorTakedown);
-  const showLinks = !!review && synced === true && !publicationsLoading && !publicationsError && (!!approval || publications.length > 0);
+  const showLinks = !!review && synced === true && !publicationsLoading && !publicationsError;
   const status = <>
     {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
     {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}

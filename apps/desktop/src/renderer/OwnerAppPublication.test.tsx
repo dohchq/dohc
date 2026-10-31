@@ -608,8 +608,9 @@ describe("owner app publication", () => {
       expect(within(access).queryByText("New")).toBeNull();
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
-      // Nothing is published and nothing is approved, so there is no link to show.
-      expect(screen.queryByRole("heading", { name: "Share links" })).toBeNull();
+      // Publishing on a link does not wait for approval here.
+      expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
+      expect(screen.getByText("Not on a link")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Remove approval" })).toBeNull();
       expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
       expect(screen.queryByText("That share isn't available anymore.")).toBeNull();
@@ -891,12 +892,15 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       await ready();
+      await screen.findByRole("button", { name: "Publish on a link" });
       const user = userEvent.setup();
       expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Trip planner" }));
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close publication" }));
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "2 files" }));
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish on a link" }));
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
       await user.tab();
@@ -923,7 +927,7 @@ describe("owner app publication", () => {
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "Done" }));
     });
 
-    it("offers a share link once approved and synced, and Back returns to the review", async () => {
+    it("offers a share link when synced, and Back returns to the review", async () => {
       api.publishOwnerApp.mockImplementation(local([localRow]));
       renderLocal();
       await openLocal();
