@@ -804,7 +804,12 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
         <Layers size={14} aria-hidden />
       </span>
       <span className={LINE_TWO}>
-        <span className="min-w-0 truncate">{versionMarkerTitle(props.version)}</span>
+        {/* The version's name takes the ink a file's name does. */}
+        <span className="min-w-0 truncate">
+          {props.version.kind === "main"
+            ? versionMarkerTitle(props.version)
+            : <>Created version <span className="text-ink">{props.version.name}</span></>}
+        </span>
       </span>
     </div>
   );

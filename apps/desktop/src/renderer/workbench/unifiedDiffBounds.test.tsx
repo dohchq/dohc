@@ -152,6 +152,9 @@ describe("history diff page", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(status.textContent).toBe("Restored the earlier state. Undo restore is available here.");
     expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
+    // The button beside the line says Undo restore, so only a screen reader
+    // hears that it is there.
+    expect(status.querySelector(".sr-only")?.textContent).toBe(" Undo restore is available here.");
   });
 
   // Restore and Undo restore take each other's place, so a press hands the

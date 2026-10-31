@@ -146,7 +146,7 @@ export function EngineMomentDiffPage({
     | { status: "idle" }
     | { status: "restoring" }
     | { status: "undoing" }
-    | { status: "restored"; restored: "text" | "deleted"; message: string }
+    | { status: "restored"; restored: "text" | "deleted"; message: string; undoOffered: boolean }
   >({ status: "idle" });
   const [moreOpen, setMoreOpen] = useState(false);
   const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
@@ -306,8 +306,9 @@ export function EngineMomentDiffPage({
             ? "Undid the restore by removing the file again. This was recorded in history."
             : "Undid the restore. This was recorded in history."
           : result.restored === "deleted"
-            ? "Removed the file this change created. Undo restore is available here."
-            : "Restored the earlier state. Undo restore is available here.",
+            ? "Removed the file this change created."
+            : "Restored the earlier state.",
+        undoOffered: kind !== "undo",
       });
       setUndoMomentId(kind === "undo" ? null : result.restoredMomentId);
     } catch (error) {
@@ -543,6 +544,9 @@ export function EngineMomentDiffPage({
             {restoreState.status === "restored" ? (
               <p data-testid="engine-diff-restore-status" className="m-0 mt-1 text-[12px] text-success">
                 {restoreState.message}
+                {/* Undo restore sits beside the line, so only a screen
+                    reader is told it is there. */}
+                {restoreState.undoOffered ? <span className="sr-only"> Undo restore is available here.</span> : null}
               </p>
             ) : null}
           </div>
