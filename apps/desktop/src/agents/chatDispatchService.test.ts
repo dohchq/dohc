@@ -881,7 +881,7 @@ describe("chatDispatchService", () => {
     fixture.spawnCalls[0]!.process.emitExit(exitCode);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.notices).toHaveLength(1);
-    expect(fixture.notices[0]!.body).toBe("");
+    expect(fixture.notices[0]!.body).toBe(exitCode === 0 ? "Its run ended without a reply." : "Its run ended with an error.");
   });
 
   it("shows the missing packaged runtime repair instruction in Notices", async () => {
@@ -890,7 +890,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     expect(fixture.spawnCalls).toHaveLength(0);
     expect(fixture.notices).toEqual([expect.objectContaining({
-      body: "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+      body: "It couldn't start: dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
     })]);
   });
   it.each([
@@ -900,7 +900,7 @@ describe("chatDispatchService", () => {
     { nodePresent: true, exitCode: 0, replied: false },
     { nodePresent: false, exitCode: 0, replied: true },
     { nodePresent: false, exitCode: 7, replied: true },
-  ])("adds the Node.js notice only for a missing runtime and missing reply: %j", async ({ nodePresent, exitCode, replied }) => {
+  ])("says Node.js is missing only for a missing runtime and missing reply: %j", async ({ nodePresent, exitCode, replied }) => {
     const fixture = await createFixture();
     const bin = join(fixture.appRoot, "node_modules", ".bin");
     await mkdir(bin, { recursive: true });
@@ -917,7 +917,7 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toHaveLength(1);
     expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
       ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
-      : "");
+      : exitCode !== 0 ? "Its run ended with an error." : replied ? "" : "Its run ended without a reply.");
   });
 
   it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
@@ -1478,7 +1478,7 @@ describe("chatDispatchService", () => {
       failureReason: expect.stringContaining("runner failed to start"),
     });
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run failed to start in \"Fail during runner setup while the daemon is unavailable.\"",
+      "Nova didn't reply in \"Fail during runner setup while the daemon is unavailable.\"",
     ]);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -1499,8 +1499,8 @@ describe("chatDispatchService", () => {
 
     await vi.waitFor(() => {
       expect(fixture.notices).toEqual([expect.objectContaining({
-        title: "Nova's run failed to start in \"Plan day 2\"",
-        body: reason,
+        title: "Nova didn't reply in \"Plan day 2\"",
+        body: `It couldn't start: ${reason}`,
       })]);
     });
     expect(fixture.spawnCalls).toEqual([]);
@@ -1552,7 +1552,7 @@ describe("chatDispatchService", () => {
     });
     // A failed reply lookup never reads as a finished run.
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run produced no reply in \"Finish while the daemon read is unavailable.\"",
+      "Nova didn't reply in \"Finish while the daemon read is unavailable.\"",
     ]);
   });
 
@@ -2379,8 +2379,8 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run produced no reply",
-      "Nova's run produced no reply in \"Plan day 3\"",
+      "Nova didn't reply",
+      "Nova didn't reply in \"Plan day 3\"",
     ]);
     expect(fixture.errors).toContainEqual(expect.objectContaining({ message: "engine busy" }));
     // Neither the runner's context nor the notice reads every thread.
@@ -2401,7 +2401,7 @@ describe("chatDispatchService", () => {
 
     const [notice] = fixture.notices;
     expect(fixture.notices).toHaveLength(1);
-    expect(notice!.title).toMatch(/^Nova's run failed in "Audit every file in the workspace .*…"$/u);
+    expect(notice!.title).toMatch(/^Nova didn't reply in "Audit every file in the workspace .*…"$/u);
     expect([...notice!.title]).toHaveLength(120);
   });
 
@@ -2444,7 +2444,8 @@ describe("chatDispatchService", () => {
     expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices).toEqual([expect.objectContaining({
-      kind: "agent-run", title: "Nova's run failed in \"Run a failing audit.\"",
+      kind: "agent-run", title: "Nova didn't reply in \"Run a failing audit.\"",
+      body: "Its run ended with an error.",
       target: { thread: trigger.threadId, run: claim.run.runId },
     })]);
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
@@ -2602,7 +2603,7 @@ describe("chatDispatchService", () => {
       failureHandled: true,
     });
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run produced no reply in \"Run silently.\"",
+      "Nova didn't reply in \"Run silently.\"",
     ]);
   });
 
@@ -2638,7 +2639,7 @@ describe("chatDispatchService", () => {
     await fixture.service.betweenScans(WORKSPACE_ID, async () => {});
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run produced no reply in \"Wait for my CLI reply provenance.\"",
+      "Nova didn't reply in \"Wait for my CLI reply provenance.\"",
     ]);
     expect(await owedRuns(fixture)).toEqual([]);
   });
@@ -2667,7 +2668,7 @@ describe("chatDispatchService", () => {
 
     expect(fixture.notices).toEqual([expect.objectContaining({
       noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
-      title: "dohc restarted and stopped Nova's run in \"Crash before this run's end is saved.\"",
+      title: "Nova didn't reply in \"Crash before this run's end is saved.\"",
     })]);
     expect(await owedRuns(fixture)).toEqual([]);
   });
@@ -2725,7 +2726,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
 
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run produced no reply in \"Exit quietly, then crash.\"",
+      "Nova didn't reply in \"Exit quietly, then crash.\"",
     ]);
     expect(await fixture.dispatch.getRunRecord(ended.run.runId)).toMatchObject({ failureHandled: true });
     const [asking] = await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId: trigger.threadId });
@@ -2823,7 +2824,7 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.notices).toEqual([expect.objectContaining({
       noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
-      title: "dohc restarted and stopped Nova's run in \"Resume this after restart.\"",
+      title: "Nova didn't reply in \"Resume this after restart.\"",
     })]);
   });
 
@@ -2969,7 +2970,7 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]);
     expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "dohc quit and stopped Nova's run in \"Recover this clean-shutdown interruption.\"",
+      "Nova didn't reply in \"Recover this clean-shutdown interruption.\"",
     ]);
   });
 
@@ -3023,7 +3024,9 @@ describe("chatDispatchService", () => {
       return { ...trigger, runId: claim.run.runId };
     }
     const stateOf = async (fixture: Fixture, threadId: string) =>
-      (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).stoppedRun;
+      (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun;
+    const wordsFor = (ending: "restarted" | "quit") =>
+      `Nova didn't reply. dohc ${ending} during its run.`;
 
     it.each(["restarted", "quit"] as const)("runs the request of a run stopped when dohc %s once more", async (ending) => {
       const fixture = await createFixture();
@@ -3031,7 +3034,7 @@ describe("chatDispatchService", () => {
       await activate(fixture);
       expect(fixture.spawnCalls).toEqual([]);
       expect(await stateOf(fixture, run.threadId)).toEqual({
-        runId: run.runId, triggerMessageId: run.messageId, ending, retryable: true,
+        runId: run.runId, triggerMessageId: run.messageId, words: wordsFor(ending), retryable: true,
       });
 
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
@@ -3095,7 +3098,7 @@ describe("chatDispatchService", () => {
       await fixture.dispatch.completeRun({ runId: codex.run.runId, exitCode: 0 });
 
       expect(await stateOf(fixture, run.threadId)).toEqual({
-        runId: run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: true,
+        runId: run.runId, triggerMessageId: run.messageId, words: wordsFor("quit"), retryable: true,
       });
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
       expect(fixture.requeues).toEqual([expect.objectContaining({ agentId: "default", runId: run.runId })]);
@@ -3122,7 +3125,7 @@ describe("chatDispatchService", () => {
       await quitCodex();
 
       expect(await stateOf(fixture, run.threadId)).toEqual({
-        runId: run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: true,
+        runId: run.runId, triggerMessageId: run.messageId, words: wordsFor("quit"), retryable: true,
       });
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
       expect(fixture.requeues.map(({ agentId }) => agentId)).toEqual(["codex", "default"]);
@@ -3149,7 +3152,7 @@ describe("chatDispatchService", () => {
       await fixture.dispatch.failRun({ runId: second.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
 
       expect(await stateOf(fixture, run.threadId)).toEqual({
-        runId: second.run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: false,
+        runId: second.run.runId, triggerMessageId: run.messageId, words: wordsFor("quit"), retryable: false,
       });
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, second.run.runId)).resolves.toBe(false);
       expect(fixture.requeues).toHaveLength(1);
@@ -3174,6 +3177,27 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls).toHaveLength(1);
       expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(run.threadId);
     });
+  });
+
+  it.each([
+    { replied: false, words: "Nova didn't reply. Its run ended with an error." },
+    { replied: true, words: "Nova stopped before finishing. Its run ended with an error." },
+  ])("says why a run didn't finish, with no Try again: %j", async ({ replied, words }) => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    if (replied) await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, retryable: false,
+    });
+    expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
+    expect(fixture.requeues).toEqual([]);
   });
 
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
@@ -3455,7 +3479,7 @@ describe("chatDispatchService", () => {
     expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Nova's run timed out in \"This harness will hang.\"",
+      "Nova didn't reply in \"This harness will hang.\"",
     ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);

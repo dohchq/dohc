@@ -482,6 +482,30 @@ describe("ChatLane", () => {
   const working = { liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 0, paused: false };
   const idle = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
 
+  it("says why a run didn't reply under the message that asked, with Try again only when it can run again", async () => {
+    const failedRun = { runId: "run-1", triggerMessageId: "message-1", words: "Nova didn't reply. dohc quit during its run.", retryable: true };
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, failedRun });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    const line = await screen.findByTestId("chats-lane-run-failed");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("message-1");
+    expect(line.textContent).toBe(`${failedRun.words}Try again`);
+
+    bridgeMock.retryStoppedRun.mockImplementationOnce(async () => {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, pendingCount: 1 });
+      return { queued: true };
+    });
+    fireEvent.click(screen.getByTestId("chats-lane-run-try-again"));
+    expect(bridgeMock.retryStoppedRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", runId: "run-1" });
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-run-failed")).toBeNull());
+
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...idle, failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", retryable: false },
+    });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect((await screen.findByTestId("chats-lane-run-failed")).textContent).toBe("Nova didn't reply. Its run ended with an error.");
+    expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
+  });
+
   it("stops the agent's run from its DM", async () => {
     bridgeMock.chatDispatchStateForThread.mockResolvedValue(working);
     render(lane("agent-dm", "workspace-a", "agent"));

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
 import { isAutomationControlsTarget, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
-import type { ChatDispatchStoppedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { ChatDispatchFailedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
@@ -43,7 +43,7 @@ const openErrorIdentity = (notice: NoticeRow) => `sent-notice-open:${notice.stor
 const nothingToReread = () => undefined;
 
 const AGENT_RUN_RETRY_FAILED = "dohc could not start your agent's run again.";
-const NO_STOPPED_RUNS: ReadonlyMap<string, ChatDispatchStoppedRun> = new Map();
+const NO_FAILED_RUNS: ReadonlyMap<string, ChatDispatchFailedRun> = new Map();
 
 // The run an agent run's notice names, when this computer ran it in this
 // workspace.
@@ -123,11 +123,11 @@ export function useSentNoticeProps(input: {
     [openChat, workspaceId],
   );
 
-  // Each conversation's latest run, when dohc's restart or quit stopped it.
-  // A notice offers Try again on that run while its conversation does.
-  // When the read fails the notice just offers no Try again.
-  const [stoppedRuns, setStoppedRuns] = useState(NO_STOPPED_RUNS);
-  const [stoppedRunsRevision, setStoppedRunsRevision] = useState(0);
+  // Each conversation's run that didn't reply. A notice offers Try again on
+  // that run while its conversation does. When the read fails the notice
+  // just offers no Try again.
+  const [failedRuns, setFailedRuns] = useState(NO_FAILED_RUNS);
+  const [failedRunsRevision, setFailedRunsRevision] = useState(0);
   // The runs the notices name, as a key, so a new list naming the same runs
   // reads nothing again.
   const agentRunsKey = useMemo(() => {
@@ -138,30 +138,30 @@ export function useSentNoticeProps(input: {
     });
     return `[${[...new Set(runs)].sort().join(",")}]`;
   }, [sentNotices?.notices, sentNotices?.toast, workspaceId]);
-  const stoppedRunReads = useRequestSequence([workspaceId]);
+  const failedRunReads = useRequestSequence([workspaceId]);
   useEffect(() => {
-    const request = stoppedRunReads.next();
+    const request = failedRunReads.next();
     const threadIds = [...new Set((JSON.parse(agentRunsKey) as [string, string][]).map(([threadId]) => threadId))];
     if (threadIds.length === 0) {
-      setStoppedRuns(NO_STOPPED_RUNS);
+      setFailedRuns(NO_FAILED_RUNS);
       return;
     }
     void Promise.all(threadIds.map(async (threadId) => {
       try {
-        return [threadId, (await bridge().chatDispatchStateForThread({ workspaceId, threadId })).stoppedRun] as const;
+        return [threadId, (await bridge().chatDispatchStateForThread({ workspaceId, threadId })).failedRun] as const;
       } catch {
         return [threadId, undefined] as const;
       }
     })).then((states) => {
-      if (!stoppedRunReads.isCurrent(request)) return;
-      setStoppedRuns(new Map(states.flatMap(([threadId, stopped]) => (stopped ? [[threadId, stopped] as const] : []))));
+      if (!failedRunReads.isCurrent(request)) return;
+      setFailedRuns(new Map(states.flatMap(([threadId, failed]) => (failed ? [[threadId, failed] as const] : []))));
     });
-  }, [agentRunsKey, stoppedRunReads, stoppedRunsRevision, workspaceId]);
-  const retriesStoppedRun = useCallback((notice: NoticeRow) => {
+  }, [agentRunsKey, failedRunReads, failedRunsRevision, workspaceId]);
+  const retriesFailedRun = useCallback((notice: NoticeRow) => {
     const run = agentRunOfNotice(notice, workspaceId);
-    const stopped = run ? stoppedRuns.get(run.threadId) : undefined;
-    return stopped !== undefined && stopped.runId === run?.runId && stopped.retryable;
-  }, [stoppedRuns, workspaceId]);
+    const failed = run ? failedRuns.get(run.threadId) : undefined;
+    return failed !== undefined && failed.runId === run?.runId && failed.retryable;
+  }, [failedRuns, workspaceId]);
 
   const describe = useCallback(
     (notice: NoticeRow): SentNotice => {
@@ -179,10 +179,10 @@ export function useSentNoticeProps(input: {
             (place.kind === "workspace" ? place.mount ?? workspaceName(place.workspace) : null),
         openable: place.kind !== "none",
         // Open takes a notice from another workspace there first.
-        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId || retriesStoppedRun(notice),
+        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId || retriesFailedRun(notice),
       };
     },
-    [retriesStoppedRun, workspaceId, workspaces],
+    [retriesFailedRun, workspaceId, workspaces],
   );
   const rows = useMemo(
     () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
@@ -418,7 +418,7 @@ export function useSentNoticeProps(input: {
       const attempt = () => {
         void bridge().retryStoppedRun({ workspaceId, ...run }).then(
           () => {
-            if (workspace.isCurrent(epoch)) setStoppedRunsRevision((revision) => revision + 1);
+            if (workspace.isCurrent(epoch)) setFailedRunsRevision((revision) => revision + 1);
           },
           (error: unknown) => {
             if (workspace.isCurrent(epoch)) reportShellError(AGENT_RUN_RETRY_FAILED, error, attempt);
