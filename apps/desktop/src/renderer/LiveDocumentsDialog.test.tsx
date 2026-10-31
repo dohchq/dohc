@@ -1,4 +1,4 @@
-import { liveStopError } from "../ipc/liveEditingStop";
+import { liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -49,7 +49,7 @@ function harness() {
     ),
     retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
-    onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
+    onError: vi.fn((message: string, error: unknown, retry: () => boolean, title?: string) => {}),
     saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
     readKeptEdits: vi.fn(async (workspaceId: string, objectId: string, incident: string) => {}),
   };
@@ -113,11 +113,11 @@ describe("LiveDocumentsDialog", () => {
       expect(buttons).toEqual([action]);
       expect(document.activeElement).toBe(action);
     }
-    expect(live.textContent).not.toContain("Session host:");
+    expect(live.textContent).not.toContain("Server:");
     await user.click(within(live).getByRole("button", {name: "Copy error details"}));
     const copy = await navigator.clipboard.readText();
     expect(copy).toContain(words);
-    expect(copy).toContain(`Session host: ${sessionHost}`);
+    expect(copy).toContain(`Server: ${sessionHost}`);
     expect(h.onError).not.toHaveBeenCalled();
   });
   it.each([
@@ -317,7 +317,20 @@ describe("LiveDocumentsDialog", () => {
     fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
     await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
   });
-  it("reports a waiting Stop through Notices and keeps its retry available", async () => {
+  it("reports a Stop with no answer through Notices by its error name, with its title, and keeps its retry available", async () => {
+    const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
+    // As it crosses Electron's IPC, which keeps only the name and message.
+    const error = new Error(`Error invoking remote method 'stopOwnerLiveDocument': ${String(liveStopWaitingError(new Error("fetch failed")))}`);
+    h.stop.mockRejectedValueOnce(error);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+    const [message, reported, retry, title] = h.onError.mock.calls[0]!;
+    expect([message, reported, title]).toEqual(["dohc is waiting for the server to stop live editing and will keep trying.", error, "Stopping live editing for a.md"]);
+    expect(retry()).toBe(true);
+    await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+  });
+  it("reports a server-only document's Stop that a restore holds through Notices and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     const error = new Error("Stop live editing is waiting. You can keep editing.");
     h.stop.mockRejectedValueOnce(error);

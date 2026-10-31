@@ -1127,7 +1127,7 @@ it.skipIf(engine.missing).each([
         expect(await hostDocumentState()).toBe("ready");
       }
       if (offlineStop) {
-        await expect(stop()).rejects.toThrow("Stop live editing is waiting.");
+        await expect(stop()).rejects.toThrow("dohc is waiting for the server to stop live editing and will keep trying.");
         const requested = await source.sessions.run(source.workspace, async ({workspace}) =>
           source.nativeClient().ownerYDocStopList({id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS}));
         expect(requested).toMatchObject([{state: "requested", binding: document.binding}]);

@@ -14,37 +14,37 @@ export const HOST_STOP_CASES = [
   [
     "host-no-edit-grant",
     "running without this document (no Edit grant)",
-    "Live editing didn't stop. The server's session host may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
+    "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
     "retry"
   ],
   [
     "host-moved",
     "running without this document (moved from old/plan.md)",
-    "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from old/plan.md. Put it back there, then try again.",
+    "Live editing didn't stop. The server may hold recent edits, but it only loads this document from old/plan.md. Put it back there, then try again.",
     "retry"
   ],
   [
     "host-start-failed",
     "couldn't start",
-    "Live editing didn't stop. The server's session host couldn't start and may hold recent edits. Contact the server's operator, then try again.",
+    "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
     "retry"
   ],
   [
     "host-not-loaded",
     "starting",
-    "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
+    "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
     "retry"
   ],
   [
     "host-not-loaded",
     "restarting",
-    "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
+    "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
     "retry"
   ],
   [
     "host-not-loaded",
     "running, document not loaded yet",
-    "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
+    "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
     "retry"
   ]
 ] as const;
@@ -52,5 +52,5 @@ export const HOST_STOP_CASES = [
 // Match Electron's rejected-handler string; code and metadata survive in the name.
 export function hostStopWireError(code: string, sessionHost: string, words: string): Error {
   const detail = {code, sessionHost, ...(code === "host-moved" ? {path: "old/plan.md"} : {})};
-  return new Error(`Error invoking remote method: LiveStopRefusal [${encodeURIComponent(JSON.stringify(detail))}]: ${words}\nSession host: ${sessionHost}`);
+  return new Error(`Error invoking remote method: LiveStopRefusal [${encodeURIComponent(JSON.stringify(detail))}]: ${words}\nServer: ${sessionHost}`);
 }

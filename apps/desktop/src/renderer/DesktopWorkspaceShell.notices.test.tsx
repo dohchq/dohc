@@ -2856,7 +2856,7 @@ describe("owner live documents", () => {
     else expect(within(toast).getByRole("button", {name: control === "resume" ? "Resume live editing" : "Try again"})).toBeTruthy();
     await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
     const copy = await navigator.clipboard.readText();
-    expect(copy).toContain(`Session host: ${sessionHost}`);
+    expect(copy).toContain(`Server: ${sessionHost}`);
     expect(copy).not.toContain("LiveStopRefusal");
     expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
     if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
@@ -2917,14 +2917,14 @@ describe("owner live documents", () => {
     const resume = control === "resume";
     if (control === "none") expect(within(toast).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
     else expect(within(toast).getByRole("button", {name: resume ? "Resume live editing" : "Try again"})).toBeTruthy();
-    expect(toast.textContent).not.toContain("Session host:");
+    expect(toast.textContent).not.toContain("Server:");
     await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
-    expect(await navigator.clipboard.readText()).toContain(`Session host: ${sessionHost}`);
+    expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
     expect(within(notice).getByText(body)).toBeTruthy();
     await user.click(within(notice).getByRole("button", {name: "Copy error details"}));
-    expect(await navigator.clipboard.readText()).toContain(`Session host: ${sessionHost}`);
+    expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     if (control === "none") {
       expect(within(notice).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
       return;

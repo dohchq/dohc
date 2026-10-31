@@ -1,5 +1,5 @@
 import type { relayShareOperations } from "./shareOperations";
-import { readLiveStopRefusal, liveStopHostCopy, liveStopError, liveStopRefusalForRow, type LiveStopRefusal } from "./liveEditingStop";
+import { readLiveStopRefusal, liveStopHostCopy, liveStopError, liveStopRefusalForRow, liveStopWaitingError, type LiveStopRefusal } from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
 import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
@@ -277,7 +277,7 @@ export function createOwnerLiveDocumentActions<
           console.warn(`[desktop] ${copy}`);
           throw liveStopError(refusal);
         }
-        throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
+        throw liveStopWaitingError(error);
       }
       const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);

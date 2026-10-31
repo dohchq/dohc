@@ -7,7 +7,7 @@ describe("session-host Stop contract", () => {
   it.each(HOST_STOP_CASES)("keeps the relay and desktop sentence equal for %s (%s)", (code, sessionHost, words) => {
     const relay = (RELAY_ERROR_MESSAGES as Readonly<Record<string, string>>)[code];
     expect(relay?.replaceAll("{path}", "old/plan.md")).toBe(words);
-    expect(liveStopHostCopy(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined)).toBe(`${words}\nSession host: ${sessionHost}`);
+    expect(liveStopHostCopy(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined)).toBe(`${words}\nServer: ${sessionHost}`);
   });
   it.each(HOST_STOP_CASES)("reads %s by code without trusting the sentence", (code, sessionHost) => {
     expect(readLiveStopRefusal(hostStopWireError(code, sessionHost, "untrusted relay text"))).toEqual({code, sessionHost,
@@ -15,7 +15,7 @@ describe("session-host Stop contract", () => {
   });
   it.each(HOST_STOP_CASES)("carries %s from the relay through Electron with local words", (code, sessionHost, words) => {
     const error = liveStopRelayError({code, sessionHost, error: "untrusted relay text", ...(code === "host-moved" ? {path: "old/plan.md"} : {})});
-    expect(error?.message).toBe(`${words}\nSession host: ${sessionHost}`);
+    expect(error?.message).toBe(`${words}\nServer: ${sessionHost}`);
     expect(readLiveStopRefusal(new Error(`Error invoking remote method: ${error}`))).toEqual({code, sessionHost,
       ...(code === "host-moved" ? {path: "old/plan.md"} : {})});
   });
@@ -31,7 +31,7 @@ it("drops an unknown sessionHost while keeping the Stop answer", () => {
 });
 it("drops a moved sessionHost whose path disagrees with the answer", () => {
   expect(liveStopHostCopy("host-moved", "running without this document (moved from wrong.md)", "old/plan.md"))
-    .not.toContain("Session host:");
+    .not.toContain("Server:");
 });
 
 it("does not offer Resume for an ineligible row, even with a Resume hint", () => {

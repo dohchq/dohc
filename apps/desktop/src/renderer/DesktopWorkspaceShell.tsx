@@ -1025,7 +1025,7 @@ export function DesktopWorkspaceShell(props: {
         ...(!withheld ? {title: `Live editing didn't stop for ${path}`} : {}),
         message: withheld ? `Live editing didn't stop for ${path}.`
           : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
-        ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
+        ...(refusal.sessionHost ? {details: [["Server", refusal.sessionHost]]} : {}),
         ...(withheld
           ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, listPath);}}}
           : needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
@@ -1075,15 +1075,17 @@ export function DesktopWorkspaceShell(props: {
   // open, and reopens the dialog once it is not — but only for the workspace
   // the failure belonged to.
   const reportLiveDocumentsError = useCallback(
-    (message: string, error: unknown, retry: () => boolean) => {
+    (message: string, error: unknown, retry: () => boolean, title?: string) => {
       const failedFor = workspaceIdRef.current;
-      reportShellError(message, error, () => {
+      const again = () => {
         if (workspaceIdRef.current !== failedFor) return;
         if (retry()) return;
         openLiveDocuments(failedFor);
-      });
+      };
+      if (title) reportShellFailure({title, message, retry: again});
+      else reportShellError(message, error, again);
     },
-    [reportShellError, openLiveDocuments],
+    [reportShellError, reportShellFailure, openLiveDocuments],
   );
   // Save recovery copy, from a notice or the Live documents dialog, of the
   // kept edits the row's incident names. Set once the shell can open the copy it wrote.
