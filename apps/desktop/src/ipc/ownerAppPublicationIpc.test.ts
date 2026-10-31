@@ -345,7 +345,7 @@ describe("owner app publication", () => {
     expect(publicationListUnavailable(403, { ok: false, code: "forbidden" })).toBe(false);
     expect(publicationListUnavailable(403, notFound)).toBe(false);
     expect(publicationListUnavailable(404, null)).toBe(false);
-    expect(publicationListUnavailable(404, { error: "Not found" })).toBe(false);
+    expect(publicationListUnavailable(404, { ok: false })).toBe(false);
     expect(publicationListUnavailable(404, { ok: false, code: "share_access_removed" })).toBe(false);
     expect([400, 401, 409, 429, 500, 502, 503, 504].map(status => publicationListUnavailable(status, notFound))).toEqual(Array(8).fill(false));
   });
