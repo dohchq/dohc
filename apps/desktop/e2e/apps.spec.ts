@@ -188,7 +188,6 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       const review = page.getByTestId("app-view-review").filter({ visible: true });
       await review.click();
       const publication = page.getByTestId("app-publication-dialog");
-      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
       await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
@@ -197,7 +196,6 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
       await share.getByRole("button", { name: "Close", exact: true }).click();
       await review.click();
-      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("combobox", { name: "Publication share link" }).selectOption({ index: 1 });
       await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
       await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();
