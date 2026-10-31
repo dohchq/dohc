@@ -814,6 +814,17 @@ describe("mergeSavedTabs (Restore tabs)", () => {
     expect(paths(merged)).not.toContain("saved-0.md");
     expect(paths(merged).filter((path) => path === "b.md")).toHaveLength(2);
   });
+
+  it("keeps an app open now in its group, so it doesn't reload", () => {
+    const app = siteTabPath("trip");
+    const savedApp: WorkbenchState = {
+      ...saved,
+      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+    };
+    const merged = mergeSavedTabs(savedApp, withTabs(app));
+    expect(merged.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([["b.md", app], ["b.md"]]);
+    expect(merged.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+  });
 });
 
 describe("views and panels", () => {

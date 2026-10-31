@@ -1561,8 +1561,9 @@ export function DesktopWorkspaceShell(props: {
   );
   // The saved layout replaces the defaults, and tabs opened since stay open
   // beside the saved ones, the one in view still in view. A file open in both
-  // keeps its saved place. Past the tab limit, saved tabs make room. Saving
-  // starts, with what's shown when nothing was saved.
+  // keeps its saved place, and an app open now stays in its group so it
+  // doesn't reload. Past the tab limit, saved tabs make room. Saving starts,
+  // with what's shown when nothing was saved.
   const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
     const shown = wbRef.current;
     if (stored) {

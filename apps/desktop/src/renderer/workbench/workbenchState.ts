@@ -599,16 +599,27 @@ function makeRoomForTabs(state: WorkbenchState, count: number, keep: ReadonlySet
 }
 
 // The saved layout with every tab open in `shown` beside it, the one in view
-// still in view. A file open in both keeps its saved place. Past the tab
+// still in view. A file open in both keeps its saved place. An app open in
+// `shown` stays in its group, because moving it reloads the app. Past the tab
 // limit, saved tabs close to make room, so no tab in `shown` closes.
 export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): WorkbenchState {
   const holder = (state: WorkbenchState, path: string) =>
     state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
   const shownPaths = new Set(allTabs(shown).map((tab) => tab.path));
-  const adding = [...shownPaths].filter((path) => !holder(saved, path)).length;
-  let next = makeRoomForTabs(saved, adding, shownPaths);
+  const appGroups = new Map<string, string>();
+  for (const group of shown.editorGroups) {
+    if (!saved.editorGroups.some((candidate) => candidate.id === group.id)) continue;
+    for (const { path } of group.tabs) if (parseTab(path).kind === "site") appGroups.set(path, group.id);
+  }
+  let next = saved;
+  for (const [path, groupId] of appGroups) {
+    const savedGroup = holder(next, path);
+    if (savedGroup !== undefined && savedGroup !== groupId) next = closeTab(next, savedGroup, path);
+  }
+  const adding = [...shownPaths].filter((path) => !holder(next, path)).length;
+  next = makeRoomForTabs(next, adding, shownPaths);
   for (const path of shownPaths) {
-    if (!holder(next, path)) next = openTab(next, path);
+    if (!holder(next, path)) next = openTab(next, path, appGroups.get(path));
   }
   const active = activeTabPath(shown);
   return active === null ? next : openTab(next, active, holder(next, active));
