@@ -8,7 +8,7 @@ import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
-import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
+import { publicationListUnavailable, registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -337,6 +337,10 @@ describe("owner app publication", () => {
     const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, datasetCapability: null, collectionCapability: null, linkCurrent: true, manifestUnavailable: true };
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
+  });
+  it("counts only a relay 404 or 403 as a list the server does not publish", () => {
+    expect([404, 403].map(publicationListUnavailable)).toEqual([true, true]);
+    expect([400, 401, 409, 429, 500, 502, 503, 504].map(publicationListUnavailable)).toEqual(Array(8).fill(false));
   });
   it("answers listUnavailable when the server says not found or forbidden, and throws any other failure", async () => {
     const h = harness();

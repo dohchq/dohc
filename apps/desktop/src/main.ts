@@ -63,7 +63,7 @@ import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseMode
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
-import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists, localDatasetStoreId, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
 import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
@@ -1290,7 +1290,7 @@ type RelayShareRetainedNotFoundResult<T> =
   // opposed to a share it does not know.
   | { kind: "missing"; removed: boolean };
 
-// `unavailable`: the relay answered 404 or 403, so it does not serve this request to this account.
+// `unavailable`: the relay answered 404 or 403, so it does not publish apps for this workspace and account.
 type RelayShareRetainedUnavailableResult<T> = { kind: "success"; body: T } | { kind: "unavailable" };
 
 type RelayShareJsonOptions =
@@ -1435,7 +1435,7 @@ async function relayShareJsonWithCredentials<T>(
     ) {
       return { kind: "missing", removed: data.code === "share_access_removed" };
     }
-    if (options && "retainUnavailable" in options && (response.status === 404 || response.status === 403)) {
+    if (options && "retainUnavailable" in options && publicationListUnavailable(response.status)) {
       return { kind: "unavailable" };
     }
     throw new Error(relayShareErrorCopy(response.status, data));

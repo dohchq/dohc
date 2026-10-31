@@ -17,6 +17,9 @@ import { datasetColumnFields, type AppDatasetBinding, type DatasetRevision } fro
 import { resolveAppDatasetCapability, verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
+/** A relay status that means the server does not publish apps for this workspace and account: not found or forbidden. */
+export const publicationListUnavailable = (status: number) => status === 404 || status === 403;
+
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
   workspace: Workspace; signal: AbortSignal; scope?: string; assertCurrent(): void;
 }>(dependencies: {
