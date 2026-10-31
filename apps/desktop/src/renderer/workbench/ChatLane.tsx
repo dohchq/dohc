@@ -11,9 +11,10 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { withErrorWords } from "../../ipc/errorWords";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages";
-import type { ChatWorking } from "./ChatThreadPanel";
+import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
@@ -55,7 +56,7 @@ export function ChatLane(props: {
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onError: (message: string, cause?: unknown) => void;
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
@@ -232,6 +233,7 @@ export function ChatLane(props: {
     setSending(false);
     setDispatch(null);
     setStopping(false);
+    setRetrying(false);
     setFirstUnreadMessageId(null);
     paintedRevision.current = null;
     setLoading(true);
@@ -395,6 +397,30 @@ export function ChatLane(props: {
     }
   }, [liveRunId, load, onError, stopping, workspaceId]);
 
+  // Try again on a run a quit or restart stopped puts its request back in
+  // line. The failure's own Try again only asks again: the run's update
+  // refreshes the conversation.
+  const failedRun = dispatch?.failedRun ?? null;
+  const [retrying, setRetrying] = useState(false);
+  const retryRun = useCallback(async () => {
+    if (!failedRun?.retryable || retrying || threadId === null) return;
+    const current = token.current;
+    const input = { workspaceId, threadId, runId: failedRun.runId };
+    const failed = (error: unknown) => withErrorWords(`dohc could not start ${props.agentName ?? "your agent"}'s run again.`, error);
+    setRetrying(true);
+    try {
+      await bridge().retryStoppedRun(input);
+      if (current === token.current) void load();
+    } catch (error) {
+      if (current !== token.current) return;
+      const again = () => void bridge().retryStoppedRun(input)
+        .catch((retryError: unknown) => onError(failed(retryError), retryError, again));
+      onError(failed(error), error, again);
+    } finally {
+      if (current === token.current) setRetrying(false);
+    }
+  }, [failedRun, load, onError, props.agentName, retrying, threadId, workspaceId]);
+
   // The agent at work. Its answer lands in the thread it was asked in, or at
   // the end of the conversation.
   const working = useMemo<ChatWorking | null>(() => liveRunId === null ? null : {
@@ -431,16 +457,27 @@ export function ChatLane(props: {
     : undefined;
 
   const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
-  const renderDecision = useCallback((message: ChatMessageRecord) => {
+  const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
+  // Under a message: its poll, and why the agent didn't answer it.
+  const renderFooter = useCallback((message: ChatMessageRecord) => {
     const decision = decisionsByMessage.get(message.id);
-    return decision ? <DecisionStatus
-      decision={decision}
-      testIdPrefix="chats-lane"
-      {...(!props.locked && !sending && decision.options?.length ? {
-        onResolve: (option?: string) => { if (option) void chooseOption(decision, option); },
-      } : {})}
-    /> : null;
-  }, [decisionsByMessage, props.locked, sending, chooseOption]);
+    return <>
+      {decision ? <DecisionStatus
+        decision={decision}
+        testIdPrefix="chats-lane"
+        {...(!props.locked && !sending && decision.options?.length ? {
+          onResolve: (option?: string) => { if (option) void chooseOption(decision, option); },
+        } : {})}
+      /> : null}
+      {failedRun && message.id === failedEnd ? <FailedRunLine
+        testIdPrefix="chats-lane"
+        failed={failedRun}
+        busy={retrying}
+        className="mt-1"
+        {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
+      /> : null}
+    </>;
+  }, [decisionsByMessage, props.locked, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
@@ -501,7 +538,7 @@ export function ChatLane(props: {
       loadFileHeadings={props.loadFileHeadings}
       onOpenPath={props.onOpenPath}
       reactionControls={reactionControls}
-      renderMessageFooter={renderDecision}
+      renderMessageFooter={renderFooter}
       working={working}
       workingMessageId={dispatch?.liveTriggerMessageId ?? null}
       listRef={listRef}

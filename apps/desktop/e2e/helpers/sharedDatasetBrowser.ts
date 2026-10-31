@@ -1,7 +1,8 @@
 import https from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
@@ -61,14 +62,19 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
 /** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
 function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
   if (process.platform !== "win32") {
-    const config = "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
-      "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n";
-    const pem = execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-      "-config", "/dev/stdin", "-keyout", "/dev/stdout", "-out", "/dev/stdout"], { input: config, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-    const key = /-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/u.exec(pem)?.[0];
-    const certPem = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/u.exec(pem)?.[0];
-    if (!key || !certPem) throw new Error("OpenSSL did not print a key and certificate.");
-    return { tls: { key, cert: certPem }, cert: new X509Certificate(certPem) };
+    // Files, not /dev/stdin and /dev/stdout: on Linux a child's stdio is a socket, which those can't open.
+    const dir = mkdtempSync(join(tmpdir(), "dohc-dataset-cert-"));
+    try {
+      const [config, keyPath, certPath] = [join(dir, "req.cnf"), join(dir, "key.pem"), join(dir, "cert.pem")];
+      writeFileSync(config, "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
+        "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n");
+      execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        "-config", config, "-keyout", keyPath, "-out", certPath], { stdio: ["ignore", "pipe", "pipe"] });
+      const certPem = readFileSync(certPath, "utf8");
+      return { tls: { key: readFileSync(keyPath, "utf8"), cert: certPem }, cert: new X509Certificate(certPem) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
   const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
 $req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-dataset-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)

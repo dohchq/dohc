@@ -107,7 +107,8 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
         })();`;
         const scriptHash = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
         // In dohc's tab, main stops every navigation of the app frame and sends an outside link to the browser, so the
-        // frame's navigations must reach main. A browser has no such gate, so there the frame stays on this origin.
+        // frame's navigations must reach main. A browser has no such gate, so there the frame stays on this origin, and
+        // the app document opens a plain link to another site in a new tab.
         const frameSources = launchOptions?.keepAlive ? "'self' http: https: mailto:" : "'self'";
         const csp = `default-src 'none'; script-src ${scriptHash} ${document.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http: https: ws: wss:; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src ${frameSources}; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
         const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title></head><body style="margin:0;background:transparent"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;

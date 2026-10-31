@@ -228,8 +228,8 @@ describe("closed app compiler", () => {
         expect(document.getElementById("theme")!.textContent).toMatch(/margin: 0/);
         expect(document.querySelector("#box > script")).not.toBeNull();
         expect(document.body.lastElementChild!.hasAttribute("nomodule")).toBe(true);
-        // This test's log script, the data block, and the inline script; bundle.js removed itself.
-        expect(document.querySelectorAll("head > script")).toHaveLength(3);
+        // This test's log script, the link script, the data block, and the inline script; bundle.js removed itself.
+        expect(document.querySelectorAll("head > script")).toHaveLength(4);
       } finally { window.close(); }
     });
 
@@ -245,8 +245,8 @@ describe("closed app compiler", () => {
         file("site/d.js", "log.push('D');"));
       const { window, document, runModules } = await open(result);
       try {
-        // The first script is this test's own log; bundle.js removed itself.
-        const scripts = () => [...document.scripts].slice(1);
+        // The first scripts are this test's own log and the link script; bundle.js removed itself.
+        const scripts = () => [...document.scripts].slice(2);
         expect(scripts().map(script => [script.getAttribute("type"), script.id, script.textContent])).toEqual([
           ["module", "", "__dohcPage.module(0);"], ["dohc-deferred-0", "b", expect.stringContaining("fromB")], ["module", "", "__dohcPage.defer(0);"],
           ["module", "c", "__dohcPage.module(1);"], ["dohc-deferred-1", "", "log.push('D');"], ["module", "", "__dohcPage.defer(1);"]]);

@@ -5810,14 +5810,17 @@ export type ChatDispatchStateForThreadPayload = z.infer<
   typeof ChatDispatchStateForThreadPayload
 >;
 
-export const ChatDispatchStoppedRun = z.object({
+// A run that ended without the agent's reply, for the line under its
+// message. Its notice says the same words.
+export const ChatDispatchFailedRun = z.object({
   runId: OPAQUE_ID,
   triggerMessageId: OPAQUE_ID,
-  ending: z.enum(["restarted", "quit"]),
+  // "Nova didn't reply. Its run ended with an error."
+  words: z.string().min(1).max(1_000),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
 }).strict();
-export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
+export type ChatDispatchFailedRun = z.infer<typeof ChatDispatchFailedRun>;
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
@@ -5825,8 +5828,8 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  // The conversation's latest run, when dohc's restart or quit stopped it.
-  stoppedRun: ChatDispatchStoppedRun.optional(),
+  // The conversation's run that didn't reply, while it is the one to show.
+  failedRun: ChatDispatchFailedRun.optional(),
 }).strict();
 export type ChatDispatchStateForThreadResult = z.infer<
   typeof ChatDispatchStateForThreadResult

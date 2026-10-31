@@ -1,4 +1,4 @@
-import type { ChatDispatchNotice, ChatDispatchStoppedRun, RunnerSelfTestResult } from "../ipc/bridgeContract";
+import type { ChatDispatchFailedRun, ChatDispatchNotice, RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/automation-executor/automation-chat";
@@ -16,6 +16,7 @@ import {
 } from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
+  AgentDispatchRecord,
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
@@ -61,45 +62,71 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
 
 const NOTICE_AGENT_NAME_MAX_CHARS = 32;
 
-// "Atlas's run failed in "Plan day 2"" or "Restricted Mode blocked Atlas's
-// run in "Plan day 2"". What happened comes first and names last, so a clamp
-// cuts only a name: the agent's Settings name at 32 characters, then the
-// thread's to fit. An agent no longer in Settings is "Your agent".
-function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
-  const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
-  const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
-  const sentence = {
+// The ways a run can end without the agent's reply. The conversation, the
+// toast and Notices all say "Nova didn't reply" and why.
+type FailedOutcome = Extract<RunOutcome, "failed" | "no-reply" | "timed-out" | "not-started" | "restarted" | "quit">;
+const FAILED_OUTCOMES: ReadonlySet<RunOutcome> = new Set<FailedOutcome>([
+  "failed", "no-reply", "timed-out", "not-started", "restarted", "quit",
+]);
+const isFailedOutcome = (outcome: RunOutcome): outcome is FailedOutcome => FAILED_OUTCOMES.has(outcome);
+
+// The agent's Settings name at 32 characters. An agent no longer in
+// Settings is "Your agent".
+function noticeAgentName(agentName: string | undefined): string {
+  return agentName === undefined ? "Your agent" : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
+}
+
+// What a run that ended with its reply, or with no failure of its own, says.
+// An agent no longer in Settings is "your agent".
+function endedRunTitle(outcome: Exclude<RunOutcome, FailedOutcome>, agentName: string | undefined): string {
+  const agent = agentName === undefined ? undefined : noticeAgentName(agentName);
+  const whose = `${agent ?? "your agent"}'s run`;
+  return {
     finished: `${agent ?? "Your agent"} replied`,
-    stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
-    "no-reply": `${whose(true)} produced no reply`,
-    "timed-out": `${whose(true)} timed out`,
-    failed: `${whose(true)} failed`,
-    "not-started": `${whose(true)} failed to start`,
-    restarted: `dohc restarted and stopped ${whose(false)}`,
-    quit: `dohc quit and stopped ${whose(false)}`,
-    restricted: `Restricted Mode blocked ${whose(false)}`,
-  } satisfies Record<RunOutcome, string>;
-  const what = sentence[outcome];
+    stopped: `Stopped ${agent === undefined ? "the run" : whose}`,
+    restricted: `Restricted Mode blocked ${whose}`,
+  }[outcome];
+}
+
+// "Atlas didn't reply in "Plan day 2"". What happened comes first and the
+// thread last, so a clamp cuts only the thread's name.
+function runNoticeTitle(what: string, thread: string): string {
   if (!thread) return what;
   return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
 }
 
-// A run that failed to start says why and what to do next.
-// Only a missing PATH runtime recommends installing Node.js.
-// Other outcomes have no body. A body holds no control characters,
-// or the notice store would refuse it.
-function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
+// Why a run didn't reply, as one sentence: the notice's body and the second
+// half of the line under the message. A missing PATH runtime says to install
+// Node.js. A body holds no control characters, or the notice store would
+// refuse it.
+function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
   if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available) {
     return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
-  if (outcome !== "not-started" || !run.failureReason) return "";
-  const reason = [...run.failureReason
-    .slice(`${RUNNER_START_FAILURE}: `.length)
-    .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
-    .trim()];
-  return reason.length <= NOTICE_BODY_MAX_CHARS
-    ? reason.join("")
-    : `${reason.slice(0, NOTICE_BODY_MAX_CHARS - 1).join("")}…`;
+  switch (outcome) {
+    case "failed":
+      return "Its run ended with an error.";
+    case "no-reply":
+      return "Its run ended without a reply.";
+    case "timed-out": {
+      const minutes = /^\d+/u.exec(run.failureReason?.slice(`${RUN_TIMEOUT} `.length) ?? "")?.[0];
+      return minutes ? `It ran past its ${minutes}-minute limit.` : "It ran past its time limit.";
+    }
+    case "restarted":
+      return "dohc restarted during its run.";
+    case "quit":
+      return "dohc quit during its run.";
+    case "not-started": {
+      const detail = [...(run.failureReason ?? "")
+        .slice(`${RUNNER_START_FAILURE}: `.length)
+        .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
+        .trim()];
+      const lead = "It couldn't start: ";
+      if (detail.length === 0) return "It couldn't start.";
+      const room = NOTICE_BODY_MAX_CHARS - lead.length;
+      return lead + (detail.length <= room ? detail.join("") : `${detail.slice(0, room - 1).join("")}…`);
+    }
+  }
 }
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -215,12 +242,20 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   };
 }
 
+// A run a quit or restart stopped, while its request is still stopped.
+interface StoppedRun {
+  run: AgentRunRecord;
+  outcome: "restarted" | "quit";
+  // Whether its request can run once more.
+  retryable: boolean;
+}
+
 interface ChatDispatchThreadState {
   liveRunId: string | null;
   liveTriggerMessageId: string | null;
   pendingCount: number;
   paused: boolean;
-  stoppedRun?: ChatDispatchStoppedRun;
+  failedRun?: ChatDispatchFailedRun;
 }
 
 interface LiveRun {
@@ -795,27 +830,39 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
-    let nodeAvailable: ReplyRuntimeAvailability | undefined;
-    if (outcome === "failed" || outcome === "no-reply") {
-      nodeAvailable = await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath));
-      if (nodeAvailable?.source === "path" && !nodeAvailable.available && outcome === "failed") {
-        const replies = await options.dispatchStoreFor(workspace)
-          .listRunMessages(workspaceId, run.runId, durableDispatchRequest);
-        if (replies.length > 0) nodeAvailable = undefined;
-      }
-    }
+    const agentName = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name;
+    const words = isFailedOutcome(outcome)
+      ? await failureWords(workspace, run, outcome, agentName)
+      : { lead: endedRunTitle(outcome, agentName), reason: "" };
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(
-        outcome,
-        await threadTitle(workspace, run.threadId),
-        (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
-      ),
-      body: runNoticeBody(run, outcome, nodeAvailable),
+      title: runNoticeTitle(words.lead, await threadTitle(workspace, run.threadId)),
+      body: words.reason,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
     });
+  }
+
+  // How a run without its reply reads: "Nova didn't reply", or "Nova
+  // stopped before finishing" once it posted, and why. A missing Node.js is
+  // the reason only for a run that posted nothing, since one that posted
+  // found it.
+  async function failureWords(
+    workspace: ChatDispatchWorkspace,
+    run: AgentRunRecord,
+    outcome: FailedOutcome,
+    agentName: string | undefined,
+  ): Promise<{ lead: string; reason: string }> {
+    const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
+      .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
+    const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
+      ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
+      : undefined;
+    return {
+      lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
+      reason: runFailureReason(run, outcome, nodeAvailable),
+    };
   }
 
   // The thread's title, read from its own channel's threads. An empty title
@@ -1578,10 +1625,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
-    const [pauseState, pending, stopped] = await Promise.all([
+    const pendingRead = Promise.resolve(dispatch.listPending(workspaceId));
+    const [pauseState, pending, failed] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
-      dispatch.listPending(workspaceId),
-      stoppedRunForThread(workspace, threadId),
+      pendingRead,
+      failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
     const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
@@ -1591,8 +1639,43 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
-      ...(stopped ? { stoppedRun: stopped.stopped } : {}),
+      ...(failed ? { failedRun: failed } : {}),
     };
+  }
+
+  // The conversation's run that didn't reply, for the line under its
+  // message. A run a quit or restart stopped that can run again comes first,
+  // so its Try again stays in reach. Then the conversation's latest run, when
+  // it ended without a reply and its request isn't back in line. Then a
+  // stopped run that has used its attempts. A clean exit counts only once
+  // the no-reply check has marked it.
+  async function failedRunForThread(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+    pending: Promise<readonly AgentDispatchRecord[]>,
+  ): Promise<ChatDispatchFailedRun | null> {
+    const [stopped, latest] = await Promise.all([
+      stoppedRunForThread(workspace, threadId),
+      options.dispatchStoreFor(workspace).latestRunForThread(workspace.workspaceId, threadId),
+    ]);
+    let found: { run: AgentRunRecord; outcome: FailedOutcome; retryable: boolean } | null =
+      stopped?.retryable ? stopped : null;
+    if (!found && latest?.endedAtMs !== undefined) {
+      const saved = savedRunOutcome(latest);
+      const outcome = saved !== "exited" ? saved : latest.failureHandled ? "no-reply" : null;
+      // Only the stopped runs' read knows whether a quit or restart left
+      // the request stopped, so it alone names those runs.
+      if (outcome && isFailedOutcome(outcome) && outcome !== "restarted" && outcome !== "quit" &&
+          !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
+        found = { run: latest, outcome, retryable: false };
+      }
+    }
+    found ??= stopped;
+    if (!found) return null;
+    const { run, outcome, retryable } = found;
+    const agentName = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name;
+    const { lead, reason } = await failureWords(workspace, run, outcome, agentName);
+    return { runId: run.runId, triggerMessageId: run.triggerMessageId, words: `${lead}. ${reason}`, retryable };
   }
 
   // The one place that decides which run Try again can run again: the
@@ -1605,25 +1688,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function stoppedRunForThread(
     workspace: ChatDispatchWorkspace,
     threadId: string,
-  ): Promise<{ stopped: ChatDispatchStoppedRun; agentId: string } | null> {
+  ): Promise<StoppedRun | null> {
     const recoveries = (await options.listAppQuitRecoveries?.(workspace, threadId)) ?? [];
     const dispatch = options.dispatchStoreFor(workspace);
-    let exhausted: { stopped: ChatDispatchStoppedRun; agentId: string } | null = null;
+    let exhausted: StoppedRun | null = null;
     for (const { run, attemptCount } of recoveries.toReversed()) {
-      const ending = savedRunOutcome(run);
-      if (ending !== "restarted" && ending !== "quit") continue;
+      const outcome = savedRunOutcome(run);
+      if (outcome !== "restarted" && outcome !== "quit") continue;
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
-      const found = {
-        stopped: {
-          runId: run.runId,
-          triggerMessageId: run.triggerMessageId,
-          ending,
-          retryable: attemptCount < 2,
-        },
-        agentId: run.agentId,
-      };
-      if (found.stopped.retryable) return found;
+      const found = { run, outcome, retryable: attemptCount < 2 };
+      if (found.retryable) return found;
       exhausted ??= found;
     }
     return exhausted;
@@ -1640,10 +1715,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace) throw new Error("This workspace is not open. Open it again.");
       const found = await stoppedRunForThread(workspace, threadId);
-      if (found?.stopped.runId !== runId || !found.stopped.retryable) return false;
+      if (found?.run.runId !== runId || !found.retryable) return false;
       // A request for an agent this computer can't start would fail as soon
       // as it was back in line, so it stays stopped and the person learns why.
-      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.agentId);
+      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.run.agentId);
       if (!agent?.enabled || !agent.launch) {
         const why = !agent
           ? "That agent is not set up on this computer."
@@ -1653,8 +1728,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const requeued = (await options.requeueFailedTrigger?.({
         workspaceId,
         ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
-        triggerMessageId: found.stopped.triggerMessageId,
-        agentId: found.agentId,
+        triggerMessageId: found.run.triggerMessageId,
+        agentId: found.run.agentId,
         runId,
       })) === true;
       if (!requeued) return false;
