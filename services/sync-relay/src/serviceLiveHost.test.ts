@@ -2856,12 +2856,13 @@ const restoreEngine = (o: Enrolled, host: Awaited<ReturnType<typeof startService
     if (!lifecycle) throw new Error("Missing restore admission.");
     return lifecycle;
   };
-  // The engine's receipts, as admitRestore in liveRestoreDrain.test.ts builds them.
+  // The engine's receipts, as admitRestore in liveRestoreDrain.test.ts builds them. The settlement
+  // counts only the restore's own application: this journal holds fewer rows than that test's three.
   const answer = (operation: string) => {
     const {preparation, candidateDigest, nativeSourceManifestDigest, admitted} = admission(), localHeadSequence = preparation.fence.localHeadSequence + 1;
     const settlementId = "restore-settlement", momentId = "restore-moment", markdownDigest = preparation.point.markdownDigest;
     if (operation === "apply") return {fence: preparation.fence, candidateDigest, nativeSourceManifestDigest, admitted, localHeadSequence, hostCoordinate, recordedAtMs: 202};
-    if (operation === "settle") return {settlementId, previousCursor: 0, terminalCursor: admitted.accepted.receipt.journalCursor, applicationCount: 3,
+    if (operation === "settle") return {settlementId, previousCursor: 0, terminalCursor: admitted.accepted.receipt.journalCursor, applicationCount: 1,
       localYDocSequence: localHeadSequence, momentId, markdownDigest, materialized: true, collectionReconcileRequired: false};
     return {relayDatabaseNamespace: preparation.fence.operation.relayDatabaseNamespace, operationId: stopLookup.operationId, binding: admitted.accepted.binding,
       applicationReceipt: admitted.accepted.receipt, settlementId, momentId, markdownDigest, localHeadSequence, recordedAtMs: 204};
