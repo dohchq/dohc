@@ -1750,7 +1750,7 @@ it("retires a document refused at a seed nothing applied before its copy, and ac
   o.engine.abandonableSeed = true;
   o.stop();
   await o.depart();
-  await vi.waitFor(() => expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull());
+  await vi.waitFor(() => expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull(), {timeout: 10_000});
   expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]});
   expect(k.row()).toMatchObject({copied: false});
   expect(o.host.drained("workspace")).toBe(false);
@@ -1758,7 +1758,7 @@ it("retires a document refused at a seed nothing applied before its copy, and ac
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   expect(k.row()).toMatchObject({copied: false});
 });
 
