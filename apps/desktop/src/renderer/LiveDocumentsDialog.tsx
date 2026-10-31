@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_RESTORING, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -441,11 +441,12 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        // A server-only document's Stop gets the relay's restore-in-progress words, without its code.
-        const restoring = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        if (work.kind === "stop" && (restoring || isLiveStopWaiting(error))) {
-          onError(restoring ? LIVE_STOP_RESTORING : LIVE_STOP_WAITING, error, retry,
-            {title: `Stopping live editing for ${work.path}`, objectId: work.objectId});
+        // A server-only document's Stop the server isn't ready for gets the
+        // relay's restore-in-progress words, without its code.
+        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        if (work.kind === "stop" && (notReady || isLiveStopWaiting(error))) {
+          onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry,
+            {title: notReady ? `Live editing didn't stop for ${work.path}` : `Stopping live editing for ${work.path}`, objectId: work.objectId});
         } else onError(failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {

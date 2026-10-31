@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { LIVE_STOP_WAITING, liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
+import { LIVE_STOP_SERVER_NOT_READY, LIVE_STOP_WAITING, liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
@@ -3450,6 +3450,43 @@ describe("owner live documents", () => {
       expect(within(notice).getByRole("button", {name: "Try again"})).toBeTruthy();
     }
     expect(within(center).getAllByText(LIVE_STOP_WAITING)).toHaveLength(2);
+  });
+
+  // Nothing sends a server-only Stop again, so the notice says to try again,
+  // keeps the relay's words in Copy only, and goes when the next Stop starts.
+  it("reports a server-only Stop the server isn't ready for with the relay's words in Copy, and clears it when the next Stop starts", async () => {
+    const relay = "Stop live editing is waiting. You can keep editing.";
+    const next = deferred<StopOwnerLiveDocumentResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => ({documents: [LIVE_ROW], nextCursor: null}));
+    // Main's plain relay error, as it crosses Electron's IPC.
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(new Error(`Error invoking remote method 'stopOwnerLiveDocument': Error: ${relay}`))
+      .mockReturnValueOnce(next.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    const stopButton = () => within(dialog).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    const title = `Live editing didn't stop for ${LIVE_ROW.path}`;
+
+    await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    await user.click(stopButton());
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(title)).toBeTruthy();
+    expect(within(toast).getByText(LIVE_STOP_SERVER_NOT_READY)).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+    expect(toast.textContent).not.toContain(relay);
+    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    expect(await navigator.clipboard.readText()).toContain(`Cause: ${relay}`);
+
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(stopButton());
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(title)).toBeNull();
+    await act(async () => next.resolve({keptEdits: "none"}));
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(title)).toBeNull();
   });
 
   // DesktopRoot remounts the shell on a switch, so this rerenders the same

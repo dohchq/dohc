@@ -992,7 +992,7 @@ export function DesktopWorkspaceShell(props: {
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
       if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
-        clearIdentity(`live-stop-edits-pending:${objectId}`);
+        clearIdentity(`live-stop-edits-pending:${objectId}`); clearIdentity(`live-stop-waiting:${id}:${objectId}`);
       }
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
@@ -1084,7 +1084,10 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
-        reportShellFailure({title: waiting.title, message, retry: again,
+        // Copy keeps what the error said. A plain relay error has words and no cause.
+        const {cause, words} = readError(error);
+        const said = cause ?? words;
+        reportShellFailure({title: waiting.title, message, retry: again, details: said ? [["Cause", said] as const] : [],
           identity: `live-stop-waiting:${failedFor}:${waiting.objectId}`});
       } else reportShellError(message, error, again);
     },

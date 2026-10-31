@@ -332,7 +332,7 @@ describe("LiveDocumentsDialog", () => {
     expect(retry()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });
-  it("reports a server-only document's Stop that a restore holds through Notices by its words, with its title and document, and keeps its retry available", async () => {
+  it("reports a server-only document's Stop the server isn't ready for through Notices by the relay's words, with its title and document, and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     const error = new Error("Stop live editing is waiting. You can keep editing.");
     h.stop.mockRejectedValueOnce(error);
@@ -340,8 +340,8 @@ describe("LiveDocumentsDialog", () => {
     fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
     await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
     const [message, reported, retry, waiting] = h.onError.mock.calls[0]!;
-    expect([message, reported, waiting]).toEqual(["A restore is still running on the server. dohc will stop live editing when it finishes.", error,
-      {title: "Stopping live editing for a.md", objectId: "object:a.md"}]);
+    expect([message, reported, waiting]).toEqual(["The server isn't ready to stop live editing yet. Try again in a moment.", error,
+      {title: "Live editing didn't stop for a.md", objectId: "object:a.md"}]);
     expect(retry()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });
