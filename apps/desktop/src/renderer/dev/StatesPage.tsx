@@ -749,6 +749,8 @@ const ABOUT_ACCESS: AccessAnswer = {
   rows: [
     aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
     aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    // A long name truncates before its level.
+    aboutGrant({ grantId: "grant-rivera", recipientUserId: "rivera", recipientEmail: "alexandra.rivera-montgomery@example.com", access: "comment" }),
     aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
   ],
   visibility: "visible",
