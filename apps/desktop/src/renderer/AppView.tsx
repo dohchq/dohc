@@ -157,11 +157,12 @@ export function useAppView(options: {
       alive.current = false;
       request.current += 1;
       void bridge().appView({ action: "close", workspaceId, viewId }).catch(() => undefined);
-      // Their Try again and Reload act on this view.
+      // Their Try again, Reload and Open in browser act on this view.
       latest.current.notices?.clear(failureId);
       latest.current.notices?.clear(sessionId);
+      latest.current.notices?.clear(downloadId);
     };
-  }, [enabled, workspaceId, appRoot, launch, viewId, failureId, sessionId]);
+  }, [enabled, workspaceId, appRoot, launch, viewId, failureId, sessionId, downloadId]);
 
   const reload = useCallback(() => {
     if (stateRef.current.status === "failed" || sessionEnded.current) void launch();
@@ -269,15 +270,15 @@ export function useAppView(options: {
     if (!options.holdFocus) tryFocus();
   }, [options.holdFocus, tryFocus]);
 
-  // Approving the app opens it here, and focus follows it in.
+  // Approving the app opens it here, and focus follows it in. An approval made while the app is open, such as of a
+  // changed version, opens that version once the open one's approval ends.
   const approvalsSeen = useRef(options.approvals);
   useEffect(() => {
-    if (approvalsSeen.current === options.approvals) return;
+    if (state.status !== "unapproved" || approvalsSeen.current === options.approvals) return;
     approvalsSeen.current = options.approvals;
-    if (stateRef.current.status !== "unapproved") return;
     wantsFocus.current = true;
     void launch();
-  }, [options.approvals, launch]);
+  }, [options.approvals, state.status, launch]);
 
   const attach = useCallback((element: Electron.WebviewTag | null) => {
     if (!element) return;

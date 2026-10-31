@@ -244,6 +244,21 @@ describe("an owner app in its tab", () => {
     expect(screen.getByTestId("app-view-retry")).toBeTruthy();
   });
 
+  it("opens a version approved while the app was open once the open one's approval ends", async () => {
+    const user = userEvent.setup();
+    render(<Page />);
+    await openedView();
+    await user.click(screen.getByTestId("app-view-review"));
+    await user.click(await screen.findByRole("button", { name: "Prepare for this device" }));
+    await user.click(await screen.findByRole("button", { name: "Approve for this device" }));
+    await waitFor(() => expect(publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve" })));
+    expect(opens()).toBe(1);
+    emit({ viewId: viewIdOf(), kind: "approval-ended" });
+    await waitFor(() => expect(opens()).toBe(2));
+    await openedView();
+    expect(screen.queryByText("This app's approval ended. Review it to open it again.")).toBeNull();
+  });
+
   it("closes the app when its approval ends, and says so after a relaunch finds it unapproved", async () => {
     render(<Page />);
     await openedView();
@@ -286,8 +301,8 @@ describe("an owner app in its tab", () => {
     await waitFor(() => expect(opens()).toBe(2));
   });
 
-  it("files one download notice per tab, replaced by the next, with Open in browser", async () => {
-    render(<Page />);
+  it("files one download notice per tab, replaced by the next, with Open in browser, and takes it back when the tab closes", async () => {
+    const view = render(<Page />);
     await openedView();
     emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "receipt.pdf" });
     emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "invoice.pdf" });
@@ -299,6 +314,8 @@ describe("an owner app in its tab", () => {
     await act(async () => second.action.run());
     expect(publishOwnerApp).toHaveBeenCalledWith({ action: "launchLocal", workspaceId: "ws-shop", publicationId });
     expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
+    view.unmount();
+    expect(notices.clear).toHaveBeenCalledWith(second.identity);
   });
 
   it("opens outside links through dohc's link path, and ignores another view's events", async () => {
