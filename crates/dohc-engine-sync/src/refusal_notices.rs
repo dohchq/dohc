@@ -102,7 +102,7 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
             "SELECT p.origin_id,p.origin_seq,p.reason_message,r.payload_json,p.reason_code \
          FROM replication_pending_refusals p JOIN replication_log r \
          USING(workspace_id,origin_id,origin_seq) WHERE p.workspace_id=?1 AND COALESCE(p.report_id,'') != ?2 \
-         ORDER BY r.rowid",
+         AND r.op_kind NOT LIKE 'live.audit.%' ORDER BY r.rowid",
         )
         .map_err(SyncError::corrupt)?;
     let rows = statement
@@ -437,7 +437,7 @@ mod tests {
         .unwrap();
         conn.execute_batch("CREATE TABLE replication_pending_refusals(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,\
             reason_message TEXT,reason_code TEXT,report_id TEXT);\
-            CREATE TABLE replication_log(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,payload_json TEXT)").unwrap();
+            CREATE TABLE replication_log(workspace_id TEXT,origin_id TEXT,origin_seq INTEGER,op_kind TEXT,payload_json TEXT)").unwrap();
         let mut owed = Obligation {
             order: 0,
             key: dohc_engine_collab::DocKey::new("ws", "main", "note").unwrap(),

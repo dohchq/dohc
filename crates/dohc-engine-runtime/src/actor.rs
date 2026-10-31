@@ -1208,6 +1208,9 @@ fn worker_main(
         return;
     }
     drop(startup_tx);
+    // Reports each live document whose history needs attention, one bounded
+    // batch per idle slot.
+    let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
     // The writer thread's cache of live Y.Docs (PR1 of the doc-cache design):
     // serves the replay-parity gate base on the LOCAL append path only. It
@@ -1251,6 +1254,23 @@ fn worker_main(
                             links = Some(worker);
                         }
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
+                    }
+                }
+                if let Some(after) = history {
+                    history = match dohc_engine_sync::history_report(&store, after) {
+                        Ok((lines, next)) => {
+                            for line in lines {
+                                eprintln!("{line}");
+                            }
+                            next
+                        }
+                        Err(error) => {
+                            eprintln!("engine: history report stopped: {error}");
+                            None
+                        }
+                    };
+                    if history.is_some() {
+                        continue;
                     }
                 }
                 #[cfg(test)]
