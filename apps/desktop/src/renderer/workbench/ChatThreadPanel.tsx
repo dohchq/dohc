@@ -1,8 +1,9 @@
-import { ChevronLeft, Square, X } from "lucide-react";
+import { ChevronLeft, LoaderCircle, RotateCw, Square, TriangleAlert, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
-import type { ActorPresentation, ChatMessageRecord } from "../../ipc/bridgeContract";
+import type { ActorPresentation, ChatDispatchFailedRun, ChatMessageRecord, ChatRunRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { formatClock, formatShortTime, sameChatDay } from "../time";
+import { SecondaryButton } from "../ui/controls";
 import { ChatAvatar, useAgentInk } from "./ChatAvatar";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatMessageList, DENSITY, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
@@ -175,6 +176,57 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
       {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
     </div>
   );
+}
+
+// Under the message an agent didn't answer: why, in its notice's words, and
+// Try again while its request can run once more.
+export function FailedRunLine(props: {
+  testIdPrefix: string;
+  failed: ChatDispatchFailedRun;
+  busy: boolean;
+  onRetry?: () => void;
+  className?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      data-testid={`${props.testIdPrefix}-run-failed`}
+      className={`flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted ${props.className ?? ""}`}
+    >
+      <TriangleAlert size={14} aria-hidden className="shrink-0 text-danger" />
+      <span role="status" className="min-w-0">{props.failed.words}</span>
+      {props.onRetry ? (
+        <SecondaryButton
+          size="row"
+          data-testid={`${props.testIdPrefix}-run-try-again`}
+          aria-disabled={props.busy || undefined}
+          aria-busy={props.busy || undefined}
+          onClick={props.busy ? undefined : props.onRetry}
+        >
+          {props.busy
+            ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
+            : <RotateCw size={12} aria-hidden />}
+          Try again
+        </SecondaryButton>
+      ) : null}
+      {props.children}
+    </div>
+  );
+}
+
+// Where a failed run's line goes: under its last post, by when it was
+// posted, or under the message that asked when it posted nothing. Of two
+// posted at once, the later in the conversation wins.
+export function failedRunEnd(
+  failed: ChatDispatchFailedRun,
+  runRecords: Readonly<Record<string, ChatRunRecord>>,
+  messages: readonly ChatMessageRecord[],
+): string {
+  let last: ChatMessageRecord | undefined;
+  for (const message of messages) {
+    if (runRecords[message.id]?.runId === failed.runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
+  }
+  return last?.id ?? failed.triggerMessageId;
 }
 
 // At the end of a stream or thread: the agent's row before its reply lands.

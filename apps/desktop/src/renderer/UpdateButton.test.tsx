@@ -96,6 +96,32 @@ describe("useUpdateFailureNotices", () => {
     report.mock.calls[0]![0].retry();
     expect(run).toHaveBeenCalledWith("download");
   });
+
+  it("says an update a person chose did not install, and takes it back once Try again starts the download", () => {
+    const run = vi.fn(async () => {});
+    const report = vi.fn();
+    const clear = vi.fn();
+    const notInstalled: UpdateStateEvent = {
+      ...available,
+      version: "1.2.5",
+      message: "dohc is still on version 1.2.3.",
+      failure: { step: "download", id: 70, notInstalled: "1.2.4" },
+    };
+    const { rerender } = renderHook((props: { state: UpdateStateEvent }) =>
+      useUpdateFailureNotices(update(props.state, run), "ws-1", report, clear), { initialProps: { state: notInstalled } });
+
+    expect(report).toHaveBeenCalledWith(expect.objectContaining({
+      title: "dohc didn't install update 1.2.4",
+      message: "dohc is still on version 1.2.3.",
+      details: [],
+    }));
+    expect(updateStatusLine(notInstalled)).toBe("dohc didn't install update 1.2.4 and is still on version 1.2.3.");
+    report.mock.calls[0]![0].retry();
+    expect(run).toHaveBeenCalledWith("download");
+    // The title bar shows the download from here on.
+    rerender({ state: { ...downloading, version: "1.2.5" } });
+    expect(clear).toHaveBeenCalledOnce();
+  });
 });
 
 describe("TitlebarUpdateButton", () => {

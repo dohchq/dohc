@@ -28,6 +28,8 @@ async function open(detail: WorkspaceEngineMomentDetail, onOpenSharedRestore: (m
     onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop}
     historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} onOpenSharedRestore={onOpenSharedRestore} />);
   await screen.findByTestId("engine-diff-restore-file");
+  // The rarer ways back wait behind More.
+  fireEvent.click(screen.getByTestId("engine-diff-more"));
   return {moment};
 }
 

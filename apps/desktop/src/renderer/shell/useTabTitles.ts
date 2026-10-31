@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { momentDiffTabPath } from "../workbench/workbenchState";
+import { momentDiffTabPath, siteTabPath } from "../workbench/workbenchState";
 
 const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
 const NO_ANSWERED_TABS: ReadonlySet<string> = new Set();
@@ -54,6 +54,11 @@ export function useTabTitles(workspaceId: string) {
     (momentId: string, filePath: string | null) => setTabTitle(momentDiffTabPath(momentId), filePath, true),
     [setTabTitle],
   );
+  // An app's page answered with the app's title.
+  const resolveAppTitle = useCallback(
+    (siteRoot: string, title: string) => setTabTitle(siteTabPath(siteRoot), title, true),
+    [setTabTitle],
+  );
   const tabLabels =
     knownTabTitles.workspaceId === workspaceId
       ? knownTabTitles.titles
@@ -63,5 +68,6 @@ export function useTabTitles(workspaceId: string) {
     tabLabels,
     rememberMomentDiffPath,
     resolveMomentDiffPath,
+    resolveAppTitle,
   };
 }

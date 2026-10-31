@@ -10,7 +10,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
 import { withEngineDb } from "./helpers/engineDb";
 import { spawnSyncRelay } from "./helpers/syncRelay";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, seedCloudCredentials, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, seedCloudCredentials, showExplorerFiles, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 type Workspace = Awaited<ReturnType<typeof createTempWorkspace>>;
@@ -47,6 +47,7 @@ async function joinWorkspace(workspace: Workspace, workspaceId: string, relayUrl
     await desktop.page.getByTestId("join-choose-folder").click();
     await desktop.page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(desktop.page);
+    await showExplorerFiles(desktop.page);
     await waitForWorkspaceFile(desktop.page, workspaceId, "shared.md");
     return desktop;
   } catch (error) { await desktop.close(); throw error; }

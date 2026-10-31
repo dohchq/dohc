@@ -6,7 +6,7 @@ import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { relayJson } from "./helpers/relayPeer";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, writeWorkspaceFiles } from "./helpers/workspace";
+import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 const OWNER = "test:e2e-granter", RECIPIENT = "test:e2e-recipient";
 const COLLECTION = "trip/Tasks", RECORD = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -30,6 +30,7 @@ async function buttons(page: Page, workspaceId: string) {
 }
 
 async function openTable(page: Page) {
+  await showExplorerFiles(page);
   for (const path of ["trip", COLLECTION]) {
     const row = page.locator(`[data-testid="tree-row"][data-path="${path}"]`);
     await expect(row).toBeVisible({ timeout: 120_000 });

@@ -1,13 +1,13 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, LoaderCircle, MessageSquare, Reply, RotateCw, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
   ChatDecisionRecord,
-  ChatDispatchStoppedRun,
+  ChatDispatchFailedRun,
   ChatMessageRecord,
   ChatReactionRecord,
   ChatRunRecord,
@@ -18,7 +18,6 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { SecondaryButton } from "../ui/controls";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -33,6 +32,7 @@ import {
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
+import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -84,58 +84,6 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
       <RunChip run={props.run} />
     </div>
   );
-}
-
-// How a run dohc's restart or quit stopped ended, under each of its posts.
-// Try again shows where the run ended, while its request can run once more.
-function StoppedRunLine(props: {
-  stopped: ChatDispatchStoppedRun;
-  run?: ChatRunRecord;
-  askedBy?: ChatMessageRecord;
-  busy: boolean;
-  onRetry?: () => void;
-  className: string;
-}) {
-  return (
-    <div
-      data-testid="chats-run-stopped"
-      data-ending={props.stopped.ending}
-      className={`flex items-center gap-2 text-[11px] text-subtle ${props.className}`}
-    >
-      <span aria-hidden className="size-1.5 rounded-full bg-warning" />
-      <span role="status">{props.stopped.ending === "quit" ? "Stopped when dohc quit" : "Stopped when dohc restarted"}</span>
-      {props.onRetry ? (
-        <SecondaryButton
-          size="row"
-          data-testid="chats-run-try-again"
-          aria-disabled={props.busy || undefined}
-          aria-busy={props.busy || undefined}
-          onClick={props.busy ? undefined : props.onRetry}
-        >
-          {props.busy
-            ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
-            : <RotateCw size={12} aria-hidden />}
-          Try again
-        </SecondaryButton>
-      ) : null}
-      {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      {props.run ? <RunChip run={props.run} /> : null}
-    </div>
-  );
-}
-
-// The run's last post in the conversation, by when it was posted. Of two
-// posted at once, the later in the conversation wins.
-function lastPostOfRun(
-  runId: string,
-  runRecords: Record<string, ChatRunRecord>,
-  messages: readonly ChatMessageRecord[],
-): string | undefined {
-  let last: ChatMessageRecord | undefined;
-  for (const message of messages) {
-    if (runRecords[message.id]?.runId === runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
-  }
-  return last?.id;
 }
 
 // A poll's choices, stacked. Picking one is the answer. An answered poll
@@ -467,10 +415,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   threadLocked: boolean;
   flashMessageId: string | null;
   runRecords: Record<string, ChatRunRecord>;
-  // The conversation's latest run, when dohc's restart or quit stopped it.
-  stoppedRun: ChatDispatchStoppedRun | null;
-  stoppedRunBusy: boolean;
-  onRetryStoppedRun?: () => void;
+  // The conversation's run that didn't reply, and Try again for it.
+  failedRun: ChatDispatchFailedRun | null;
+  retryBusy: boolean;
+  onRetryFailedRun?: () => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -504,9 +452,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     threadLocked,
     flashMessageId,
     runRecords,
-    stoppedRun,
-    stoppedRunBusy,
-    onRetryStoppedRun,
+    failedRun,
+    retryBusy,
+    onRetryFailedRun,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -540,27 +488,24 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingIsAgent = openingMessage.authorKind === "agent";
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
-  // A stopped run ends under its last post, or under its request when it
-  // posted nothing.
-  const stoppedRunEnd = stoppedRun
-    ? lastPostOfRun(stoppedRun.runId, runRecords, messages) ?? stoppedRun.triggerMessageId
-    : null;
-  const ofStoppedRun = (messageId: string) =>
-    stoppedRun !== null && runRecords[messageId]?.runId === stoppedRun.runId;
-  // The opening post shows its run's chip in its own row, so its line leaves
-  // the run out.
-  const stoppedLine = (messageId: string, className: string, showRun: boolean) => {
-    if (!stoppedRun || !(ofStoppedRun(messageId) || messageId === stoppedRunEnd)) return null;
-    const run = showRun && ofStoppedRun(messageId) ? runRecords[messageId] : undefined;
+  const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
+  // Under the failed run's last post, its line takes the run's chip in. The
+  // opening post shows its chip in its own row, so its line leaves it out.
+  const failedLine = (messageId: string, className: string, showRun: boolean) => {
+    if (!failedRun || messageId !== failedEnd) return null;
+    const run = showRun && runRecords[messageId]?.runId === failedRun.runId ? runRecords[messageId] : undefined;
+    const askedBy = run ? automationAsking(run, messagesById) : undefined;
     return (
-      <StoppedRunLine
-        stopped={stoppedRun}
-        run={run}
-        askedBy={run ? automationAsking(run, messagesById) : undefined}
-        busy={stoppedRunBusy}
-        onRetry={messageId === stoppedRunEnd && stoppedRun.retryable ? onRetryStoppedRun : undefined}
+      <FailedRunLine
+        testIdPrefix="chats"
+        failed={failedRun}
+        busy={retryBusy}
+        onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
         className={className}
-      />
+      >
+        {askedBy ? <RunAskedBy message={askedBy} /> : null}
+        {run ? <RunChip run={run} /> : null}
+      </FailedRunLine>
     );
   };
 
@@ -770,13 +715,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         </div>
         </AgentColorScope>
-        {runRecords[comment.id] && !ofStoppedRun(comment.id) ? (
+        {runRecords[comment.id] && comment.id !== failedEnd ? (
           <RunLine
             run={runRecords[comment.id]}
             askedBy={automationAsking(runRecords[comment.id], messagesById)}
           />
         ) : null}
-        {stoppedLine(comment.id, "mt-1 px-2", true)}
+        {failedLine(comment.id, "mt-1 px-2", true)}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
@@ -904,7 +849,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ) : null}
             </div>
           ) : null}
-          {stoppedLine(openingMessage.id, "mt-2", false)}
+          {failedLine(openingMessage.id, "mt-2", false)}
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}

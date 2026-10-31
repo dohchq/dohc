@@ -2,6 +2,7 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
+import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
@@ -84,6 +85,8 @@ export interface WorkspaceErrorNotice {
   additionalActionLabels?: string[];
   seen: boolean;
   read?: boolean;
+  // The row has no Dismiss: it stays until its action runs.
+  noDismiss?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -121,7 +124,7 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// A failed automation run, or an agent run that says why it didn't start. Its
+// A failed automation run, or an agent run that says why it didn't reply. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
   notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
@@ -518,10 +521,11 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 // clear of them with scroll room (Overlay), and F6 reaches them from the
 // dialog's focus trap (modalFocus). Their rows stay in Notices, which opens
 // on the same layer.
+// A chat's message box raises them above it (toastClearance).
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
+  rail: "fixed bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)] right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
+  corner: "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -879,8 +883,11 @@ export function NoticeCenter(props: {
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(stack);
+    // A chat's message box moves the stack without resizing it.
+    const stopRoom = onComposerRoomChange(measure);
     return () => {
       observer?.disconnect();
+      stopRoom();
       root.style.removeProperty("--dohc-toast-room");
     };
   }, [open]);
@@ -1204,7 +1211,7 @@ export function NoticeCenter(props: {
               }]
             : []),
         ],
-        ...(props.onDismissWorkspaceError
+        ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
         ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)

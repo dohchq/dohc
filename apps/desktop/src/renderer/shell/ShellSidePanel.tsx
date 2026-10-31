@@ -51,6 +51,7 @@ export interface ShellSidePanelProps {
   selectedAppRoot: string | null;
   openAppTab: SitePreviewPageProps["onOpenApp"];
   reportShellError: SitePreviewPageProps["reportError"];
+  appNotices: SitePreviewPageProps["notices"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
 
@@ -67,6 +68,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     selectedAppRoot,
     openAppTab,
     reportShellError,
+    appNotices,
     setAppPinned,
     setShareTarget,
     showAppsInExplorer,
@@ -117,6 +119,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
             onUnpin={() => void setAppPinned(selectedAppRoot, false)}
             workspaceId={workspaceId}
             reportError={reportShellError}
+            notices={appNotices}
             siteRoot={selectedAppRoot}
             sharedView={!!shareView}
             onShareSite={(target) =>

@@ -382,7 +382,7 @@ describe("About rail (right side)", () => {
     }));
     renderShell(bridge, SHARE_VIEW);
     expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
-      "Open a file to see its chats and access.",
+      "Open a file to see its comments and access.",
     );
   });
 
@@ -398,7 +398,7 @@ describe("About rail (right side)", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("shows the open file's chats and History, and reads access only when opened", async () => {
+  it("shows the open file's comments, History and access", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-a", threads: [] });
     const getObjectAccess = vi.fn(async () => ({
@@ -412,7 +412,6 @@ describe("About rail (right side)", () => {
     }));
     const requestAccessRefresh = vi.fn(async () => undefined);
     Object.assign(bridge, { getObjectAccess, requestAccessRefresh });
-    const user = userEvent.setup();
     renderShell(bridge);
 
     const rail = await screen.findByTestId("about-rail");
@@ -422,16 +421,11 @@ describe("About rail (right side)", () => {
       expect(bridge.listEngineMoments).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         objectId: "object-a",
-        limit: 5,
+        limit: 20,
       }),
     );
-    expect(getObjectAccess).not.toHaveBeenCalled();
-    expect(requestAccessRefresh).not.toHaveBeenCalled();
-
-    await user.click(within(rail).getByTestId("about-access-toggle"));
-    expect((await within(rail).findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this file.",
-    );
+    // Access opens with the file, so who has access shows without a press.
+    expect((await within(rail).findByTestId("about-access-empty")).textContent).toBe("Only you");
     expect(requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, reason: "access-expand" });
   });
 });

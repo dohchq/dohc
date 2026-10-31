@@ -11,7 +11,7 @@ export interface AppDocumentFile {
 /**
  * page.json: an HTML entry compiled for the browser to parse natively. The app
  * document is `<html>` with htmlAttributes, then `<head>` with the document's
- * own policy and bundle.js first and `head` after it, then `body`, which is the
+ * own policy, the link script and bundle.js first and `head` after it, then `body`, which is the
  * whole `<body>` element. `scripts` holds every script text the page may run,
  * each pinned by hash in the policy: the page's inline scripts, template
  * scripts, and the stubs that run module and deferred scripts.
@@ -64,8 +64,21 @@ function parsePage(text: string): AppPage {
 
 const attributeValue = (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll(" ", "&nbsp;");
 
+// A plain link to another site would take the app's own frame there, the launch page's frame-src refuses that, and
+// the frame would show the browser's error page instead of the app. For the length of the click, such a link gets
+// target="_blank", so the browser opens it in a new tab unless the app cancels the click. This listener comes before
+// any of the app's, and a target the app sets during the click stays. Links with a modifier key or download, links
+// with another target, and links to the launch page's own origin keep the browser's behavior.
+const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
+  'if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey||' +
+  'a.hasAttribute("download")||!["","_self","_parent","_top"].includes(a.target.toLowerCase()))return;' +
+  'const u=new URL(a.href);if(!/^https?:$/.test(u.protocol)||u.origin===new URL(document.baseURI).origin)return;' +
+  'const t=a.getAttribute("target");a.target="_blank";' +
+  'setTimeout(()=>{if(a.getAttribute("target")==="_blank")t===null?a.removeAttribute("target"):a.setAttribute("target",t);});},true);';
+
 /**
  * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
+ * Links to other sites open only with allow-popups and allow-popups-to-escape-sandbox.
  * The parent CSP must include scriptSources and the child's permitted media and
  * network schemes. Srcdoc inherits that policy; this meta policy only narrows it.
  * This document contains no credentials and must not hold the launch session.
@@ -100,7 +113,7 @@ export function createAppDocument(
   const loader = `{const style=document.createElement("style");style.textContent=${inlineJson(contents.get("bundle.css") ?? "")};` +
     `document.head.append(style);const script=document.createElement("script");script.textContent=${inlineJson(script)};document.body.append(script);}`;
   // A page is parsed by the browser as written; bundle.js runs first in <head>, inline, before any page node.
-  const texts = new Set(page ? [script, ...page.scripts] : [loader, script]);
+  const texts = new Set(page ? [LINK_SCRIPT, script, ...page.scripts] : [LINK_SCRIPT, loader, script]);
   const scriptSources = [...texts].map(text => `'sha256-${createHash("sha256").update(text).digest("base64")}'`);
   // Inline styles support React style properties. Script hashes limit browser
   // script loading; approved code can still interpret data it fetches.
@@ -111,7 +124,7 @@ export function createAppDocument(
   const policy = '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<meta name="referrer" content="no-referrer">' +
-    `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
+    `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${LINK_SCRIPT}</script>`;
   const html = page
     ? `<!doctype html><html${page.htmlAttributes.map(([name, value]) => ` ${name}="${attributeValue(value)}"`).join("")}><head>${policy}` +
       `<script>${script}</script>${page.head}</head>${page.body}</html>`

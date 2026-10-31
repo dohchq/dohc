@@ -1635,8 +1635,9 @@ describe("notice center", () => {
     it("keeps the toast corner and the rail-side panel by default", async () => {
       renderNotices({ workspaceErrors: [shellError] });
 
+      // 12px up, or that far above a chat's message box (toastClearance).
       const toasts = screen.getByTestId("notice-toasts");
-      expect(toasts.className).toContain("bottom-3");
+      expect(toasts.className).toContain("bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)]");
       expect(toasts.className).toContain("right-3");
 
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1651,8 +1652,7 @@ describe("notice center", () => {
       // The toggle owns the bottom-right corner here, so the stack starts
       // above it instead of landing on top of it.
       const toasts = screen.getByTestId("notice-toasts");
-      expect(toasts.className).toContain("bottom-14");
-      expect(toasts.className).not.toContain("bottom-3");
+      expect(toasts.className).toContain("bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))]");
       expect(toasts.className).toContain("right-3");
 
       await userEvent.click(screen.getByTestId("notice-center-toggle"));

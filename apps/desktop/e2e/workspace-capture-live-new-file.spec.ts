@@ -85,7 +85,6 @@ test("a new file open in the editor keeps History, search, and its chats working
     await moment.click();
     await expect(page.getByTestId("engine-diff-lines")).toContainText("Edited on disk.");
     await page.getByTestId("engine-diff-restore-file").click();
-    await page.getByTestId("engine-diff-confirm-restore").click();
     await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
     await expect
       .poll(async () => await readFile(join(temp.rootPath, "notes/readme.md"), "utf8"))

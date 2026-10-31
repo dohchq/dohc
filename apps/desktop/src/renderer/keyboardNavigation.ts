@@ -3,12 +3,16 @@
 // The site's demo passes its own root, because it renders in a shadow root.
 // A pointer press or any other key clears it, so a click, a shortcut such as
 // Ctrl+P, or Enter opening a dialog leaves the focus dohc moves unmarked.
-// Escape keeps the mark as it was, so closing a menu opened from the
-// keyboard shows where focus returned. With an empty set, focus never shows.
+// Escape, Delete and Backspace keep the mark as it was, with or without a
+// modifier: they close or remove what has focus, so closing a menu or a tab
+// from the keyboard shows where focus went. With an empty set, focus never
+// shows.
 const NAVIGATION_KEYS = new Set([
   "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F6",
 ]);
-const UNCHANGED_KEYS = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "Escape"]);
+const UNCHANGED_KEYS = new Set([
+  "Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "Escape", "Delete", "Backspace",
+]);
 
 export const KEYBOARD_NAV_ATTRIBUTE = "data-keyboard-nav";
 

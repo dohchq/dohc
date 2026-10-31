@@ -21,6 +21,7 @@ import { resolveDesktopIconDirectory } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import { installTextContextMenu } from "./textContextMenu";
+import { installAppViewEmbedder } from "./appViews";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
@@ -282,8 +283,9 @@ export function createMainWindow(options?: {
           titleBarStyle: "hidden" as const,
           titleBarOverlay: titleBarOverlayOptions(theme),
         }),
-    webPreferences: createMainWindowWebPreferences(preloadPath, options?.preloadArguments),
+    webPreferences: { ...createMainWindowWebPreferences(preloadPath, options?.preloadArguments), webviewTag: role === "workspace" },
   });
+  installAppViewEmbedder(window.webContents);
 
   // CDP input bypasses OS hit testing. Keep the real pointer out of e2e
   // windows without forwarding mousemove events or changing keyboard focus.

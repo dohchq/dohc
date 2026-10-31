@@ -619,7 +619,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-policy-hidden")).toBeNull();
   });
 
-  it("reports a refused restore in dohc's words, and Try again asks before it restores", async () => {
+  it("reports a refused restore in dohc's words, and Try again reads the change before it restores", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const moment = historyMoment("m-1", "Wrote the plan");
     bridge.listHistory = vi.fn(async () => historyPage([moment]));
@@ -636,7 +636,6 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
     // What failed is the title and what to fix is the body, so the title's
@@ -646,14 +645,13 @@ describe("history page", () => {
     expect(toast.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
 
-    // Try again reads the change again, then opens its confirm dialog
-    // instead of restoring.
+    // Try again reads the change again, then restores it.
     const readsBefore = bridge.readEngineMoment.mock.calls.length;
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
-    expect(await screen.findByTestId("engine-diff-restore-confirm")).toBeTruthy();
-    expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore);
-    await user.click(screen.getByTestId("engine-diff-confirm-restore"));
     await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+    expect(bridge.readEngineMoment.mock.invocationCallOrder[readsBefore]).toBeLessThan(
+      restoreEngineMomentFile.mock.invocationCallOrder[1]!,
+    );
     expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
       "Restored the earlier state. Undo restore is available here.",
     );
@@ -661,7 +659,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("keeps a hidden change's tab nameless and asks nothing when Try again finds it hidden", async () => {
+  it("keeps a hidden change's tab nameless and restores nothing when Try again finds it hidden", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const moment = historyMoment("m-1", "Wrote the plan");
     const blocked = {
@@ -686,7 +684,6 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     const toast = await screen.findByTestId("workspace-shell-error");
     const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
     expect(tab.textContent).toContain("Diff: plan.md");
@@ -705,7 +702,6 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore));
     await act(async () => {});
     expect(screen.getByTestId("engine-diff-hidden")).toBeTruthy();
-    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
     expect(tab.textContent).toContain("History change");
     expect(tab.textContent).not.toContain("plan.md");
     expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
@@ -3439,6 +3435,9 @@ describe("shared view moment-diff tab", () => {
 
     await screen.findByTestId("engine-moment-diff-page");
     expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId, momentId: "m-1" });
+    // More still opens the file, and holds no way to restore.
+    await userEvent.setup().click(screen.getByTestId("engine-diff-more"));
+    expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
     for (const control of ["engine-diff-restore-file", "engine-diff-shared-restore", "engine-diff-stop-and-restore", "engine-diff-undo-restore"]) {
       expect(screen.queryByTestId(control)).toBeNull();
     }

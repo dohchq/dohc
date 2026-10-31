@@ -3771,11 +3771,11 @@ export function ChatsView(props: {
     }
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
-  const stoppedRun = dispatchState?.stoppedRun ?? null;
-  const retryStoppedRun = useCallback(async () => {
-    if (nav.level !== "thread" || !stoppedRun?.retryable || dispatchActionBusy) return;
+  const failedRun = dispatchState?.failedRun ?? null;
+  const retryFailedRun = useCallback(async () => {
+    if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
-    const { runId } = stoppedRun;
+    const { runId } = failedRun;
     const token = liveToken.current;
     const refreshSeq = ++threadRefreshSeq.current;
     const current = () => token === liveToken.current && refreshSeq === threadRefreshSeq.current;
@@ -3796,7 +3796,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, nav, props.onError, stoppedRun, workspaceId]);
+  }, [dispatchActionBusy, failedRun, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -4149,6 +4149,7 @@ export function ChatsView(props: {
           <MentionComposer
             testIdPrefix="chats-dm-new"
             composerId="chats-dm-new-composer"
+            pinned
             value={dmDraft}
             sending={startingDm}
             placeholder="Write the first message…"
@@ -4220,6 +4221,7 @@ export function ChatsView(props: {
             belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
             composer={(inset) => dm.connected ? (
               <MentionComposer
+                pinned
                 testIdPrefix="chats-dm"
                 composerId="chats-dm-composer"
                 value={composer}
@@ -4442,9 +4444,9 @@ export function ChatsView(props: {
               threadLocked={threadLocked}
               flashMessageId={flashMessageId}
               runRecords={runRecords}
-              stoppedRun={stoppedRun}
-              stoppedRunBusy={dispatchActionBusy}
-              onRetryStoppedRun={threadLocked ? undefined : retryStoppedRun}
+              failedRun={failedRun}
+              retryBusy={dispatchActionBusy}
+              onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4848,7 +4850,9 @@ export function ChatsView(props: {
           topPadding={0}
           header={<>
             {!channelLocked && !agentDm ? (
-              <div className="mb-4 mt-4">
+              // Padding, not margin: a top margin would collapse through the
+              // list's full-height content and make an empty page scroll.
+              <div className="py-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"

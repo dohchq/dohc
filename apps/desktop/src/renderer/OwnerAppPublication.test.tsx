@@ -2,11 +2,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import type { CloudStatusResult, ListRelayShareLinksResult } from "../ipc/bridgeContract";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { deferred } from "../testing/deferred";
-import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
+import { OwnerAppPublication as Control } from "./OwnerAppPublication";
 
 const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   kind: "prepared", approvalId: "af28e679-fb6e-4b69-b852-c6f643e5d7ac", candidateDigest: "a".repeat(64),
@@ -45,8 +45,15 @@ const api = {
 const localList = (request: OwnerAppPublicationRequest) => request.action === "listLocal" ? Promise.resolve<OwnerAppPublicationResult>({ kind: "localListed", publications: [localRow] }) : answer(request);
 const openButton = () => screen.findByRole("button", { name: `Open in browser ${localRow.publicationId}` });
 
+// The page owns whether the dialog is open.
+function OwnerAppPublication(props: Omit<ComponentProps<typeof Control>, "open" | "onOpenChange" | "testId">) {
+  const context = `${props.workspaceId}\0${props.appRoot}`;
+  const [openFor, setOpenFor] = useState<string | null>(null);
+  return <Control {...props} open={openFor === context} onOpenChange={open => setOpenFor(open ? context : null)} testId="app-view-review" />;
+}
+
 async function open() {
-  await userEvent.setup().click(screen.getByRole("button", { name: "Publish app" }));
+  await userEvent.setup().click(screen.getByRole("button", { name: "Review app" }));
   await waitFor(() => expect(screen.queryByText("Loading links…")).toBeNull());
 }
 async function review() {
@@ -92,66 +99,6 @@ describe("owner app publication", () => {
     expect(screen.getByTestId("app-publication-capability").textContent).toContain("Orders");
   });
 
-  it("opens approval from the form empty state and restores focus after closing", async () => {
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} />);
-    const trigger = await screen.findByRole("button", { name: "Review and open app" });
-    expect(screen.getByText("Review this app to open it on this device or publish it to a shared link.")).toBeTruthy();
-    await userEvent.setup().click(trigger);
-    await screen.findByRole("button", { name: "Prepare for this device" });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it("shows an approval made from the empty state and opens it there without the dialog", async () => {
-    let approved = false;
-    api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "listLocal") return { kind: "localListed", publications: approved ? [localRow] : [] };
-      if (request.action === "prepareLocal") return { ...prepared, local: true };
-      if (request.action === "approve") { approved = true; return { ...published, local: true }; }
-      if (request.action === "launchLocal") return { kind: "localLaunched", publicationId: localRow.publicationId, url: "http://127.0.0.1:43123/" };
-      return answer(request);
-    });
-    function Page() {
-      const [reload, setReload] = useState(0);
-      return <OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={reload} onLocalChange={() => setReload(value => value + 1)} />;
-    }
-    render(<Page />);
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Review and open app" }));
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Prepare for this device" }));
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve for this device" }));
-    await screen.findByText("App approved on this device. It is not published on any link.");
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
-    expect(screen.getByText("Approved on this device. Later source edits need a new approval.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Review and open app" })).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open in browser" })));
-    expect(screen.getByRole("button", { name: "Review app" })).toBeTruthy();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open in browser" }));
-    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "launchLocal", workspaceId: "ws-trip", publicationId: localRow.publicationId });
-    expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
-    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
-  });
-
-  it("refuses a non-loopback address from the empty state and reports it with Try again", async () => {
-    api.publishOwnerApp.mockImplementation(async request => request.action === "launchLocal"
-      ? { kind: "localLaunched", publicationId: localRow.publicationId, url: "http://localhost:43123/" } : localList(request));
-    const reportError = vi.fn();
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} reportError={reportError} />);
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Open in browser" }));
-    await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
-    expect(reportError.mock.calls[0]![0]).toBe("dohc could not open this app in your browser.");
-    expect((reportError.mock.calls[0]![1] as Error).message).toBe("The app address is not on this device. dohc did not open it.");
-    expect(reportError.mock.calls[0]![2]).toEqual(expect.any(Function));
-    expect(api.openExternalUrl).not.toHaveBeenCalled();
-  });
-
-  it("keeps the empty state on review when this device has only an inactive approval", async () => {
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal"
-      ? { kind: "localListed", publications: [{ ...localRow, approved: false, active: false }] } : answer(request));
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} />);
-    expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
-  });
-
   it("scopes the sync prerequisite to link publishing in a local workspace", async () => {
     const unsynced = new Error("Sync this workspace before sharing.");
     api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
@@ -172,113 +119,6 @@ describe("owner app publication", () => {
   });
 
   const checkFailed = "dohc could not check whether this app is approved on this device.";
-  const reviewIntro = "Review this app to open it on this device or publish it to a shared link.";
-
-  it("reports a failed approval check without claiming the app is unapproved, then recovers on Try again", async () => {
-    const failure = new Error("Engine connection lost");
-    let fail = true;
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" && fail ? Promise.reject(failure) : localList(request));
-    const reportError = vi.fn();
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} reportError={reportError} />);
-    await screen.findByText(checkFailed);
-    expect(reportError).toHaveBeenCalledExactlyOnceWith(checkFailed, failure, expect.any(Function));
-    expect(screen.queryByText(reviewIntro)).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByRole("button", { name: "Review and open app" })).toBeTruthy();
-    fail = false;
-    act(() => reportError.mock.calls[0]![2]());
-    expect(await screen.findByRole("button", { name: "Open in browser" })).toBeTruthy();
-    expect(screen.queryByText(checkFailed)).toBeNull();
-  });
-
-  it("treats a wrong answer as a failed check and shows it inline without a shell reporter", async () => {
-    let wrong = true;
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" && wrong
-      ? { kind: "listed", publications: [], nextCursor: null } : localList(request));
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} />);
-    expect((await screen.findByRole("alert")).textContent).toBe(checkFailed);
-    wrong = false;
-    await userEvent.setup().click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("button", { name: "Open in browser" })).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("recovers the page entry when the dialog's Reload finds an approval", async () => {
-    let fail = true;
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" && fail ? Promise.reject(new Error("busy")) : localList(request));
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} reportError={vi.fn()} />);
-    await screen.findByText(checkFailed);
-    await userEvent.setup().click(screen.getByRole("button", { name: "Review and open app" }));
-    const reload = await screen.findByRole("button", { name: "Reload local apps" });
-    await waitFor(() => expect((reload as HTMLButtonElement).disabled).toBe(false));
-    fail = false;
-    await userEvent.setup().click(reload);
-    await openButton();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
-    expect(await screen.findByText("Approved on this device. Later source edits need a new approval.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open in browser" })).toBeTruthy();
-  });
-
-  it("ignores a stale approval check and its retry after the page moves on", async () => {
-    const slow = deferred<OwnerAppPublicationResult>();
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" && request.workspaceId === "ws-old" ? slow.promise : localList(request));
-    const reportError = vi.fn();
-    const view = render(<OwnerAppEntry workspaceId="ws-old" appRoot="trip" reload={0} reportError={reportError} />);
-    view.rerender(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} reportError={reportError} />);
-    await screen.findByRole("button", { name: "Open in browser" });
-    await act(async () => { slow.reject(new Error("late")); await slow.promise.catch(() => undefined); });
-    expect(reportError).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Open in browser" })).toBeTruthy();
-
-    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" ? Promise.reject(new Error("busy")) : answer(request));
-    view.rerender(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={1} reportError={reportError} />);
-    await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
-    view.unmount();
-    const calls = api.publishOwnerApp.mock.calls.length;
-    act(() => reportError.mock.calls[0]![2]());
-    expect(api.publishOwnerApp).toHaveBeenCalledTimes(calls);
-  });
-
-  it("reads the approval again after a launch fails, so an ended approval stops offering Open in browser", async () => {
-    let ended = false;
-    api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "launchLocal") { ended = true; throw new Error("This app approval ended."); }
-      return request.action === "listLocal" ? { kind: "localListed", publications: ended ? [] : [localRow] } : answer(request);
-    });
-    const reportError = vi.fn();
-    render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} reportError={reportError} />);
-    await userEvent.setup().click(await screen.findByRole("button", { name: "Open in browser" }));
-    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not open this app in your browser.", expect.any(Error), expect.any(Function)));
-    expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.getByText(reviewIntro)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
-    expect(api.openExternalUrl).not.toHaveBeenCalled();
-  });
-
-  it.each([["succeeds", false], ["fails after moving the data", true]] as const)("updates the page entry when a link publish from the header %s", async (_name, failPublish) => {
-    let shared = false;
-    api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "listLocal") return { kind: "localListed", publications: [{ ...localRow, active: !shared }] };
-      if (request.action === "approve") { shared = true; if (failPublish) throw new Error("dohc could not reach your sharing server."); }
-      return answer(request);
-    });
-    function Page() {
-      const [reload, setReload] = useState(0);
-      const changed = () => setReload(value => value + 1);
-      return <><OwnerAppPublication workspaceId="ws-trip" appRoot="trip" onLocalChange={changed} />
-        <OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={reload} onLocalChange={changed} /></>;
-    }
-    render(<Page />);
-    await screen.findByRole("button", { name: "Open in browser" });
-    await review();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
-    await screen.findByText(failPublish ? "dohc could not reach your sharing server." : "App published on the selected link.");
-    await screen.findByText("Inactive on this device", { exact: false });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
-    expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
-  });
-
   it("reviews a bound Collection app without presenting another response database", async () => {
     const datasetCapability = { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
@@ -359,7 +199,7 @@ describe("owner app publication", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" })));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Review app" })));
   });
   it.each([approvedCollection, "unavailable" as const])("confirms revocation of %s, sends the displayed revision, and keeps the app published", async currentCapability => {
     let revision = 7;
@@ -575,7 +415,7 @@ describe("owner app publication", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
     await userEvent.setup().click(screen.getByTestId("app-publication-withdraw-cancel"));
     expect(screen.queryByTestId("app-publication-withdraw-confirm")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Publish app" }));
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review app" }));
     expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list" || input.action === "listLocal")).toBe(true);
   });
 

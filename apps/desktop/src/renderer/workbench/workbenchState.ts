@@ -276,8 +276,9 @@ const diffTitle: TabTitle = (_tab, label) => {
   return name ? `Diff: ${name}` : "History change";
 };
 const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
-// An app's folder, as typed. A folder that cannot be decoded keeps its address.
-const appTitle: TabTitle = tab => basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
+// The app's title once its page reads it, and until then its folder, as typed. A folder that cannot be decoded keeps
+// its address. The tooltip names the folder.
+const appTitle: TabTitle = (tab, label) => label ?? basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
 const collectionFolder = (tab: ParsedTab) => tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection";
 export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   file: {
@@ -566,6 +567,66 @@ function evictFirstInactiveTab(state: WorkbenchState): WorkbenchState | null {
     }));
   }
   return null;
+}
+
+// Closes saved tabs, first group first, until `count` more fit under the cap:
+// inactive tabs, then a second copy of a file open in two groups, then the
+// tab a group shows. A path in `keep` stays open in one group.
+function makeRoomForTabs(state: WorkbenchState, count: number, keep: ReadonlySet<string>): WorkbenchState {
+  let excess = allTabs(state).length + count - MAX_OPEN_TABS;
+  if (excess <= 0) return state;
+  const copies = new Map<string, number>();
+  for (const tab of allTabs(state)) copies.set(tab.path, (copies.get(tab.path) ?? 0) + 1);
+  const closable: ((group: EditorGroup, path: string) => boolean)[] = [
+    (group, path) => path !== group.activeTab && !keep.has(path),
+    (group, path) => path !== group.activeTab && copies.get(path)! > 1,
+    (_group, path) => copies.get(path)! > 1 || !keep.has(path),
+  ];
+  let next = state;
+  for (const canClose of closable) {
+    for (const { id } of state.editorGroups) {
+      const group = () => next.editorGroups.find((candidate) => candidate.id === id)!;
+      for (const { path } of group().tabs) {
+        if (excess === 0) return next;
+        if (!canClose(group(), path)) continue;
+        next = closeTab(next, id, path);
+        copies.set(path, copies.get(path)! - 1);
+        excess -= 1;
+      }
+    }
+  }
+  return next;
+}
+
+// The saved layout with every tab open in `shown` beside it, the one in view
+// still in view. A file open in both keeps its saved place. An app open in
+// `shown` stays in its group, because moving it reloads the app. Past the tab
+// limit, saved tabs close to make room, so no tab in `shown` closes.
+export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): WorkbenchState {
+  const holder = (state: WorkbenchState, path: string) =>
+    state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
+  const shownPaths = new Set(allTabs(shown).map((tab) => tab.path));
+  const appGroups = new Map<string, string>();
+  for (const group of shown.editorGroups) {
+    if (!saved.editorGroups.some((candidate) => candidate.id === group.id)) continue;
+    for (const { path } of group.tabs) if (parseTab(path).kind === "site") appGroups.set(path, group.id);
+  }
+  let next = saved;
+  for (const [path, groupId] of appGroups) {
+    const savedGroup = holder(next, path);
+    if (savedGroup !== undefined && savedGroup !== groupId) next = closeTab(next, savedGroup, path);
+  }
+  const adding = [...shownPaths].filter((path) => !holder(next, path)).length;
+  next = makeRoomForTabs(next, adding, shownPaths);
+  for (const path of shownPaths) {
+    if (holder(next, path)) continue;
+    const groupId = appGroups.get(path);
+    // An app joins its group without taking its place or the focus. Room was made above.
+    next = groupId === undefined ? openTab(next, path) : replaceGroup(next, groupId, (group) =>
+      ({ ...group, tabs: [...group.tabs, { path }], activeTab: group.activeTab ?? path }));
+  }
+  const active = activeTabPath(shown);
+  return active === null ? next : openTab(next, active, holder(next, active));
 }
 
 export function focusEditorGroup(
