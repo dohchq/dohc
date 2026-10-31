@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { repoRoot, run } from "./process.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // Each case starts the verifier in its own Node process. On Windows, run() would
 // add two to three seconds of PowerShell job setup to every case.
@@ -79,7 +80,8 @@ function createVerificationFixtures(directory) {
   put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];export const macSlotRoot=()=>'';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
   git(["config", "core.logAllRefUpdates", "true"]);
   mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+  copyFlakyFixture(root);
+  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
     "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs",
     "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
     put(path, readFileSync(join(repoRoot, path)));

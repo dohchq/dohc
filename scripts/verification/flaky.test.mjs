@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import TestRecordReporter from "./test-record-reporter.mjs";
 import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
+import { flakyFixtureFiles } from "./flaky-fixture.mjs";
+
+test("flaky fixtures include every relative module imported at load time", () => {
+  const copied = new Set(flakyFixtureFiles.map(file => new URL(`../../${file}`, import.meta.url).href));
+  for (const file of copied) {
+    const source = readFileSync(new URL(file), "utf8");
+    // Static imports and re-exports load with the module; import() runs only when called.
+    const imports = /^\s*(?:import|export)\s+(?:[^;]*?\s+from\s+)?["'](\.[^"']+)["']/gmu;
+    for (const [, specifier] of source.matchAll(imports)) {
+      assert.ok(copied.has(new URL(specifier, file).href), `${file} imports ${specifier}, which flakyFixtureFiles does not copy`);
+    }
+  }
+});
 
 test("nextest's FLAKY lines name each test once", () => {
   const log = [
