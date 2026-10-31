@@ -684,8 +684,8 @@ describe("tabs", () => {
     expect(replaceTab(state, "tab://new-page/gone/", "Untitled.md")).toBe(state);
   });
 
-  // The shell does not load the Apps view's list, so the tab names an app by
-  // its folder, as typed, never by its encoded tab address.
+  // A tab names an app by its folder, as typed, never by its encoded tab
+  // address.
   it.each([
     ["apps/trip", "trip"],
     ["clients/acme/portal", "portal"],
@@ -900,13 +900,13 @@ describe("ui-state persistence round-trip", () => {
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(["notes/a.md"]);
   });
 
-  it("restores the built-in Apps view", () => {
+  it("opens the Explorer for a layout saved on the Apps view, which the rail no longer has", () => {
     expect(
       parseUiState({
         ...serializeUiState(defaultWorkbenchState()),
         activeView: "sites",
       }).activeView,
-    ).toBe("sites");
+    ).toBe("explorer");
   });
 
   it("serialize → parse restores the workbench state", () => {

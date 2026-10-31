@@ -1,4 +1,5 @@
 import { historyCursor, historyPageFields, timelinePage } from "../testing/historyPageFixture";
+import { defaultWorkbenchState, serializeUiState } from "./workbench/workbenchState";
 import "../testing/legendListMock";
 import {
   act,
@@ -196,7 +197,15 @@ export const STORED_STATE: WorkspaceUiState = {
   activeEditorGroup: "primary",
   aboutVisible: true,
   aboutWidth: 360,
+  explorerMode: "files",
 };
+
+// These tests drive the folder tree, so a workspace with no saved state
+// opens the Explorer in Files rather than Home.
+const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({ ...defaultWorkbenchState(), explorerMode: "files" });
+
+// A workspace with no saved state but its Explorer on Home, as a new one opens.
+export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
 
 // The stored state with the chat list showing in the left side panel.
 export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
@@ -344,7 +353,7 @@ function makeBaseBridge(
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    getWorkspaceUiState: vi.fn((): Promise<WorkspaceUiState | null> => uiStatePromise.then((state) => state ?? FRESH_FILES_STATE)),
     openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -705,6 +714,8 @@ function makeBaseBridge(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
+    // The Explorer's Apps section: no apps unless a test says so.
+    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({ sites: [] })),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {

@@ -1,4 +1,4 @@
-import { LoaderCircle, Send } from "lucide-react";
+import { ArrowUp, LoaderCircle, Send } from "lucide-react";
 import { useEffect, useState } from "react";
 
 // A send still in flight after this long shows the ring. A quicker send
@@ -28,7 +28,9 @@ export function ComposerSendButton(props: {
   label: string;
   sending: boolean;
   disabled: boolean;
-  shape: "icon" | "post";
+  // A chat's box sends from a 28px square that fills with the accent once
+  // there's something to send.
+  shape: "icon" | "post" | "box";
 }) {
   const slow = useSlowSend(props.sending);
   const hidden = slow ? "invisible" : undefined;
@@ -41,11 +43,14 @@ export function ComposerSendButton(props: {
         title={props.label}
         aria-busy={slow || undefined}
         disabled={props.sending || props.disabled}
-        className={`relative shrink-0 rounded-md bg-accent text-bg ${
-          props.shape === "icon" ? "grid size-8 place-items-center" : "h-7 px-3 text-[12px] font-medium"
-        } ${slow ? "cursor-progress" : "cursor-pointer hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"}`}
+        className={`relative shrink-0 rounded-md ${
+          props.shape === "box"
+            ? `grid size-7 place-items-center ${props.disabled && !props.sending ? "bg-panel-2 text-subtle" : "bg-accent text-bg"}`
+            : `bg-accent text-bg ${props.shape === "icon" ? "grid size-8 place-items-center" : "h-7 px-3 text-[12px] font-medium"}`
+        } ${slow ? "cursor-progress" : `cursor-pointer hover:opacity-90 disabled:cursor-not-allowed ${props.shape === "box" ? "" : "disabled:opacity-40"}`}`}
       >
-        {props.shape === "icon" ? <Send size={13} aria-hidden className={hidden} /> : <span className={hidden}>Post</span>}
+        {props.shape === "box" ? <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
+          : props.shape === "icon" ? <Send size={13} aria-hidden className={hidden} /> : <span className={hidden}>Post</span>}
         {slow ? (
           <LoaderCircle
             data-testid={`${props.testId}-pending`}

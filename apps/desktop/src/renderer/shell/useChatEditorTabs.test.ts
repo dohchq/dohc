@@ -167,7 +167,7 @@ describe("chat editor tabs", () => {
     expect(generalEditor.nav).toBe(thread);
     expect(generalEditor.drafts).toBe(draft);
     expect(result.current.get(chatEditorPath(dm)).drafts).toBeUndefined();
-    expect(result.current.titles.get(chatEditorPath(general))).toBe("#General");
+    expect(result.current.titles.get(chatEditorPath(general))).toBe("General");
     expect(result.current.titles.get(chatEditorPath(agent))).toBe("Your agent");
     expect(result.current.titles.get(chatEditorPath(dm))).toBe("Alice");
   });
@@ -218,7 +218,7 @@ describe("chat editor tabs", () => {
     expect(result.current.get(path).nav).toBeUndefined();
     expect(result.current.get(path).drafts).toBeUndefined();
     await act(async () => pending.resolve({ channels: [general.channel], fileThreads: [] }));
-    await waitFor(() => expect(result.current.titles.get(path)).toBe("#General"));
+    await waitFor(() => expect(result.current.titles.get(path)).toBe("General"));
     expect(stale.nav).toBeUndefined();
     vi.unstubAllGlobals();
   });

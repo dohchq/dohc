@@ -6,7 +6,7 @@ import { SidebarViewsControl } from "../settings/SidebarViewsControl";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
 import { VIEW_IDS } from "../workbench/workbenchState";
-import type { SidePanelContext } from "./ShellSidePanel";
+import type { ShellSidePanelProps } from "./ShellSidePanel";
 import { SIDE_PANEL_VIEWS } from "./sidePanelViews";
 
 afterEach(cleanup);
@@ -45,7 +45,7 @@ describe("the side-panel view registry", () => {
 
 it("routes panel graph failures and retry to the shell notice hook", () => {
   const reportShellError = vi.fn();
-  const element = SIDE_PANEL_VIEWS.graph.render({ workspaceId: "ws", reportShellError } as unknown as SidePanelContext) as React.ReactElement<{children: React.ReactElement<{onError: typeof reportShellError}>}>;
+  const element = SIDE_PANEL_VIEWS.graph.render({ workspaceId: "ws", reportShellError } as unknown as ShellSidePanelProps) as React.ReactElement<{children: React.ReactElement<{onError: typeof reportShellError}>}>;
   const retry = vi.fn(), error = new Error("offline");
   element.props.children.props.onError("dohc could not load the graph.", error, retry);
   expect(reportShellError).toHaveBeenCalledWith("dohc could not load the graph.", error, retry);
