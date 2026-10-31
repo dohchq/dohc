@@ -1031,16 +1031,25 @@ function expectParkedWith(proof: SelfHostProof, cursor: number, markdown: string
 }
 
 // The engine applies a live edit, and its reply carrying the ACK has not
-// reached the relay when the owner stops. The reply then arrives on the same
-// daemon, too late to be recorded; the departure reads the engine's own record.
-it("settles a live edit whose application reply Stop overtook, then parks", () => withSelfHostProof("self-host-stop-held", async proof => {
+// reached the relay when the owner stops. Stop delivers before it fences, so
+// it waits for that reply, which arrives once Stop reaches the daemon. A reply
+// that arrives after the fence, too late to be recorded, is no longer covered.
+it("settles a live edit whose application reply Stop waited for, then parks (no reply after the fence)", () => withSelfHostProof("self-host-stop-held", async proof => {
   const markdown = await proof.markdownWith("heldAtStop", "live");
   const held = proof.holdApplication();
   const edit = proof.liveEdit("heldAtStop", "live").then(() => "accepted", () => "refused");
   await held.applied;
   const cursor = proof.settlement().applied;
   expect(proof.ownerTip()).toBeLessThan(cursor);
-  const stop = await stopLiveEditing(proof, held.release);
+  // The running daemon's Stop reads the retirable activation first, before it waits for the held delivery.
+  let reached!: () => void;
+  const reachedHost = new Promise<void>(resolve => {reached = resolve;});
+  const retirable = proof.storage.retirableServiceActivation.bind(proof.storage);
+  vi.spyOn(proof.storage, "retirableServiceActivation").mockImplementation(document => {reached(); return retirable(document);});
+  const stopping = stopLiveEditing(proof);
+  await reachedHost;
+  held.release();
+  const stop = await stopping;
   await edit;
   expect(stop.acceptedCursor).toBe(cursor);
   expectParkedWith(proof, cursor, markdown);
@@ -1048,9 +1057,12 @@ it("settles a live edit whose application reply Stop overtook, then parks", () =
 }), 120000);
 
 // The engine applies a live edit and its daemon goes before the relay records
-// it. The owner stops while no daemon runs. The daemon after it never loaded
-// the document, and settles it from the relay's journal and the engine's record.
-it("settles a live edit its daemon applied before it went, after a Stop no daemon saw, then parks", () => withSelfHostProof("self-host-stop-restart", async proof => {
+// it. The owner stops while no daemon runs, and the relay refuses, changing
+// nothing: no daemon can deliver and prepare the activation. Once a daemon
+// runs again, the owner's second Stop settles the edit from the relay's
+// journal and the engine's record. An absent host accepting the first Stop is
+// no longer covered.
+it("settles a live edit its daemon applied before it went, after a refused Stop no daemon saw and a retry, then parks (no Stop accepted without a daemon)", () => withSelfHostProof("self-host-stop-restart", async proof => {
   const markdown = await proof.markdownWith("beforeRestart", "live");
   const held = proof.holdApplication();
   const edit = proof.liveEdit("beforeRestart", "live").then(() => "accepted", () => "refused");
@@ -1060,12 +1072,15 @@ it("settles a live edit its daemon applied before it went, after a Stop no daemo
   expect(await edit).toBe("refused");
   expect(proof.ownerTip()).toBeLessThan(cursor);
   expect(proof.settlement().settled).toBeLessThan(cursor);
-  const captures = harness.captures.length;
-  const stop = await stopLiveEditing(proof, proof.startSupervisor);
+  const refused = await proof.route("DELETE", {path: "docs/a.md", retire: true});
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({ok: false, code: "host-not-loaded", sessionHost: "starting"});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false});
+  await proof.startSupervisor();
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]), {timeout: 30000});
+  const stop = await stopLiveEditing(proof);
   expect(stop.acceptedCursor).toBe(cursor);
   expectParkedWith(proof, cursor, markdown);
-  // The replacement settled it without loading a session.
-  expect(harness.captures.length).toBe(captures);
   return {cursor, acceptedCursor: stop.acceptedCursor};
 }), 120000);
 
