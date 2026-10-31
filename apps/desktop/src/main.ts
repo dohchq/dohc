@@ -5145,6 +5145,7 @@ function startUpdates(): Promise<AutoUpdateController | null> {
     // reload would reset. The quit is already approved:
     // the IPC handler approves before asking the controller.
     quitForStagedRestart: () => app.quit(),
+    stateDir: stateDir(),
     onState: (_state, state) => {
       broadcastUpdateState(state);
     },

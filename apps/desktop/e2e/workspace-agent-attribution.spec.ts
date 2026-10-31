@@ -144,14 +144,12 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
     await openAboutPanel(page);
+    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
-    const titleInput = page.getByTestId("linked-chat-new-title");
-    await titleInput.fill("Agent question");
-    await titleInput.press("Enter");
+    const comment = page.getByTestId("linked-chat-new-composer");
+    await comment.fill("Agent question\nCan you summarize this file?");
+    await comment.press("Enter");
     await expect(page.getByTestId("linked-chat-title")).toContainText("Agent question");
-    const composer = page.getByTestId("linked-chat-composer");
-    await composer.fill("Can you summarize this file?");
-    await composer.press("Enter");
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "Can you summarize this file?",
     );
