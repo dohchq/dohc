@@ -10,6 +10,7 @@ use dohc_engine_storage::{NoFaults, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, open_store};
 use serde_json::json;
 mod apply_performance;
+mod held;
 mod passive;
 
 // Fields drop in order, so the scratch directory comes last: its guard
