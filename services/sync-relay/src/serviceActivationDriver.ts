@@ -403,10 +403,11 @@ export class ServiceActivationDriver {
     let delivery=this.#delivery.departedOwnerDelivery(input);
     if(!delivery || (behind && !delivery.next))return null;
     // Registering retires the engine registration a cached owner holds. That owner
-    // registers again, and the document is ready again, only if it returns.
-    const owner=this.#owners.get(JSON.stringify(document));
+    // registers again, and the document is ready again, only if it returns. The
+    // path's readiness ends only if it is this object's: after a move, it is the replacement's.
+    const owner=this.#owners.get(JSON.stringify(document)),key=targetKey(target);
     if(owner){owner.consumer.release(document);owner.completed=false;}
-    this.#completedTargets.delete(targetKey(target));
+    if(owner?.target===key || this.#objects.get(key)===document.objectId)this.#completedTargets.delete(key);
     let registered;
     try{
       registered=await o.client.sendRequest({...request(),method:"liveApplication.register",

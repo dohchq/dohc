@@ -858,7 +858,8 @@ export async function startServiceLiveHost(options: {
         if (!heads) {heads = await endKeptRetries(row, operation, true); heldOf.set(key, heads);}
         if (settleTarget && !heads.seeded.has(document.lineageClaimId)) {
           const settled = await activation!.settleDeparted(row.target, document, operation);
-          // One the engine refuses as not ready is left to the unload, which answers pending over unsettled work.
+          // One the engine refuses as not ready is left to the unload. While anything of it is loaded, the engine answers
+          // that unload as pending over unsettled work. With nothing loaded, it answers that the workspace has none, which counts as unloaded.
           if (settled?.kind === "pending") return settled.reason;
           if (settled?.kind === "settled") {
             if (!settled.settlement.materialized) return "Settlement has not reached the file.";
