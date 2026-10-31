@@ -3112,20 +3112,21 @@ const REPLACEMENT_ACTIVATION = `ordinary-activation-${"c".repeat(64)}`;
 // A new document at the fixture document's path, with its own lineage and an
 // activation the running host completed: adoption, seed and native application,
 // as for the fixture document. The fake engine resumes it by its activation ID.
-// Its object and activation IDs sort after the fixture document's.
-const replacementActivation = async (o: Enrolled) => {
+// Its object and activation IDs sort after the fixture document's. `name`,
+// `path` and `activationId` give another such document at another path.
+const replacementActivation = async (o: Enrolled, {name = "replacement", path = o.sibling.path, activationId = REPLACEMENT_ACTIVATION} = {}) => {
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
     maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
-  const path = o.sibling.path, origin = "replacement-origin", doc = markdownToYDoc("Replacement"), baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+  const origin = `${name}-origin`, doc = markdownToYDoc(name === "replacement" ? "Replacement" : `Document ${name}`), baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
   doc.getMap("frontmatter").set("title", "Replaced");
   const fullState = Buffer.from(Y.encodeStateAsUpdate(doc)); doc.destroy();
-  const document = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: "replacement-object", lineageClaimId: sha256(baselineBytes)};
+  const document = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: `${name}-object`, lineageClaimId: sha256(baselineBytes)};
   const validated = o.validateJournal({document, currentPath: path, checkpoint: baselineBytes, suffix: [], candidate: fullState});
   const base = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: path, checkpoint: baselineBytes});
   if (validated.kind !== "accepted" || base.kind !== "accepted") throw new Error("Invalid replacement fixture.");
   const log = o.raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','${origin}',?,?,?,?)`);
   const relaySeq = (originSeq: number) => Number(o.raw.prepare(`SELECT relay_seq FROM sync_relay_log WHERE origin_id='${origin}' AND origin_seq=?`).get(originSeq)!.relay_seq);
-  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: "replacement-moment", path, operation: "write",
+  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: document.objectId, momentId: `${name}-moment`, path, operation: "write",
     payloadAfterPath: path, payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
     payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 30);
   log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: document.objectId, path, contentKind: "richdoc", isBaseState: true,
@@ -3134,9 +3135,9 @@ const replacementActivation = async (o: Enrolled) => {
     lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 32);
   const blob = o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
   blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
-  o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,'replacement-moment','main',?,?,'text',?,30)")
-    .run(document.objectId, relaySeq(0), path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
-  const capture: NativeOwnerActivation = {activationId: REPLACEMENT_ACTIVATION, sessionId: "replacement-session", baselineBytes, fullState,
+  o.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace',?,?,?,'main',?,?,'text',?,30)")
+    .run(document.objectId, relaySeq(0), `${name}-moment`, path, base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  const capture: NativeOwnerActivation = {activationId, sessionId: `${name}-session`, baselineBytes, fullState,
     source: {version: 1, relayDatabaseNamespace: o.f.history.namespace, ...document, currentPath: path, replicationEpoch: "epoch",
       streamIdentity: "stream", committedCursor: relaySeq(2), baseOriginId: origin, baseOriginSeq: 1, baseRelaySeq: relaySeq(1),
       sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", document.objectId, path, origin, "2"].join("\0")))}`,
@@ -3147,21 +3148,21 @@ const replacementActivation = async (o: Enrolled) => {
   await store.prepare({capture, host, shareId: "share", registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, host), delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
-  const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: REPLACEMENT_ACTIVATION,
+  const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: activationId,
     expectedLocalSequence: 2, maxBytes: 1_000_000, maxEvents: 100, throughCursor: 0});
-  delivery.acknowledgeOwnerAdoption(adoption, {adoptionId: REPLACEMENT_ACTIVATION, localYDocSequence: 2, terminalCursor: 0, adoptionReplayed: false});
+  delivery.acknowledgeOwnerAdoption(adoption, {adoptionId: activationId, localYDocSequence: 2, terminalCursor: 0, adoptionReplayed: false});
   const current = o.f.storage.resolveCurrentLiveDocumentBinding({document, actor}, access), cut = o.f.storage.readLiveUpdateJournalCut({document});
   if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Missing replacement activation authority.");
   const seed = o.validateJournal({document, currentPath: current.binding.currentPath, checkpoint: cut.cut.checkpoint.bytes,
     suffix: cut.cut.suffix.map(row => row.bytes), candidate: fullState});
   o.f.storage.commitLiveUpdateJournal({host, actor, expectedAuthority: current.authority,
-    metadata: {deliveryId: "replacement-seed", updateDigest: sha256(fullState), binding: current.binding}, cutToken: cut.cut, validation: seed,
+    metadata: {deliveryId: `${name}-seed`, updateDigest: sha256(fullState), binding: current.binding}, cutToken: cut.cut, validation: seed,
     updateBytes: fullState, receivedAtMs: 34}, access);
   const owner = delivery.openOwnerDelivery({host, document, actor}), event = delivery.nextOwnerApplication(owner)!;
   delivery.acknowledgeOwnerDeliveryApplication(owner, {...event.metadata.accepted.receipt, localYDocSequence: 2, applicationReplayed: false});
-  store.complete({document, host, access, nativeState: {adoptionId: REPLACEMENT_ACTIVATION, pendingBytes: 0}, guard() {}});
-  o.otherActivations.set(REPLACEMENT_ACTIVATION, capture);
-  return {...o.sibling, objectId: document.objectId};
+  store.complete({document, host, access, nativeState: {adoptionId: activationId, pendingBytes: 0}, guard() {}});
+  o.otherActivations.set(activationId, capture);
+  return {...o.sibling, path, objectId: document.objectId};
 };
 
 // Proves: a restarted host's ordinary recovery of a departing document reads
@@ -3226,6 +3227,54 @@ it("recovers a departing replacement at a moved document's old path through its 
   expect(host.retains(o.sibling)).toBe(true);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   expect({row: movedRow(), restore: o.f.storage.readStopRestore(stopLookup)}).toEqual(before);
+});
+
+// Proves: settling a moved document's finished restore route leaves the
+// readiness of a replacement now hosted at its old path alone. The route waits
+// on an unload the engine holds pending, and a pass activates one document, so
+// the replacement and an ordinary document take turns. On every pass the
+// replacement stays ready and the workspace pushes before it pulls.
+it("keeps a replacement at a moved document's old path ready while the moved document's restore route waits", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  anotherEditGrant(o);
+  o.beginRestore();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const replacement = await replacementActivation(o);
+  const ordinary = await replacementActivation(o, {name: "ordinary", path: "docs/c.md", activationId: `ordinary-activation-${"d".repeat(64)}`});
+  await o.host.close();
+  const at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input => input.path === o.sibling.path ? replacement.objectId : at(input));
+  let driver: ServiceActivationDriver | undefined;
+  const addTarget = ServiceActivationDriver.prototype.addTarget;
+  vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (this: ServiceActivationDriver, ...args) {driver = this; return addTarget.apply(this, args);});
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  await host.update({workspaces: [o.workspace], documents: [replacement, ordinary], departing: [o.sibling]});
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  await vi.waitFor(() => {expect(driver!.completed(replacement)).toBe(true); expect(driver!.completed(ordinary)).toBe(true);});
+  // The route's unload stays pending, so it settles and publishes again on every pass.
+  vi.spyOn(o.unloads, "shift").mockReturnValue({status: "pending", reason: "The test holds the unload."});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("The test holds the unload.")));
+  // At each pull: whether the replacement is ready, and whether the workspace pushed after the route's unload.
+  const ready: boolean[] = [], pushed: boolean[] = [];
+  let pushing = false;
+  const listener = (method: string) => {
+    if (method === "liveApplication.unloadDocument") pushing = false;
+    if (method === "sync.push") pushing = true;
+    if (method === "sync.pullHosted") {ready.push(driver!.completed(replacement)); pushed.push(pushing); pushing = false;}
+  };
+  o.requestListeners.add(listener);
+  await o.nextPull();
+  await o.nextPull();
+  o.requestListeners.delete(listener);
+  expect(ready.length).toBeGreaterThanOrEqual(4);
+  expect(ready.filter(value => !value)).toEqual([]);
+  expect(pushed.slice(1).filter(value => !value)).toEqual([]);
+  expect(host.retains(o.sibling)).toBe(true);
 });
 
 // Proves: reconciliation that names deliveries the engine cannot prove gets the
