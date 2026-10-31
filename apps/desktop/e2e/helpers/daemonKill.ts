@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 
@@ -7,12 +8,20 @@ const execFileAsync = promisify(execFile);
 const ENGINE_BASENAME = "dohc-workspace-engine";
 
 /**
- * Whether a process table name is the engine. macOS `comm` is the executable's
- * full path, Linux truncates it to 15 bytes, and Windows adds `.exe`.
+ * Whether a process's executable path or name is the engine. macOS `comm` is
+ * the executable's full path, and Windows adds `.exe`.
  */
 function isEngineProcessName(name: string): boolean {
-  const executable = basename(name).replace(/\.exe$/iu, "");
-  return executable === (process.platform === "linux" ? ENGINE_BASENAME.slice(0, 15) : ENGINE_BASENAME);
+  return basename(name).replace(/\.exe$/iu, "") === ENGINE_BASENAME;
+}
+
+/**
+ * The path a Linux process was started as. Linux `comm` can't name the engine:
+ * it keeps 15 bytes, and Node renames its main thread `MainThread`.
+ */
+async function linuxStartedAs(pid: number): Promise<string> {
+  const commandLine = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+  return commandLine.split("\0")[0] ?? "";
 }
 
 interface ProcessRow {
@@ -75,9 +84,12 @@ export async function engineDaemonPids(appPid: number): Promise<number[]> {
       changed = true;
     }
   }
-  return rows
-    .filter((row) => row.pid !== appPid && descendants.has(row.pid) && isEngineProcessName(row.name))
-    .map((row) => row.pid);
+  const children = rows.filter((row) => row.pid !== appPid && descendants.has(row.pid));
+  const names =
+    process.platform === "linux"
+      ? await Promise.all(children.map((row) => linuxStartedAs(row.pid)))
+      : children.map((row) => row.name);
+  return children.filter((_, index) => isEngineProcessName(names[index]!)).map((row) => row.pid);
 }
 
 /**
