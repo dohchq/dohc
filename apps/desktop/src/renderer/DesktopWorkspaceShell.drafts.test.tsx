@@ -198,7 +198,10 @@ describe("workspace switch admission", () => {
   describe("saved tabs after a failed read", () => {
     const refused = () => new Error("dohc has not finished opening this workspace.");
     const notices = () => screen.getByTestId("notice-center-toggle").getAttribute("aria-label");
+    // With no saved layout read, the Explorer opens on Home, as a new workspace does.
     const openFile = async (user: ReturnType<typeof userEvent.setup>, path: string) => {
+      const files = await screen.findByTestId("explorer-mode-files");
+      if (files.getAttribute("aria-selected") !== "true") await user.click(files);
       await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
       await screen.findByTestId(`tab-${path}`);
     };
