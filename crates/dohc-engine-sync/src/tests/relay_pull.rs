@@ -6821,7 +6821,7 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
     seed_identity(&mut engine);
     let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
     let first = version_create_with_shipped_snapshots("held", "first", Vec::new());
-    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    crate::deferred::retain(&mut engine, &identity, None, &[&first], &NoFaults).unwrap();
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "held").unwrap(),
         -1
@@ -6831,7 +6831,7 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
     assert!(crate::deferred::check_redelivery(&engine, &[divergent]).is_err());
     let mut next = version_create_with_shipped_snapshots("held", "second", Vec::new());
     next.origin_seq = 2;
-    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    assert!(crate::deferred::retain(&mut engine, &identity, None, &[&next], &NoFaults).is_err());
     let mut other_identity = identity.clone();
     other_identity.replication_epoch = "another-epoch".to_owned();
     assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
@@ -6846,7 +6846,7 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
         })
         .unwrap();
     next.origin_seq = 1;
-    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    assert!(crate::deferred::retain(&mut engine, &identity, None, &[&next], &NoFaults).is_err());
     let (pending, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
     assert_eq!(
         pending,
@@ -6887,7 +6887,7 @@ fn deferred_relay_work_charges_a_blob_it_names_twice_once() {
             .unwrap()
     };
     let first = twice("a-held");
-    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    crate::deferred::retain(&mut engine, &identity, None, &[&first], &NoFaults).unwrap();
     assert_eq!(retained(&engine, "a-held"), charged(&first));
     let next = twice("b-held");
     engine
@@ -6900,7 +6900,7 @@ fn deferred_relay_work_charges_a_blob_it_names_twice_once() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
-    crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults)
+    crate::deferred::retain(&mut engine, &identity, None, &[&next], &NoFaults)
         .expect("work that exactly fills the limit is retained");
     assert_eq!(retained(&engine, "b-held"), charged(&next));
 }
@@ -6925,6 +6925,7 @@ fn deferred_relay_replay_rotates_between_held_origins() {
     crate::deferred::retain(
         &mut engine,
         &identity,
+        None,
         &ops.iter().collect::<Vec<_>>(),
         &NoFaults,
     )
@@ -7030,6 +7031,7 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
     crate::deferred::retain(
         &mut engine,
         &identity,
+        None,
         &retained.iter().collect::<Vec<_>>(),
         &NoFaults,
     )
@@ -7122,6 +7124,7 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
     crate::deferred::retain(
         &mut engine,
         &identity,
+        None,
         &retained.iter().collect::<Vec<_>>(),
         &NoFaults,
     )
@@ -7146,6 +7149,7 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
         crate::deferred::retain(
             &mut engine,
             &identity,
+            None,
             &suffixes.iter().collect::<Vec<_>>(),
             &NoFaults,
         )

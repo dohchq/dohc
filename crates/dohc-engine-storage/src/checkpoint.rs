@@ -12,6 +12,54 @@ const WRITER_CHECKPOINT_FRAMES: i64 = 2000;
 const MAX_WRITER_BACKFILL_FRAMES: i64 = 1000;
 const MAX_PENDING_WAL_FRAMES: i64 = 6000;
 const MAX_CHECKPOINT_HANDOFF_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+/// Half the WAL writes are refused at: where a held reader gives way.
+const HELD_READER_WAL_FRAMES: i64 = MAX_PENDING_WAL_FRAMES / 2;
+
+/// Whether a store's WAL presses on its held readers, which keep it from
+/// restarting: at least [`HELD_READER_WAL_FRAMES`] long with frames left to
+/// backfill. Its length, not only its tail, is what reaches the refusal.
+/// The store's writer raises it, and held readers stop for it; see
+/// [`crate::EngineStore::wal_pressure`].
+#[derive(Debug, Default)]
+pub struct WalPressure {
+    readers: std::sync::atomic::AtomicUsize,
+    raised: AtomicBool,
+}
+
+impl WalPressure {
+    pub fn raised(&self) -> bool {
+        self.raised.load(Ordering::Relaxed)
+    }
+
+    /// Count a held reader until the answer drops; the writer measures the
+    /// WAL before each write only while one is counted.
+    pub fn hold(self: &Arc<Self>) -> HeldReader {
+        self.readers.fetch_add(1, Ordering::Relaxed);
+        HeldReader(Arc::clone(self))
+    }
+
+    pub(crate) fn held(&self) -> bool {
+        self.readers.load(Ordering::Relaxed) > 0
+    }
+
+    /// Measure the WAL at `conn` and raise or lower the flag; whether raised.
+    pub(crate) fn measure(&self, conn: &Connection) -> rusqlite::Result<bool> {
+        let (log, backfilled) = frames(conn)?;
+        let raised = log >= HELD_READER_WAL_FRAMES && log > backfilled;
+        self.raised.store(raised, Ordering::Relaxed);
+        Ok(raised)
+    }
+}
+
+/// One held reader [`WalPressure`] counts.
+#[derive(Debug)]
+pub struct HeldReader(Arc<WalPressure>);
+
+impl Drop for HeldReader {
+    fn drop(&mut self) {
+        self.0.readers.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// The outcome of a bounded wait for checkpoint work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,12 +423,12 @@ impl Checkpoints {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn completed_for_test(&self) -> u64 {
         *self.completed.0.lock().unwrap()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn wait_for_completion_for_test(&self, before: u64) {
         let (sequence, signal) = &*self.completed;
         let (sequence, _) = signal
@@ -1171,6 +1219,80 @@ mod tests {
         assert!(s.read_with(frames).unwrap().0 < before.0);
         assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
         assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
+    }
+
+    /// Opus's r2c-3c-1 finding 2: while a held reader keeps the WAL from
+    /// restarting, the writer raises the store's pressure flag once the WAL
+    /// reaches half the length writes are refused at, every write before it
+    /// admitted.
+    #[test]
+    fn a_held_reader_sees_the_wal_press_before_writes_are_refused() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        let pressure = s.wal_pressure();
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        let held = pressure.hold();
+        let mut n = 0;
+        while !pressure.raised() {
+            let (log, _) = s.read_with(frames).unwrap();
+            assert!(
+                log < MAX_PENDING_WAL_FRAMES,
+                "raised before writes are refused"
+            );
+            write(&mut s, n, 64 * 1024);
+            n += 1;
+        }
+        assert!(s.read_with(frames).unwrap().0 >= HELD_READER_WAL_FRAMES);
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(held);
+        drop(reader);
+        write_after_checkpoint(&mut s, n, 4096);
+    }
+
+    /// Opus's r2c-3c-4 finding 2: once the last held reader gave way with
+    /// the WAL past the mark, an idle store admits the next without any
+    /// write. Measuring for admission runs the writer's bounded checkpoint
+    /// and asks the background worker for the rest, and presses only while
+    /// the WAL still does.
+    #[test]
+    fn an_idle_store_admits_a_held_reader_once_its_wal_is_backfilled() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        let pressure = s.wal_pressure();
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        let held = pressure.hold();
+        let mut n = 0;
+        while !pressure.raised() {
+            write(&mut s, n, 64 * 1024);
+            n += 1;
+        }
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(held);
+        drop(reader);
+        let mut asked = 0;
+        loop {
+            let before = s.checkpoint_completed_for_test();
+            if !s.measure_wal_pressure().unwrap() {
+                break;
+            }
+            asked += 1;
+            assert!(asked < 100, "the WAL never stopped pressing");
+            s.wait_for_checkpoint_completion_for_test(before);
+        }
+        assert!(!pressure.raised());
+        let (log, backfilled) = s.read_with(frames).unwrap();
+        assert!(
+            log < HELD_READER_WAL_FRAMES || log == backfilled,
+            "{log} against {backfilled}"
+        );
     }
 
     #[test]

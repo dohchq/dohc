@@ -44,7 +44,7 @@ impl RestoreOperation {
 }
 
 struct RestoreOutputGuard {
-    fence: RestoreFenceOutputGuard,
+    fence: HostOutputGuard,
     reservation: Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl RestoreOutputGuard {
@@ -88,6 +88,9 @@ impl OutputGuard for RestoreOutputGuard {
     }
     fn release(&self) {
         lock(&self.reservation).take();
+    }
+    fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+        self.fence.with_unretired(action)
     }
 }
 
@@ -212,10 +215,11 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let guard = Arc::new(RestoreOutputGuard {
-            fence: RestoreFenceOutputGuard {
+            fence: HostOutputGuard {
                 host: host.clone(),
                 cancel: ctx.cancel.clone(),
                 deadline: ctx.deadline,
+                read: false,
             },
             reservation: Mutex::new(Some(input.reservation.clone())),
         });

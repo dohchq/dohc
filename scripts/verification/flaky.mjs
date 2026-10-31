@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { READER_TESTS } from "../../tools/rust-engine-program/reader-tests.mjs";
 
 /** The vitest reporter that records the tests that passed only on retry, and the slow ones. */
 export const testRecordReporter = fileURLToPath(new URL("./test-record-reporter.mjs", import.meta.url));
@@ -153,6 +154,8 @@ export function rerunCommand(row) {
   if (step === "rust") {
     // nextest names a test by its binary, then its path. The focused Rust runner reuses the gate's test build and budget.
     const [, binary, path] = test.match(/^([\w:/.-]+) ([\w:]+)$/u) ?? [];
+    // A reader regression is ignored and needs a staged reader, which the gate's reader phase provides.
+    if (binary === "dohc-engine-collab" && READER_TESTS.includes(path)) return "node tools/rust-engine-program/reader-tests.mjs";
     return binary ? `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=${binary}) & test(=${path})"` : null;
   }
   const at = test.indexOf(" › ");

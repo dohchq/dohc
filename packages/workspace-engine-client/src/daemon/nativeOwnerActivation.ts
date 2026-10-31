@@ -21,6 +21,8 @@ export interface NativeOwnerActivationSource {
   nativeHeadSequence: number;
   fullStateDigest: string;
   fullStateByteLength: number;
+  /** The released chain tail the capture follows. Absent, the source follows none. */
+  predecessorActivationId?: string;
 }
 
 export interface NativeOwnerActivation {
@@ -45,8 +47,12 @@ export function parseNativeOwnerActivationSource(value: unknown, path: string, m
   const invalid = (): never => { throw new TypeError("Invalid native owner activation source."); };
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const source = value as NativeOwnerActivationSource;
+  const keys = Object.keys(value).filter(key => key !== "predecessorActivationId").sort().join();
   if ((source.readerSource !== undefined && source.readerSource !== true) ||
-      Object.keys(value).sort().join() !== (source.readerSource === true ? readerSourceKeys : sourceKeys)) return invalid();
+      keys !== (source.readerSource === true ? readerSourceKeys : sourceKeys)) return invalid();
+  const predecessor = source.predecessorActivationId;
+  if ("predecessorActivationId" in value && (typeof predecessor !== "string" || predecessor.length < 1 ||
+    Buffer.byteLength(predecessor) > 1024 || predecessor.includes("\0"))) return invalid();
   if (source.version !== 1 || source.mainVersionId !== "main" || source.currentPath !== path ||
       !isDigest(source.lineageClaimId) || !isDigest(source.sourceDigest) || !isDigest(source.fullStateDigest) ||
       !isInteger(source.committedCursor, 0) || !isInteger(source.baseOriginSeq, 0) ||
@@ -64,7 +70,8 @@ export function parseNativeOwnerActivationSource(value: unknown, path: string, m
     committedCursor: source.committedCursor, baseOriginId: source.baseOriginId, baseOriginSeq: source.baseOriginSeq,
     baseRelaySeq: source.baseRelaySeq, sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
     sourceByteLength: source.sourceByteLength, nativeHeadSequence: source.nativeHeadSequence,
-    fullStateDigest: source.fullStateDigest, fullStateByteLength: source.fullStateByteLength};
+    fullStateDigest: source.fullStateDigest, fullStateByteLength: source.fullStateByteLength,
+    ...(predecessor === undefined ? {} : {predecessorActivationId: predecessor})};
 }
 
 export function parseNativeOwnerActivation(value: unknown, bytes: Buffer, path: string, maxBytes: number): NativeOwnerActivation {

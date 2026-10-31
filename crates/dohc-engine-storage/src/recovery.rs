@@ -663,11 +663,11 @@ mod tests {
         let (store, folder) = (scratch.path().join("store"), scratch.path().join("copy"));
         std::fs::create_dir(&store).unwrap();
         let source = store.join("engine.db");
-        create_store_before_migration_for_test(&source, "v2-chat-stream-order").unwrap();
+        create_store_before_migration_for_test(&source, "v2-live-owner-activations").unwrap();
         // That migration creates an index of this name, so on this store it fails.
         Connection::open(&source)
             .unwrap()
-            .execute_batch("CREATE TABLE idx_chat_threads_channel_lane_created (planted INTEGER)")
+            .execute_batch("CREATE TABLE live_owner_adoptions_lineage (planted INTEGER)")
             .unwrap();
         let before = contents(&store);
         let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();

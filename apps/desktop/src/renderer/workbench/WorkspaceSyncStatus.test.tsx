@@ -230,7 +230,7 @@ describe("sync status surface", () => {
     {
       delivery: "retrying" as const,
       reason: "live-edit-unadmitted" as const,
-      label: "Live editing can't resume",
+      label: "Live editing stopped",
     },
     {
       delivery: "retrying" as const,

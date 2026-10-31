@@ -5,7 +5,7 @@ import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationSource.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationValidation.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import { liveRestoreValidator, type LiveRestoreReply, type LiveRestoreValidator, type LiveRestoreWork } from "./liveRestoreValidation.js";
 

@@ -1286,62 +1286,77 @@ pub fn maybe_compact(
     let up_to = persisted.up_to_seq;
 
     store.write_with(faults, |tx| {
-        let snapshot_sha = put_binary_blob(tx, &snapshot_bytes)?;
-        let sv_sha = put_binary_blob(tx, &sv_bytes)?;
-        tx.execute(
-            "INSERT INTO ydoc_snapshots \
-             (workspace_id, version_id, object_id, up_to_seq, \
-              snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(workspace_id, version_id, object_id, up_to_seq) DO UPDATE SET \
-               snapshot_blob_sha256 = excluded.snapshot_blob_sha256, \
-               state_vector_blob_sha256 = excluded.state_vector_blob_sha256, \
-               recorded_at_ms = excluded.recorded_at_ms",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                up_to,
-                snapshot_sha,
-                sv_sha,
-                now_ms,
-            ],
-        )
-        .map_err(map_sql)?;
-        crate::author_coverage::fold_in(tx, key, up_to)?;
-        // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
-        // the exact base identity and state vector during successor replay.
-        let pruned = tx
-            .execute(
-                "DELETE FROM ydoc_updates \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND seq <= ?4",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
-            )
-            .map_err(map_sql)?;
-        tx.execute(
-            "DELETE FROM ydoc_snapshots \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-               AND up_to_seq > 0 AND up_to_seq < ?4",
+        write_head_snapshot_in_tx(tx, key, up_to, &snapshot_bytes, &sv_bytes, now_ms)
+    })
+}
+
+/// Write `snapshot_bytes` as the full-state snapshot at `up_to`, the marker's
+/// head, fold the authors through it, and prune the updates and nonzero
+/// snapshots it supersedes. Compaction writes the replayed log. A release
+/// that returns the Y.Doc to its accepted state writes that state.
+pub(crate) fn write_head_snapshot_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    up_to: i64,
+    snapshot_bytes: &[u8],
+    sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<CompactOutcome, CollabError> {
+    let snapshot_sha = put_binary_blob(tx, snapshot_bytes)?;
+    let sv_sha = put_binary_blob(tx, sv_bytes)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots \
+         (workspace_id, version_id, object_id, up_to_seq, \
+          snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(workspace_id, version_id, object_id, up_to_seq) DO UPDATE SET \
+           snapshot_blob_sha256 = excluded.snapshot_blob_sha256, \
+           state_vector_blob_sha256 = excluded.state_vector_blob_sha256, \
+           recorded_at_ms = excluded.recorded_at_ms",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            up_to,
+            snapshot_sha,
+            sv_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    crate::author_coverage::fold_in(tx, key, up_to)?;
+    // Prune folded updates and superseded nonzero snapshots. Seq 0 proves
+    // the exact base identity and state vector during successor replay.
+    let pruned = tx
+        .execute(
+            "DELETE FROM ydoc_updates \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND seq <= ?4",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
         )
         .map_err(map_sql)?;
-        tx.execute(
-            "UPDATE ydoc_docs SET head_snapshot_seq = ?4, updated_at_ms = ?5 \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            rusqlite::params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                up_to,
-                now_ms
-            ],
-        )
-        .map_err(map_sql)?;
-        Ok(CompactOutcome::Compacted {
-            up_to_seq: up_to,
-            snapshot_sha,
-            pruned_updates: pruned,
-        })
+    tx.execute(
+        "DELETE FROM ydoc_snapshots \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+           AND up_to_seq > 0 AND up_to_seq < ?4",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id, up_to],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET head_snapshot_seq = ?4, updated_at_ms = ?5 \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            up_to,
+            now_ms
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(CompactOutcome::Compacted {
+        up_to_seq: up_to,
+        snapshot_sha,
+        pruned_updates: pruned,
     })
 }
 
@@ -2894,6 +2909,16 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Supply an existing transaction to read the marker, snapshot, and updates from
 /// one snapshot. Appends and lineage changes must use that same transaction.
 pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_doc_between::<CollabError>(conn, key, &mut || Ok(()))
+}
+
+/// [`load_doc_in`], calling `between` before each blob loads and hashes and
+/// before it applies; its error ends the load.
+pub(crate) fn load_doc_between<E: From<CollabError>>(
+    conn: &Connection,
+    key: &DocKey,
+    between: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ydoc, E> {
     #[cfg(test)]
     passive_cache_tests::record_reconstruction();
     read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
@@ -2902,16 +2927,20 @@ pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError>
     let tail = updates_after(conn, key, from_seq)?;
     let doc = Ydoc::wire();
     if let Some((_, sha)) = snapshot {
+        between()?;
         let bytes = binary_blob_for_gate(conn, &sha)?;
+        between()?;
         doc.apply(&bytes)?;
     }
     for (seq, sha) in tail {
+        between()?;
         let bytes = binary_blob_for_gate(conn, &sha).map_err(|error| match error {
             CollabError::Corrupt { .. } => CollabError::Corrupt {
                 reason: format!("update blob missing or invalid at seq {seq}"),
             },
             other => other,
         })?;
+        between()?;
         doc.apply(&bytes)?;
     }
     Ok(doc)
@@ -3213,7 +3242,7 @@ pub(crate) fn blob_seq_in_log(
 ) -> Result<Option<i64>, CollabError> {
     let seq: Option<i64> = conn
         .query_row(
-            "SELECT seq FROM ydoc_updates INDEXED BY idx_ydoc_updates_doc_blob \
+            "SELECT seq FROM ydoc_updates INDEXED BY idx_ydoc_updates_blob \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND update_blob_sha256 = ?4 ORDER BY seq ASC LIMIT 1",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],

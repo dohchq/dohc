@@ -1431,7 +1431,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
-  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
+  ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
@@ -3520,6 +3520,7 @@ export const WorkspaceActivityEvent = z
     paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
     pathSetChanged: z.boolean().optional(),
     summaryChanged: z.literal(true).optional(),
+    liveDocumentStopped: z.string().min(1).optional(),
   })
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;

@@ -12,6 +12,7 @@ import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // Native tests include these files from outside crates; the daemon never does.
 const nativeTestFixtures = [
@@ -1035,8 +1036,9 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
+    copyFlakyFixture(root);
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "scripts/verification/linux.mjs", "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",

@@ -1,245 +1,372 @@
 [
   {
-    "originSeq": 3,
-    "opKind": "ydoc.update",
-    "recordedAtMs": 1791272935313,
-    "payload": {
-      "contentKind": "richdoc",
-      "isBaseState": false,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "path": "trip/Tasks/Untitled.md",
-      "updateBlobSha256": "162b50e3e943792cce1eb1130547dc7601fdf6f94774bdf230feceab367de384",
-      "versionId": "main"
-    }
-  },
-  {
-    "originSeq": 4,
-    "opKind": "live.audit.application",
-    "recordedAtMs": 1791272935313,
-    "payload": {
-      "eventCount": 1,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "mainVersionId": "main",
-      "manifest": {
-        "byteLength": 1416,
-        "chunks": [
-          {
-            "byteLength": 1416,
-            "sha256": "0103842421f3f6f31195598a3025d815588cef021db318aae07848ea5220b165"
-          }
-        ],
-        "formatVersion": 1,
-        "recordDigest": "0103842421f3f6f31195598a3025d815588cef021db318aae07848ea5220b165"
-      },
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "relayDatabaseNamespace": "64e3aa83-2b09-48b5-919a-b63093a7db32",
-      "updateBlobSha256": "162b50e3e943792cce1eb1130547dc7601fdf6f94774bdf230feceab367de384"
-    }
-  },
-  {
-    "originSeq": 5,
-    "opKind": "ydoc.update",
-    "recordedAtMs": 1791272935419,
-    "payload": {
-      "contentKind": "richdoc",
-      "isBaseState": false,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "path": "trip/Tasks/Untitled.md",
-      "updateBlobSha256": "72132d631b8e7f720df134e82582b2c9f035d0313e22fed2a442d6c3ad687a5a",
-      "versionId": "main"
-    }
-  },
-  {
-    "originSeq": 6,
-    "opKind": "live.audit.application",
-    "recordedAtMs": 1791272935419,
-    "payload": {
-      "eventCount": 2,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "mainVersionId": "main",
-      "manifest": {
-        "byteLength": 1466,
-        "chunks": [
-          {
-            "byteLength": 1466,
-            "sha256": "f35b5ec857ff118146ae62bf5de10371543157c6c101a605a595297a652a50f6"
-          }
-        ],
-        "formatVersion": 1,
-        "recordDigest": "f35b5ec857ff118146ae62bf5de10371543157c6c101a605a595297a652a50f6"
-      },
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "relayDatabaseNamespace": "64e3aa83-2b09-48b5-919a-b63093a7db32",
-      "updateBlobSha256": "72132d631b8e7f720df134e82582b2c9f035d0313e22fed2a442d6c3ad687a5a"
-    }
-  },
-  {
-    "originSeq": 7,
-    "opKind": "ydoc.update",
-    "recordedAtMs": 1791272935517,
-    "payload": {
-      "contentKind": "richdoc",
-      "isBaseState": false,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "path": "trip/Tasks/Untitled.md",
-      "updateBlobSha256": "0acd9385a4d1d28812233c85bd7f3f96cb2fdfe5683308a2ec38fc28acc35304",
-      "versionId": "main"
-    }
-  },
-  {
-    "originSeq": 8,
-    "opKind": "live.audit.application",
-    "recordedAtMs": 1791272935517,
-    "payload": {
-      "eventCount": 3,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "mainVersionId": "main",
-      "manifest": {
-        "byteLength": 1416,
-        "chunks": [
-          {
-            "byteLength": 1416,
-            "sha256": "b65692252744e3231658b869abae05e4f665ed7f84b942f14af519f42c58ef94"
-          }
-        ],
-        "formatVersion": 1,
-        "recordDigest": "b65692252744e3231658b869abae05e4f665ed7f84b942f14af519f42c58ef94"
-      },
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "relayDatabaseNamespace": "64e3aa83-2b09-48b5-919a-b63093a7db32",
-      "updateBlobSha256": "0acd9385a4d1d28812233c85bd7f3f96cb2fdfe5683308a2ec38fc28acc35304"
-    }
-  },
-  {
-    "originSeq": 9,
-    "opKind": "ydoc.update",
-    "recordedAtMs": 1791272935652,
-    "payload": {
-      "contentKind": "richdoc",
-      "isBaseState": false,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "path": "trip/Tasks/Untitled.md",
-      "updateBlobSha256": "1977cb44877354dff0059bfe420f80b0ad82b0d04acf94d868fcb24978ff7c53",
-      "versionId": "main"
-    }
-  },
-  {
-    "originSeq": 10,
-    "opKind": "live.audit.application",
-    "recordedAtMs": 1791272935652,
-    "payload": {
-      "eventCount": 4,
-      "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-      "mainVersionId": "main",
-      "manifest": {
-        "byteLength": 1466,
-        "chunks": [
-          {
-            "byteLength": 1466,
-            "sha256": "36fc4d08f241a4fb4590faa74bb6ae1a93a5ec3975aa86186f04d7c4ab64b869"
-          }
-        ],
-        "formatVersion": 1,
-        "recordDigest": "36fc4d08f241a4fb4590faa74bb6ae1a93a5ec3975aa86186f04d7c4ab64b869"
-      },
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "relayDatabaseNamespace": "64e3aa83-2b09-48b5-919a-b63093a7db32",
-      "updateBlobSha256": "1977cb44877354dff0059bfe420f80b0ad82b0d04acf94d868fcb24978ff7c53"
-    }
-  },
-  {
-    "originSeq": 11,
-    "opKind": "live.audit.settlement",
-    "recordedAtMs": 1791272935728,
+    "opKind": "live.audit.base",
+    "originSeq": 0,
     "payload": {
       "formatVersion": 1,
       "record": {
-        "acceptedEventCount": 4,
-        "acceptedIntervalDigest": "b86e88990a7fc319af2dd2e3873fea74a6e7ac81ea44e19972d06eb10ef3e163",
-        "applicationCount": 4,
-        "binding": {
-          "currentPath": "trip/Tasks/Untitled.md",
-          "lineageClaimId": "d3da2347a5016db5a5d0ba342bd98ed4e15ad60da7484febbd64d48bc8b5ebe4",
-          "mainVersionId": "main",
-          "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-          "restoreFenceGeneration": 1,
-          "selectorPaths": [
-            "trip"
-          ],
-          "workspaceId": "record-create-owner"
+        "baseByteLength": 33,
+        "baseCoordinate": {
+          "originId": "owner-origin",
+          "originSeq": 2
         },
-        "hostCoordinate": {
-          "connectionId": "ef2b2c91-9334-4850-b087-3e97a21d794e",
-          "hostEpoch": 1,
-          "hostId": "self-host-64e3aa83-2b09-48b5-919a-b63093a7db32",
-          "instanceId": "self-host-service"
+        "checkpoint": {
+          "binding": {
+            "currentPath": "note.md",
+            "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+            "mainVersionId": "main",
+            "objectId": "object",
+            "restoreFenceGeneration": 0,
+            "selectorPaths": [
+              "note.md"
+            ],
+            "workspaceId": "ws"
+          },
+          "eventCount": 0,
+          "evidenceDigest": "d4a6ec65b4bce38194d47a6bf979de26a45099d6085d405f213466932b1cffb6",
+          "stateDigest": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+          "terminal": null
         },
-        "localYdocSequence": 4,
-        "markdownDigest": "2af934ec9333afb9cacdf407ee41ab01df6af08d627a1c932f981f201c9f4bbe",
-        "momentId": "moment-ydoc-af26dabe9a061a02aa307bacdcb8a30b25f45f2894d5112481017c98f83daf58",
-        "nativeIntervalDigest": "a0743768dddd7b45641599593723cacbf6a61a48958d9d9b1419b5eb8b769289",
-        "previousCursor": 0,
-        "previousYdocSequence": 0,
-        "recordedAtMs": 1791272935728,
-        "relayDatabaseNamespace": "64e3aa83-2b09-48b5-919a-b63093a7db32",
-        "restoreOperationId": null,
-        "settlementId": "live-settlement-6e54e88c39c2049d506bb1a16177eae7f0d96d2823072497a69fadf5e8f826c2",
-        "sourceStateVectorDigest": "e3bd1254d3fef1b920baa8ce700c3420ce2c245e82d0cb2b5240835e1b13b754",
-        "terminalCursor": 4
+        "origin": {
+          "kind": "owner",
+          "source": {
+            "adoptionId": "ordinary-activation-338637aba644b82360ff468b5c1126b8c75a5bbb219096893013ada3ee0f74a1",
+            "baselineMomentRelaySequence": 2,
+            "baselineRegisteredAtMs": 100,
+            "coverageDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "coveredOutboxSequence": 0,
+            "evidenceDigest": "d9db478d850eda24768d16bd2e15ef27cf3407e537917bbc42935b81f4bd423d",
+            "hostCoordinate": {
+              "connectionId": "connection",
+              "hostEpoch": 1,
+              "hostId": "service-host",
+              "instanceId": "self-host-service"
+            },
+            "localYDocSequence": 1,
+            "maxPendingAgeMs": 100000,
+            "maxPendingBytes": 1000000,
+            "sourceByteLength": 24,
+            "sourceDigest": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+            "sourceMomentId": "moment-ydoc-apply-0323a9fb1c795531e7fde09f403825fabed9f6409b4e1e6eae9756b02c720d7a",
+            "terminalCursor": 0,
+            "terminalReceipt": null
+          }
+        },
+        "originStamp": "a13249bccadb2d216181c4229887fb992e5061a3ccd761a94ced9e5800caab58",
+        "relayDatabaseNamespace": "relay"
       },
-      "recordDigest": "21fa410932bc088df9e9e993135dcdb5e341e35b98fade9e648a8d32d8d0c1c8"
-    }
+      "recordDigest": "08192ee0795dfc53e2296c98c8d0eef757f08581ac61616e23a0120a4f5ef0be"
+    },
+    "recordedAtMs": 260
   },
   {
-    "originSeq": 12,
-    "opKind": "moment.append",
-    "recordedAtMs": 1791272935728,
+    "opKind": "live.audit.application",
+    "originSeq": 1,
     "payload": {
-      "authors": [
-        {
-          "humanId": "e2e-recipient",
-          "humanName": "e2e-recipient",
-          "kind": "human"
-        }
-      ],
-      "beforeBlobSha256": "c1e1250a9756cb9fe18ca995a495b9287c9993c40c7024cca6b9dd8d8839cc4b",
-      "beforeByteLength": 43,
+      "eventCount": 1,
+      "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+      "mainVersionId": "main",
+      "manifest": {
+        "byteLength": 1045,
+        "chunks": [
+          {
+            "byteLength": 1045,
+            "sha256": "bef37d5ae6db4be5a4b13f7a17c892a5121acabd684cd35862b2ae5ce869e1a9"
+          }
+        ],
+        "formatVersion": 1,
+        "recordDigest": "bef37d5ae6db4be5a4b13f7a17c892a5121acabd684cd35862b2ae5ce869e1a9"
+      },
+      "objectId": "object",
+      "relayDatabaseNamespace": "relay",
+      "updateBlobSha256": "79163a5dee2ca5918e78fce5ddc10dfb3d0194109fc6cf0535796650a02305b3"
+    },
+    "recordedAtMs": 200
+  },
+  {
+    "opKind": "live.audit.settlement",
+    "originSeq": 2,
+    "payload": {
+      "formatVersion": 1,
+      "record": {
+        "acceptedEventCount": 1,
+        "acceptedIntervalDigest": "10c3da16048c6c04617bffd7f35107918c0eb8ce6023d815487e3b65ac553b12",
+        "acceptedStateBlobSha256": "79163a5dee2ca5918e78fce5ddc10dfb3d0194109fc6cf0535796650a02305b3",
+        "applicationCount": 1,
+        "binding": {
+          "currentPath": "note.md",
+          "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+          "mainVersionId": "main",
+          "objectId": "object",
+          "restoreFenceGeneration": 0,
+          "selectorPaths": [
+            "note.md"
+          ],
+          "workspaceId": "ws"
+        },
+        "hostCoordinate": {
+          "connectionId": "connection",
+          "hostEpoch": 1,
+          "hostId": "service-host",
+          "instanceId": "self-host-service"
+        },
+        "localYdocSequence": 1,
+        "markdownDigest": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+        "momentId": "service-first-settlement",
+        "nativeIntervalDigest": "4e6a79fe612893be5d86231e54eaae836b6c2cfb4a2ad7b7a7daf70edb739652",
+        "previousCursor": 0,
+        "previousYdocSequence": 1,
+        "recordedAtMs": 301,
+        "relayDatabaseNamespace": "relay",
+        "restoreOperationId": null,
+        "settlementId": "live-settlement-f5dec1befd7eb939a991dffe032913169b24cff68a5c7230f6fc00cb592b4488",
+        "sourceStateVectorDigest": "cfc0e3e30f781e97d530773b0412c581116936314112503fd9553eeccb3c956e",
+        "terminalCursor": 1
+      },
+      "recordDigest": "df024a19455ebd3af230a6074572026a5cb843c6022bf60796914bac2560adbd"
+    },
+    "recordedAtMs": 301
+  },
+  {
+    "opKind": "moment.append",
+    "originSeq": 3,
+    "payload": {
+      "beforeBlobSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "beforeByteLength": 0,
       "beforeContentKind": "text",
-      "beforeLatestMomentId": "moment-ydoc-ecb0b63240d07407acca1c84eebdfe52f83126efa3cb347b6c580f0457cea45a",
+      "beforeLatestMomentId": "bootstrap-moment",
       "beforeMetadata": {
         "correlationId": null,
-        "origin": "local-file",
+        "origin": "sync",
         "summary": null
       },
-      "beforeObjectId": "6952e846-3bab-4633-9207-f374f43c77ba",
-      "beforePath": "trip/Tasks/Untitled.md",
+      "beforeObjectId": "object",
+      "beforePath": "note.md",
       "beforePresent": "present",
-      "beforeUpdatedAtMs": 1791272933369,
+      "beforeUpdatedAtMs": 100,
       "beforeVersionId": "main",
       "metadata": {
         "correlationId": null,
         "origin": "local-file",
         "summary": null
       },
-      "momentId": "moment-ydoc-af26dabe9a061a02aa307bacdcb8a30b25f45f2894d5112481017c98f83daf58",
-      "objectCreatedAtMs": 1791272925596,
-      "objectId": "6952e846-3bab-4633-9207-f374f43c77ba",
+      "momentId": "service-first-settlement",
+      "objectCreatedAtMs": 100,
+      "objectId": "object",
       "operation": "write",
-      "path": "trip/Tasks/Untitled.md",
-      "payloadAfterBlobSha256": "2af934ec9333afb9cacdf407ee41ab01df6af08d627a1c932f981f201c9f4bbe",
-      "payloadAfterByteLength": 78,
+      "path": "note.md",
+      "payloadAfterBlobSha256": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+      "payloadAfterByteLength": 24,
       "payloadAfterContentKind": "text",
-      "payloadAfterPath": "trip/Tasks/Untitled.md",
-      "payloadBeforeBlobSha256": "c1e1250a9756cb9fe18ca995a495b9287c9993c40c7024cca6b9dd8d8839cc4b",
-      "payloadBeforeByteLength": 43,
+      "payloadAfterPath": "note.md",
+      "payloadBeforeBlobSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "payloadBeforeByteLength": 0,
       "payloadBeforeContentKind": "text",
-      "payloadBeforePath": "trip/Tasks/Untitled.md",
-      "recordedAtMs": 1791272935728,
+      "payloadBeforePath": "note.md",
+      "recordedAtMs": 301,
+      "settlementReference": {
+        "formatVersion": 1,
+        "record": {
+          "acceptedEventCount": 1,
+          "acceptedIntervalDigest": "10c3da16048c6c04617bffd7f35107918c0eb8ce6023d815487e3b65ac553b12",
+          "acceptedStateBlobSha256": "79163a5dee2ca5918e78fce5ddc10dfb3d0194109fc6cf0535796650a02305b3",
+          "applicationCount": 1,
+          "binding": {
+            "currentPath": "note.md",
+            "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+            "mainVersionId": "main",
+            "objectId": "object",
+            "restoreFenceGeneration": 0,
+            "selectorPaths": [
+              "note.md"
+            ],
+            "workspaceId": "ws"
+          },
+          "hostCoordinate": {
+            "connectionId": "connection",
+            "hostEpoch": 1,
+            "hostId": "service-host",
+            "instanceId": "self-host-service"
+          },
+          "localYdocSequence": 1,
+          "markdownDigest": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+          "momentId": "service-first-settlement",
+          "nativeIntervalDigest": "4e6a79fe612893be5d86231e54eaae836b6c2cfb4a2ad7b7a7daf70edb739652",
+          "previousCursor": 0,
+          "previousYdocSequence": 1,
+          "recordedAtMs": 301,
+          "relayDatabaseNamespace": "relay",
+          "restoreOperationId": null,
+          "settlementId": "live-settlement-f5dec1befd7eb939a991dffe032913169b24cff68a5c7230f6fc00cb592b4488",
+          "sourceStateVectorDigest": "cfc0e3e30f781e97d530773b0412c581116936314112503fd9553eeccb3c956e",
+          "terminalCursor": 1
+        },
+        "recordDigest": "df024a19455ebd3af230a6074572026a5cb843c6022bf60796914bac2560adbd"
+      },
       "versionId": "main"
-    }
+    },
+    "recordedAtMs": 301
+  },
+  {
+    "opKind": "ydoc.update",
+    "originSeq": 4,
+    "payload": {
+      "contentKind": "richdoc",
+      "isBaseState": false,
+      "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+      "objectId": "object",
+      "path": "note.md",
+      "updateBlobSha256": "dbadf51d80cf66f426807e31e17e4df129afb124db00f48ea6b0dfec428950a6",
+      "versionId": "main"
+    },
+    "recordedAtMs": 200
+  },
+  {
+    "opKind": "live.audit.application",
+    "originSeq": 5,
+    "payload": {
+      "eventCount": 2,
+      "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+      "mainVersionId": "main",
+      "manifest": {
+        "byteLength": 980,
+        "chunks": [
+          {
+            "byteLength": 980,
+            "sha256": "7e1ebbfcfba3c9cbd6e5e5e3c9978cc23d012d91f3a4c322aade117a5e491628"
+          }
+        ],
+        "formatVersion": 1,
+        "recordDigest": "7e1ebbfcfba3c9cbd6e5e5e3c9978cc23d012d91f3a4c322aade117a5e491628"
+      },
+      "objectId": "object",
+      "relayDatabaseNamespace": "relay",
+      "updateBlobSha256": "dbadf51d80cf66f426807e31e17e4df129afb124db00f48ea6b0dfec428950a6"
+    },
+    "recordedAtMs": 200
+  },
+  {
+    "opKind": "live.audit.settlement",
+    "originSeq": 6,
+    "payload": {
+      "formatVersion": 1,
+      "record": {
+        "acceptedEventCount": 1,
+        "acceptedIntervalDigest": "586002dd131c528b5312a7b34a0fd28452e5c66538bd1e60152362702ffe83db",
+        "acceptedStateBlobSha256": "dbadf51d80cf66f426807e31e17e4df129afb124db00f48ea6b0dfec428950a6",
+        "applicationCount": 1,
+        "binding": {
+          "currentPath": "note.md",
+          "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+          "mainVersionId": "main",
+          "objectId": "object",
+          "restoreFenceGeneration": 0,
+          "selectorPaths": [
+            "note.md"
+          ],
+          "workspaceId": "ws"
+        },
+        "hostCoordinate": {
+          "connectionId": "connection",
+          "hostEpoch": 1,
+          "hostId": "service-host",
+          "instanceId": "self-host-service"
+        },
+        "localYdocSequence": 2,
+        "markdownDigest": "3dc5f13fc618c120a4e1f18ade5ddb5b3b261e403d51d376f231bda65c91553d",
+        "momentId": "service-second-settlement",
+        "nativeIntervalDigest": "25e436227fba864beab72127f0fde15355ef3caf8bb1c5cef8a98c60ee8d85bd",
+        "previousCursor": 1,
+        "previousYdocSequence": 1,
+        "recordedAtMs": 302,
+        "relayDatabaseNamespace": "relay",
+        "restoreOperationId": null,
+        "settlementId": "live-settlement-505545a0360bed8a939afa795c48a6b59fc2a133a09b66305618f46c698a5a8f",
+        "sourceStateVectorDigest": "82b37521cbc449ce189968f274875da7a9d0bdd3fdc16881c0209f55a9ef188b",
+        "terminalCursor": 2
+      },
+      "recordDigest": "34f14643b0e03cb1e50806c1857fd7c7917b6130fd770738e5eab87b577c394e"
+    },
+    "recordedAtMs": 302
+  },
+  {
+    "opKind": "moment.append",
+    "originSeq": 7,
+    "payload": {
+      "beforeBlobSha256": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+      "beforeByteLength": 24,
+      "beforeContentKind": "text",
+      "beforeLatestMomentId": "service-first-settlement",
+      "beforeMetadata": {
+        "correlationId": null,
+        "origin": "local-file",
+        "summary": null
+      },
+      "beforeObjectId": "object",
+      "beforePath": "note.md",
+      "beforePresent": "present",
+      "beforeUpdatedAtMs": 301,
+      "beforeVersionId": "main",
+      "metadata": {
+        "correlationId": null,
+        "origin": "local-file",
+        "summary": null
+      },
+      "momentId": "service-second-settlement",
+      "objectCreatedAtMs": 100,
+      "objectId": "object",
+      "operation": "write",
+      "path": "note.md",
+      "payloadAfterBlobSha256": "3dc5f13fc618c120a4e1f18ade5ddb5b3b261e403d51d376f231bda65c91553d",
+      "payloadAfterByteLength": 19,
+      "payloadAfterContentKind": "text",
+      "payloadAfterPath": "note.md",
+      "payloadBeforeBlobSha256": "0555e28056375b36cb608eacd9d9d32e4fe7df9b25c497d542f5519f2f0a36c0",
+      "payloadBeforeByteLength": 24,
+      "payloadBeforeContentKind": "text",
+      "payloadBeforePath": "note.md",
+      "recordedAtMs": 302,
+      "settlementReference": {
+        "formatVersion": 1,
+        "record": {
+          "acceptedEventCount": 1,
+          "acceptedIntervalDigest": "586002dd131c528b5312a7b34a0fd28452e5c66538bd1e60152362702ffe83db",
+          "acceptedStateBlobSha256": "dbadf51d80cf66f426807e31e17e4df129afb124db00f48ea6b0dfec428950a6",
+          "applicationCount": 1,
+          "binding": {
+            "currentPath": "note.md",
+            "lineageClaimId": "9b7c50464ddcac2d0aca3bfa7ad1d8b90a684215e352f0b489a4400c37586e67",
+            "mainVersionId": "main",
+            "objectId": "object",
+            "restoreFenceGeneration": 0,
+            "selectorPaths": [
+              "note.md"
+            ],
+            "workspaceId": "ws"
+          },
+          "hostCoordinate": {
+            "connectionId": "connection",
+            "hostEpoch": 1,
+            "hostId": "service-host",
+            "instanceId": "self-host-service"
+          },
+          "localYdocSequence": 2,
+          "markdownDigest": "3dc5f13fc618c120a4e1f18ade5ddb5b3b261e403d51d376f231bda65c91553d",
+          "momentId": "service-second-settlement",
+          "nativeIntervalDigest": "25e436227fba864beab72127f0fde15355ef3caf8bb1c5cef8a98c60ee8d85bd",
+          "previousCursor": 1,
+          "previousYdocSequence": 1,
+          "recordedAtMs": 302,
+          "relayDatabaseNamespace": "relay",
+          "restoreOperationId": null,
+          "settlementId": "live-settlement-505545a0360bed8a939afa795c48a6b59fc2a133a09b66305618f46c698a5a8f",
+          "sourceStateVectorDigest": "82b37521cbc449ce189968f274875da7a9d0bdd3fdc16881c0209f55a9ef188b",
+          "terminalCursor": 2
+        },
+        "recordDigest": "34f14643b0e03cb1e50806c1857fd7c7917b6130fd770738e5eab87b577c394e"
+      },
+      "versionId": "main"
+    },
+    "recordedAtMs": 302
   }
 ]

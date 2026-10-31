@@ -449,23 +449,7 @@ pub(crate) fn apply_base_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-        let payload: BasePayload = serde_json::from_value(op.payload.clone())
-            .map_err(|_| invalid("invalid native base audit payload"))?;
-        if payload.format_version != 1 {
-            return Err(invalid("unsupported native base audit format"));
-        }
-        if serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload {
-            return Err(invalid("noncanonical native base audit"));
-        }
-        let record = payload.record;
-        record.validate(&op.workspace_id)?;
-        if record.origin.stamp(tx, &record.checkpoint.binding)? != record.origin_stamp {
-            return Err(invalid("historical origin stamp differs"));
-        }
-        let json = record.canonical_json()?;
-        if payload.record_digest != hex_sha256(json.as_bytes()) {
-            return Err(invalid("native base audit digest differs"));
-        }
+        let (record, json, record_digest) = imported_base(tx, &op.payload, &op.workspace_id)?;
         require_base_blob(tx, &record)?;
         require_base_coordinate(tx, &record)?;
         let p = scope(&record.relay_database_namespace, &record.checkpoint.binding);
@@ -478,19 +462,47 @@ pub(crate) fn apply_base_envelope(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some((saved_digest, saved_json)) = existing {
-            if saved_digest == payload.record_digest && saved_json == json {
+            if saved_digest == record_digest && saved_json == json {
                 return Ok(MutationOutcome::Applied(()));
             }
             tx.execute("INSERT INTO live_audit_base_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,base_blob_sha256) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![op.workspace_id,op.origin_id,op.origin_seq,payload.record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
+                params![op.workspace_id,op.origin_id,op.origin_seq,record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "native event-zero audit identity contains different evidence".to_owned(),
             });
         }
         tx.execute("INSERT INTO live_audit_bases(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,record_digest,record_json,base_blob_sha256) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![p[0],p[1],p[2],p[3],p[4],payload.record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
+            params![p[0],p[1],p[2],p[3],p[4],record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
         Ok(MutationOutcome::Applied(()))
     })
+}
+
+/// Import's checks that read no store row: a canonical current-format
+/// payload, its record valid with its origin's own stamp, and the digest of
+/// its record JSON.
+fn imported_base(
+    conn: &Connection,
+    payload: &serde_json::Value,
+    workspace: &str,
+) -> Result<(BaseRecord, String, String), SyncError> {
+    let parsed: BasePayload = serde_json::from_value(payload.clone())
+        .map_err(|_| invalid("invalid native base audit payload"))?;
+    if parsed.format_version != 1 {
+        return Err(invalid("unsupported native base audit format"));
+    }
+    if serde_json::to_value(&parsed).map_err(SyncError::corrupt)? != *payload {
+        return Err(invalid("noncanonical native base audit"));
+    }
+    let record = parsed.record;
+    record.validate(workspace)?;
+    if record.origin.stamp(conn, &record.checkpoint.binding)? != record.origin_stamp {
+        return Err(invalid("historical origin stamp differs"));
+    }
+    let json = record.canonical_json()?;
+    if parsed.record_digest != hex_sha256(json.as_bytes()) {
+        return Err(invalid("native base audit digest differs"));
+    }
+    Ok((record, json, parsed.record_digest))
 }
 
 #[cfg(test)]

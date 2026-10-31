@@ -4,6 +4,8 @@ import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MA
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { readServiceActivation, serviceActivationState } from "./serviceActivationAccess";
 
 const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const parameters = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
@@ -62,6 +64,38 @@ function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumen
     row.accepting_host_epoch, maximum, "service", maximum, hostIdentifier, hostIdentifier]);
   reserve(storage, document, hostId, Number(row.journal_cursor), amount);
 }
+/**
+ * A successor's owner adoption on the configured host that prepares it, in
+ * the same transaction. Its quota decision is Resume's; another host is
+ * funded only when a transition makes it the configured host.
+ */
+export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+  reserveLiveDeliveryBaseline(storage, document, hostId);
+}
+// Deletes the lineage's reservations `condition` selects, refunding each whole.
+function releaseReservations(storage: StorageContext, document: LiveDocumentKey, condition: string, values: readonly unknown[]): void {
+  const where = `${WHERE_DOCUMENT} AND ${condition}`, params = [...parameters(document), ...values];
+  const bytes = storage.db.prepare(`SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) AS bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).get(...params)?.bytes;
+  integrity(typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0);
+  if (bytes === 0) return;
+  storage.db.prepare(`DELETE FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).run(...params);
+  integrity(storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(bytes, document.workspaceId, bytes).changes === 1);
+}
+/**
+ * A retired chain tail adopts nothing until a successor reserves its own
+ * adoption on the configured host, so retirement on `hostId` releases the
+ * unconsumed adoption reservation there, as a never-adopted release leaves,
+ * and every reservation the lineage holds on another host. A transition to
+ * another host funds it again. A bootstrap keeps its own.
+ */
+export function releaseRetiredLiveDelivery(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+  releaseReservations(storage, document, `(journal_cursor=0 OR host_id<>?) AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`,
+    [hostId, ...parameters(document)]);
+}
+/** A successor adopted on `hostId` at its predecessor's released terminal needs no delivery through it there. */
+export function adoptLiveDeliveryPrefix(storage: StorageContext, document: LiveDocumentKey, hostId: string, terminalCursor: number): void {
+  releaseReservations(storage, document, "host_id=? AND journal_cursor BETWEEN 1 AND ?", [hostId, terminalCursor]);
+}
 export function registerLiveDeliveryBaseline(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
   const overhead = bytes([maximum, ...parameters(document)]);
   charge(storage, document.workspaceId, overhead);
@@ -79,16 +113,20 @@ export function registerLiveDeliveryEvent(storage: StorageContext, document: Liv
   integrity(advanced.changes === 1);
 }
 
-/** Runs in the transaction that provisions or changes the configured host. */
-export function provisionLiveDeliveryHost(storage: StorageContext, hostId: string, fundNewHost = false): void {
+/**
+ * Runs in the transaction that provisions or changes the configured host.
+ * Only that explicit change, `transition`, funds a new host, or a known one
+ * whose reservations for a lineage its retirement released.
+ */
+export function provisionLiveDeliveryHost(storage: StorageContext, hostId: string, transition = false): void {
   for (const workspace of storage.db.prepare("SELECT DISTINCT workspace_id FROM sync_relay_live_documents").all()) {
-    provisionWorkspaceHost(storage, hostId, String(workspace.workspace_id), fundNewHost);
+    provisionWorkspaceHost(storage, hostId, String(workspace.workspace_id), transition);
   }
 }
-function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspaceId: string, fundNewHost = false): void {
+function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspaceId: string, transition = false): void {
   const known = storage.db.prepare(`SELECT funded_document_sequence,funded_journal_cursor FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`).get(hostId, workspaceId);
   if (!known) {
-    integrity(fundNewHost || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
+    integrity(transition || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId,hostId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
@@ -112,9 +150,25 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     const cursors = new Set(reserved.map(row => Number(row.journal_cursor)));
     const owner = storage.db.prepare(`SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document),hostId);
     integrity(owner.length <= 1 && !(owner.length && bootstrap.length));
-    if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
+    // A retired owner's archived tip still covers what it applied: its successor adopts there.
+    const archived = bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
+      WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null;
+    // A retired chain tail that no successor follows yet has no adoption to fund.
+    const tail = readServiceActivation(storage, document), state = serviceActivationState(tail);
+    const retired = !owner.length && !bootstrap.length && state === "retired";
+    // A successor adopts at the lineage's latest retired boundary, the tail's own or its predecessor's, so a host without an owner needs no delivery through it.
+    const floor = owner.length || bootstrap.length || !tail ? null : state === "retired" ? tail.activation_id : tail.predecessor_activation_id;
+    const boundary = floor === null ? 0 : storage.db.prepare(`SELECT json_extract(retired_boundary_json,'$.terminalReceipt.journalCursor') AS cursor FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(tail!.relay_database_namespace, floor)?.cursor ?? 0;
+    integrity(typeof boundary === "number" && Number.isSafeInteger(boundary) && boundary >= 0);
+    const applied = owner[0]?.tip_cursor ?? (floor === null ? archived : Math.max(Number(archived ?? 0), boundary));
+    // A transition funds again what a retirement of the lineage released below this host's watermarks. Retirement never releases a bootstrap's.
+    const released = transition && !bootstrap.length && !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`)
+      .get(...parameters(document));
+    if (retired) integrity(!cursors.has(0));
+    else if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
-        integrity(documentSequence > fundedDocument);
+        integrity(released || documentSequence > fundedDocument);
         reserveLiveDeliveryBaseline(storage, document, hostId);
       }
     } else integrity(!cursors.has(0));
@@ -124,9 +178,9 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     for (const event of events) {
       const cursor = Number(event.journal_cursor);
       journalHighWater = Math.max(journalHighWater, cursor);
-      if (acknowledged.has(cursor) || (owner[0] && cursor <= Number(owner[0].tip_cursor))) { integrity(!cursors.has(cursor)); continue; }
+      if (acknowledged.has(cursor) || (applied !== null && cursor <= Number(applied))) { integrity(!cursors.has(cursor)); continue; }
       if (!cursors.has(cursor)) {
-        integrity(cursor > fundedCursor);
+        integrity(released || cursor > fundedCursor);
         reserveLiveDeliveryEvent(storage, document, hostId, event);
       }
     }

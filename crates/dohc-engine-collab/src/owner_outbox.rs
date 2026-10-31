@@ -6,6 +6,7 @@
 //! durable receipt for each ordered update.
 
 use crate::live_object_binding::LiveObjectBinding;
+use crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
 use dohc_engine_domain::{AgentDeclaration, AutomationDeclaration};
 use dohc_engine_storage::{
     get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, NoFaults, StorageError,
@@ -33,7 +34,7 @@ pub fn has_adopted_owner_in(
     conn: &Connection,
     key: &crate::DocKey,
 ) -> Result<bool, crate::CollabError> {
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)"),
         params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
@@ -377,6 +378,9 @@ pub struct OwnerOutboxRefuseInput {
     pub reason: String,
 }
 
+/// The longest reason a terminal entry keeps.
+pub(crate) const MAX_TERMINAL_REASON_BYTES: usize = 256;
+
 /// A terminal host refusal retires an entry and its causal dependents,
 /// preserving their bytes and provenance. Independent pending writes survive.
 pub fn refuse_entry_in_tx(
@@ -388,7 +392,7 @@ pub fn refuse_entry_in_tx(
     validate_identifier(&input.outbox_id, "invalid outbox id")?;
     validate_identifier(&input.delivery_id, "invalid delivery id")?;
     validate_identifier(&input.reason, "invalid refusal reason")?;
-    if input.reason.len() > 256 {
+    if input.reason.len() > MAX_TERMINAL_REASON_BYTES {
         return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
     }
     if !(0..=9_007_199_254_740_991).contains(&now_ms) {
@@ -460,10 +464,14 @@ fn native_refusal_checkpoint_in_tx(
     if active != *binding {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let adoption: Option<String> = tx.query_row(
-        "SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-        params![namespace,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id], |r| r.get(0),
-    ).optional().map_err(read_sql)?;
+    let adoption = crate::live_update_application::owner_activations::current_activation(
+        tx,
+        Some(namespace.as_str()),
+        &key,
+        &binding.lineage_claim_id,
+    )
+    .map_err(|_| OwnerOutboxError::Corrupt)?
+    .map(|(activation, _)| activation.activation_id);
     if adoption.as_deref() != Some(source.adoption_id.as_str()) {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -563,7 +571,7 @@ fn append_with_retained_base(
     // The private retained-base path already read these controls in this transaction.
     if retained_base.is_none() {
         let adopted: Option<(String, i64, i64)> = tx.query_row(
-        "SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM {CURRENT_ACTIVATIONS} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
         params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(read_sql)?;
@@ -587,6 +595,17 @@ fn append_with_retained_base(
                 return Err(OwnerOutboxError::InvalidInput(
                     "append limits differ from persisted owner adoption",
                 ));
+            }
+        } else {
+            // A released lineage takes no owner delivery, and no limits bound
+            // one, until a successor activation holds it.
+            let released: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_owner_activations WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
+                |row| row.get(0),
+            ).map_err(read_sql)?;
+            if released {
+                return Err(OwnerOutboxError::Frozen);
             }
         }
     }
@@ -737,29 +756,14 @@ fn append_with_retained_base(
             if retained_base.is_none() {
                 put_binary_blob_with_sha(tx, &input.base_update, &base_update_digest)?;
             }
-            tx.execute(
-                    "INSERT INTO owner_ydoc_outboxes \
-                     (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
-                      current_path,selector_paths_json,restore_fence_generation,\
-                      base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,\
-                      oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,'active',0,NULL,1,NULL,NULL,?11)",
-                    params![
-                        outbox_id,
-                        binding.workspace_id,
-                        binding.main_version_id,
-                        binding.object_id,
-                        binding.lineage_claim_id,
-                        binding.current_path,
-                        serde_json::to_string(&binding.selector_paths)
-                            .map_err(|_| OwnerOutboxError::InvalidInput("selector paths are not serializable"))?,
-                        binding.restore_fence_generation,
-                        base_update_digest,
-                        base_byte_length,
-                        input.created_at_ms,
-                    ],
-                )
-                .map_err(write_sql)?;
+            insert_outbox(
+                tx,
+                &outbox_id,
+                &binding,
+                &base_update_digest,
+                base_byte_length,
+                input.created_at_ms,
+            )?;
             read_parent(tx, &outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?
         }
     };
@@ -920,13 +924,16 @@ fn retain_fenced_in_tx(
 }
 
 /// Called only by the ordinary local append transaction. Remote applications
-/// use their own receipt ledger and never enter this path.
+/// use their own receipt ledger and never enter this path. An activation
+/// whose Stop prepared, or whose retirement began, refuses the append as a
+/// frozen queue does, and the whole transaction rolls back.
 pub fn append_adopted_local_update_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &crate::DocKey,
     path: &str,
     sequence: i64,
     update: &[u8],
+    preparations: &crate::live_update_application::RetirementPreparations,
     now_ms: i64,
 ) -> Result<(), crate::CollabError> {
     use crate::CollabError;
@@ -944,17 +951,18 @@ pub fn append_adopted_local_update_in_tx(
         }
         return Ok(());
     };
-    let saved: Option<(String, i64, i64, String)> = tx
+    let saved: Option<(String, i64, i64, String, String)> = tx
         .query_row(
-            "SELECT binding_json,max_pending_bytes,max_pending_age_ms,adoption_id FROM live_owner_adoptions
-         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id,relay_database_namespace FROM {CURRENT_ACTIVATIONS}
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
             params![key.workspace_id, key.version_id, key.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()
         .map_err(read_sql)
         .map_err(map)?;
-    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
+    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id, namespace)) = saved
+    else {
         if has_adopted_owner_in(tx, key)? {
             return Err(CollabError::OwnerOutboxFrozen);
         }
@@ -972,6 +980,19 @@ pub fn append_adopted_local_update_in_tx(
         || marker.path.as_deref() != Some(path)
     {
         return Err(map(OwnerOutboxError::ParentMismatch));
+    }
+    // After the relay's fence, an edit could reach neither the relay nor
+    // the retirement that answers for this activation.
+    let retiring: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_retirements WHERE relay_database_namespace=?1 AND activation_id=?2)",
+            params![namespace, adoption_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)
+        .map_err(map)?;
+    if retiring || preparations.blocks(&adoption_id, binding.restore_fence_generation) {
+        return Err(CollabError::OwnerOutboxFrozen);
     }
     // Adoption authenticated these immutable bytes. Each keystroke needs only
     // their retained metadata; loading and hashing the full base scales with
@@ -1742,6 +1763,29 @@ pub fn acknowledge(
     receipts: &[OwnerDeliveryReceipt],
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     validate_identifier(outbox_id, "outbox id must be non-empty and bounded")?;
+    validate_receipts(receipts)?;
+    let outcome = store.write_with(&NoFaults, |tx| -> Result<_, OwnerOutboxError> {
+        let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+        require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        require_unfrozen(&parent, receipts)?;
+        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
+        if observed && accepted::check_release_in(tx, &parent, receipts)? {
+            return Ok(OwnerOutboxAcknowledgeResult {
+                acknowledged: receipts.len() as i64,
+                pending_bytes: parent.pending_bytes,
+                oldest_entry_at_ms: parent.oldest_entry_at_ms,
+            });
+        }
+        let result = acknowledge_prefix_in(tx, &parent, receipts)?;
+        if observed {
+            accepted::prune_in(tx, &parent.binding)?;
+        }
+        Ok(result)
+    })?;
+    committed(outcome)
+}
+
+fn validate_receipts(receipts: &[OwnerDeliveryReceipt]) -> Result<(), OwnerOutboxError> {
     if receipts.is_empty() {
         return Err(OwnerOutboxError::InvalidInput("receipts must not be empty"));
     }
@@ -1750,122 +1794,253 @@ pub fn acknowledge(
         if !delivery_ids.insert(&receipt.delivery_id) {
             return Err(OwnerOutboxError::ReceiptMismatch);
         }
-        validate_identifier(
-            &receipt.delivery_id,
-            "delivery id must be non-empty and bounded",
-        )?;
-        validate_digest(&receipt.update_digest)?;
-        if !(1..=9_007_199_254_740_991).contains(&receipt.accepting_host_epoch) {
-            return Err(OwnerOutboxError::InvalidInput(
-                "accepting host epoch must be a positive safe integer",
-            ));
-        }
-        if !(1..=9_007_199_254_740_991).contains(&receipt.journal_cursor) {
-            return Err(OwnerOutboxError::InvalidInput(
-                "journal cursor must be a positive safe integer",
-            ));
+        validate_receipt(receipt)?;
+    }
+    Ok(())
+}
+
+fn validate_receipt(receipt: &OwnerDeliveryReceipt) -> Result<(), OwnerOutboxError> {
+    validate_identifier(
+        &receipt.delivery_id,
+        "delivery id must be non-empty and bounded",
+    )?;
+    validate_digest(&receipt.update_digest)?;
+    if !(1..=9_007_199_254_740_991).contains(&receipt.accepting_host_epoch) {
+        return Err(OwnerOutboxError::InvalidInput(
+            "accepting host epoch must be a positive safe integer",
+        ));
+    }
+    if !(1..=9_007_199_254_740_991).contains(&receipt.journal_cursor) {
+        return Err(OwnerOutboxError::InvalidInput(
+            "journal cursor must be a positive safe integer",
+        ));
+    }
+    Ok(())
+}
+
+/// Acknowledge the pending prefix of `outbox_id` that `receipts` name, in
+/// order, keeping each receipt. Every receipt must name its entry's exact
+/// delivery and digest. Only a retirement calls this, with receipts the
+/// relay's journal proved, so a quarantined outbox accepts them too: its
+/// freeze stops delivery, and a Try again whose grant ended may have been
+/// accepted before its acknowledgement was lost.
+pub(crate) fn acknowledge_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    receipts: &[OwnerDeliveryReceipt],
+) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
+    validate_receipts(receipts)?;
+    let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    acknowledge_prefix_in(tx, &parent, receipts)
+}
+
+/// A quarantined outbox accepts only the head its owner asked to try again.
+fn require_unfrozen(
+    parent: &ParentRow,
+    receipts: &[OwnerDeliveryReceipt],
+) -> Result<(), OwnerOutboxError> {
+    if parent.state == OwnerOutboxState::Quarantined
+        && (receipts.len() != 1
+            || parent.retry_delivery_id.as_deref() != Some(receipts[0].delivery_id.as_str()))
+    {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    Ok(())
+}
+
+/// Keep the missing receipt of an entry that was acknowledged before
+/// receipts were kept. An entry that already keeps this exact receipt writes
+/// nothing, and any other entry refuses.
+pub(crate) fn record_missing_receipt_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    receipt: &OwnerDeliveryReceipt,
+) -> Result<(), OwnerOutboxError> {
+    validate_receipt(receipt)?;
+    let json = serde_json::to_string(receipt).map_err(|_| OwnerOutboxError::Corrupt)?;
+    let entry: Option<(String, bool, Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
+            params![outbox_id, receipt.delivery_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let (digest, pending, saved, terminal) = entry.ok_or(OwnerOutboxError::NotFound)?;
+    if digest != receipt.update_digest || pending || terminal.is_some() {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    match saved {
+        Some(saved) if saved == json => Ok(()),
+        Some(_) => Err(OwnerOutboxError::ReceiptMismatch),
+        None => {
+            tx.execute(
+                "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=0 AND accepted_receipt_json IS NULL",
+                params![outbox_id, receipt.delivery_id, json],
+            )
+            .map_err(write_sql)?;
+            Ok(())
         }
     }
+}
 
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-        require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        // A quarantined outbox accepts only the head its owner asked to try again.
-        if parent.state == OwnerOutboxState::Quarantined
-            && (receipts.len() != 1
-                || parent.retry_delivery_id.as_deref() != Some(receipts[0].delivery_id.as_str()))
-        {
-            return Err(OwnerOutboxError::Frozen);
-        }
-        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
-        if observed && accepted::check_release_in(tx, &parent, receipts)? {
-            return Ok(OwnerOutboxAcknowledgeResult {acknowledged: receipts.len() as i64,
-                pending_bytes: parent.pending_bytes, oldest_entry_at_ms: parent.oldest_entry_at_ms});
-        }
-        let mut statement = tx
-            .prepare(
-                "SELECT sequence,delivery_id,update_digest,byte_length \
-                 FROM owner_ydoc_outbox_entries \
-                 WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
-            )
-            .map_err(read_sql)?;
-        let rows = statement
-            .query_map([outbox_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
-            })
-            .map_err(read_sql)?;
-        let prefix = rows
-            .take(receipts.len())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(read_sql)?;
-        if prefix.len() != receipts.len()
-            || prefix.iter().zip(receipts).any(|((_, delivery_id, digest, _), receipt)| {
-                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
-            })
-        {
-            return Err(OwnerOutboxError::ReceiptMismatch);
-        }
-        let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
-            total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
-        })?;
-        let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
-        let released_digests = prefix
-            .iter()
-            .map(|(_, _, digest, _)| digest.clone())
-            .collect::<BTreeSet<_>>();
-        if observed {
-            for receipt in receipts {
-                tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
-                    params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
-            }
-        }
-        let acknowledged = tx
-            .execute(
-                "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
-                 WHERE outbox_id=?1 AND pending=1 AND sequence<=?2",
-                params![outbox_id, last_sequence],
-            )
-            .map_err(write_sql)?;
-        if acknowledged != receipts.len() {
-            return Err(OwnerOutboxError::Corrupt);
-        }
-        for digest in released_digests {
-            delete_binary_blob_if_unreferenced(tx, &digest)?;
-        }
-        let pending_bytes = parent
-            .pending_bytes
-            .checked_sub(acknowledged_bytes)
-            .filter(|value| *value >= 0)
-            .ok_or(OwnerOutboxError::Corrupt)?;
-        let oldest_entry_at_ms = tx
-            .query_row(
-                "SELECT MIN(created_at_ms) FROM owner_ydoc_outbox_entries \
-                 WHERE outbox_id=?1 AND pending=1",
-                [outbox_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .map_err(read_sql)?;
-        // Accepting the granted head ends the quarantine and resumes delivery.
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
-             quarantine_reason=CASE WHEN state='quarantined' THEN NULL ELSE quarantine_reason END, \
-             state=CASE WHEN state='quarantined' OR (state='sealed' AND ?2=0) THEN 'active' ELSE state END, \
-             retry_delivery_id=NULL WHERE outbox_id=?1",
-            params![outbox_id, pending_bytes, oldest_entry_at_ms],
+/// The terminal reason of an adoption seed its released activation never
+/// delivered. The reason alone proves nothing; the caller validates the seed.
+pub(crate) const ACTIVATION_RELEASED: &str = "activation-released";
+
+/// Retire a pending adoption seed the caller proved was never delivered. It
+/// keeps no receipt and no bytes, and the totals count it no longer.
+pub(crate) fn abandon_seed_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(), OwnerOutboxError> {
+    let abandoned: Option<(String, String)> = tx
+        .query_row(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,accepted_receipt_json=NULL,update_blob_digest=NULL,\
+             terminal_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND sequence=?2 AND pending=1 \
+             AND accepted_receipt_json IS NULL RETURNING update_digest,delivery_id",
+            params![outbox_id, sequence, ACTIVATION_RELEASED],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(write_sql)?;
+    let (digest, delivery_id) = abandoned.ok_or(OwnerOutboxError::ReceiptMismatch)?;
+    // Abandoning the granted head ends its Try again.
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET retry_delivery_id=NULL WHERE outbox_id=?1 AND retry_delivery_id=?2",
+        params![outbox_id, delivery_id],
+    )
+    .map_err(write_sql)?;
+    refresh_pending_in_tx(tx, outbox_id)?;
+    delete_binary_blob_if_unreferenced(tx, &digest)
+}
+
+/// The terminal reason of a refused entry a retirement kept: the relay's
+/// journal proved it absent, and nothing can deliver it again.
+pub(crate) const RETIREMENT_KEPT: &str = "retirement-kept";
+
+/// Retire a pending entry of a quarantined outbox the relay refused, which
+/// the caller proved was never accepted. Like a host refusal, it keeps the
+/// entry's bytes, and the outbox stays quarantined with its refusals and
+/// checkpoints.
+pub(crate) fn keep_refused_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(), OwnerOutboxError> {
+    let kept = tx
+        .execute(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,\
+             terminal_reason=?3 WHERE outbox_id=?1 AND sequence=?2 AND pending=1 AND accepted_receipt_json IS NULL \
+             AND update_blob_digest=update_digest",
+            params![outbox_id, sequence, RETIREMENT_KEPT],
         )
         .map_err(write_sql)?;
-        // Every refusal recorded here was of a head this acknowledgement passed.
-        tx.execute("DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1", [outbox_id])
-            .map_err(write_sql)?;
-        if observed { accepted::prune_in(tx, &parent.binding)?; }
-        Ok(OwnerOutboxAcknowledgeResult {
-            acknowledged: i64::try_from(receipts.len())
-                .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
-            pending_bytes,
-            oldest_entry_at_ms,
+    if kept != 1 {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    refresh_pending_in_tx(tx, outbox_id)
+}
+
+fn acknowledge_prefix_in(
+    tx: &rusqlite::Transaction<'_>,
+    parent: &ParentRow,
+    receipts: &[OwnerDeliveryReceipt],
+) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
+    let outbox_id = parent.outbox_id.as_str();
+    let mut statement = tx
+        .prepare(
+            "SELECT sequence,delivery_id,update_digest,byte_length \
+             FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
+        )
+        .map_err(read_sql)?;
+    let rows = statement
+        .query_map([outbox_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })
+        .map_err(read_sql)?;
+    let prefix = rows
+        .take(receipts.len())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_sql)?;
+    if prefix.len() != receipts.len()
+        || prefix
+            .iter()
+            .zip(receipts)
+            .any(|((_, delivery_id, digest, _), receipt)| {
+                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
+            })
+    {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
+        total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
     })?;
-    committed(outcome)
+    let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
+    let released_digests = prefix
+        .iter()
+        .map(|(_, _, digest, _)| digest.clone())
+        .collect::<BTreeSet<_>>();
+    // Every acknowledgement keeps its receipt, observed or not: a cleared
+    // entry alone does not prove the relay accepted it.
+    for receipt in receipts {
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
+            params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    }
+    let acknowledged = tx
+        .execute(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
+             WHERE outbox_id=?1 AND pending=1 AND sequence<=?2",
+            params![outbox_id, last_sequence],
+        )
+        .map_err(write_sql)?;
+    if acknowledged != receipts.len() {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    for digest in released_digests {
+        delete_binary_blob_if_unreferenced(tx, &digest)?;
+    }
+    let pending_bytes = parent
+        .pending_bytes
+        .checked_sub(acknowledged_bytes)
+        .filter(|value| *value >= 0)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    let oldest_entry_at_ms = tx
+        .query_row(
+            "SELECT MIN(created_at_ms) FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1",
+            [outbox_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(read_sql)?;
+    // Accepting the granted head ends the quarantine and resumes delivery.
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
+         quarantine_reason=CASE WHEN state='quarantined' THEN NULL ELSE quarantine_reason END, \
+         state=CASE WHEN state='quarantined' OR (state='sealed' AND ?2=0) THEN 'active' ELSE state END, \
+         retry_delivery_id=NULL WHERE outbox_id=?1",
+        params![outbox_id, pending_bytes, oldest_entry_at_ms],
+    )
+    .map_err(write_sql)?;
+    // Every refusal recorded here was of a head this acknowledgement passed.
+    tx.execute(
+        "DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+        [outbox_id],
+    )
+    .map_err(write_sql)?;
+    Ok(OwnerOutboxAcknowledgeResult {
+        acknowledged: i64::try_from(receipts.len())
+            .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
+        pending_bytes,
+        oldest_entry_at_ms,
+    })
 }
 
 pub fn quarantine(
@@ -1951,6 +2126,73 @@ pub fn record_refusal(
         record_refusal_in_tx(tx, workspace_id, &input, &refusal, now_ms)
     })?;
     committed(outcome)
+}
+
+fn insert_outbox(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    binding: &LiveObjectBinding,
+    base_update_digest: &str,
+    base_byte_length: i64,
+    created_at_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    tx.execute(
+        "INSERT INTO owner_ydoc_outboxes \
+         (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
+          current_path,selector_paths_json,restore_fence_generation,\
+          base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,\
+          oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10,'active',0,NULL,1,NULL,NULL,?11)",
+        params![
+            outbox_id,
+            binding.workspace_id,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            binding.current_path,
+            serde_json::to_string(&binding.selector_paths).map_err(|_| {
+                OwnerOutboxError::InvalidInput("selector paths are not serializable")
+            })?,
+            binding.restore_fence_generation,
+            base_update_digest,
+            base_byte_length,
+            created_at_ms,
+        ],
+    )
+    .map_err(write_sql)?;
+    Ok(())
+}
+
+/// Open an empty outbox at a successor's binding, on its lineage's retained
+/// base, beside the outboxes its released chain left at earlier paths of the
+/// same restore generation. Only successor adoption calls this, once its
+/// coverage proved each of them; an ordinary append never opens a second
+/// outbox for a generation.
+pub(crate) fn open_successor_outbox_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    created_at_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let binding = binding
+        .clone()
+        .normalized()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    let base = &binding.lineage_claim_id;
+    let base_byte_length: i64 = tx
+        .query_row(
+            "SELECT byte_length FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes)",
+            [base],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?
+        .filter(|length| *length > 0)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    if find_parent_for_binding(tx, &binding)?.is_some() {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let id = outbox_id(&binding, base, &binding_json(&binding)?);
+    insert_outbox(tx, &id, &binding, base, base_byte_length, created_at_ms)
 }
 
 pub(crate) fn record_refusal_in_tx(
@@ -2315,6 +2557,64 @@ pub(crate) fn stored_automation_declaration(
             Ok(declaration)
         })
         .transpose()
+}
+
+/// The actor an outbox entry credits, and its attribution.
+pub(crate) type EntryCredit = (
+    Option<String>,
+    Option<dohc_engine_domain::ChangeAttribution>,
+);
+
+/// What an outbox entry's evidence credits: a native entry's journal row,
+/// whose declarations must be the ones its source derives, or what a draft
+/// declared. An automation outranks an agent, and either a person's edit.
+/// An adoption seed, and a draft that declared nothing, credit nobody; a
+/// caller treats that as unattributed, never as whoever reads the entry.
+pub(crate) fn entry_credit(
+    native: Option<&OwnerOutboxNativeSource>,
+    agent: Option<String>,
+    automation: Option<String>,
+    person: Option<i64>,
+) -> Result<EntryCredit, OwnerOutboxError> {
+    let person = match person {
+        None => false,
+        Some(1) => true,
+        Some(_) => return Err(OwnerOutboxError::Corrupt),
+    };
+    let agent = stored_declaration(agent)?;
+    let automation = stored_automation_declaration(automation)?;
+    if agent.is_some() && automation.is_some() {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    if let Some(source) = native {
+        if automation.is_some()
+            || agent != source.agent_declaration()?
+            || person != source.person_edit()?
+        {
+            return Err(OwnerOutboxError::Corrupt);
+        }
+        return Ok(source.native_author()?.unwrap_or((None, None)));
+    }
+    Ok(if let Some(declared) = automation {
+        (Some(declared.automation_id), Some(declared.attribution))
+    } else if let Some(declared) = agent {
+        (
+            Some(declared.agent_id.clone()),
+            Some(declared.attribution()),
+        )
+    } else if person {
+        (
+            Some("local-person".into()),
+            Some(dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+            }),
+        )
+    } else {
+        (None, None)
+    })
 }
 
 #[cfg(test)]

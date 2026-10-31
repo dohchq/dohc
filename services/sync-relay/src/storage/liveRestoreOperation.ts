@@ -1,7 +1,7 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
-import {readServiceActivation} from "./serviceActivationAccess";
+import {hasServiceActivation,readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -12,6 +12,7 @@ import {
   parseLiveUpdateReceipt, type LiveUpdateReceipt, type LiveDocumentKey,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
+import { relayError } from "../errors";
 import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -111,9 +112,28 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) refuse();
 }
 // A fence would strand a pending service activation: it can no longer complete,
-// and service restore continues only a completed one.
+// and service restore continues only a completed one. A retiring activation
+// keeps the generation its retirement names.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
-  if (readServiceActivation(storage, document)?.completion_json === null) refuse();
+  const state = serviceActivationState(readServiceActivation(storage, document));
+  if (state !== "absent" && state !== "completed") refuse();
+}
+const ownerOrigin = (storage: StorageContext, namespace: string, document: LiveDocumentKey, hostId: string): unknown =>
+  storage.db.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?")
+    .get(namespace, ...key(document), hostId)?.origin_json;
+// Committed delivery refuses to bootstrap a service activation's lineage, so a
+// bootstrap restore of one could never apply its cut once the grant is revoked.
+function requireBootstrapRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  if (hasServiceActivation(storage, document)) {
+    throw relayError("conflict", "Stop access isn't available for this file on this session host. Access hasn't changed. Switch back to the session host this file used before, then try again.");
+  }
+}
+/** Refuses a document whose Stop restore needs a bootstrap that the configured session host can't deliver. */
+export function requireStopRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  const control = storage.getLiveHostControl();
+  if (!control || ownerOrigin(storage, liveJournalHistoryNamespace(storage), document, control.configuredHostId) === undefined) {
+    requireBootstrapRestorable(storage, document);
+  }
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
@@ -129,14 +149,13 @@ function basis(storage: StorageContext, intent: StopRestoreIntent, authority: St
     !currentLiveDocumentMoment(storage, intent.document, authority.binding.currentPath) ||
     authority.baselineSequence <= storage.getEpochLogFloor(intent.document.workspaceId)) refuse();
   const namespace = liveJournalHistoryNamespace(storage);
-  const ownerOrigin = storage.db.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?")
-    .get(namespace,...key(intent.document),control.configuredHostId)?.origin_json;
-  if (ownerOrigin !== undefined && typeof ownerOrigin !== "string") refuse();
+  const origin = ownerOrigin(storage, namespace, intent.document, control.configuredHostId);
+  if (origin !== undefined && typeof origin !== "string") refuse();
   return { binding: authority.binding, ownerBinding: parseLiveObjectBinding({...authority.binding, selectorPaths: selector.paths}),
     baselineDigest: authority.baselineDigest, baselineByteLength: authority.baselineBytes.byteLength,
     projectedDigest: authority.projectedDigest, projectedLength: authority.projectedLength,
     baselineSequence: authority.baselineSequence, registeredAtMs: authority.registeredAtMs,
-    namespace, hostMode: control.configuredMode, hostId: control.configuredHostId,ownerOrigin: ownerOrigin ?? null };
+    namespace, hostMode: control.configuredMode, hostId: control.configuredHostId,ownerOrigin: origin ?? null };
 }
 function parseBasis(value: StopRestoreBasis): StopRestoreBasis {
   if (value.hostMode !== "service" && value.hostMode !== "device") refuse();
@@ -262,6 +281,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
       restorePointCursor: cursor, restorePointReceiptDigest: parseLiveUpdateDigest(digest)});
     const savedBasis = basis(storage, intent, authority(storage, intent));
     if (savedBasis.ownerOrigin !== null) { requireStopRestoreOwnerOrigin(storage, savedBasis); intent = {...intent, deliveryKind: "owner"}; }
+    else requireBootstrapRestorable(storage, document);
     const plan = {intent, path: String(row.current_path), recipients};
     if (Buffer.byteLength(JSON.stringify(plan)) > limit) throw new Error("The complete affected access list exceeds its output budget.");
     return plan;
@@ -313,6 +333,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const intentJson = JSON.stringify(intent);
     const initialBasis = basis(storage,intent,authority(storage,intent)), basisJson = JSON.stringify(initialBasis);
     if (intent.deliveryKind === "bootstrap" && initialBasis.ownerOrigin !== null) refuse();
+    if (intent.deliveryKind === "bootstrap") requireBootstrapRestorable(storage, intent.document);
     if (intent.deliveryKind === "owner") requireStopRestoreOwnerOrigin(storage,initialBasis);
     // Fund the final cutoff metadata before invalidation so fencing cannot run out of quota.
     const maximumReceipt = {deliveryId: "\\".repeat(512),updateDigest: "f".repeat(64),journalCursor: Number.MAX_SAFE_INTEGER,acceptingHostEpoch: Number.MAX_SAFE_INTEGER};

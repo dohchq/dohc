@@ -20,6 +20,11 @@
 
 #![forbid(unsafe_code)]
 
+// The heap profiler the held-proof memory measurement reads, as the unit
+// tests' global allocator.
+#[cfg(all(test, feature = "held-proof-memory"))]
+extern crate dohc_heap_profiler;
+
 pub mod author_coverage;
 pub mod canonical_json;
 mod doc_cache;
@@ -72,8 +77,8 @@ pub use owner_outbox::{
     OwnerOutboxRetryInput, OwnerOutboxState,
 };
 pub use replay_parity::{
-    apply_replay_validated_batch, validate_replay_parity, validate_replay_parity_with_scratch,
-    ReplayBatch,
+    apply_replay_validated_batch, inspect_update, validate_replay_parity,
+    validate_replay_parity_with_scratch, ReplayBatch, StructuralHold, UpdateInspection,
 };
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection,

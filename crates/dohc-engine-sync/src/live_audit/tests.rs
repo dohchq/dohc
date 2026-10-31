@@ -3372,9 +3372,16 @@ fn imported_activation_publication_admits_the_preserved_event_zero_source() {
     imported_activation_publication(false, true);
 }
 
-fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bool) {
+/// An imported activation's adoption and two settlements on the service
+/// host. Returns what that host published, or nothing when the settlement is
+/// refused.
+fn imported_activation_publication(
+    foreign_baseline: bool,
+    preserve_baseline: bool,
+) -> Vec<ReplicationEnvelope> {
     use dohc_engine_collab::live_update_application::{
-        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
+        NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
+        capture_imported_owner_activation,
     };
     let mut source =
         fixture_with_markdown(true, preserve_baseline.then_some("Original source.\n\n"));
@@ -3562,9 +3569,13 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         expected_local_sequence: activation.source.native_head_sequence,
         events: vec![],
         terminal_receipt: None,
+        retained_prefix: None,
         outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
             max_pending_bytes: 1_000_000,
             max_pending_age_ms: 100_000,
+        },
+        reconstruction: NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
         },
     };
     adopt_owner_committed(
@@ -3600,7 +3611,29 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         bytes,
         _scratch: scratch,
     };
-    accept_named_event(&mut f, 1, delivery);
+    accept_named_event(&mut f, 1, delivery.clone());
+    // The seed keeps its receipt; until then the host holds every later delivery.
+    let outbox: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| {
+                r.get(0)
+            })
+            .map_err(SyncError::corrupt)
+        })
+        .unwrap();
+    dohc_engine_collab::owner_outbox::acknowledge(
+        &mut f.store,
+        "ws",
+        &outbox,
+        &[dohc_engine_collab::owner_outbox::OwnerDeliveryReceipt {
+            delivery_id: delivery,
+            update_digest: hex_sha256(&f.bytes),
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
     if foreign_baseline {
         VersionedTextStore::new(&mut f.store)
             .write_text(
@@ -3643,7 +3676,7 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
                 .iter()
                 .any(|op| op.payload["momentId"] == "service-first-settlement")
         );
-        return;
+        return Vec::new();
     }
     settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
     let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
@@ -3730,6 +3763,67 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         second.payload["payloadAfterBlobSha256"],
         hex_sha256(b"Next accepted edit.")
     );
+    crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap()
+}
+
+const NATIVE_AUDIT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json"
+);
+
+/// The operations an imported activation publishes, as the relay's fixture holds them.
+fn native_audit_fixture() -> serde_json::Value {
+    let ops = imported_activation_publication(false, false);
+    ops.iter()
+        .map(|op| {
+            serde_json::json!({
+                "originSeq": op.origin_seq,
+                "opKind": op.op_kind,
+                "recordedAtMs": op.recorded_at_ms,
+                "payload": op.payload,
+            })
+        })
+        .collect()
+}
+
+/// The relay's fixture of native output holds base and settlement audits
+/// this engine still imports byte for byte. Each run of the engine names its
+/// activation afresh, so the fixture is one run's output, not a reproduction.
+#[test]
+fn the_relay_fixture_holds_current_native_audit_payloads() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(NATIVE_AUDIT_FIXTURE).unwrap()).unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    let mut checked = Vec::new();
+    for op in fixture.as_array().unwrap() {
+        let (kind, payload) = (op["opKind"].as_str().unwrap(), &op["payload"]);
+        let imported = match kind {
+            BASE_OP => imported_base(&conn, payload, "ws").map(|_| ()),
+            settlement_record::SETTLEMENT_OP => {
+                settlement_record::check_imported_payload(payload, "ws")
+            }
+            _ => continue,
+        };
+        if let Err(error) = imported {
+            panic!("{kind}: {error:?}; regenerate with update_native_audit_fixture");
+        }
+        checked.push(kind);
+    }
+    assert!(
+        checked.contains(&BASE_OP) && checked.contains(&settlement_record::SETTLEMENT_OP),
+        "regenerate with update_native_audit_fixture"
+    );
+}
+
+// Like protocol/examples/update_fixtures.rs, Rust is the fixture's only writer.
+#[test]
+#[ignore = "regenerates the relay's native audit fixture"]
+fn update_native_audit_fixture() {
+    std::fs::write(
+        NATIVE_AUDIT_FIXTURE,
+        serde_json::to_string_pretty(&native_audit_fixture()).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -4430,8 +4524,8 @@ fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
 #[test]
 fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     use dohc_engine_collab::live_update_application::{
-        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
-        resume_imported_owner_activation,
+        NativeHistoryReconstruction, OwnerAdoptionCut, adopt_owner_committed,
+        capture_imported_owner_activation, resume_imported_owner_activation,
     };
     use dohc_engine_storage::TxnOutcome;
     use std::collections::BTreeMap;
@@ -4558,6 +4652,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
                 reads: BTreeMap::from([("object".to_owned(), read)]),
                 settlement_report_id: None,
             },
+            &dohc_engine_collab::live_update_application::ReleasedTails::uncached(),
             &NoFaults,
         )
         .unwrap();
@@ -4631,9 +4726,13 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             expected_local_sequence: activation.source.native_head_sequence,
             events: vec![],
             terminal_receipt: None,
+            retained_prefix: None,
             outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                 max_pending_bytes: 1_000_000,
                 max_pending_age_ms: 100_000,
+            },
+            reconstruction: NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
             },
         },
         1_000_000,

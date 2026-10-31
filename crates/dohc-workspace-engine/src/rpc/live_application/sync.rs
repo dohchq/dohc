@@ -93,6 +93,7 @@ impl EngineService {
             ));
         }
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,

@@ -23,6 +23,10 @@ description = "Durable Y.Doc layer for the workspace engine: update log, snapsho
 # Production builds must not enable this feature.
 # Poison tests require debug assertions.
 test-support = []
+# Links `dohc-heap-profiler`, dhat as the unit tests' global allocator, for
+# the held-proof memory measurement in
+# `src/live_update_application/held_proof_memory_tests.rs`.
+held-proof-memory = []
 
 [dependencies]
 memchr = "2.8.3"
@@ -45,8 +49,9 @@ dohc-engine-domain = { path = "../dohc-engine-domain" }
 # The ydoc SQL runs against the store's connection/transaction through its
 # read_with/write_with seams. Pinned to storage's exact rusqlite so the shared
 # Connection/Transaction types unify (the `bundled` SQLite comes from storage
-# via feature unification). Incremental reads retain one metadata chunk.
-rusqlite = { version = "0.40", features = ["blob"] }
+# via feature unification). Incremental reads retain one metadata chunk. The
+# released-tails worker's reader stops on close through a progress handler.
+rusqlite = { version = "0.40", features = ["blob", "hooks"] }
 # The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
 # with OffsetKind::Utf16 (binding constraint 1).
 yrs = "=0.27.3"
@@ -70,6 +75,12 @@ rusqlite = { version = "0.40", features = ["limits"] }
 dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
+# The heap profiler the held-proof memory measurement reads, and the crate
+# that installs it as the global allocator, outside this crate's
+# `forbid(unsafe_code)`; the unit tests link it only under the
+# `held-proof-memory` feature.
+dhat = "0.3"
+dohc-heap-profiler = { path = "../dohc-heap-profiler" }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

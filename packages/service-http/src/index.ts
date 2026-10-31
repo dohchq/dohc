@@ -2,7 +2,7 @@
 // pipe, one token bucket, one parked-waiter registry, and process lifecycle.
 // sync-relay, share-web, and workspace-api import from here instead of carrying copies.
 export { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
-export { pipeResponseBody } from "./pipeResponseBody";
+export { DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
 export { TokenBucketLimiter } from "./tokenBucketLimiter";
 export { WaiterRegistry, type WaiterCaps } from "./waiterRegistry";
 export { readBoundedJson } from "./readBoundedJson";

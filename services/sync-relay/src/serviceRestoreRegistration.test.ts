@@ -7,11 +7,11 @@ const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",li
 const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",source:{nativeHeadSequence:2}} as NativeOwnerActivation;
 const fenced={kind:"owner"} as never;
 
-// Native registration accepts exactly the binding. Owner state needs the activation's own session.
+// Native registration accepts exactly the binding and the activation it serves. Owner state needs the activation's own session.
 function nativeHost(adopted:boolean){
   return vi.fn(async(request:{id:number;method:string;params:Record<string,unknown>})=>{
     if(request.method==="liveApplication.register"){
-      if(Object.keys(request.params).join()!=="binding")throw new Error("INVALID_PARAMS: invalid-live-registration");
+      if(Object.keys(request.params).join()!=="binding,activationId")throw new Error("INVALID_PARAMS: invalid-live-registration");
       return {id:request.id,result:{registrationId:7}};
     }
     if(request.method==="liveApplication.ownerState" && request.params.sessionId===capture.sessionId){
@@ -34,15 +34,16 @@ function stopAccess(client:unknown){
 }
 
 const verified=(native:ReturnType<typeof nativeHost>)=>serviceOwnerTransport({client:{sendRequest:native} as never,
-  workspace:"native-workspace",capture:async()=>capture,binding,nextRequestId:()=>2,assertCurrent(){}}).client;
+  workspace:"native-workspace",capture:async()=>capture,binding,storage:{},host:{mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never,
+  nextRequestId:()=>2,assertCurrent(){}}).client;
 
-it("stops a retained service owner through its verified session, sending native only the binding",async()=>{
+it("stops a retained service owner through its verified session, sending native the binding and its activation",async()=>{
   const native=nativeHost(true);
   await expect(stopAccess({sendRequest:native}).stopped).rejects.toThrow("invalid-live-registration");
   native.mockClear();
   await expect(stopAccess(verified(native)).stopped).resolves.toEqual({kind:"done",receipt:fenced});
   expect(native.mock.calls.map(([request])=>[request.method,request.params])).toEqual([
-    ["liveApplication.register",{binding}],
+    ["liveApplication.register",{binding,activationId:capture.activationId}],
     ["liveApplication.ownerState",{registrationId:7,sessionId:capture.sessionId}],
   ]);
 });
