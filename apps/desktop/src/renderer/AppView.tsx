@@ -219,6 +219,7 @@ export function useAppView(options: {
         request.current += 1;
         notices?.clear(failureId);
         notices?.clear(sessionId);
+        notices?.clear(downloadId);
         setLoading(false);
         setState({ status: "unapproved", ended: true });
       } else if (event.kind === "session-ended") {

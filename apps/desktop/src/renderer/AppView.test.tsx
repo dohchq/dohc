@@ -262,7 +262,10 @@ describe("an owner app in its tab", () => {
   it("closes the app when its approval ends, and says so after a relaunch finds it unapproved", async () => {
     render(<Page />);
     await openedView();
+    emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "receipt.pdf" });
+    const [download] = notices.report.mock.calls.map(([notice]) => notice);
     emit({ viewId: viewIdOf(), kind: "approval-ended" });
+    expect(notices.clear).toHaveBeenCalledWith(download.identity);
     expect(screen.getByText("This app's approval ended. Review it to open it again.")).toBeTruthy();
     expect(screen.queryByTestId("app-view-webview")).toBeNull();
     expect((screen.getByTestId("app-view-reload") as HTMLButtonElement).disabled).toBe(true);

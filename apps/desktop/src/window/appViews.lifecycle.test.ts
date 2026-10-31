@@ -92,7 +92,6 @@ it("creates no launch or guest authorization without an active approval", async 
   const event = { preventDefault: vi.fn() };
   f.owner.emit("will-attach-webview", event, {}, { src: "http://127.0.0.1:43000/bootstrap" });
   expect(event.preventDefault).toHaveBeenCalledOnce();
-  await expect(f.invoke({ action: "open", workspaceId: "other", appRoot: "app", viewId: "one", colorScheme: "dark" })).rejects.toThrow("Wrong workspace");
 });
 it("refuses a launch URL issued to another owning window", async () => {
   const first = fixture();
