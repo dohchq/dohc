@@ -728,8 +728,8 @@ export function SitePreviewPage(props: {
     !props.sharedView &&
     site?.authority.kind === "workspace" &&
     !!props.onShareSite;
-  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0
-    && site.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const declaresApp = !!site?.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
@@ -820,7 +820,8 @@ export function SitePreviewPage(props: {
             </IconButton>
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
-            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
+            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} title={site.title} reportError={props.reportError}
+              localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
               testId={needsPublication ? "app-view-review" : "site-preview-review"} open={reviewOpen} onOpenChange={setReviewOpen}
               onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
