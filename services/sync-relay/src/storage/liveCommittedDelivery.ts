@@ -1415,8 +1415,10 @@ export class LiveCommittedDeliveryStore {
         : {journalCursor: operation.terminal?.journalCursor ?? 0, receiptDigest: operation.terminal?.updateDigest ?? authority.baselineDigest};
       const binding = operation.intent.deliveryKind === "owner" ? operation.basis.ownerBinding : operation.basis.binding;
       integrity(binding);
+      // History with no checkpoint starts where the lineage registered, at generation 1, not at this binding's.
+      // A restore declined after its fence moves the generation without a checkpoint.
       const historyInput = {document: operation.intent.document, namespace: operation.basis.namespace, through: point.journalCursor,
-        baseline: authority.baselineBytes, baselineDigest: authority.baselineDigest, originBinding: binding};
+        baseline: authority.baselineBytes, baselineDigest: authority.baselineDigest, originBinding: {...binding, restoreFenceGeneration: 1}};
       const history = readAcceptedHistory(this.#storage, historyInput, budget);
       integrity((history.proof.terminal?.updateDigest ?? authority.baselineDigest) === point.receiptDigest);
       return {operation, binding, historyInput, ...history, point};
