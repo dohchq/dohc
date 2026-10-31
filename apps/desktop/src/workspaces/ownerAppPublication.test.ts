@@ -1,7 +1,7 @@
 import { invalidateDatasetAddresses } from "./datasetAddress";
 import { describe, expect, it, vi } from "vitest";
 import { compileClosedApp } from "./closedAppCompiler";
-import { parseAppPublicationDeclaration, prepareOwnerAppPublication } from "./ownerAppPublication";
+import { parseAppPublicationDeclaration, prepareLocalAppPublication, prepareOwnerAppPublication, readLocalAppSource } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
@@ -28,7 +28,7 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
   const prepare = (appRoot = "app", shared = [appRoot]) => prepareOwnerAppPublication({ workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
     { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
     { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision, deferredWrites: hooks.deferredWrites });
-  return { declaration, sources, compile, capturePaths, listCalls, hooks, prepare, controller,
+  return { declaration, sources, adapter, compile, capturePaths, listCalls, hooks, prepare, controller,
     setDeclaration(value: unknown) { invalidateDatasetAddresses({ workspaceId: "w" }); sources.set("app/app.publish.json", JSON.stringify(value)); } };
 }
 
@@ -45,6 +45,43 @@ it.each(["app/index.html", "app/new-file.js", "shared/theme.css"])("refuses a wa
   h.hooks.deferredWrites.push(path);
   await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow(path);
   expect(h.compile).not.toHaveBeenCalled();
+});
+
+describe("local app source revision", () => {
+  const local = (h: ReturnType<typeof harness>) => ({ adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: h.hooks.deferredWrites });
+  const app = { workspaceId: "w", appRoot: "app" };
+
+  it("matches the approved revision until a source file changes, and compiles nothing", async () => {
+    const h = harness();
+    h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts", "rules.ts"], packageMap: {} });
+    h.sources.set("app/main.ts", "import { capacity } from './rules.ts'; document.body.textContent = String(capacity);");
+    const { candidate } = await prepareLocalAppPublication(app, { ...local(h), compile: h.compile });
+    h.compile.mockClear();
+    expect(await readLocalAppSource(app, local(h))).toEqual({ sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path) });
+    h.sources.set("app/rules.ts", "export const capacity: number = 30;");
+    expect((await readLocalAppSource(app, local(h))).sourceRevision).not.toBe(candidate.sourceRevision);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("reads a file app.publish.json adds, and ignores files it does not list", async () => {
+    const h = harness();
+    h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} });
+    const before = await readLocalAppSource(app, local(h));
+    h.sources.set("app/notes.txt", "not part of the app");
+    expect(await readLocalAppSource(app, local(h))).toEqual(before);
+    h.setDeclaration({ entryPath: "main.ts", inputs: ["main.ts", "rules.ts"], packageMap: {} });
+    const after = await readLocalAppSource(app, local(h));
+    expect(after.sourcePaths).toEqual(["app/app.publish.json", "app/main.ts", "app/rules.ts"]);
+    expect(after.sourceRevision).not.toBe(before.sourceRevision);
+  });
+
+  it("refuses an app in shared-with-me and a source waiting to be written", async () => {
+    const h = harness();
+    await expect(readLocalAppSource({ workspaceId: "w", appRoot: "shared-with-me/app" }, local(h))).rejects.toThrow();
+    h.hooks.deferredWrites.push("app/main.ts");
+    await expect(readLocalAppSource(app, local(h))).rejects.toThrow("app/main.ts");
+    expect(h.capturePaths).toEqual([]);
+  });
 });
 
 describe("app.publish.json paths", () => {

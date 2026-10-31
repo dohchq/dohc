@@ -85,6 +85,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
   createLink: ["linkCreated", "urlUnavailable"],
   listLocal: ["localListed"],
+  checkLocal: ["localChecked"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],
   list: ["listed"],

@@ -108,14 +108,23 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
   return { ...await prepareAppSources(input, versionId, allowed, dependencies), generation: grant.generation };
 }
 
+const localAllowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
+
 /** Local approval captures the same immutable source without creating a share grant. */
 export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
-  const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
-  return prepareAppSources(input, "main", allowed, dependencies);
+  return prepareAppSources(input, "main", localAllowed, dependencies);
 }
 
-async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
-  versionId: string, allowed: (path: string) => boolean, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+/** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
+export async function readLocalAppSource(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: SourceDependencies): Promise<{ sourceRevision: string; sourcePaths: string[] }> {
+  const { metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
+  return { sourceRevision: metadata.sourceDigest, sourcePaths: metadata.files.map(file => file.path) };
+}
+
+type SourceDependencies = Pick<AppPublicationPreparationDependencies, "adapter" | "signal" | "assertCurrent" | "deferredWrites">;
+
+async function selectAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
+  versionId: string, allowed: (path: string) => boolean, dependencies: SourceDependencies) {
   const { adapter, signal, assertCurrent } = dependencies;
   if (!allowed(input.appRoot)) throw new Error("The app is outside this link's shared files.");
   const manifestPath = `${input.appRoot}/app.publish.json`;
@@ -131,9 +140,7 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
     const metadata = await adapter.captureSourceMetadata({ workspaceId: input.workspaceId, versionId, paths, bounds: { maxInputFiles: inputBounds.maxInputFiles, maxInputBytes }, signal })
       .catch(async (error: unknown) => { throw await captureRefusal(error, paths, maxInputBytes); });
     assertCurrent();
-    const files = await adapter.hydrateCapturedSources(metadata, signal);
-    assertCurrent();
-    return { metadata, files };
+    return metadata;
   };
   // The engine's refusal carries only its code. Only after a refusal, list the workspace to name the file.
   const captureRefusal = async (error: unknown, paths: readonly string[], maxInputBytes: number): Promise<unknown> => {
@@ -151,14 +158,25 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
     return error;
   };
   const first = hasManifest ? await capture([manifestPath], manifestLimit) : null;
-  const declared = first ? parseAppPublicationDeclaration(first.files[0]!.bytes, input.appRoot) : staticDeclaration(input.appRoot, folder);
+  const manifest = first && (await adapter.hydrateCapturedSources(first, signal))[0]!;
+  assertCurrent();
+  const declared = manifest ? parseAppPublicationDeclaration(manifest.bytes, input.appRoot) : staticDeclaration(input.appRoot, folder);
   const schemaPath = declared.collection && `${declared.collection.collectionPath}/collection.yaml`;
   if (declared.collection && !allowed(declared.collection.collectionPath)) throw new Error(`${manifestPath} names the collection ${declared.collection.collectionPath}, which is outside this link's shared files. Choose a link that includes it.`);
   const paths = [...new Set([...(first ? [manifestPath] : []), ...declared.inputs, ...(schemaPath ? [schemaPath] : [])])];
   const outside = paths.find(path => !allowed(path));
   if (outside) throw new Error(`${first ? `${manifestPath} lists ${outside}` : outside}, which is outside this link's shared files. Choose a link that includes it.`);
-  const selected = await capture(paths, inputBounds.maxInputBytes);
-  if (first && selected.files.find(file => file.path === manifestPath)?.sha256 !== first.files[0]!.sha256) throw new Error("The app declaration changed. Prepare the app again.");
+  const metadata = await capture(paths, inputBounds.maxInputBytes);
+  if (manifest && metadata.files.find(file => file.path === manifestPath)?.sha256 !== manifest.sha256) throw new Error("The app declaration changed. Prepare the app again.");
+  return { declared, schemaPath, metadata };
+}
+
+async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
+  versionId: string, allowed: (path: string) => boolean, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+  const { adapter, signal, assertCurrent } = dependencies;
+  const { declared, schemaPath, metadata } = await selectAppSources(input, versionId, allowed, dependencies);
+  const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
+  assertCurrent();
   const capabilities: AppPublicationCandidate["capabilities"] = [];
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
