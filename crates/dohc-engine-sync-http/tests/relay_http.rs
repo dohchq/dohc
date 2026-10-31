@@ -1315,6 +1315,13 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "link_name_already_set"
         | "notice_list_full"
         | "restore-in-progress"
+        | "edits-pending"
+        | "host-diverged"
+        | "host-paused"
+        | "host-no-edit-grant"
+        | "host-moved"
+        | "host-start-failed"
+        | "host-not-loaded"
         | "stale" => RelayError::Conflict,
         "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,

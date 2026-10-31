@@ -1071,7 +1071,9 @@ it.skipIf(engine.missing).each([
         relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
           if (offline) throw new Error("offline");
           const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"}});
-          expect(response.ok).toBe(true); return await response.json() as R;
+          // A refusal's status and body name why, as the relay answered it.
+          const refusal = response.ok ? undefined : `${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${await response.text()}`;
+          expect(response.ok, refusal).toBe(true); return await response.json() as R;
         }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
@@ -1196,6 +1198,17 @@ it.skipIf(engine.missing).each([
       const ready = {ready: true, row: expect.objectContaining({path, status: "ready"})};
       // The operator's reports that the session host holds the document.
       const reports = () => relayServer!.diagnostics().stderr.split(`Live editing of ${path} in workspace ${workspaceId} is held`).length - 1;
+      // The relay's activations, the session host's copy and the relay's log, for a row that never became ready.
+      const notReady = async (error: unknown): Promise<never> => {
+        const db = new DatabaseSync(relayOptions.dbPath, {readOnly: true});
+        let activations: unknown;
+        try {
+          activations = db.prepare(`SELECT activation_id,predecessor_activation_id,object_id,lineage_claim_id,completion_json IS NOT NULL AS completed,
+            retire_requested_at_ms,retire_restore_generation,retired_at_ms FROM sync_relay_service_activations WHERE workspace_id=?`).all(workspaceId);
+        } finally {db.close();}
+        throw new Error(JSON.stringify({discoveryPayload, activations, hostDocument: await hostDocumentState(),
+          diagnostics: relayServer!.diagnostics()}), {cause: error});
+      };
       await resume();
       if (preStopFeed) {
         // Finish the pre-Stop pass, then hold the fresh feed before it can fence the stale copy.
@@ -1212,7 +1225,7 @@ it.skipIf(engine.missing).each([
         await waitForHostedLog(resumedFeed, resumedFeed.delivered, "resumed delivery");
       }
       // A successor captures the stopped edit, and the session host's copy has it.
-      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready).catch(notReady);
       expect(await hostDocumentState()).toBe("ready");
       expect(reports()).toBe(0);
       // The settlement commits before the engine writes the file.
@@ -1226,7 +1239,7 @@ it.skipIf(engine.missing).each([
       await relayServer.stop();
       relayServer = await spawnSyncRelay(relayOptions);
       proxy.routeRelayTo(relayServer.baseUrl);
-      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready).catch(notReady);
       expect(await hostDocumentState()).toBe("ready");
       expect(reports()).toBe(0);
       // Another document of the workspace also starts live editing.

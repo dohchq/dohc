@@ -2669,12 +2669,12 @@ fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
 
 /// An owner observed at restore generation 0 and accepted cursor 0.
 struct RestoreOwner {
-    _scratch: ScratchDir,
     store: EngineStore,
     observed: dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding,
     checkpoint: Vec<u8>,
     initial_text: String,
     initial_moment: String,
+    _scratch: ScratchDir,
 }
 
 fn restore_owner() -> RestoreOwner {
@@ -2759,6 +2759,14 @@ fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> Restor
         initial_text: initial_text.into(),
         initial_moment,
     }
+}
+
+#[test]
+fn restore_owner_drop_removes_scratch() {
+    let owner = restore_owner();
+    let path = owner._scratch.path().to_owned();
+    drop(owner);
+    assert!(!path.exists(), "scratch cleanup left {}", path.display());
 }
 
 #[test]
