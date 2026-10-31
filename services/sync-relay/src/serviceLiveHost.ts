@@ -783,9 +783,10 @@ export async function startServiceLiveHost(options: {
         return gone(key, row, joined);
       }
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
-      if (recovering.has(key) && activation!.retained(row.target)) {
+      // Recovery holds the document without its target, and parking removes one, so its reads name its object.
+      if (recovering.has(key) && activation!.retained(row.target, row.objectId)) {
         let outcome;
-        try {outcome = await activation!.activate(row.target, joined, settleTarget);}
+        try {outcome = await activation!.activate(row.target, joined, settleTarget, undefined, row.objectId);}
         catch (error) {
           if (!isHostedDocumentUnready(error)) throw error;
           return awaitParking(key, row);
@@ -817,16 +818,22 @@ export async function startServiceLiveHost(options: {
       return gone(key, row, joined);
     };
     // Resolves to why a moved document whose activation has a restore stays, or undefined once it goes. With no
-    // retirement open, as when another Edit grant still covers the document, it stays while that restore is unfinished.
-    // With one, it stays until the retirement retires it, and while refused edits wait for their recovery copy before
-    // retirement can run. A retirement that departs as an ordinary unload leaves it as any moved document an earlier
-    // daemon left: unsettled, and kept only while its owner has no recovery copy of edits this host refused.
+    // retirement open, as when another Edit grant still covers the document, it stays while that restore is unfinished,
+    // then until the engine unloads what the route loaded. One hosted again at its path goes at once, without an
+    // unload: its own target carries the restore and the session. With a retirement open, it stays until the
+    // retirement retires it, and while refused edits wait for their recovery copy before retirement can run. A
+    // retirement that departs as an ordinary unload leaves it as any moved document an earlier daemon left:
+    // unsettled, and kept only while its owner has no recovery copy of edits this host refused.
     const keepMovedRestore = async (key: string, joined: AbortSignal) => {
       const row = movedRestores.get(key);
       if (!row) return undefined;
       const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
       if (!storage.serviceActivationRetirement(document)) {
-        if (storage.serviceRestoreInProgress(document)) return RESTORING;
+        if (hostedKey(document) === undefined) {
+          if (storage.serviceRestoreInProgress(document)) return RESTORING;
+          const waiting = await unloadMovedRestore(row, joined);
+          if (waiting !== undefined) return waiting;
+        }
       } else {
         const waiting = await retire(key, joined);
         if (waiting !== null) return waiting;
@@ -835,6 +842,24 @@ export async function startServiceLiveHost(options: {
       forgetMovedRestore(key);
       if (uncopied(row)) retained.set(documentKey(document), row);
       return undefined;
+    };
+    // Resolves to why the engine still holds what a moved document's restore route loaded, or undefined once
+    // nothing of it is loaded. Its restore steps may have loaded the document without an owner here, so it always
+    // unloads. As for a document that leaves, it first settles through the route's owner, if one exists, and publishes.
+    const unloadMovedRestore = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      const owner = activation!.movedOwner(row.target, row.objectId);
+      const leave = async (operation: AbortSignal) => {
+        if (owner) {
+          if (settleTarget) {
+            const settled = await owner.consumer.settle(owner.document, operation);
+            if (settlementPending(settled)) return settled.reason;
+            if (!settled.materialized) return "Settlement has not reached the file.";
+          }
+          if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
+        }
+        return requestUnload(row, operation);
+      };
+      return owner ? await runDocument(owner.document, joined, leave) : await leave(joined);
     };
     // Resolves to why a retained document stays, or undefined once its owner has
     // a recovery copy of every refusal, when its rows go too. Nothing delivers

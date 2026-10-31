@@ -2919,7 +2919,8 @@ it("keeps a moved document's restore route while a refused edit waits for its re
 // document opens no retirement. A restarted host still keeps the moved
 // document's route while that restore is unfinished, so the restore's steps
 // and the owner's Decline reach the engine through it, and the route ends with
-// the restore. Nothing retires the activation.
+// the restore, once the engine unloaded what the route loaded. Nothing retires
+// the activation, and the workspace drains.
 it("keeps a moved document's route for a restore that opened no retirement until the owner declines it", async () => {
   const {o, host} = await movedDuringRestore({covered: true});
   await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
@@ -2930,6 +2931,47 @@ it("keeps a moved document's route for a restore that opened no retirement until
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   expect(retiredRow(o).retired).toBe(false);
   expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+});
+
+// Proves: a moved document whose restore opened no retirement, and that moves
+// back to its enrolled path while the restore is unfinished, leaves its route
+// as soon as its path hosts it again, before the restore ends. Its hosted
+// target then carries the restore with the one capture it made, and the route
+// ends without an unload, which would end the hosted target's session.
+it("ends a no-retirement restore route without an unload once the moved document is hosted at its path again", async () => {
+  const {o, host, log, driver} = await movedDuringRestore({covered: true});
+  const forgetMoved = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], departing: []});
+  log.mockClear();
+  await vi.waitFor(() => expect(forgetMoved).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId), {timeout: 10_000});
+  await vi.waitFor(() => expect(captures()).toBe(1), {timeout: 10_000});
+  const pulls = () => engineMethods(o.client()).filter(method => method === "sync.pullHosted").length, seen = pulls();
+  await vi.waitFor(() => expect(pulls()).toBeGreaterThan(seen + 1), {timeout: 10_000});
+  expect(log).not.toHaveBeenCalledWith(...waiting("Waiting for its restore to finish."));
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(captures()).toBe(1);
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(forgetMoved).toHaveBeenCalledTimes(1);
+  expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
+  expect(host.retains(o.sibling)).toBe(true);
+  expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path, shareId: o.sibling.shareId})]);
+});
+
+// Proves: activation reads that name an object, as departure recovery's do for
+// a document it holds without a target, find that object's activation and not
+// another's at the same path.
+it("reads a recovered departure's retained activation by its object at a shared path", async () => {
+  const {o, other, driver} = await movedDuringRestore({replacement: true});
+  driver()!.removeTarget(other);
+  expect(driver()!.retained(other)).toBe(true);
+  expect(driver()!.retained(other, other.objectId)).toBe(false);
+  expect(driver()!.retained(other, o.document.objectId)).toBe(true);
+  driver()!.addTarget(other, other.objectId);
 });
 
 // Proves: a replacement document hosted at a moved document's old path reads

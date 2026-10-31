@@ -151,6 +151,12 @@ export class ServiceActivationDriver {
   }
   /** Forgets a document the engine no longer holds, so a later pass activates it from its retained source. */
   removeTarget(target:ServiceActivationTarget){this.#forget(targetKey(target));}
+  /** The document and consumer of the owner a restore step built through a moved document's route, if one did. */
+  movedOwner(target:ServiceActivationTarget,objectId:string){
+    const slot=movedKey(target,objectId);
+    for(const [document,owner] of this.#owners)if(owner.target===slot)return {document:parseLiveDocumentKey(JSON.parse(document)),consumer:owner.consumer};
+    return undefined;
+  }
   /** Forgets the target of a moved document's restore, which `restoreConsumer` and `retire` were given as moved. */
   forgetMoved(target:ServiceActivationTarget,objectId:string){this.#forget(movedKey(target,objectId));}
   #forget(key:string){
@@ -260,13 +266,14 @@ export class ServiceActivationDriver {
   hasRetained(){
     return this.#targets.some(target=>this.retained(target));
   }
-  /** Whether the relay retains an activation of the document at the target's path. */
-  retained(target:ServiceActivationTarget){
-    return this.activationId(target)!==undefined;
+  /** Whether the relay retains an activation of the document at the target's path. `objectId` is as for `activationId`. */
+  retained(target:ServiceActivationTarget,objectId?:string){
+    return this.activationId(target,objectId)!==undefined;
   }
   /**
    * The activation the relay retains at the target's path, which an unload of its document names.
-   * A host that removed the target while its document parks names that document as `objectId`.
+   * A host that holds a document without its target, or removed the target while the document parks,
+   * names that document as `objectId`.
    */
   activationId(target:ServiceActivationTarget,objectId?:string){
     return this.#read(target,objectId)?.activationId;
@@ -551,9 +558,10 @@ export class ServiceActivationDriver {
    * Without it, a retained activation resumes without that pull: its
    * caller pulled already, or the document left the hosted set, and a pull
    * would adopt the scope it left, after which the engine no longer captures it.
+   * `objectId` is as for `activationId`.
    */
   async activate(target:ServiceActivationTarget,signal:AbortSignal,
-    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp){
+    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp,objectId?:string){
     const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -578,7 +586,7 @@ export class ServiceActivationDriver {
     if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
       return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
     }
-    let saved=this.#read(target);
+    let saved=this.#read(target,objectId);
     if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     if(saved)this.#objects.set(key,saved.source.objectId);
@@ -634,7 +642,7 @@ export class ServiceActivationDriver {
         }
         this.#staleLeases.delete(key);
         o.registered();
-        saved=this.#read(target)!;
+        saved=this.#read(target,objectId)!;
       }
       document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
         objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
