@@ -5918,10 +5918,12 @@ export const UpdateStateEvent = z.object({
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
   // The step that failed, while its state stands; `message` says why. A new
-  // id is a new failure to report.
+  // id is a new failure to report. `notInstalled` is the version of an update
+  // a person chose that dohc opened without.
   failure: z.object({
     step: z.enum(["check", "download", "install"]),
     id: z.number().int().positive(),
+    notInstalled: z.string().min(1).max(200).optional(),
   }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
