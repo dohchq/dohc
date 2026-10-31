@@ -37,6 +37,7 @@ import {nativeBaseRecord} from '../../../services/sync-relay/src/storage/service
 import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
 import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerRestoreRoutes.js'
 import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
+import {preparedStop} from '../../../services/sync-relay/src/liveTickets.test-helper.js'
 import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -1286,7 +1287,8 @@ function enroll(f:ReturnType<typeof fixture>){
     VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)`)
   return f.storage.enrollServiceHostDocument({...enrollment,nowMs:1})
 }
-const stopDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:false,retire:true,nowMs})
+// Stops as a running service host does, with its preparation of the activation its engine blocked.
+const stopDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>preparedStop(f.storage,{...enrollment,enabled:false,retire:true,nowMs})
 const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs})
 const retirement=(storage:unknown)=>readServiceActivationRetirement(storage as StorageContext,{workspaceId:'workspace',objectId:'object'})
 const generation=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
