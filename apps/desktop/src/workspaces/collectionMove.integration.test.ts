@@ -140,6 +140,9 @@ it("gives a teammate access to a Collection on this computer by moving it to the
   controller.abort();
 });
 
+// What a person sees when the server stops answering partway through a move.
+const stopped = "This Collection didn't finish moving to relay.test. Its records are kept on this computer.";
+
 // The first chunk of an upload, then a broken connection.
 function firstChunkOnly(body: ReadableStream<Uint8Array>) {
   const reader = body.getReader();
@@ -167,13 +170,13 @@ it.each([
       await upload(init, send).catch(() => undefined);
       throw Error("The server stopped answering.");
     } });
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
   expect(transferStatus(id(1))?.state).toBe("ready");
 
   // After a restart, a read tries to finish the move. While the server is still away it fails, and the Collection stays fenced.
   await restart();
-  await expect(collection("window", { ...address, action: "permissions" })).rejects.toThrow("The server stopped answering.");
-  await expect(ownerInvoke(id(6), "owner-while-moving", { name: "Too late" })).rejects.toThrow("The server stopped answering.");
+  await expect(collection("window", { ...address, action: "permissions" })).rejects.toThrow(stopped);
+  await expect(ownerInvoke(id(6), "owner-while-moving", { name: "Too late" })).rejects.toThrow(stopped);
   expect(transferStatus(id(1))?.state).toBe("ready");
 
   // Once the server answers, the next read finishes the move with the owner's record, and access saves with no new agreement.
@@ -200,7 +203,7 @@ it("leaves a stopped move alone until a person tries it again, so the reads a ch
       throw Error("The server stopped answering.");
     } });
   readAgain = () => { reads.push(collection("window", { ...address, action: "describe" }).catch(() => undefined)); };
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
   expect(transferStatus(id(1))?.state).toBe("ready");
 
   // The move's own check of its upload is the one refusal so far. Every read the move set off settles without trying it again.
@@ -211,7 +214,7 @@ it("leaves a stopped move alone until a person tries it again, so the reads a ch
   expect({ pending, afterStop }).toEqual({ pending: 0, afterStop: 1 });
 
   // A person's Try again tries the move once, and its stop sets off nothing either.
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow("The server stopped answering.");
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
   expect(refusals).toBe(2);
   down = false;
   await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
