@@ -36,6 +36,11 @@ import { createLiveMarkdownHistoryValidator, createLiveMarkdownJournalValidator,
 import { hostedWindowCovers, releasedLineageBindingDigest, type HostedWindow, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
 import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
+import { nativeSettlementId, prepareHostedSettlements, settlementRecordDigest } from "./storage/hostedSettlement.js";
+import { stableJsonStringify } from "./canonicalJson.js";
+import { encodeNativeRestoreProposal } from "./liveRestoreProposal.js";
+import { resolveLiveRestorePoint } from "../../../packages/ydoc-projection/src/liveRestorePoint.js";
+import { policy as restorePolicy, restore as restoreValidation } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises",async importOriginal => {
@@ -2755,7 +2760,8 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
 // `kept` first records an edit the server refused. Unless `stopped` is false,
 // the restore's first step runs before the restart. `pending` has the relay
 // accept an edit after the adoption cut that no activation pass delivers.
-const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true, pending = false} = {}) => {
+// `admitted` configures restore preparation on the restarted host.
+const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true, pending = false, admitted = false} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
@@ -2772,6 +2778,7 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
   if (stopped) await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
   await o.host.close(); log.mockClear(); o.passes.deliver = true;
+  if (admitted) {Object.assign(o.f.config, {restore: RESTORE}); await o.f.save();}
   moveAway(o);
   const other = {...o.sibling, objectId: "another-object"};
   let driver: ServiceActivationDriver | undefined;
@@ -2789,23 +2796,98 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   expect(host.drained("workspace")).toBe(false);
   return {o, host, other, log, k, driver: () => driver};
 };
-// Stands in for an admitted restore's completion through owner delivery. As a
-// real admission does, it moves the open retirement's accepted-through to the
-// restore's own cursor, so the retirement after it names a new key. The relay's
-// retirement completion is mocked to retire it.
-const admittedCompletion = (o: Enrolled) => {
-  let finished = false;
-  const progress = o.f.storage.serviceRestoreInProgress.bind(o.f.storage);
-  vi.spyOn(o.f.storage, "serviceRestoreInProgress").mockImplementation(document => !finished && progress(document));
-  const completed = {phase: "resumed"} as never, before = retirementKey(o);
-  const completeRestore = vi.spyOn(OwnerCommittedDelivery.prototype, "completeRestore").mockImplementation(async () => {
-    o.raw.prepare("UPDATE sync_relay_service_activations SET retire_accepted_cursor=? WHERE activation_id=?").run(before.acceptedThrough + 1, ACTIVATION);
-    finished = true;
-    return completed;
-  });
-  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement").mockReturnValue({status: "retired", replayed: false});
-  cleanup.push(async () => {completeRestore.mockRestore(); complete.mockRestore();});
-  return {completed, completeRestore, complete, moved: {...before, acceptedThrough: before.acceptedThrough + 1}};
+// Restore preparation as liveRestoreDrain.test.ts configures it.
+const RESTORE = {maxBytes: 1_000_000, maxEvents: 10, aggregateBytes: 17_000_000, workingReserveBytes: 1_000_000, maxOperations: 1, validation: restorePolicy};
+// An admitted restore's real end, as liveRestoreDrain.test.ts builds it. The
+// engine commits the restore's native fence, and the owner's host proposes a
+// content-valid candidate that restores the selected point, which the relay
+// records. Completing it through `host` then has the relay admit the proposal,
+// which moves the open retirement's accepted-through to the restore's own
+// cursor, and acknowledge the engine's apply, settle and resume, which answer
+// from the admission the relay holds. `publish` appends the restore's
+// settlement, as the retiring host's push does, which the retirement waits for.
+const admittedRestore = async (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>) => {
+  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history), coordinate = host.coordinate;
+  const input = {...stopLookup, host: coordinate, maxBytes: RESTORE.maxBytes, maxEvents: RESTORE.maxEvents};
+  const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
+  const fence = {operation: store.pendingStopRestoreFence(input).operation, localHeadSequence: 11, recordedAtMs: 100};
+  store.acknowledgeStopRestoreFence(input, fence);
+  const selected = store.captureStopRestorePoint(input), accepted = store.captureStopRestoreAcceptedCut(input);
+  const point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
+  let encoded: Uint8Array;
+  try {
+    Y.applyUpdate(point, selected.checkpoint.bytes); for (const e of selected.events) Y.applyUpdate(point, e.updateBytes);
+    Y.applyUpdate(head, accepted.checkpoint.bytes); for (const e of accepted.events) Y.applyUpdate(head, e.updateBytes);
+    const frozen = Y.encodeStateAsUpdate(head), pointBytes = Y.encodeStateAsUpdate(point), vector = Y.encodeStateVector(head);
+    const used = Y.decodeStateVector(vector); let client = 1; while (used.has(client)) client++; head.clientID = client;
+    head.transact(() => {
+      const body = head.getXmlFragment("body"); body.delete(0, body.length);
+      body.insert(0, point.getXmlFragment("body").toArray().map(node => {
+        if (!(node instanceof Y.XmlElement || node instanceof Y.XmlText)) throw new Error("Unexpected fixture body.");
+        return node.clone();
+      }));
+      const fields = head.getMap("frontmatter"); for (const key of fields.keys()) fields.delete(key);
+      for (const [key, value] of point.getMap("frontmatter").entries()) fields.set(key, structuredClone(value));
+    });
+    const candidate = Y.encodeStateAsUpdate(head, vector);
+    const validated = createLiveMarkdownJournalValidator(restorePolicy)({document: o.document, currentPath: selected.binding.currentPath,
+      checkpoint: frozen, suffix: [], candidate});
+    if (validated.kind !== "accepted") throw new Error(validated.reason);
+    const receipt = {fence, point: resolveLiveRestorePoint(selected, restorePolicy), candidateDigest: sha256(candidate), frozenStateDigest: sha256(frozen),
+      pointStateDigest: sha256(pointBytes), finalContentDigest: "d".repeat(64), beforeStateVector: [...vector], afterStateVector: [...Y.encodeStateVector(head)],
+      replacementRanges: [...validated.evidence.candidate.ranges], originEvidenceDigest: store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
+      selectedHistory: selected.proof, acceptedHistory: accepted.proof, nativeSources: [], nativeSourceManifestDigest: jsonHash([fence, []])};
+    encoded = encodeNativeRestoreProposal(JSON.stringify(receipt), {candidateBytes: candidate, frozenStateBytes: frozen, pointStateBytes: pointBytes, nativeSourceBytes: []}, input);
+  } finally {point.destroy(); head.destroy();}
+  const {proposalDigest} = await store.recordStopRestoreProposal(input, encoded, restoreValidation, 200);
+  const hostCoordinate = {hostId: coordinate.hostId, hostEpoch: coordinate.hostEpoch, instanceId: coordinate.instanceId, connectionId: coordinate.connectionId};
+  const admission = () => {
+    const lifecycle = store.readStopRestoreLifecycle(input);
+    if (!lifecycle) throw new Error("Missing restore admission.");
+    return lifecycle;
+  };
+  // The engine's receipts, as admitRestore in liveRestoreDrain.test.ts builds them.
+  const answer = (operation: string) => {
+    const {preparation, candidateDigest, nativeSourceManifestDigest, admitted} = admission(), localHeadSequence = preparation.fence.localHeadSequence + 1;
+    const settlementId = "restore-settlement", momentId = "restore-moment", markdownDigest = preparation.point.markdownDigest;
+    if (operation === "apply") return {fence: preparation.fence, candidateDigest, nativeSourceManifestDigest, admitted, localHeadSequence, hostCoordinate, recordedAtMs: 202};
+    if (operation === "settle") return {settlementId, previousCursor: 0, terminalCursor: admitted.accepted.receipt.journalCursor, applicationCount: 3,
+      localYDocSequence: localHeadSequence, momentId, markdownDigest, materialized: true, collectionReconcileRequired: false};
+    return {relayDatabaseNamespace: preparation.fence.operation.relayDatabaseNamespace, operationId: stopLookup.operationId, binding: admitted.accepted.binding,
+      applicationReceipt: admitted.accepted.receipt, settlementId, momentId, markdownDigest, localHeadSequence, recordedAtMs: 204};
+  };
+  const sendLiveRestore = vi.fn(async (_request: unknown, operation: string) => ({bytes: Buffer.from(JSON.stringify(answer(operation)))}));
+  Object.assign(o.client(), {sendLiveRestore});
+  // Proves and appends the restore's settlement moment, as publishRestore in liveRestoreDrain.test.ts does.
+  const publish = async () => {
+    const {admitted} = admission(), document = o.document, terminal = admitted.accepted.receipt.journalCursor, binding = {...admitted.accepted.binding};
+    const row = o.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!;
+    const bytes = row.validation_checkpoint_bytes as Uint8Array;
+    const normalized = createLiveMarkdownRegistrationValidator(restorePolicy)({document, currentPath: binding.currentPath, checkpoint: bytes});
+    if (normalized.kind !== "accepted") throw new Error(normalized.reason);
+    const markdown = Buffer.from(normalized.evidence.projectedMarkdown), markdownDigest = sha256(markdown), stateDigest = sha256(bytes);
+    for (const [digest, content] of [[stateDigest, bytes], [markdownDigest, markdown]] as const)
+      o.f.storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content, createdAtMs: 1});
+    const before = String(o.raw.prepare("SELECT baseline_projected_sha256 FROM sync_relay_live_documents WHERE object_id=?").get(document.objectId)!.baseline_projected_sha256);
+    const namespace = String(row.relay_database_namespace), key = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+    const acceptedEventCount = Number(row.accepted_event_count);
+    const record = {settlementId: "", relayDatabaseNamespace: namespace, binding, hostCoordinate, previousCursor: 0, terminalCursor: terminal,
+      previousYdocSequence: 0, localYdocSequence: 1, applicationCount: acceptedEventCount, nativeIntervalDigest: sha256(Buffer.from("native-interval-restore")), acceptedEventCount,
+      acceptedIntervalDigest: jsonHash(["live-settlement-accepted-interval-v1", key, [0, 0, initialAcceptedHistoryDigest(namespace, document)],
+        [acceptedEventCount, terminal, row.accepted_evidence_digest]]),
+      momentId: "restore-publication", markdownDigest, sourceStateVectorDigest: sha256(Buffer.from("state-vector-restore")), acceptedStateBlobSha256: stateDigest,
+      recordedAtMs: 1, restoreOperationId: null};
+    record.settlementId = nativeSettlementId(record);
+    const payload = {momentId: record.momentId, objectId: document.objectId, versionId: "main", path: binding.currentPath, operation: "write",
+      payloadBeforePath: binding.currentPath, payloadAfterPath: binding.currentPath, payloadBeforeContentKind: "text", payloadAfterContentKind: "text",
+      payloadBeforeBlobSha256: before, payloadAfterBlobSha256: markdownDigest, payloadAfterByteLength: markdown.byteLength, recordedAtMs: 1,
+      settlementReference: {formatVersion: 1, recordDigest: settlementRecordDigest(record), record}};
+    const op = {originSeq: 0, opKind: "moment.append", payloadJson: stableJsonStringify(payload), recordedAtMs: 1};
+    await prepareHostedSettlements(o.f.storage as StorageContext, {workspaceId: "workspace", originId: "proof", ops: [op]});
+    expect(op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [op]})).toMatchObject({inserted: 1});
+  };
+  return {proposalDigest, sendLiveRestore, publish, before: retirementKey(o)};
 };
 
 // Proves: a restarted host keeps the route of a moved document's unfinished
@@ -2834,25 +2916,34 @@ it.each([false, true])("keeps a moved document's restore route after a restart u
 });
 
 // Proves: a moved document's restore that the relay admitted, which no Decline
-// can end, completes through the restarted host's route. Its retirement then
-// runs at the key the completion left, not the one before it, and the route
-// ends. Owner delivery's completion stands in for the restore's own steps; the
-// relay finishing an admitted restore after a rename, and completing its
-// retirement, is proved in liveRestoreDrain.test.ts.
+// can end, completes through the restarted host's route: the relay admits it
+// and records each engine step through resume. Once the restore's settlement
+// is published, its retirement runs at the key the admission left, not the one
+// before it, and completes, and the route ends.
 it("completes a moved document's admitted restore through a restarted host, then retires it", async () => {
-  const {o, host} = await movedDuringRestore();
-  const {completed, completeRestore, complete, moved} = admittedCompletion(o);
-  await expect(host.completeRestore(stopLookup, "proposal")).resolves.toBe(completed);
-  expect(completeRestore).toHaveBeenCalledWith(stopLookup, "proposal", expect.any(AbortSignal));
-  expect(retirementKey(o)).toEqual(moved);
+  const {o, host} = await movedDuringRestore({admitted: true});
+  const {proposalDigest, sendLiveRestore, publish, before} = await admittedRestore(o, host);
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
+  await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  expect(sendLiveRestore.mock.calls.map(call => call[1])).toEqual(["apply", "settle", "resume"]);
+  expect(o.f.storage.readStopRestore(stopLookup)?.phase).toBe("resumed");
+  const moved = retirementKey(o);
+  expect(moved.acceptedThrough).toBeGreaterThan(before.acceptedThrough);
+  expect(retiredRow(o).retired).toBe(false);
+  await publish();
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
-  expect(complete).toHaveBeenCalledWith(expect.objectContaining({key: moved}));
-  expect(retiringSettles(o, 0)).toEqual([["liveApplication.settle", expect.objectContaining({retirement: moved})]]);
+  expect(retiredRow(o).retired).toBe(true);
+  expect(complete).toHaveBeenLastCalledWith(expect.objectContaining({key: moved}));
+  expect(complete).not.toHaveBeenCalledWith(expect.objectContaining({key: before}));
+  // The retirement may settle again on each pass that waited for the settlement.
+  const settles = retiringSettles(o, 0).map(([, params]) => (params as {retirement: unknown}).retirement);
+  expect(settles.length).toBeGreaterThan(0);
+  expect(settles).toEqual(settles.map(() => moved));
   expect(leaving(o)).toContain("liveApplication.releaseActivation");
   expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
   expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
   expect(host.retains(o.sibling)).toBe(false);
-  await expect(host.completeRestore(stopLookup, "proposal")).rejects.toThrow("Service restore source is unavailable.");
+  await expect(host.completeRestore(stopLookup, proposalDigest)).rejects.toThrow("Service restore source is unavailable.");
 });
 
 // Proves: once a moved document's restore ended, a restart before its
@@ -2881,18 +2972,25 @@ it.each([["liveApplication.reconcileActivation", false], ["liveApplication.relea
 
 // Proves: a restart after a moved document's admitted restore completed, but
 // before its retirement completed, still completes the retirement, at the key
-// the completion left.
+// the admission left.
 it("completes a moved document's retirement after a restart that follows its admitted restore", async () => {
-  const {o, host} = await movedDuringRestore();
-  const {complete, moved} = admittedCompletion(o);
+  const {o, host} = await movedDuringRestore({admitted: true});
+  const {proposalDigest, publish, before} = await admittedRestore(o, host);
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
   const reached = unansweredAfter(o, "liveApplication.reconcileActivation", 0);
-  await host.completeRestore(stopLookup, "proposal");
+  await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  const moved = retirementKey(o);
+  expect(moved.acceptedThrough).toBeGreaterThan(before.acceptedThrough);
+  await publish();
   await reached;
   await host.close();
   expect(complete).not.toHaveBeenCalled();
+  expect(retiredRow(o).retired).toBe(false);
   const restarted = await restartedHost(o);
   await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true), {timeout: 10_000});
-  expect(complete).toHaveBeenCalledWith(expect.objectContaining({key: moved}));
+  expect(retiredRow(o).retired).toBe(true);
+  expect(complete).toHaveBeenLastCalledWith(expect.objectContaining({key: moved}));
+  expect(complete).not.toHaveBeenCalledWith(expect.objectContaining({key: before}));
   expect(leaving(o)).toContain("liveApplication.releaseActivation");
   expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
 });
