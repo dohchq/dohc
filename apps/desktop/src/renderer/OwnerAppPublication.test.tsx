@@ -1158,6 +1158,19 @@ describe("owner app publication", () => {
       expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
     });
 
+    it.each([
+      ["an active", true],
+      ["an inactive", false],
+    ])("offers Open in browser in state 2 only for %s approval", async (_, active) => {
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, active }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe(active ? "Approved on this device" : "Approved on this deviceInactive on this device");
+      expect(screen.getByRole("button", { name: "Done" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
+      expect(!!screen.queryByRole("button", { name: "Open in browser" })).toBe(active);
+    });
+
     it("shows a failed Open in browser in place, and sends it to Notices only once the dialog closes", async () => {
       const reportError = vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
       const answers = local([localRow]);
