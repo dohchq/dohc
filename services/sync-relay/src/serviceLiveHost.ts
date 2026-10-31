@@ -471,7 +471,7 @@ export async function startServiceLiveHost(options: {
       check();
     }
     const registerRetained = () => {
-      if (registered || (!activation?.hasRetained() && !movedRestores.size)) return;
+      if (registered || (!activation?.hasRetained() && !movedRestores.size && !retained.size)) return;
       if(!storage.registerLiveHost({...coordinate,updatedAtMs:Date.now(),guard:standing}).ok)throw new Error("Retained service host registration refused.");
       registered=true;check();
     };
@@ -832,7 +832,7 @@ export async function startServiceLiveHost(options: {
       if (!storage.serviceActivationRetirement(document)) {
         if (storage.serviceRestoreInProgress(document)) return RESTORING;
         if (hostedKey(document) === undefined) {
-          const waiting = await unloadMovedRestore(row, joined);
+          const waiting = await unloadMovedRestore(key, row, joined);
           if (waiting !== undefined) return waiting;
         }
       } else {
@@ -845,13 +845,28 @@ export async function startServiceLiveHost(options: {
       return undefined;
     };
     // Resolves to why the engine still holds what a moved document's restore route loaded, or undefined once
-    // nothing of it is loaded. Its restore steps may have loaded the document without an owner here, so it always
-    // unloads. It never settles: the route's owner never completes, so no live edit reaches it, and the restore
-    // settles its own applications. The engine answers an unload over unsettled work as pending, which keeps the
-    // route. With an owner, the unload runs in its document's work, after any restore step there.
-    const unloadMovedRestore = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
-      const owner = activation!.movedOwner(row.target, row.objectId);
-      return owner ? await runDocument(owner.document, joined, operation => requestUnload(row, operation)) : await requestUnload(row, joined);
+    // nothing of it is loaded. Its restore ended, but a step may have applied accepted edits that a Decline does not
+    // settle. So, in the document's work and as for a document whose owner lost live authority, it settles what the
+    // engine applied from durable state at the finished restore's binding, publishes, then unloads. It never
+    // settles through the route's owner, which never completes. A queue frozen at its owner's adoption seed stays
+    // unsettled, as on departure. The engine answers an unload over unsettled work as pending, which keeps the route.
+    const unloadMovedRestore = async (key: string, row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      const document = activation!.departing(row.target, joined, row.objectId);
+      if (!document) return requestUnload(row, joined);
+      return runDocument(document, joined, async operation => {
+        let heads = heldOf.get(key);
+        if (!heads) {heads = await endKeptRetries(row, operation, true); heldOf.set(key, heads);}
+        if (settleTarget && !heads.seeded.has(document.lineageClaimId)) {
+          const settled = await activation!.settleDeparted(row.target, document, operation);
+          // One the engine refuses as not ready is left to the unload, which answers pending over unsettled work.
+          if (settled?.kind === "pending") return settled.reason;
+          if (settled?.kind === "settled") {
+            if (!settled.settlement.materialized) return "Settlement has not reached the file.";
+            if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
+          }
+        }
+        return requestUnload(row, operation);
+      });
     };
     // Resolves to why a retained document stays, or undefined once its owner has
     // a recovery copy of every refusal, when its rows go too. Nothing delivers

@@ -2743,12 +2743,14 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
 // retirement, unless another Edit grant still covers it: then `paused` opens it
 // by the owner's Pause after the restore began, and `covered` leaves none open.
 // `kept` first records an edit the server refused. Unless `stopped` is false,
-// the restore's first step runs before the restart.
-const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true} = {}) => {
+// the restore's first step runs before the restart. `pending` has the relay
+// accept an edit after the adoption cut that no activation pass delivers.
+const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true, pending = false} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
   if (paused || covered) anotherEditGrant(o);
+  if (pending) {o.passes.deliver = false; o.acceptEdit("pending");}
   o.beginRestore();
   if (paused) o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
   // A covered document opens no retirement, so it stays hosted until the restart.
@@ -2759,7 +2761,7 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
   }
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
   if (stopped) await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
-  await o.host.close(); log.mockClear();
+  await o.host.close(); log.mockClear(); o.passes.deliver = true;
   moveAway(o);
   const other = {...o.sibling, objectId: "another-object"};
   let driver: ServiceActivationDriver | undefined;
@@ -2950,10 +2952,10 @@ it("keeps a moved document's route for a restore that opened no retirement until
 // document through its route, so the route has an owner, the route still ends
 // with the restore after the owner's Decline. The engine unloads what the route
 // loaded, and nothing settles through the route's owner, which never completed.
+// What the route settles comes from durable state; the next test covers it.
 it("unloads a no-retirement restore route that captured its document once the owner declines it", async () => {
   const {o, host} = await movedDuringRestore({covered: true, stopped: false});
   const captures = () => o.client().captureOwnerActivation.mock.calls.length;
-  const movedOwner = vi.spyOn(ServiceActivationDriver.prototype, "movedOwner");
   // A restore step checks the document's current moment at its path.
   vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
   await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
@@ -2964,9 +2966,32 @@ it("unloads a no-retirement restore route that captured its document once the ow
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
   await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
-  expect(movedOwner.mock.results.some(result => result.value !== undefined)).toBe(true);
   expect(leaving(o)).toContain("liveApplication.unloadDocument");
   expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+});
+
+// Proves: a restore step through a moved document's route can apply an edit the
+// relay accepted after the activation's adoption cut, which the owner's Decline
+// does not settle, before or after the native fence committed. Once the restore
+// ended, the route settles that edit from durable state and publishes it before
+// the engine unloads the document, and the workspace drains.
+it.each([false, true])("settles what a no-retirement restore route applied before unloading it once the owner declines it, fence committed: %s", async fenceCommitted => {
+  const {o, host} = await movedDuringRestore({covered: true, stopped: false, pending: true});
+  o.engine.fenceCommitted = fenceCommitted;
+  // A restore step checks the document's current moment at its path.
+  vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
+  expect(o.applied.has("edit-pending")).toBe(false);
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.applied.has("edit-pending")).toBe(true);
+  moveAway(o);
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  const methods = engineMethods(o.client()), settled = methods.indexOf("liveApplication.settle"), pushed = methods.indexOf("sync.push", settled);
+  expect(settled).toBeGreaterThan(-1);
+  expect(pushed).toBeGreaterThan(settled);
+  expect(methods.indexOf("liveApplication.unloadDocument", settled)).toBeGreaterThan(pushed);
+  expect(host.retains(o.sibling)).toBe(false);
 });
 
 // Proves: a moved document whose restore opened no retirement, and that moves
