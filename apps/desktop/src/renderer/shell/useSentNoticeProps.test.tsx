@@ -637,7 +637,7 @@ describe("Try again on an agent run dohc's restart or quit stopped", () => {
   // Each conversation's dispatch state, as main reads it.
   let states: Record<string, ChatDispatchStateForThreadResult>;
   const stopped = (runId: string, retryable = true): ChatDispatchStateForThreadResult =>
-    ({ ...IDLE, stoppedRun: { runId, triggerMessageId: `ask-${runId}`, ending: "quit", retryable } });
+    ({ ...IDLE, failedRun: { runId, triggerMessageId: `ask-${runId}`, words: "Nova didn't reply. dohc quit during its run.", retryable } });
   beforeEach(() => {
     states = {};
     chatDispatchStateForThread.mockImplementation(async ({ threadId }) => states[threadId] ?? IDLE);

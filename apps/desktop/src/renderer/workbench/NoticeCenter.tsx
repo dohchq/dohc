@@ -120,7 +120,7 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// A failed automation run, or an agent run that says why it didn't start. Its
+// A failed automation run, or an agent run that says why it didn't reply. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
   notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");

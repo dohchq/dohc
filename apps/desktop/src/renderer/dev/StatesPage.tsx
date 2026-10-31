@@ -9,7 +9,6 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
-  ChatDispatchStoppedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
   ChatRunRecord,
@@ -850,8 +849,8 @@ function ChatThreadSpecimen() {
         threadLocked={false}
         flashMessageId={null}
         runRecords={{}}
-        stoppedRun={null}
-        stoppedRunBusy={false}
+        failedRun={null}
+        retryBusy={false}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -869,8 +868,8 @@ function ChatThreadSpecimen() {
   );
 }
 
-// A run dohc's quit or restart stopped: under the request when it posted
-// nothing, under its last post when it did.
+// A run that didn't reply: under the request when it posted nothing, under
+// its last post when it did. Try again only after a quit or restart.
 const STOPPED_REQUEST = chatMessage("opening", "Draft day 2 from the bookings, and add the ferry times.", 0);
 const STOPPED_REPLY: ChatMessageRecord = {
   id: "stopped-reply", threadId: "post-plain", authorKind: "agent", authorDisplayName: "Claude Code",
@@ -881,7 +880,7 @@ const STOPPED_RUN: ChatRunRecord = {
   runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
   startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
 };
-function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"]; posted: boolean; retryable?: boolean; busy?: boolean }) {
+function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryable: boolean; busy?: boolean }) {
   return (
     <div className="w-[560px]">
       <ThreadMessages
@@ -892,9 +891,9 @@ function ChatStoppedRunSpecimen(props: { ending: ChatDispatchStoppedRun["ending"
         threadLocked={false}
         flashMessageId={null}
         runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
-        stoppedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", ending: props.ending, retryable: props.retryable ?? true }}
-        stoppedRunBusy={props.busy ?? false}
-        onRetryStoppedRun={noop}
+        failedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words, retryable: props.retryable }}
+        retryBusy={props.busy ?? false}
+        onRetryFailedRun={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -2417,17 +2416,20 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
           <ChatThreadSpecimen />
         </Specimen>
+        <Specimen label="failed before the agent posted">
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. Its run ended with an error." posted={false} retryable={false} />
+        </Specimen>
         <Specimen label="stopped when dohc quit, before the agent posted">
-          <ChatStoppedRunSpecimen ending="quit" posted={false} />
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable />
         </Specimen>
         <Specimen label="stopped when dohc restarted, after the agent posted">
-          <ChatStoppedRunSpecimen ending="restarted" posted />
+          <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc restarted during its run." posted retryable />
         </Specimen>
         <Specimen label="stopped, Try again pressed">
-          <ChatStoppedRunSpecimen ending="quit" posted={false} busy />
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable busy />
         </Specimen>
         <Specimen label="stopped again after its second attempt">
-          <ChatStoppedRunSpecimen ending="quit" posted retryable={false} />
+          <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc quit during its run." posted retryable={false} />
         </Specimen>
       </Section>
 
