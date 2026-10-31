@@ -2753,7 +2753,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     await source.currentClient().sendRequest({
       id: 1,
       method: "workspace.open",
-      params: { rootDir: "/root", workspaceId: "ws", ...params },
+      params: { rootDir: "/no-such-root", workspaceId: "ws", ...params },
     });
     return inner.requests.at(-1)?.params;
   }
@@ -2781,7 +2781,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     const routes = new RelayTransportRouteGuard();
     const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
     expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
-    routes.bind({ workspaceId: "ws", rootPath: "/root", relay: { baseUrl: "https://relay.test", token: "token" } });
+    routes.bind({ workspaceId: "ws", rootPath: "/no-such-root", relay: { baseUrl: "https://relay.test", token: "token" } });
     const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
     const params = await openParams(routed, inner);
     expect(params).toHaveProperty("relay");
