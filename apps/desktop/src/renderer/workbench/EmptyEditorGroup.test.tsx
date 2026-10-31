@@ -9,8 +9,9 @@ import { EmptyEditorGroup } from "./EmptyEditorGroup";
 
 afterEach(cleanup);
 
-// File tiles carry the kind registry's names.
-const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+// File tiles carry the kind registry's names, except a Markdown file, which
+// the start surface calls a Page.
+const DOCUMENT = "Page";
 const LABELS = { markdown: DOCUMENT, collection: "Collection", drawing: FILE_KIND_RECORDS.drawing.name, app: "App" };
 
 const FILES = [

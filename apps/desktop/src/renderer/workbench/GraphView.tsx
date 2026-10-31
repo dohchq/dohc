@@ -487,7 +487,7 @@ function graphStatus(
 ): string | null {
   const notices: string[] = [];
   if (shownNodeCount < graph.nodes.length) {
-    notices.push(`${shownNodeCount} of ${graph.nodes.length} docs shown`);
+    notices.push(`${shownNodeCount} of ${graph.nodes.length} pages shown`);
   }
   if (shownEdgeCount < graph.edges.length) {
     notices.push(
@@ -918,7 +918,7 @@ export function GraphView(props: {
     [graph, rows, variant],
   );
   const notice = graphStatus(graph, rows.length, shownEdgeCount);
-  const docCount = `${graph.nodes.length} doc${graph.nodes.length === 1 ? "" : "s"}`;
+  const docCount = `${graph.nodes.length} page${graph.nodes.length === 1 ? "" : "s"}`;
   const linkCount = `${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"}`;
   const counts = `${docCount} · ${linkCount}`;
 

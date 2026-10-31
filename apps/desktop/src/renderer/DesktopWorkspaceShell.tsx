@@ -292,6 +292,7 @@ import {
   siteTabPath,
   setCollectionActiveView,
   setFolderExpanded,
+  setExplorerMode,
   setOpenEditorsHeight,
   setView,
   showView,
@@ -302,6 +303,7 @@ import {
   SHARING_VIEW_ID,
   type ActivityViewId,
   type EditorGroup,
+  type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
@@ -1808,8 +1810,14 @@ export function DesktopWorkspaceShell(props: {
       quiet,
     }),
   });
-  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
   const workspaceApps = useApps(workspaceId, listingsSettled, aboutNotices, workspaceIsReady && !shareViewEnded);
+  // Every app folder: the listed apps, and any read before the list arrives.
+  const appFolders = useMemo(() => {
+    const folders = new Set(folderApps.keys());
+    const listed = workspaceApps.state;
+    if (listed.status === "ready" && listed.workspaceId === workspaceId) for (const app of listed.apps) folders.add(app.root);
+    return folders;
+  }, [folderApps, workspaceApps.state, workspaceId]);
   // The app folder of each entry file, so a file view shows Run.
   const appEntries = useMemo(() => {
     const entries = new Map<string, string>();
@@ -2724,7 +2732,7 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string) => {
+    (path: string, recent = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
@@ -2741,7 +2749,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       clearTabLimitError();
-      mutateWb(() => next);
+      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
     },
     [
       clearTabLimitError,
@@ -2761,7 +2769,7 @@ export function DesktopWorkspaceShell(props: {
   // other dohc surface — MAX_OPEN_TABS refusal included.
   const openCollectionTab = useCallback(
     (path: string) => {
-      openVirtualTab(collectionTabPath(path));
+      openVirtualTab(collectionTabPath(path), true);
     },
     [openVirtualTab],
   );
@@ -2898,7 +2906,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
     },
     [openVirtualTab],
   );
@@ -3766,11 +3774,11 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
   );
 
-  // Reveal-then-create: the inline editbox lives in the explorer view, so
-  // make that view visible first (never setView — re-selecting the active
+  // Reveal-then-create: the inline editbox lives in the explorer's Files
+  // tree, so make it visible first (never setView — re-selecting the active
   // view toggles the panel).
   const requestExplorerFolder = useCallback(() => {
-    mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+    mutateWb((state) => setExplorerMode({ ...state, activeView: "explorer", sidebarVisible: true }, "files"));
     setNewFolderRequest((current) => (current ?? 0) + 1);
   }, [mutateWb]);
 
@@ -3783,8 +3791,17 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
     [mutateWb],
   );
+  // An app folder's pin is its sidebar pin, kept in the settings file.
+  // Anything else is pinned in Home, in the workspace's ui-state.
   const toggleExplorerPin = useCallback(
-    (path: string) => mutateWb((state) => togglePinned(state, path)),
+    (path: string) => {
+      if (appFolders.has(path)) void setAppPinned(path, !pinnedRoots.includes(path));
+      else mutateWb((state) => togglePinned(state, path));
+    },
+    [appFolders, mutateWb, pinnedRoots, setAppPinned],
+  );
+  const setExplorerModeInWb = useCallback(
+    (mode: ExplorerMode) => mutateWb((state) => setExplorerMode(state, mode)),
     [mutateWb],
   );
   const collapseExplorerFolders = useCallback(() => {
@@ -3914,7 +3931,7 @@ export function DesktopWorkspaceShell(props: {
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
   const clearAppsReveal = useCallback(() => setAppsReveal(null), []);
   const showAppsInExplorer = useCallback(() => {
-    mutateWb((state) => showView(state, "explorer"));
+    mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
     setAppsReveal(workspaceId);
   }, [mutateWb, workspaceId]);
   const explorerApps = useMemo<ExplorerApps>(
@@ -5155,6 +5172,10 @@ export function DesktopWorkspaceShell(props: {
     <>
       <Explorer
         workspaceId={workspaceId}
+        mode={wb.explorerMode}
+        onModeChange={setExplorerModeInWb}
+        listed={fileListingCommit !== null}
+        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}
@@ -5162,6 +5183,7 @@ export function DesktopWorkspaceShell(props: {
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         tabLabels={tabLabels}
+        tabGlyphs={chatEditors.glyphs}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -6013,6 +6035,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      tabGlyphs={chatEditors.glyphs}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}

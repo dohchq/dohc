@@ -143,9 +143,12 @@ describe("share mounts real daemon", () => {
         const granter = new RelayFilePeer({
           baseUrl: relay.baseUrl, token: granterToken, workspaceId: granterWorkspaceId,
         });
+        const scene = JSON.stringify({ type: "excalidraw", version: 2, elements: [] });
         await granter.writeTextFiles([
           { path: "docs/brief.md", text: "# Brief\n\nThe lighthouse memo.\n" },
+          { path: "docs/sketch.excalidraw", text: scene },
           { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+          { path: "private/plan.excalidraw", text: scene },
         ]);
         const created = await relayJson(relay.baseUrl, granterToken,
           `/sync/${granterWorkspaceId}/shares`, {
@@ -166,6 +169,15 @@ describe("share mounts real daemon", () => {
         const mountedFile = join(mountRoot, "docs/brief.md");
         await expect(readFile(mountedFile, "utf8")).resolves.toContain("The lighthouse memo.");
         expect(existsSync(join(mountRoot, "private"))).toBe(false);
+        // The graph lists the share's drawings and nothing outside its scope.
+        const graphFiles: string[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await mounted.linksEdges(shareId, cursor);
+          graphFiles.push(...page.files.map((file) => file.path));
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor !== undefined);
+        expect(graphFiles.sort()).toEqual(["docs/brief.md", "docs/sketch.excalidraw"]);
         await expect(mounted.writeText("shared-with-me/e2e-granter/docs/brief.md"))
           .rejects.toThrow("reserved");
         await expect(mounted.reshare("shared-with-me/e2e-granter/docs"))

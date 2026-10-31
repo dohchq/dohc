@@ -31,7 +31,7 @@ export function reachName(path: string): string {
 }
 
 /** A conversation that does not exist yet: no run and no pause. */
-export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
+export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
 
 /** The room, in pixels, a stream list keeps above its composer for the offer. */
 export const AGENT_OFFER_SPACE = 36;

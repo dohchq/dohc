@@ -114,6 +114,8 @@ describe("history page", () => {
     };
     const decision = deferred<typeof FAILED_HISTORY_STATUS>();
     const bridge = makeBridge(Promise.resolve(null));
+    // No saved layout, so the History click below stays the shown view.
+    bridge.getWorkspaceUiState = vi.fn(async () => null);
     bridge.openWorkspace = vi.fn(() => decision.promise);
     // Main's answer while the build runs: the entry exists, and its recorder
     // fields are still the defaults it registered before awaiting the build.

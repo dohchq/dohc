@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, DmRecord } from "../../ipc/bridgeContract";
@@ -533,6 +533,23 @@ describe("ChatsView direct messages", () => {
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
     expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+  });
+
+  it("opens a focused reply's thread and highlights the reply there", async () => {
+    const root = message({ id: "message-root", threadId: "thread-dm-1", body: "Where should we eat?" });
+    const reply = message({ id: "message-focus", threadId: "thread-dm-1", body: "Prado at 8:30", parentMessageId: root.id });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [root, reply] });
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "dm", dm: dm(), focusMessageId: reply.id },
+    });
+
+    const panel = await screen.findByTestId("chats-dm-thread-panel");
+    await waitFor(() => {
+      const row = within(panel).getByText("Prado at 8:30").closest("[data-message-id]");
+      expect(row?.className).toContain("ring-2");
+    });
   });
 
   it("clears focused-message state and refs when a DM is opened normally", async () => {

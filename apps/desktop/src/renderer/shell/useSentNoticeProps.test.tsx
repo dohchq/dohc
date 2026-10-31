@@ -24,6 +24,7 @@ import {
 import type { SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
+import { showChat } from "../workbench/chatsOnScreen";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -61,7 +62,7 @@ const retryAutomationNotice = vi.fn();
 const listChatChannels = vi.fn();
 const listChannelThreads = vi.fn();
 const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
-const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
+const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
 const chatDispatchStateForThread = vi.fn(async (_payload: ChatDispatchStateForThreadPayload) => IDLE);
 const retryStoppedRun = vi.fn(async (): Promise<RetryStoppedRunResult> => ({ queued: true }));
 beforeEach(() => vi.stubGlobal("dohcDesktop", {
@@ -373,7 +374,7 @@ describe("opening a sent notice", () => {
 });
 
 describe("a failed run's notice", () => {
-  it("opens a run's thread in the chat of whichever agent ran it", async () => {
+  it("opens a run in the DM of whichever agent ran it", async () => {
     const chat = (id: string, agentId: string) => ({
       id, name: agentId, slug: id, kind: "agent" as const, agentId, createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0,
     });
@@ -391,7 +392,8 @@ describe("a failed run's notice", () => {
     const { result, openChat, openFile, reportShellError } = setup([run], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.openable).toBe(true);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
-    expect(openChat).toHaveBeenCalledWith({ level: "thread", channel: chat("chat-scout", "scout"), thread: thread("thread-scout", "chat-scout") });
+    // An agent DM is one conversation, so the run opens the DM, not a thread view.
+    expect(openChat).toHaveBeenCalledWith({ level: "channel", channel: chat("chat-scout", "scout") });
     expect(openFile).not.toHaveBeenCalled();
 
     // A thread that is gone says so on the row. A read that fails goes to
@@ -724,5 +726,42 @@ describe("Try again on an agent run dohc's restart or quit stopped", () => {
     await act(async () => again?.());
     expect(retryStoppedRun).toHaveBeenCalledTimes(2);
     expect(retryStoppedRun).toHaveBeenLastCalledWith({ workspaceId: "notes", threadId: "thread-1", runId: "run-1" });
+  });
+});
+
+describe("an agent's reply notice", () => {
+  const replied = (target: NoticeRow["target"]) => notice({
+    store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
+    title: "Nova replied", target,
+  });
+
+  it("skips the toast and the row while the chat with the reply is on screen", async () => {
+    const shown = document.createElement("div");
+    document.body.append(shown);
+    const hide = showChat("thread-1", shown);
+    const reply = replied({ thread: "thread-1", run: "run-1", message: "m-reply" });
+    const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
+    expect(result.current.sentNoticeToast).toBeNull();
+    await waitFor(() => expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "local", noticeId: "n1" }));
+    expect(sentNotices.hideToast).toHaveBeenCalledOnce();
+    hide();
+    shown.remove();
+  });
+
+  it("shows the notice when that chat isn't on screen, or the run didn't reply", () => {
+    const shown = document.createElement("div");
+    document.body.append(shown);
+    const hide = showChat("thread-1", shown);
+    for (const toast of [
+      replied({ thread: "thread-2", run: "run-1", message: "m-reply" }),
+      replied({ thread: "thread-1", run: "run-1" }),
+    ]) {
+      const { result, sentNotices, unmount } = setup([toast], [workspace("notes")], "notes", { toast });
+      expect(result.current.sentNoticeToast?.notice).toBe(toast);
+      expect(sentNotices.dismiss).not.toHaveBeenCalled();
+      unmount();
+    }
+    hide();
+    shown.remove();
   });
 });

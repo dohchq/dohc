@@ -390,11 +390,11 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRunId: "run-1",
+        liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       })
-      .mockResolvedValue({ liveRunId: null, pendingCount: 0, paused: false });
+      .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -425,11 +425,11 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: 3,
         paused: true,
       })
-      .mockResolvedValue({ liveRunId: null, pendingCount: 3, paused: false });
+      .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 3, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -456,7 +456,7 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: true });
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-      liveRunId: null,
+      liveRunId: null, liveTriggerMessageId: null,
       pendingCount: 2,
       paused: true,
     });
@@ -480,7 +480,7 @@ describe("ChatsView dispatch state", () => {
 });
 
 describe("ChatsView runs dohc's restart or quit stopped", () => {
-  const STOPPED = { liveRunId: null, pendingCount: 0, paused: false };
+  const STOPPED = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
   const agentPost = (id: string, at: number) =>
     message({ id, parentMessageId: "message-1", authorKind: "agent", authorDisplayName: "Claude Code", body: "Ferry times are in day-2.md.", createdAtMs: at });
   const run = { runId: "run-1", threadId: "thread-1", triggerMessageId: "message-1", command: "claude", startedAtMs: NOW, endedAtMs: NOW + 5_000, exitCode: 143 };
@@ -497,7 +497,7 @@ describe("ChatsView runs dohc's restart or quit stopped", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({ ...STOPPED, stoppedRun: { runId: "run-1", triggerMessageId: "message-1", ending: "quit", retryable: true } })
-      .mockResolvedValue({ ...STOPPED, liveRunId: "run-2" });
+      .mockResolvedValue({ ...STOPPED, liveRunId: "run-2", liveTriggerMessageId: null });
     renderView();
     const user = await openThread();
 

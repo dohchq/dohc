@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -119,6 +119,43 @@ describe("useBoundNoteCheck", () => {
     reopened.getXmlFragment("body").push([paragraph]);
     view.rerender({ doc: reopened });
     await waitFor(() => expect(view.result.current).toBe("clear"));
+  });
+
+  describe("after a clear verdict", () => {
+    const source = "Title\n=====\n\n* one\n";
+    async function checkedClear() {
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const view = renderHook(({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
+        initialProps: { headSha256: sha(source) },
+      });
+      await waitFor(() => expect(view.result.current).toBe("clear"));
+      return { doc, view };
+    }
+
+    it("stays clear when a save moves the file head", async () => {
+      const { view } = await checkedClear();
+      // "checking" would replace the editor and drop its focus mid-typing.
+      view.rerender({ headSha256: sha("# Title\n\n- one\n") });
+      expect(view.result.current).toBe("clear");
+    });
+
+    it("checks again when the file becomes a lossy source", async () => {
+      const { doc, view } = await checkedClear();
+      // A change outside dohc resyncs into the same document. Its witness can
+      // arrive before its head.
+      act(() => {
+        doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
+        doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
+        doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(LOSSY))));
+      });
+      expect(view.result.current).toBe("checking");
+      view.rerender({ headSha256: sha(LOSSY) });
+      expect(view.result.current).toBe("checking");
+      await waitFor(() => expect(view.result.current).toBe("lossy"));
+    });
   });
 
   it("reads the document as it was when the check ran", async () => {
