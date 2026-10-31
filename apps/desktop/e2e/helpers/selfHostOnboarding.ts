@@ -20,6 +20,7 @@ import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { parseStoredShareSelectorJson } from "../../../../services/sync-relay/src/shareFilter";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
+import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
 import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
 
@@ -531,6 +532,8 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     // The live host requires canonical paths.
     DOHC_RELAY_SERVICE_HOST_ROOT: realpathSync.native(join(deployment, "live-host")),
     DOHC_RELAY_ENGINE_EXECUTABLE: realpathSync.native(resolveEngineBinary()),
+    // The self-host image gives the service host a Markdown reader. Without one it holds every lossy rewrite.
+    DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
     DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
