@@ -646,6 +646,15 @@ describe("owner app publication", () => {
       expect(screen.queryByTestId("app-publication-source-paths")).toBeNull();
     });
 
+    it("lists the candidate's files while changes are under review, the ones Approve changes binds", async () => {
+      api.publishOwnerApp.mockImplementation(local([localRow], { revision: "e".repeat(64) }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      await userEvent.setup().click(screen.getByRole("button", { name: "2 files" }));
+      expect([...screen.getByTestId("app-publication-source-paths").querySelectorAll("li")].map(item => item.textContent)).toEqual(["main.tsx", "style.css"]);
+    });
+
     it("shows an unchanged approval without preparing anything, and Done closes", async () => {
       api.publishOwnerApp.mockImplementation(local([localRow]));
       renderLocal();
@@ -833,21 +842,28 @@ describe("owner app publication", () => {
       expect(actions("approve").map(input => input.action === "approve" && input.approvalId)).toEqual([prepared.approvalId, secondApproval]);
     });
 
-    it("reports a failed check to Notices with a retry in the access box", async () => {
+    it("keeps a known approval when only its source check fails, and reports the check with Try again", async () => {
       const reportError = vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
-      const failure = new Error("Local apps are unavailable. Restart dohc and try again.");
+      // For example, a malformed app.publish.json makes main's source check throw.
+      const failure = new Error("Error invoking remote method 'desktop:publish-owner-app': Error: app.publish.json is not valid JSON.");
       let checks = 0;
       const answers = local([localRow]);
       api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" && ++checks === 1 ? Promise.reject(failure) : answers(request));
       renderLocal({ reportError });
       await openLocal();
-      await waitFor(() => expect(reportError).toHaveBeenCalledWith(checkFailed, failure, expect.any(Function)));
-      expect(screen.getByTestId("app-access-retry")).toBeTruthy();
-      expect(approveButton().disabled).toBe(true);
-      expect(screen.queryByTestId("app-review-state")).toBeNull();
-      await userEvent.setup().click(within(screen.getByTestId("app-access-retry")).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(reportError).toHaveBeenCalledExactlyOnceWith(
+        "dohc could not check whether this app's source changed since you approved it.", failure, expect.any(Function)));
+      // The source counts as unchanged, so the state line stays true.
       expect(await stateText()).toBe("Approved on this device");
-      expect(actions("checkLocal")).toHaveLength(2);
+      expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
+      expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
+      expect(screen.queryByTestId("app-access-retry")).toBeNull();
+      expect(actions("prepareLocal")).toEqual([]);
+      // Try again on the Notices row runs the check again.
+      await act(async () => reportError.mock.calls[0]![2]!());
+      await waitFor(() => expect(actions("checkLocal")).toHaveLength(2));
+      expect(await stateText()).toBe("Approved on this device");
+      expect(reportError).toHaveBeenCalledTimes(1);
     });
 
     it("retries a failed approvals list through the Notices row", async () => {

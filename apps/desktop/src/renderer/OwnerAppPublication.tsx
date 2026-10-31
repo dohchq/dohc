@@ -135,6 +135,7 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
 type Capability = AppDatasetCapability | AppCollectionCapability;
 type Checked = Extract<OwnerAppPublicationResult, { kind: "localChecked" }>;
 const checkFailed = "dohc could not check whether this app is approved on this device.";
+const sourceCheckFailed = "dohc could not check whether this app's source changed since you approved it.";
 
 /** What a capability lets the app do, each item marked when the approval did not already allow it. */
 type Reach = { text: string; added: boolean };
@@ -399,10 +400,20 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       if (page.kind !== "localListed") throw new Error(checkFailed);
       const rows = page.publications.filter(row => row.appRoot === props.appRoot);
       const approval = rows.find(row => row.approved) ?? null;
-      const source = approval ? await api.publishOwnerApp({ action: "checkLocal", workspaceId: props.workspaceId, appRoot: props.appRoot }) : null;
-      if (!current) return;
-      if (source && (source.kind !== "localChecked" || source.appRoot !== props.appRoot)) throw new Error(checkFailed);
-      setLocalReview({ status: "ready", rows, approval, source: source?.kind === "localChecked" ? source : null });
+      // The approval is known even when its source check fails, so the dialog keeps it and treats the source as unchanged.
+      let source: Checked | null = null;
+      if (approval) {
+        try {
+          const checked = await api.publishOwnerApp({ action: "checkLocal", workspaceId: props.workspaceId, appRoot: props.appRoot });
+          if (checked.kind !== "localChecked" || checked.appRoot !== props.appRoot) throw new Error(sourceCheckFailed);
+          source = checked;
+        } catch (error) {
+          if (!current) return;
+          report.current(sourceCheckFailed, error, () => { if (alive.current) setLocalReload(value => value + 1); else props.onReopen(); });
+        }
+        if (!current) return;
+      }
+      setLocalReview({ status: "ready", rows, approval, source });
     })().catch(error => {
       if (!current) return;
       setLocalReview({ status: "failed" });
@@ -616,7 +627,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   };
 
   const localView = view === "local" && !prepared;
-  const paths = localView ? review?.source?.sourcePaths ?? (needsCandidate ? localCandidate?.sourcePaths : undefined) : undefined;
+  // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
+  const paths = localView ? (needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths : undefined;
   const shown = (path: string) => path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
   const boxCapabilities = !review ? null : !needsCandidate && approval ? [approvedCapability(approval)] : localCandidate?.capabilities ?? null;
   const approving = busy === "approve" || candidateState === "loading";
