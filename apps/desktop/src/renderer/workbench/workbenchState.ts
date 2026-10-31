@@ -619,7 +619,11 @@ export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): Wo
   const adding = [...shownPaths].filter((path) => !holder(next, path)).length;
   next = makeRoomForTabs(next, adding, shownPaths);
   for (const path of shownPaths) {
-    if (!holder(next, path)) next = openTab(next, path, appGroups.get(path));
+    if (holder(next, path)) continue;
+    const groupId = appGroups.get(path);
+    // An app joins its group without taking its place or the focus. Room was made above.
+    next = groupId === undefined ? openTab(next, path) : replaceGroup(next, groupId, (group) =>
+      ({ ...group, tabs: [...group.tabs, { path }], activeTab: group.activeTab ?? path }));
   }
   const active = activeTabPath(shown);
   return active === null ? next : openTab(next, active, holder(next, active));
