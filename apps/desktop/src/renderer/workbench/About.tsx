@@ -1173,7 +1173,7 @@ function AccessRowView(props: { row: AccessRow }) {
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
-        <span className="shrink-0 text-[11px] text-subtle">Can {level.label.toLowerCase()}</span>
+        <span className="shrink-0 text-[11px] text-muted">Can {level.label.toLowerCase()}</span>
       ) : null}
     </div>
   );

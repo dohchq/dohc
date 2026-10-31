@@ -216,6 +216,8 @@ describe("About Access", () => {
     ]);
     expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
     expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
+    // A level is information, so it takes secondary ink, not decorative.
+    expect(within(rows[1]!).getByText("Can edit").classList.contains("text-muted")).toBe(true);
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
     // Two grants give access now; the two ended ones stay listed, their names quieter.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
