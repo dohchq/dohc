@@ -57,6 +57,22 @@ describe("keyboard navigation", () => {
     expect(marked()).toBe(false);
   });
 
+  it("keeps the mark as it was for Delete, Backspace and Cmd+Backspace", () => {
+    const keys: [string, string, KeyboardEventInit][] = [
+      ["Delete", "Delete", {}],
+      ["Backspace", "Backspace", {}],
+      ["Cmd+Backspace", "Backspace", { metaKey: true }],
+    ];
+    for (const [label, name, init] of keys) {
+      key("Tab");
+      key(name, init);
+      expect(marked(), `Tab, then ${label}`).toBe(true);
+      press();
+      key(name, init);
+      expect(marked(), `a pointer press, then ${label}`).toBe(false);
+    }
+  });
+
   it("marks the root it is given", () => {
     stop();
     const root = document.createElement("div");
