@@ -313,6 +313,7 @@ export function ThreadedChat(props: {
           working={working && workingRootId === openRootId ? working : null}
           composer={props.replyNotice ?? (
             <MentionComposer
+              pinned
               testIdPrefix={`${prefix}-thread`}
               composerId={`${prefix}-thread-composer`}
               value={replyDraft}

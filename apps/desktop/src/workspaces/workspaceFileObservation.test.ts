@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeWorkspaceFiles, startWorkspaceFileObservation, type WorkspaceObservationCallbacks } from "./workspaceFileObservation";
-import type { EngineDaemonLifecycle, EngineWorkspaceSessions, FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
-import type { Event } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions, type EngineDaemonLifecycle, type FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
+import type { Event, JsonValue, Request } from "@dohc/workspace-engine-client";
 import { deferred } from "../testing/deferred";
+import { closeActivityFirst } from "./workspaceActivity";
+import { createSuiteTestScratchSync } from "./testTemp";
 
 const answer = (revision: number, extra: Partial<FileObservationChanges> = {}): FileObservationChanges => ({
   cursor: { generation: "first", revision }, ready: true, resync: false, facts: [], ...extra,
@@ -282,5 +284,32 @@ describe("workspace file observation", () => {
     await handle.stop();
     expect(eventHandlers.size).toBe(0);
     expect(clientHandlers.size).toBe(0);
+  });
+
+  it("drains the file feed through the engine session before the stores close it", async () => {
+    const workspace = { workspaceId: "forget", rootPath: createSuiteTestScratchSync("dohc-file-feed-"),
+      attachmentId: Symbol(), kind: "personal" as const, mode: "local-first" as const };
+    const methods: string[] = [];
+    const client = {
+      close: () => undefined,
+      async sendRequest(request: Request) {
+        methods.push(request.method);
+        const result: JsonValue = request.method === "workspace.open" ? { workspace: `handle-${methods.length}` }
+          : request.method === "workspace.close" ? { closed: true }
+            : { cursor: { generation: "first", revision: 1 }, ready: true, resync: false, facts: [] };
+        return { id: request.id, result };
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const daemon = { onEvent: () => () => {}, onClientChanged: () => () => {} };
+    const handle = startWorkspaceFileObservation(workspace, sessions, daemon, {
+      facts: vi.fn(), resync: vi.fn(async () => {}), captured: vi.fn(), pulled: vi.fn(), degraded: vi.fn(),
+    });
+    await handle.ready;
+    // The linked chat store and the agent dispatch store each close the session.
+    await closeActivityFirst(() => handle.stop(),
+      () => [sessions.closeWorkspace(workspace), sessions.closeWorkspace(workspace)]);
+    expect(methods).toEqual(["workspace.open", "files.changesSince", "files.drain", "workspace.close"]);
+    await sessions.closeAll();
   });
 });

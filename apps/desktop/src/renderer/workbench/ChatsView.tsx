@@ -4149,6 +4149,7 @@ export function ChatsView(props: {
           <MentionComposer
             testIdPrefix="chats-dm-new"
             composerId="chats-dm-new-composer"
+            pinned
             value={dmDraft}
             sending={startingDm}
             placeholder="Write the first message…"
@@ -4220,6 +4221,7 @@ export function ChatsView(props: {
             belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
             composer={(inset) => dm.connected ? (
               <MentionComposer
+                pinned
                 testIdPrefix="chats-dm"
                 composerId="chats-dm-composer"
                 value={composer}
@@ -4848,7 +4850,9 @@ export function ChatsView(props: {
           topPadding={0}
           header={<>
             {!channelLocked && !agentDm ? (
-              <div className="mb-4 mt-4">
+              // Padding, not margin: a top margin would collapse through the
+              // list's full-height content and make an empty page scroll.
+              <div className="py-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
