@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -125,9 +125,11 @@ export interface ShellError {
 // failure the part has already worded. Outside an owner, the part says it in
 // place only.
 export type ReportShellFailure = (failure: {
+  title?: string;
   message: string;
   cause?: unknown;
   retry?: (() => void) | null;
+  identity?: string;
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
@@ -336,6 +338,7 @@ export function useShellError(workspaceId: string) {
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
       ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])];
+      // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
       push({
         ...(title ? { title } : {}),
         message: title && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
@@ -348,7 +351,7 @@ export function useShellError(workspaceId: string) {
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
-      });
+      }, waitedForCollectionMove(error) ? "quiet" : false);
     },
     [push, privacySettingsAction, keepCollectionsHere],
   );

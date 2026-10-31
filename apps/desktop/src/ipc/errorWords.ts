@@ -459,6 +459,35 @@ export class CollectionServerUnreachableError extends Error {
   override name = "CollectionServerUnreachableError";
 }
 
+/**
+ * A Collection's move to a server that stopped after this computer stopped
+ * changing it. `waited`: the request only waited for a move another request
+ * started, which reports the stop itself.
+ */
+export class CollectionMoveUnfinishedError extends Error {
+  override name = "CollectionMoveUnfinishedError";
+  readonly code: "waited" | undefined;
+  constructor(host: string, options: { cause: unknown; waited?: boolean }) {
+    super(`This Collection didn't finish moving to ${host}. Its records are kept on this computer.`, { cause: options.cause });
+    this.code = options.waited ? "waited" : undefined;
+  }
+}
+
+/** A request that failed only because it waited for another request's Collection move, which stopped. */
+export function waitedForCollectionMove(error: unknown): boolean {
+  const { name, code } = parse(error);
+  return name === "CollectionMoveUnfinishedError" && code === "waited";
+}
+
+/**
+ * A stopped Collection move's error with the Collection's name in place of "This Collection", for a row among others in Notices.
+ * The name goes in quotes, so a name such as "CRM: Accounts" never reads as a code that hides the words.
+ */
+export function namingCollectionMove(error: unknown, collection: string): unknown {
+  const { name, text } = parse(error);
+  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `) : error;
+}
+
 /** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */
 export function readCollectionServerUnreachable(error: unknown): string | null {
   const { name, message } = parse(error);
