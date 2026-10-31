@@ -162,6 +162,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();
       await expect(moment).toBeVisible({timeout: 60_000});
       await moment.click();
+      await page.getByTestId("engine-diff-more").click();
       await page.getByTestId("engine-diff-shared-restore").click();
       const dialog = page.getByTestId("owner-restore-dialog");
       await expect(dialog).toBeVisible();

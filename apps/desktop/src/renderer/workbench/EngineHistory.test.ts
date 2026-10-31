@@ -305,16 +305,36 @@ describe("groupTimeline", () => {
     expect(groups.map((group) => [group.run, group.moments.map((entry) => entry.id)])).toEqual([[true, ["m3", "m2", "m1"]]]);
   });
 
-  it("never folds a delete, a multi-file pass, another day, or edits with no agent", () => {
+  // An edit by the person `humanId`.
+  const byPerson = (id: string, overrides: Partial<EngineMomentRecord> = {}, humanId = "maya") =>
+    moment({ id, authors: [{ kind: "human", humanId }], ...overrides });
+
+  it("folds a person's consecutive edits to one file as it folds an agent's", () => {
+    expect(groupEngineMoments([byPerson("m3"), byPerson("m2"), byPerson("m1")])
+      .map((group) => [group.run, group.moments.map((entry) => entry.id)])).toEqual([[true, ["m3", "m2", "m1"]]]);
+    // Another person, or an agent, starts a new row.
+    expect(groupEngineMoments([byPerson("m3"), byPerson("m2", {}, "jun"), byAgent("m1")])
+      .map((group) => group.moments.length)).toEqual([1, 1, 1]);
+    // A person the owner shared with, writing directly, folds by their user id.
+    const byNamed = (id: string, userId = "ana") =>
+      moment({ id, authors: [{ kind: "named", userId, grantId: "g-1", grantGeneration: 1 }] });
+    expect(groupEngineMoments([byNamed("m4"), byNamed("m3"), byNamed("m2", "lee"), byPerson("m1")])
+      .map((group) => group.moments.map((entry) => entry.id))).toEqual([["m4", "m3"], ["m2"], ["m1"]]);
+  });
+
+  it("never folds a delete, a restore, kept typing, a multi-file pass, another day, or edits with no single author", () => {
     const day = new Date(2026, 9, 16, 12).getTime();
     const cases: Array<[EngineMomentRecord[], number[]]> = [
       [[byAgent("a"), byAgent("b", { operation: "delete" })], [1, 1]],
+      [[byPerson("a"), byPerson("b", { origin: "restore" }), byPerson("c", { origin: "capture-recovery" })], [1, 1, 1]],
       // The pass's first file stays with the pass, and the pass stays whole.
       [[byAgent("a"), byAgent("b", { correlationId: "pass" }), byAgent("c", { correlationId: "pass", path: "notes/other.md" })], [1, 2]],
       [[byAgent("a", { correlationId: "pass" }), byAgent("b", { correlationId: "pass", path: "notes/other.md" }),
         byAgent("c", { path: "notes/other.md" })], [2, 1]],
       [[byAgent("a", { recordedAtMs: day }), byAgent("b", { recordedAtMs: day - 86_400_000 })], [1, 1]],
       [[moment({ id: "a" }), moment({ id: "b" })], [1, 1]],
+      [[byPerson("a", { authors: [{ kind: "human", humanId: "maya" }, { kind: "human", humanId: "jun" }] }),
+        byPerson("b", { authors: [{ kind: "human", humanId: "maya" }, { kind: "human", humanId: "jun" }] })], [1, 1]],
     ];
     for (const [moments, sizes] of cases) expect(groupEngineMoments(moments).map((group) => group.moments.length)).toEqual(sizes);
   });

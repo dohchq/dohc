@@ -3179,8 +3179,8 @@ export function DesktopWorkspaceShell(props: {
     },
     [captureRecoveries, reportShellError, reportShellFailure],
   );
-  // Try again on a failed restore opens the change's tab, and that page asks
-  // before it restores, with its Undo restore after.
+  // Try again on a failed restore opens the change's tab, and that page
+  // restores again once a fresh read allows it, with its Undo restore after.
   const [restoreRequest, setRestoreRequest] = useState<{ workspaceId: string; momentId: string } | null>(null);
   const reopenRestore = useCallback(
     (momentId: string, path: string) => {
@@ -5112,8 +5112,9 @@ export function DesktopWorkspaceShell(props: {
       />
     ) : engineHistoryReadState === "updating" ? (
       // The next capture's activity reads again, so the line asks nothing.
-      <div className="flex flex-1 items-center justify-center px-4">
-        {historyPaused ? <HistoryPaused testId="history-paused" /> : <HistoryUpdating testId="history-updating" />}
+      // It sits where the first row will, so the rows arrive under it.
+      <div className="shrink-0 px-3">
+        {historyPaused ? <HistoryPaused testId="history-paused" className="h-7" /> : <HistoryUpdating testId="history-updating" className="h-7" />}
       </div>
     ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats

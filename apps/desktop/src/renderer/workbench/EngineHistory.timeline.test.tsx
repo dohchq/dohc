@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
 import type { EngineMomentRecord, TimelineEntry } from "../../ipc/bridgeContract";
-import { EngineHistoryView, type HistoryCollections } from "./EngineHistory";
+import { EngineHistoryView, HistoryRow, type HistoryCollections } from "./EngineHistory";
 
 // This suite checks what each row says and offers, not viewport measurement.
 // The real virtualizer is covered by history-virtualization.spec.ts.
@@ -98,10 +98,10 @@ describe("History timeline rows", () => {
   it("titles a Collection change with its operation's label, else by its Collection", () => {
     view({ entries: [change(4, DAY - 2_000), change(2, DAY - 3_000, GUESTS, "Guests")] });
     const [labelled, unlabelled] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
-    expect(labelled!.querySelector(".font-medium")!.textContent).toBe("Add row");
+    expect(labelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Add row");
     expect(labelled!.textContent).not.toContain("addRow");
-    expect(unlabelled!.querySelector(".font-medium")!.textContent).toBe("Changed Guests");
-    expect(unlabelled!.querySelector(".font-mono:last-child")!.textContent).toBe("addRow");
+    expect(unlabelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed Guests");
+    expect(unlabelled!.querySelector("[id]")!.lastElementChild!.textContent).toBe("addRow");
     // The title already names the Collection, so the meta line does not.
     expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
     // The row's name says what it opens; the change describes it.
@@ -111,11 +111,12 @@ describe("History timeline rows", () => {
     expect(description?.textContent).toContain("Stamp the date");
   });
 
-  it("names the agent that approved a Collection's rules first, in the agent's voice", () => {
+  // The name stays in the line's ink; colour belongs to faces.
+  it("names the agent that approved a Collection's rules first, in the line's ink", () => {
     view({ entries: [change(4, DAY - 2_000, BUDGET, "Budget", { rulesApprovedBy: "trip-agent" }), change(3, DAY - 3_000, BUDGET, "Budget", { rulesApprovedBy: null })] });
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
-    expect(agents[0]!.className).toContain("text-agent");
+    expect(agents[0]!.className).not.toContain("text-agent");
     expect(agents[0]!.parentElement!.firstElementChild).toBe(agents[0]);
   });
 
@@ -124,7 +125,7 @@ describe("History timeline rows", () => {
   it("titles a rules change in words and names its Collection, without an operation", () => {
     view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })] });
     const row = screen.getAllByRole("listitem").find((item) => item.dataset.historyKey)!;
-    expect(row.querySelector(".font-medium")!.textContent).toBe("Changed fields and rules");
+    expect(row.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed fields and rules");
     const meta = row.querySelector("[id]")!;
     expect(meta.textContent).toContain("Guests");
     expect(meta.textContent).not.toContain("Fields and rules");
@@ -161,28 +162,31 @@ describe("History timeline changes", () => {
   const agentEdit = (id: string, minutes: number): TimelineEntry =>
     file(id, { recordedAtMs: DAY - minutes * 60_000, agentAuthorName: "Nova", summary: "Updated plan.md", authors: [nova], authorPresentations: [{ group: "nova", hue: null, self: false }] });
 
-  it("draws each change on one line: who, the file, its folder, and the time", () => {
+  it("draws each change on two lines: who and when, then the file and its folder", () => {
     view({ entries: [agentEdit("m-2", 0), file("m-1", { recordedAtMs: DAY - 3_600_000 })] });
     const [agent, local] = screen.getAllByTestId("engine-moment-open");
     // The agent's square avatar leads, and its name follows in the agent voice.
     expect(agent!.querySelector('[title="Nova"]')?.className).toContain("rounded");
     expect(agent!.querySelector('[title="Nova"]')?.className).not.toContain("rounded-full");
     expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
-    // A local edit leads with its origin's mark, says its folder, and keeps
-    // its origin in words for screen readers.
+    // A local edit leads with its origin's mark and names it, then says
+    // its file and folder.
     expect(local!.querySelector('[title="Local file edit"] .lucide-hard-drive')).not.toBeNull();
     expect(local!.textContent).toContain("plan.mdnotes");
     expect(local!.textContent).not.toContain("Edited");
-    expect(screen.getAllByTestId("engine-moment-source")[1]!.className).toBe("sr-only");
+    expect(screen.getAllByTestId("engine-moment-source")[1]!.textContent).toBe("Local file edit");
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
     const calls = view({ entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)] });
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
-    // The run's head names its file; each edit's summary is listed under it.
-    expect(screen.getByTestId("engine-moment-open").textContent).toMatch(/^plan\.mdNova/);
+    // The run's head leads with its time, then names the agent and its file;
+    // each edit's summary is listed under it.
+    const head = screen.getByTestId("engine-moment-open");
+    expect(head.firstElementChild!.tagName).toBe("TIME");
+    expect(head.textContent).toMatch(/Nova.*plan\.mdnotes$/);
     const toggle = screen.getByTestId("engine-moment-run-toggle");
-    expect(toggle.textContent).toBe("3");
+    expect(toggle.textContent).toBe("3 changes");
     expect(toggle.getAttribute("aria-label")).toBe("3 changes");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(screen.getByTestId("engine-moment-open"));
@@ -202,15 +206,15 @@ describe("History timeline changes", () => {
   it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
     const pass = (id: string) => file(id, { correlationId: "import", path: `notes/${id}.md` });
     view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2"), pass("p-1")], hasMore: true });
-    expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2");
+    expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2 changes");
     const count = screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!;
-    expect(count.textContent).toBe("2+ or more files");
-    expect(count.querySelector("[aria-hidden]")?.textContent).toBe("+");
+    expect(count.querySelector("[aria-hidden]")?.textContent).toBe("2+ files");
+    expect(count.querySelector(".sr-only")?.textContent).toBe("2 or more files");
     cleanup();
 
     view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: true });
     const run = screen.getByTestId("engine-moment-run-toggle");
-    expect(run.textContent).toBe("2+");
+    expect(run.querySelector("[aria-hidden]")?.textContent).toBe("2+ changes");
     expect(run.getAttribute("aria-label")).toBe("2 or more changes");
     expect(run.getAttribute("title")).toBe("2 or more changes");
     expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!.textContent).toBe("2 files");
@@ -282,6 +286,23 @@ describe("History timeline changes", () => {
     expect(earlier).toMatch(/^Updated plan\.md, Agent Nova, /);
     expect(earlier).not.toBe(newest);
     expect(person).toMatch(/^Edited plan\.md, Sam Rivera, /);
+  });
+
+  it("in one file's History, leaves a bare Edited unsaid after a name that already says it", () => {
+    const row = (overrides: Partial<EngineMomentRecord>) => {
+      cleanup();
+      const moment = (file("m-1", overrides) as Extract<TimelineEntry, { kind: "file" }>).moment;
+      render(<HistoryRow moment={moment} context="file" onOpen={() => {}} />);
+      return screen.getByTestId("engine-moment-open").textContent;
+    };
+    expect(row({})).toMatch(/Local file edit$/);
+    expect(row({ origin: "ydoc" })).toMatch(/Live edit$/);
+    // A real summary, another operation, a source that is not an action, and
+    // a person's name all keep their words.
+    expect(row({ summary: "Added the Sintra day trip" })).toMatch(/Local file editAdded the Sintra day trip$/);
+    expect(row({ operation: "delete" })).toMatch(/Local file editDeleted$/);
+    expect(row({ origin: "sync" })).toMatch(/SyncEdited$/);
+    expect(row({ origin: "ydoc", liveAuthorName: "Jun Park" })).toMatch(/Jun ParkEdited$/);
   });
 });
 

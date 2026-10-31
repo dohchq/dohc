@@ -78,7 +78,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
+import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
@@ -1928,7 +1928,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
-        <Specimen label="one line per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
+        <Specimen label="two lines per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
           <div className="flex h-[300px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_STORY} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               openMomentId="story-nova-2" onRetry={noop} />
@@ -1937,9 +1937,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="the agent's run, listed: its earlier edit open; count hovered">
           <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
             <li data-force-state="hover" data-force-target="[data-testid=engine-moment-run-toggle]">
-              <MomentRow moment={STORY_RUN[0]!} fold={{ count: 3, expanded: true, onToggle: noop }} onOpenMoment={noop} />
-              <MomentRow moment={STORY_RUN[1]!} nested="run" selected onOpenMoment={noop} />
-              <MomentRow moment={STORY_RUN[2]!} nested="run" onOpenMoment={noop} />
+              <HistoryRow moment={STORY_RUN[0]!} context="workspace" fold={{ count: 3, expanded: true, onToggle: noop }} onOpen={noop} />
+              <HistoryRow moment={STORY_RUN[1]!} context="workspace" nested="run" selected onOpen={noop} />
+              <HistoryRow moment={STORY_RUN[2]!} context="workspace" nested="run" onOpen={noop} />
             </li>
           </ul>
         </Specimen>
@@ -2134,7 +2134,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="History at its default width: the recovery change">
           <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
             <li>
-              <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
+              <HistoryRow moment={RECOVERY_MOMENT} context="workspace" onOpen={noop} />
             </li>
           </ul>
         </Specimen>
