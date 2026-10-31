@@ -7138,6 +7138,7 @@ enum Retained {
 /// document back in the scope with no activation current. Fields drop in
 /// order: the actor closes before its scratch tree goes.
 struct RetainedWindow {
+    reader: std::sync::Weak<dohc_engine_reader::Reader>,
     witness: Arc<dohc_engine_collab::reader_resolver::ReaderResolver>,
     owner: dohc_engine_runtime::actor::ActorLiveApplicationOwner,
     actor: ActorHandle,
@@ -7167,7 +7168,16 @@ fn owner_source_base() -> Vec<u8> {
 
 /// Prove the shared source safe before a test measures released-tail waits.
 async fn witness_cache(root: &ScratchDir) -> dohc_engine_collab::WriterDocCache {
-    let resolver = support::witness_reader(root);
+    observed_witness_cache(root).await.0
+}
+
+async fn observed_witness_cache(
+    root: &ScratchDir,
+) -> (
+    dohc_engine_collab::WriterDocCache,
+    std::sync::Weak<dohc_engine_reader::Reader>,
+) {
+    let (resolver, reader) = support::observed_witness_reader(root);
     let doc = Ydoc::wire();
     doc.apply(&owner_source_base()).unwrap();
     loop {
@@ -7181,7 +7191,7 @@ async fn witness_cache(root: &ScratchDir) -> dohc_engine_collab::WriterDocCache 
     }
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     cache.reader_resolver = Some(resolver);
-    cache
+    (cache, reader)
 }
 
 async fn configure_window_witness(actor: &ActorHandle, root: &ScratchDir) {
@@ -7269,7 +7279,8 @@ async fn retained_window_keeping(
         .open(&engine_db_path(&root).unwrap(), 3)
         .unwrap()
         .actor;
-    let witness = witness_cache(&root).await.reader_resolver.unwrap();
+    let (cache, reader) = observed_witness_cache(&root).await;
+    let witness = cache.reader_resolver.unwrap();
     actor
         .configure_reader_resolver(witness.clone())
         .await
@@ -7438,6 +7449,7 @@ async fn retained_window_keeping(
         );
     }
     let window = RetainedWindow {
+        reader,
         witness,
         owner,
         actor,
@@ -7481,6 +7493,16 @@ impl RetainedWindow {
     async fn close(self) {
         self.owner.close().await.unwrap();
         self.supervisor.close_all().unwrap();
+        drop(self.witness);
+        // Reader::drop joins the worker after terminating and reaping its child.
+        assert!(
+            self.reader.upgrade().is_none(),
+            "the reader must exit before scratch cleanup"
+        );
+        drop(self.store);
+        let path = self.root.path().to_owned();
+        drop(self.root);
+        assert!(!path.exists(), "scratch cleanup left {}", path.display());
     }
 }
 
@@ -8219,6 +8241,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         );
         // The hold carries the binding admission built. An apply outside a
         // pull names no feed namespace.
+        drop(cache);
         let mut cache = w.cache();
         let held = settled_apply(
             &mut w.store,
@@ -8270,6 +8293,7 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
         );
         assert_eq!(w.native(), native, "{case}");
         desktop.close().await;
+        drop(cache);
         w.close().await;
     }
 }
@@ -8415,6 +8439,7 @@ async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_
         .unwrap();
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 
@@ -9060,6 +9085,7 @@ async fn the_end_of_pass_drain_reports_the_head_it_writes_across_a_validation_wa
     assert_eq!(next.held.get("object"), pass.held.get("object"));
     assert!(pass_commit(&mut w.store, &client, &next).committed);
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 
@@ -9376,6 +9402,7 @@ async fn artifact_recovery_that_meets_a_released_hold_reports_it_and_records_no_
     );
     assert!(pass_commit(&mut w.store, &client, &pass).committed);
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 
@@ -10990,6 +11017,7 @@ async fn artifact_recovery_keeps_a_completed_documents_facts_across_a_later_wait
             .unwrap();
         assert_eq!(failures, 0, "{after:?}");
         desktop.close().await;
+        drop(cache);
         w.close().await;
     }
 }
@@ -11354,6 +11382,8 @@ async fn drain_waiting_after_a_committed_prefix(from: FromPause, refused: bool) 
     assert_eq!(queued_updates(&w.store), Vec::new(), "{case}");
     assert!(w.text().contains("A later paragraph."), "{case}");
     assert!(settled_drain(&mut w).record_facts.is_empty(), "{case}");
+    drop(cache);
+    drop(witness);
     w.close().await;
 }
 
@@ -11464,6 +11494,7 @@ async fn a_protected_drain_that_waits_after_a_committed_prefix_keeps_its_rows() 
         assert_eq!(text.matches("A second paragraph.").count(), 1, "{case}");
         assert!(text.contains(RETAINED), "{case}");
         assert_eq!(queued_updates(&w.store), Vec::new(), "{case}");
+        drop(cache);
         w.close().await;
     }
 }
@@ -12707,6 +12738,7 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
         applied.primary
     );
     assert!(w.text().contains("Safe") && w.text().contains(RETAINED));
+    drop(cache);
     w.close().await;
 }
 
@@ -13087,6 +13119,7 @@ async fn validated_tails_stand_across_passes_until_a_tail_input_changes() {
     assert!(journaled(&w.store, &fold));
     assert_eq!(validations(&w, &cache), 2, "a tail input changed");
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 
@@ -13373,6 +13406,7 @@ async fn a_pass_waiting_for_validation_goes_on_from_the_row_that_waited() {
         "no decision scanned"
     );
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 
@@ -14103,6 +14137,7 @@ async fn a_desktop_edit_in_the_released_window_holds_its_settlement_before_a_con
         Some("A neighbour.\n"),
         "A neighbour, edited.\n",
     );
+    drop(cache);
     let mut cache = w.cache();
     let again = hosted_pass(&mut w.store, &client, &mut cache);
     assert_eq!(again.applied, 1, "{:?}", again.pending_cursor);
@@ -14113,6 +14148,7 @@ async fn a_desktop_edit_in_the_released_window_holds_its_settlement_before_a_con
     assert_eq!(written(&w.store), 0);
     assert!(w.text().contains(RETAINED));
     desktop.close().await;
+    drop(cache);
     w.close().await;
 }
 

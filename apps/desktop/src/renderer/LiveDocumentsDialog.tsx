@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -74,8 +74,16 @@ export type LiveDocumentsDialogProps = {
   onClose: () => void;
   /** Reported to the shell, which owns the toast and the Notices row. The
    * retry returns false once this workspace scope is gone, so the shell can
-   * offer to reopen the dialog instead of running work nobody can see. */
-  onError: (message: string, error: unknown, retry: () => boolean) => void;
+   * offer to reopen the dialog instead of running work nobody can see. With
+   * `waiting`, the Stop of that document is waiting, and `message` is the
+   * whole body, without the error's words. */
+  onError: (message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => void;
+};
+
+/** A waiting Stop's notice: its title, and the document whose notice it replaces. */
+export type LiveStopWaitingNotice = {
+  title: string;
+  objectId: string;
 };
 
 type Work =
@@ -433,8 +441,13 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        const waiting = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        onError(waiting ? `Stop live editing for ${work.path} is waiting for a connection or restore.` : failureMessage(work, mutated), error, retry);
+        // A server-only document's Stop the server isn't ready for gets the
+        // relay's restore-in-progress words, without its code.
+        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        if (work.kind === "stop" && (notReady || isLiveStopWaiting(error))) {
+          onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry,
+            {title: notReady ? `Live editing didn't stop for ${work.path}` : `Stopping live editing for ${work.path}`, objectId: work.objectId});
+        } else onError(failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
           running.current = false;
@@ -775,7 +788,7 @@ export function LiveDocumentsDialog({
                     {pendingStops.get(row.objectId)?.sessionHost ? (
                       <CopyButton iconOnly label="Copy error details" getText={() => errorDetails([
                         ["Live editing", liveStopOffersResume(pendingStops.get(row.objectId)!, row) ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!, row)],
-                        ["File", row.path], ["Session host", pendingStops.get(row.objectId)?.sessionHost],
+                        ["File", row.path], ["Server", pendingStops.get(row.objectId)?.sessionHost],
                       ])} />
                     ) : null}
                   </div>

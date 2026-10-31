@@ -130,6 +130,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   noteNoAtomicPlacement(workspaceId: string): void;
   noteWriteDeferred(workspaceId: string, path: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
+  // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
+  notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -357,7 +359,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     failures.set(row.document.objectId,{objectId:row.document.objectId,path:row.document.currentPath,detail});
                     ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
                   },
-                  onComplete:row => {stopsChanged=true;if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  onComplete:row => {stopsChanged=true;dependencies.notifyOwnerLiveStopped?.(workspaceId,row.document.objectId);if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
                   retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
                 // A Stop that finished or failed in the background changes what the
                 // notices say, even when no live document remains to deliver.

@@ -63,6 +63,7 @@ import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { relayShareOperations } from "../ipc/shareOperations";
 import { registerOperations } from "../ipc/operationTable";
 import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
+import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
@@ -721,19 +722,22 @@ it.skipIf(engine.missing)(
   90_000,
 );
 
+// A stale ready copy at Resume is covered by the relay test "captures a retired
+// activation's successor only after a hosted pull that started after Resume".
+const heldStopCase = "stale-binding quarantine, Stop refused while the host is held";
 it.skipIf(engine.missing).each([
   { name: "existing id", hasId: true, body: "# Keep this body\n", stopQuarantine: false },
   { name: "id-less canonical", hasId: false, body: "# Body\n", stopQuarantine: false },
   { name: "id-less non-canonical", hasId: false, body: "A setext heading\n================\n\n* first\n* second\n", stopQuarantine: false },
   { name: "quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
-  { name: "stale-binding quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
+  { name: heldStopCase, hasId: true, body: "# Keep this body\n", stopQuarantine: true },
   { name: "offline stop", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
   { name: "deferred resume", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
 ])("settles open Collection adoption with native owner delivery and recipient sync ($name)", async ({ name, hasId, body: originalBody, stopQuarantine }) => {
   const canonical = markdownToYDoc(originalBody);
   const body = name === "id-less canonical" ? yDocToMarkdown(canonical) : originalBody;
   canonical.destroy();
-  const workspaceId = name === "stale-binding quarantine" ? "native-stale-quarantine" : `native-open-adoption-${name.replaceAll(" ", "-")}`;
+  const workspaceId = name === heldStopCase ? "native-stale-quarantine" : `native-open-adoption-${name.replaceAll(" ", "-")}`;
   const rootA = await createTestScratch("dohc-native-adoption-owner-");
   const rootB = await createTestScratch("dohc-native-adoption-peer-");
   const relayRoot = await createTestScratch("dohc-native-adoption-relay-");
@@ -750,7 +754,6 @@ it.skipIf(engine.missing).each([
   let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
   let peer: LiveDaemonCapture | undefined;
   let preStopFeed: ReturnType<typeof proxy.holdNextHostedLogResponse> | undefined;
-  let resumedFeed: ReturnType<typeof proxy.holdNextHostedLogResponse> | undefined;
   const errors: string[] = [];
   let resyncSignals = 0;
   const recordError = (context: string, error: unknown) => {
@@ -1035,7 +1038,7 @@ it.skipIf(engine.missing).each([
       await delivery?.stop(); delivery = undefined;
       const offlineStop = name === "offline stop";
       const deferredResume=name==="deferred resume";
-      const quarantineReason = name === "stale-binding quarantine" ? "stale-binding" : "delivery-conflict";
+      const quarantineReason = name === heldStopCase ? "stale-binding" : "delivery-conflict";
       await session.applyDecidedLocalUpdate(doc => {
         const scratch = new Y.Doc();
         try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
@@ -1064,14 +1067,23 @@ it.skipIf(engine.missing).each([
       const handlers = new Map<string, (event: {sender: {id: number}}, payload: unknown) => unknown>();
       const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token: relayConnection.token};
       const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
-      let offline = offlineStop;
+      let offline = offlineStop, stopRefusalStatus: number | undefined;
       const ownerHandlers = createRelaySharesIpcHandlers({
         remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
         currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
         relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
           if (offline) throw new Error("offline");
           const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"}});
-          expect(response.ok).toBe(true); return await response.json() as R;
+          if (!response.ok) {
+            const text = await response.text();
+            let data: unknown = null;
+            try {data = JSON.parse(text);} catch {/* Not JSON: fail below with the relay's answer. */}
+            // A Stop refusal reaches Stop as main's relayShareJsonWithCredentials throws it.
+            const stopRefusal = liveStopRelayError(data);
+            if (stopRefusal) {stopRefusalStatus = response.status; throw stopRefusal;}
+            expect(response.ok, `${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${text}`).toBe(true);
+          }
+          return await response.json() as R;
         }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
@@ -1113,19 +1125,35 @@ it.skipIf(engine.missing).each([
         try {return (db.prepare("SELECT state FROM hosted_documents WHERE object_id=?").get(document.binding.objectId) as {state: string} | undefined)?.state;}
         finally {db.close();}
       };
-      // The session host either parks the stopped document before Resume, or
-      // pulls nothing between Stop and Resume and still holds it ready.
-      const hostReadyAtResume = name === "stale-binding quarantine";
-      if (hostReadyAtResume) {
+      // This computer's Stops that still owe the server a retirement.
+      const owedStops = async () => (await source.sessions.run(source.workspace, async ({workspace}) =>
+        source.nativeClient().ownerYDocStopList({id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS}))).filter(row => row.retirementOwed);
+      if (name === heldStopCase) {
+        // A hosted pull holds the session host's only request slot, so Stop can't
+        // drain or prepare there, and the relay answers that edits are pending.
         preStopFeed = proxy.holdNextHostedLogResponse(workspaceId);
         const response = await waitForHostedLog(preStopFeed, preStopFeed.captured, "pre-Stop capture");
         expect(response.status).toBe(200);
         expect(JSON.parse(response.body.toString("utf8"))).toMatchObject({ ok: true,
           scope: { documents: expect.arrayContaining([{ objectId: document.binding.objectId, path }]) } });
         expect(await hostDocumentState()).toBe("ready");
+        const refused = await stop().then(() => {throw new Error("Stop succeeded while the session host was held.");}, (error: unknown) => error);
+        expect(stopRefusalStatus).toBe(409);
+        expect(readLiveStopRefusal(refused)).toEqual({code: "edits-pending"});
+        expect((refused as Error).message).toBe(LIVE_STOP_EDITS_PENDING);
+        // The refusal cleared this computer's Stop, so the next Stop starts afresh.
+        expect(await owedStops()).toEqual([]);
+        preStopFeed.release();
+        try { await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery"); }
+        catch (error) {
+          // A host that gave up on the held pull retries it, and the release lets that retry through.
+          if (!(error instanceof HostedLogClientClosedError)) throw error;
+        }
+        // The session host holds the document again before Stop is sent again.
+        await expect.poll(async () => (await discovery()).length, {timeout: 120_000}).toBe(1);
       }
       if (offlineStop) {
-        await expect(stop()).rejects.toThrow("Stop live editing is waiting.");
+        await expect(stop()).rejects.toThrow("dohc is waiting for the server to stop live editing and will keep trying.");
         const requested = await source.sessions.run(source.workspace, async ({workspace}) =>
           source.nativeClient().ownerYDocStopList({id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS}));
         expect(requested).toMatchObject([{state: "requested", binding: document.binding}]);
@@ -1150,6 +1178,7 @@ it.skipIf(engine.missing).each([
         }));
       } else await stop();
       await expect.poll(async () => (await discovery()).length, {timeout: 60_000}).toBe(0);
+      if (name === heldStopCase) expect(await owedStops()).toEqual([]);
       if (deferredResume) {
         expect((await readPending()).entries).toHaveLength(33);
         await resume();
@@ -1169,7 +1198,7 @@ it.skipIf(engine.missing).each([
       expect(await readFile(join(rootA, path), "utf8")).toContain(offlineStop ? "Name: Offline while stopping" : "Name: Quarantined edit");
       const releasedMoment = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
       expect(releasedMoment?.authors).toContainEqual({kind: "human", humanId: "local-person"});
-      if (!hostReadyAtResume) await expect.poll(hostDocumentState, {timeout: 120_000}).toBe("parked");
+      await expect.poll(hostDocumentState, {timeout: 120_000}).toBe("parked");
       // An ordinary owner edit that reaches the peer through ordinary sync.
       const editOrdinary = async (value: string, key: string) => {
         const ordinary = await capture!.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
@@ -1196,23 +1225,20 @@ it.skipIf(engine.missing).each([
       const ready = {ready: true, row: expect.objectContaining({path, status: "ready"})};
       // The operator's reports that the session host holds the document.
       const reports = () => relayServer!.diagnostics().stderr.split(`Live editing of ${path} in workspace ${workspaceId} is held`).length - 1;
+      // The relay's activations, the session host's copy and the relay's log, for a row that never became ready.
+      const notReady = async (error: unknown): Promise<never> => {
+        const db = new DatabaseSync(relayOptions.dbPath, {readOnly: true});
+        let activations: unknown;
+        try {
+          activations = db.prepare(`SELECT activation_id,predecessor_activation_id,object_id,lineage_claim_id,completion_json IS NOT NULL AS completed,
+            retire_requested_at_ms,retire_restore_generation,retired_at_ms FROM sync_relay_service_activations WHERE workspace_id=?`).all(workspaceId);
+        } finally {db.close();}
+        throw new Error(JSON.stringify({discoveryPayload, activations, hostDocument: await hostDocumentState(),
+          diagnostics: relayServer!.diagnostics()}), {cause: error});
+      };
       await resume();
-      if (preStopFeed) {
-        // Finish the pre-Stop pass, then hold the fresh feed before it can fence the stale copy.
-        resumedFeed = proxy.holdNextHostedLogResponse(workspaceId);
-        preStopFeed.release();
-        try { await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery"); }
-        catch (error) {
-          // A timed-out host retries through the queued pull and the fresh-response barrier.
-          if (!(error instanceof HostedLogClientClosedError)) throw error;
-        }
-        expect((await waitForHostedLog(resumedFeed, resumedFeed.captured, "resumed capture")).status).toBe(200);
-        expect(await hostDocumentState()).toBe("ready");
-        resumedFeed.release();
-        await waitForHostedLog(resumedFeed, resumedFeed.delivered, "resumed delivery");
-      }
       // A successor captures the stopped edit, and the session host's copy has it.
-      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready).catch(notReady);
       expect(await hostDocumentState()).toBe("ready");
       expect(reports()).toBe(0);
       // The settlement commits before the engine writes the file.
@@ -1226,7 +1252,7 @@ it.skipIf(engine.missing).each([
       await relayServer.stop();
       relayServer = await spawnSyncRelay(relayOptions);
       proxy.routeRelayTo(relayServer.baseUrl);
-      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready).catch(notReady);
       expect(await hostDocumentState()).toBe("ready");
       expect(reports()).toBe(0);
       // Another document of the workspace also starts live editing.
@@ -1250,7 +1276,7 @@ it.skipIf(engine.missing).each([
     }
     await session.close({settle: false});
   } finally {
-    preStopFeed?.destroy(); resumedFeed?.destroy();
+    preStopFeed?.destroy();
     await delivery?.stop(); await peer?.close();
     try {await capture?.stop().catch(() => undefined);} finally {await owner?.close(); await relayServer?.stop(); await proxy.close();
       setDefaultCACertificates(previousRoots); vi.unstubAllEnvs();}

@@ -911,7 +911,7 @@ it("waits to stop a retained activation that no running host can prepare", async
   retainServiceActivation(f.raw, namespace, true);
   const waiting = await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true}));
   expect(waiting.status).toBe(409);
-  expect(await waiting.json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "starting", error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
+  expect(await waiting.json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "starting", error: "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment."});
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
 });

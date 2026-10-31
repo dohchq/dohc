@@ -238,9 +238,9 @@ it("stays unavailable until retained documents have a running native host", asyn
 it.each([
   {name: "diverged", code: "host-diverged", state: "running without this document (server copy diverged)", error: "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator."},
   {name: "paused", code: "host-paused", state: "running without this document (paused)", error: "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it."},
-  {name: "no Edit grant", code: "host-no-edit-grant", state: "running without this document (no Edit grant)", error: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again."},
-  {name: "moved", code: "host-moved", state: `running without this document (moved from ${binding.currentPath})`, error: `Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from ${binding.currentPath}. Put it back there, then try again.`},
-  {name: "start failed", code: "host-start-failed", state: "couldn't start", error: "Live editing didn't stop. The server's session host couldn't start and may hold recent edits. Contact the server's operator, then try again."},
+  {name: "no Edit grant", code: "host-no-edit-grant", state: "running without this document (no Edit grant)", error: "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again."},
+  {name: "moved", code: "host-moved", state: `running without this document (moved from ${binding.currentPath})`, error: `Live editing didn't stop. The server may hold recent edits, but it only loads this document from ${binding.currentPath}. Put it back there, then try again.`},
+  {name: "start failed", code: "host-start-failed", state: "couldn't start", error: "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again."},
   {name: "starting", code: "host-not-loaded", state: "starting"},
   {name: "restarting", code: "host-not-loaded", state: "restarting"},
   {name: "not loaded", code: "host-not-loaded", state: "running, document not loaded yet"},
@@ -281,7 +281,7 @@ it.each([
     expect(response.status).toBe(409);
     const body = await response.json();
     expect(body).toEqual({ok: false, code: test.code, sessionHost: test.state,
-      error: test.error ?? "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.",
+      error: test.error ?? "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
       ...(test.name === "moved" ? {path: binding.currentPath} : {})});
     expect(JSON.stringify(body)).not.toContain(failure.message);
     expect(f.enrollment()).toEqual(before);

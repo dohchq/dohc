@@ -184,7 +184,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -990,15 +990,17 @@ export function DesktopWorkspaceShell(props: {
   }, [loadLiveDocuments]);
   // A Stop names the row's document. A Try again closes that document's
   // editors wherever they opened it, and no other document's at its old path.
+  // The document's waiting row stays until a Stop succeeds: one that waits
+  // again replaces it, even when no dialog is left to report the wait.
   const stopLiveDocument = useCallback(
     async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
-      if (id === workspaceIdRef.current && !workspaceAdmission.superseded) {
-        clearIdentity(`live-stop-edits-pending:${objectId}`);
-      }
+      const current = () => id === workspaceIdRef.current && !workspaceAdmission.superseded;
+      if (current()) clearIdentity(`live-stop-edits-pending:${objectId}`);
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
         result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
       });
+      if (current()) clearIdentity(`live-stop-waiting:${id}:${objectId}`);
       return result;
     },
     [clearIdentity, workspaceAdmission],
@@ -1026,7 +1028,7 @@ export function DesktopWorkspaceShell(props: {
         ...(!withheld ? {title: `Live editing didn't stop for ${path}`} : {}),
         message: withheld ? `Live editing didn't stop for ${path}.`
           : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
-        ...(refusal.sessionHost ? {details: [["Session host", refusal.sessionHost]]} : {}),
+        ...(refusal.sessionHost ? {details: [["Server", refusal.sessionHost]]} : {}),
         ...(withheld
           ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, listPath);}}}
           : needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
@@ -1074,17 +1076,25 @@ export function DesktopWorkspaceShell(props: {
   // A refused read or action becomes the shell's own notice, which outlives
   // the dialog. Its Try again runs the dialog's retry while the dialog is
   // open, and reopens the dialog once it is not — but only for the workspace
-  // the failure belonged to.
+  // the failure belonged to. A waiting Stop's notice is one per document,
+  // apart from that document's recovery row.
   const reportLiveDocumentsError = useCallback(
-    (message: string, error: unknown, retry: () => boolean) => {
+    (message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => {
       const failedFor = workspaceIdRef.current;
-      reportShellError(message, error, () => {
+      const again = () => {
         if (workspaceIdRef.current !== failedFor) return;
         if (retry()) return;
         openLiveDocuments(failedFor);
-      });
+      };
+      if (waiting) {
+        // Copy keeps what the error said. A plain relay error has words and no cause.
+        const {cause, words} = readError(error);
+        const said = cause ?? words;
+        reportShellFailure({title: waiting.title, message, retry: again, details: said ? [["Cause", said] as const] : [],
+          identity: `live-stop-waiting:${failedFor}:${waiting.objectId}`});
+      } else reportShellError(message, error, again);
     },
-    [reportShellError, openLiveDocuments],
+    [reportShellError, reportShellFailure, openLiveDocuments],
   );
   // Save recovery copy, from a notice or the Live documents dialog, of the
   // kept edits the row's incident names. Set once the shell can open the copy it wrote.
@@ -4441,6 +4451,7 @@ export function DesktopWorkspaceShell(props: {
         if (event.liveDocumentStopped && event.workspaceId === workspaceId &&
           workspaceIdRef.current === workspaceId && !workspaceAdmission.superseded) {
           clearIdentity(`live-stop-edits-pending:${event.liveDocumentStopped}`);
+          clearIdentity(`live-stop-waiting:${workspaceId}:${event.liveDocumentStopped}`);
         }
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;

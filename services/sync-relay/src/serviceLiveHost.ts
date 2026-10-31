@@ -1520,7 +1520,8 @@ export async function startServiceLiveHost(options: {
        * new local edits of the activation Stop retires. In the document's work
        * it drains the document within its budgets, then prepares that
        * activation for this connection. `waiting` while edits or a Try again
-       * remain, with nothing blocked or fenced. With no activation to retire, as
+       * remain, or once this connection ends before the fence, with nothing
+       * blocked or fenced. With no activation to retire, as
        * after a first Stop, or none this host holds, `fence` runs unprepared,
        * and the relay refuses an activation that needs a preparation. The block
        * ends unless the fence recorded that activation's retirement.
@@ -1534,7 +1535,13 @@ export async function startServiceLiveHost(options: {
           return stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence);
         }
         // A dormant document reloads, so its queues can drain.
-        try {await wake(document, callerSignal);} catch {callerSignal?.throwIfAborted(); check();}
+        // A wake request past its deadline ends this connection. Nothing was
+        // prepared or fenced, so Stop waits, as below.
+        try {await wake(document, callerSignal);} catch {
+          callerSignal?.throwIfAborted();
+          if (signal.aborted) return "waiting";
+          check();
+        }
         const value = parseLiveDocumentKey({workspaceId: document.workspaceId, mainVersionId: "main", objectId: document.objectId, lineageClaimId: candidate.lineageClaimId});
         const current = () => {check(); if (checked(document.workspaceId) !== attached) throw new Error("Service host workspace attachment changed.");};
         // A release that fails ends this connection, which ends the block.
@@ -1582,6 +1589,12 @@ export async function startServiceLiveHost(options: {
               if (reconnect) abort();
             }
           }));
+        } catch (error) {
+          // A host request past its deadline ends this connection, so Stop's
+          // drain or preparation fails with the connection's abort reason.
+          // Nothing was fenced, so Stop waits, as while edits remain.
+          if (signal.aborted && error === signal.reason) return "waiting";
+          throw error;
         } finally {changes?.notify(value);}
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */

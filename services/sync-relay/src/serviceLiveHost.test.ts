@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {errorResponse} from "./errors.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -2331,6 +2331,26 @@ it("records a departed application only as the next accepted row, for its adopti
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
 });
 
+// Proves: whether a pending activation holds an admitted seed comes from relay
+// rows alone, so a store rebuilt on a later connection reads the same answer.
+// It counts only while the activation is pending.
+it("finds a pending activation's admitted seed from relay rows alone, on any store", async () => {
+  const o = await enrolledServiceHost(), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  await o.host.close();
+  const host = {...o.host.coordinate, connectionId: "rebuilt"};
+  expect(o.f.storage.registerLiveHost({...host, updatedAtMs: Date.now(), guard: o.f.storage.captureStanding()}).ok).toBe(true);
+  const hasSeed = (pending: boolean) => {
+    const access = pending ? o.f.storage.createServiceActivationStore(o.f.history).pending(o.document, host) : undefined;
+    const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
+    return store.hasPendingActivationSeed(store.openOwnerDelivery({host, document: o.document, actor}));
+  };
+  expect(hasSeed(false)).toBe(false);
+  // As before the host applied it: the activation has not completed.
+  o.raw.prepare("UPDATE sync_relay_service_activations SET completion_json=NULL WHERE activation_id=?").run(ACTIVATION);
+  expect(hasSeed(true)).toBe(true);
+  expect(hasSeed(true)).toBe(true);
+});
+
 // Proves: a daemon that starts after Stop retires a stopped document it never
 // loaded, from its durable obligation, the relay's journal and the engine's
 // record of what it applied. It captures no session and registers nothing.
@@ -2608,6 +2628,39 @@ it("activates a retired activation's successor after Resume, which admits edits 
   expect(o.client().sendLiveOwnerAdoption).toHaveBeenLastCalledWith(expect.anything(),
     expect.objectContaining({adoptionId: SUCCESSOR, terminalReceipt: tip, events: []}), expect.anything(), expect.any(AbortSignal));
   expect(o.acceptEdit("after")).toMatchObject({journalCursor: tip.journalCursor + 1});
+});
+
+// Proves: a session host may still hold the copy it had at Stop, ready but
+// missing what the owner wrote while live editing was off. After Resume, the
+// successor's pass pulls the hosted feed before it captures, so the successor
+// starts from the feed, never from that copy. The two-daemon e2e can't hold
+// the host's copy ready across Stop since #2103, so it relies on this test.
+it("captures a retired activation's successor only after a hosted pull that started after Resume", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  // Resume waits behind a pass that is pulling, so the next pull is one that started after Resume.
+  const before = o.park("sync.pullHosted");
+  await before.entered.promise;
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  const resumed = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  const after = o.park("sync.pullHosted");
+  before.release.resolve();
+  await resumed;
+  const sent = methods().length;
+  await after.entered.promise;
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(captures);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  after.release.resolve();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const pulled = methods().indexOf("sync.pullHosted", sent);
+  expect(o.client().sendRequest.mock.invocationCallOrder[pulled]).toBeLessThan(o.client().captureOwnerActivation.mock.invocationCallOrder[captures]!);
 });
 
 // Proves: the engine refuses to release a stopped document until it parked.
@@ -5153,7 +5206,7 @@ it("fails the fence and ends the block when the host connection is replaced duri
 });
 
 // Proves: a host that closes while the engine prepares fences nothing, and
-// ends the block before it stops.
+// ends the block before it stops. Stop waits, as while edits remain.
 it("fences nothing and ends the block when the host closes during preparation", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -5162,10 +5215,59 @@ it("fences nothing and ends the block when the host closes during preparation", 
   await parked.entered.promise;
   const closing = o.host.close();
   parked.release.resolve();
-  await expect(stopping).rejects.toThrow();
+  await expect(stopping).resolves.toBe("waiting");
   await closing;
   expect(o.engine.prepared).toBeUndefined();
   stillLive(o);
+});
+
+// Proves: a Stop whose host request passes its deadline waits, and does not
+// fail with the connection's abort. The deadline retires the connection,
+// which fences nothing and ends the block, so the document stays live.
+it.each([
+  ["its drain", "liveApplication.ownerState"],
+  ["its preparation", "liveApplication.prepareRetirement"],
+])("waits to stop when %s passes its deadline and retires the host connection", async (_step, method) => {
+  const o = await enrolledServiceHost({frameChanges: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const send = o.client().sendRequest, answer = send.getMockImplementation()!;
+  let late = true;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    if (late && request.method === method) {late = false; throw new EngineRequestDeadlineError(request.id, request.method, 1_000);}
+    return answer(request);
+  });
+  await expect(hostStop(o)).resolves.toBe("waiting");
+  expect(late).toBe(false);
+  expect(o.host.invalidated.aborted).toBe(true);
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+});
+
+// Proves: a Stop that wakes a dormant document waits when the wake's pull
+// passes its deadline and retires the host connection. It does not fail as an
+// unavailable host, and nothing is prepared or fenced.
+it("waits to stop a dormant document when its wake passes its deadline and retires the host connection", async () => {
+  const o = await idleHost({alone: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const send = o.client().sendRequest, answer = send.getMockImplementation()!;
+  let late = 0;
+  // Every pull from here passes its deadline, whether the wake's or a pass's.
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    if (request.method === "sync.pullHosted") {late++; throw new EngineRequestDeadlineError(request.id, request.method, 1_000);}
+    return answer(request);
+  });
+  const fence = vi.fn();
+  await expect(o.host.stop({workspaceId: "workspace", objectId: "object"}, fence)).resolves.toBe("waiting");
+  expect(late).toBeGreaterThan(0);
+  expect(o.host.invalidated.aborted).toBe(true);
+  expect(fence).not.toHaveBeenCalled();
+  expect(o.methods()).not.toContain("liveApplication.prepareRetirement");
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
 });
 
 // Proves: a cancelled Stop releases the block and leaves admission open, and
@@ -5320,7 +5422,7 @@ it.each(["running without this workspace", "running without this document"] as c
     expect(response).toBeInstanceOf(Response);
     expect((response as Response).status).toBe(409);
     expect(await (response as Response).json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "running, document not loaded yet",
-      error: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment."});
+      error: "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment."});
     stillLive(o);
     expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([]);
     expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([

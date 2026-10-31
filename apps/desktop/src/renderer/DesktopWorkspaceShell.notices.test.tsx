@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { liveStopError } from "../ipc/liveEditingStop";
+import { LIVE_STOP_SERVER_NOT_READY, LIVE_STOP_WAITING, liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
@@ -2856,7 +2856,7 @@ describe("owner live documents", () => {
     else expect(within(toast).getByRole("button", {name: control === "resume" ? "Resume live editing" : "Try again"})).toBeTruthy();
     await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
     const copy = await navigator.clipboard.readText();
-    expect(copy).toContain(`Session host: ${sessionHost}`);
+    expect(copy).toContain(`Server: ${sessionHost}`);
     expect(copy).not.toContain("LiveStopRefusal");
     expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
     if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
@@ -2917,14 +2917,14 @@ describe("owner live documents", () => {
     const resume = control === "resume";
     if (control === "none") expect(within(toast).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
     else expect(within(toast).getByRole("button", {name: resume ? "Resume live editing" : "Try again"})).toBeTruthy();
-    expect(toast.textContent).not.toContain("Session host:");
+    expect(toast.textContent).not.toContain("Server:");
     await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
-    expect(await navigator.clipboard.readText()).toContain(`Session host: ${sessionHost}`);
+    expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
     expect(within(notice).getByText(body)).toBeTruthy();
     await user.click(within(notice).getByRole("button", {name: "Copy error details"}));
-    expect(await navigator.clipboard.readText()).toContain(`Session host: ${sessionHost}`);
+    expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     if (control === "none") {
       expect(within(notice).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
       return;
@@ -3390,6 +3390,157 @@ describe("owner live documents", () => {
 
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
     expect(await screen.findByTestId("live-documents-dialog")).toBeTruthy();
+  });
+
+  // The waiting words are the same for every document, so each document's
+  // waiting Stop keeps its own notice, and another report replaces only its own.
+  it("keeps one waiting Stop notice per document, each with its title, words and Try again", async () => {
+    const PLAN_ROW = {...LIVE_ROW, path: "notes/plan.md", objectId: "object-plan"};
+    // As it crosses Electron's IPC, which keeps only the name and message.
+    const waiting = () => new Error(`Error invoking remote method 'stopOwnerLiveDocument': ${String(liveStopWaitingError(new Error("fetch failed")))}`);
+    const again = deferred<StopOwnerLiveDocumentResult>(), retried = deferred<StopOwnerLiveDocumentResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => ({documents: [LIVE_ROW, PLAN_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(waiting()).mockRejectedValueOnce(waiting())
+      .mockReturnValueOnce(again.promise).mockReturnValueOnce(retried.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    const stopButton = (row: typeof LIVE_ROW) => within(dialog).getByRole("button", {name: `Stop live editing for ${row.path}`});
+    const toastTitle = (title: string) => waitFor(() => expect(within(screen.getByTestId("workspace-shell-error")).getByText(title)).toBeTruthy());
+    const [todayTitle, planTitle] = [LIVE_ROW, PLAN_ROW].map(row => `Stopping live editing for ${row.path}`) as [string, string];
+    // Waits out a Stop the test answers: busy while it runs, free once the dialog has reported it.
+    const settle = async (stop: typeof again) => {
+      await waitFor(() => expect(stopButton(LIVE_ROW)).toHaveProperty("disabled", true));
+      await act(async () => stop.reject(waiting()));
+      await waitFor(() => expect(stopButton(LIVE_ROW)).toHaveProperty("disabled", false));
+    };
+
+    await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    await user.click(stopButton(LIVE_ROW));
+    await toastTitle(todayTitle);
+    await waitFor(() => expect(stopButton(PLAN_ROW)).toHaveProperty("disabled", false));
+    await user.click(stopButton(PLAN_ROW));
+    await toastTitle(planTitle);
+    // A second report for today.md, while both rows stand, replaces only its own.
+    await waitFor(() => expect(stopButton(LIVE_ROW)).toHaveProperty("disabled", false));
+    await user.click(stopButton(LIVE_ROW));
+    await settle(again);
+    await toastTitle(todayTitle);
+    // The toast's Try again stops its own document.
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(within(toast).getByText(LIVE_STOP_WAITING)).toBeTruthy();
+    await user.click(within(toast).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(4));
+    for (const [n, row] of [LIVE_ROW, PLAN_ROW, LIVE_ROW, LIVE_ROW].entries()) {
+      expect(bridge.stopOwnerLiveDocument).toHaveBeenNthCalledWith(n + 1, {workspaceId: WORKSPACE.workspaceId, path: row.path, objectId: row.objectId});
+    }
+    await settle(retried);
+    await toastTitle(todayTitle);
+
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = await screen.findByTestId("notice-center");
+    for (const title of [todayTitle, planTitle]) {
+      const titles = within(center).getAllByText(title);
+      expect(titles).toHaveLength(1);
+      const notice = titles[0]!.closest("li")!;
+      expect(within(notice).getByText(LIVE_STOP_WAITING)).toBeTruthy();
+      expect(within(notice).getByRole("button", {name: "Try again"})).toBeTruthy();
+    }
+    expect(within(center).getAllByText(LIVE_STOP_WAITING)).toHaveLength(2);
+  });
+
+  // Nothing sends a server-only Stop again, so the notice says to try again,
+  // and keeps the relay's words in Copy only. The row stays while a Stop runs,
+  // and through one that waits again after the dialog closes; it goes when a
+  // Stop succeeds.
+  it("keeps a server-only Stop the server isn't ready for, with the relay's words in Copy, until a Stop succeeds, through a closed dialog's wait", async () => {
+    const relay = "Stop live editing is waiting. You can keep editing.";
+    // Main's plain relay error, as it crosses Electron's IPC.
+    const notReady = () => new Error(`Error invoking remote method 'stopOwnerLiveDocument': Error: ${relay}`);
+    const next = deferred<StopOwnerLiveDocumentResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => ({documents: [LIVE_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(notReady()).mockReturnValueOnce(next.promise)
+      .mockResolvedValueOnce({keptEdits: "none"});
+    const user = userEvent.setup();
+    renderShell(bridge);
+    let dialog = await openLiveDocumentsFromSettings(user);
+    const stopButton = () => within(dialog).getByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    const title = `Live editing didn't stop for ${LIVE_ROW.path}`;
+    const noticeTitles = async () => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const titles = within(await screen.findByTestId("notice-center")).queryAllByText(title);
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      return titles;
+    };
+
+    await within(dialog).findByRole("button", {name: `Stop live editing for ${LIVE_ROW.path}`});
+    await user.click(stopButton());
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(title)).toBeTruthy();
+    expect(within(toast).getByText(LIVE_STOP_SERVER_NOT_READY)).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+    expect(toast.textContent).not.toContain(relay);
+    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    expect(await navigator.clipboard.readText()).toContain(`Cause: ${relay}`);
+
+    // The second Stop runs, and the row stays.
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(stopButton());
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
+    expect(within(screen.getByTestId("workspace-shell-error")).getByText(title)).toBeTruthy();
+    // It waits again after the dialog closed, which reports nothing: the row is still there, once.
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+    await act(async () => next.reject(notReady()));
+    const kept = await noticeTitles();
+    expect(kept).toHaveLength(1);
+    expect(within(kept[0]!.closest("li")!).getByText(LIVE_STOP_SERVER_NOT_READY)).toBeTruthy();
+
+    // A Stop that succeeds clears it.
+    dialog = await openLiveDocumentsFromSettings(user);
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(stopButton());
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(stopButton()).toHaveProperty("disabled", false));
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    expect(await noticeTitles()).toHaveLength(0);
+  });
+
+  // Main reports every Stop that succeeds, including an agent's, so the
+  // document's waiting row goes, and no other row.
+  it("clears a document's waiting row when main reports its Stop succeeded, and leaves other documents and workspaces alone", async () => {
+    const PLAN_ROW = {...LIVE_ROW, path: "notes/plan.md", objectId: "object-plan"};
+    // As it crosses Electron's IPC, which keeps only the name and message.
+    const waiting = () => new Error(`Error invoking remote method 'stopOwnerLiveDocument': ${String(liveStopWaitingError(new Error("fetch failed")))}`);
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => ({documents: [LIVE_ROW, PLAN_ROW], nextCursor: null}));
+    bridge.stopOwnerLiveDocument = vi.fn().mockRejectedValueOnce(waiting()).mockRejectedValueOnce(waiting());
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const dialog = await openLiveDocumentsFromSettings(user);
+    const [todayTitle, planTitle] = [LIVE_ROW, PLAN_ROW].map(row => `Stopping live editing for ${row.path}`) as [string, string];
+    for (const [row, title] of [[LIVE_ROW, todayTitle], [PLAN_ROW, planTitle]] as const) {
+      const stop = await within(dialog).findByRole("button", {name: `Stop live editing for ${row.path}`});
+      await waitFor(() => expect(stop).toHaveProperty("disabled", false));
+      await user.click(stop);
+      await waitFor(() => expect(within(screen.getByTestId("workspace-shell-error")).getByText(title)).toBeTruthy());
+    }
+    await user.click(within(dialog).getByRole("button", {name: "Close"}));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = () => within(screen.getByTestId("notice-center"));
+    await screen.findByTestId("notice-center");
+
+    await act(async () => bridge.emitWorkspaceActivity({workspaceId: OTHER_WORKSPACE.workspaceId, liveDocumentStopped: LIVE_ROW.objectId}));
+    await act(async () => bridge.emitWorkspaceActivity({workspaceId: WORKSPACE.workspaceId, liveDocumentStopped: "other-object"}));
+    expect(center().getByText(todayTitle)).toBeTruthy();
+    expect(center().getByText(planTitle)).toBeTruthy();
+    await act(async () => bridge.emitWorkspaceActivity({workspaceId: WORKSPACE.workspaceId, liveDocumentStopped: LIVE_ROW.objectId}));
+    await waitFor(() => expect(center().queryByText(todayTitle)).toBeNull());
+    expect(center().getByText(planTitle)).toBeTruthy();
   });
 
   // DesktopRoot remounts the shell on a switch, so this rerenders the same

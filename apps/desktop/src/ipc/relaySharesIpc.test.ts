@@ -1643,7 +1643,7 @@ it("keeps a Stop request on a failure other than edits-pending", async () => {
   const h = pendingStopHarness("workspace", "live.md", "object");
   h.relay.mockRejectedValueOnce(new Error("connection lost"));
   await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
-    .rejects.toThrow("Stop live editing is waiting. Reconnect or wait for the restore to finish.");
+    .rejects.toMatchObject({name: "LiveStopWaitingError", message: "dohc is waiting for the server to stop live editing and will keep trying."});
   expect(h.recorded()?.state).toBe("requested");
   expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
 });
@@ -1655,7 +1655,7 @@ it.each(HOST_STOP_CASES)("relayShareErrorCopy maps %s and %s to the desktop's co
   const hostCopy = vi.fn(liveStopHostCopy);
   const copy = new Function("liveStopHostCopy", `${js}; return relayShareErrorCopy;`)(hostCopy) as
     (status: number, data: {code: string; error?: string; sessionHost: string; path?: string}) => string;
-  expect(copy(409, {code, sessionHost, path: code === "host-moved" ? "old/plan.md" : undefined, error: "arbitrary server wording"})).toBe(`${words}\nSession host: ${sessionHost}`);
+  expect(copy(409, {code, sessionHost, path: code === "host-moved" ? "old/plan.md" : undefined, error: "arbitrary server wording"})).toBe(`${words}\nServer: ${sessionHost}`);
   expect(hostCopy).toHaveBeenCalledExactlyOnceWith(code, sessionHost, code === "host-moved" ? "old/plan.md" : undefined);
 });
 

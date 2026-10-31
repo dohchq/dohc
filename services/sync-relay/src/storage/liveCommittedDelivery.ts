@@ -5,7 +5,7 @@ import {RestoreAdmissionReads} from "./restoreAdmissionReads";
 import {relayError} from "../errors";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
-import { hasServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { hasServiceActivation, readServiceActivation, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
@@ -464,6 +464,18 @@ export class LiveCommittedDeliveryStore {
     if (!raw) {integrity((progress.terminal?.journalCursor ?? 0) === highWater); return undefined;}
     const row = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,row); verifyJournalRow(row);
     return row.admitted;
+  }
+  /**
+   * Whether the journal admitted a seed for the pending service activation
+   * this delivery adopted for. It reads only relay rows.
+   */
+  hasPendingActivationSeed(capture: OwnerDeliveryCapture): boolean {
+    const {document} = this.#ownerDelivery(capture), {adoptionId} = this.ownerDeliveryProgress(capture);
+    return this.#storage.readTx(() => {
+      const row = readServiceActivation(this.#storage,document);
+      return serviceActivationState(row) === "pending" && row!.activation_id === adoptionId && row!.relay_database_namespace === this.#history.namespace &&
+        serviceActivationSeed(this.#storage,row!) !== null;
+    });
   }
   acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
     this.#acknowledgeOwnerApplication(capture,value);

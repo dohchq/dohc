@@ -415,7 +415,7 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
     expect(append(f,[first.op]).settlementRefusals).toBeUndefined();
     expect(first.receipt.journalCursor).toBe(7);
     let fileDigest = f.input.evidence.projectedMarkdownSha256, terminal = first.receipt, requestId = 0;
-    let next: ReturnType<typeof publication> | undefined, failSettle = restart;
+    let next: ReturnType<typeof publication> | undefined, failSettle = restart, cutSettled = false;
     const methods: string[] = [];
     const client = {
       async sendRequest(input: Parameters<EngineClient["sendRequest"]>[0]) {
@@ -424,14 +424,16 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
         if(input.method === "liveApplication.ownerState")return {id: input.id,result: {
           adoptionId: "handover",expectedLocalSequence: 1,throughCursor: null,sessionId: "session"}};
         if(input.method === "liveApplication.ownerOutbox") {
-          // A collaborator keeps typing while this delivery pass drains the outbox.
-          next ??= publication(f,"typed-through-handover",7,fileDigest,1);
+          // A collaborator keeps typing while this delivery pass drains the
+          // outbox. The pass reads the empty queue once before the cut, too.
+          if(cutSettled) next ??= publication(f,"typed-through-handover",7,fileDigest,1);
           return {id: input.id,result: {outboxId: null,pendingBytes: 0,state: "active",retryDeliveryId: null}};
         }
         expect(input.method).toBe("liveApplication.settle");
         if(failSettle){failSettle = false;throw new Error("relay restarted before empty settle");}
         const empty = terminal.journalCursor === 7;
         fileDigest = empty ? first.markdownSha : next!.markdownSha;
+        cutSettled = true;
         return {id: input.id,result: {status: "settled",settlement: {
           settlementId: empty ? null : next!.record.settlementId,previousCursor: 7,terminalCursor: terminal.journalCursor,
           applicationCount: empty ? 0 : 1,localYDocSequence: empty ? 1 : 2,momentId: empty ? "cut" : "typed-through-handover",
@@ -457,11 +459,16 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
     let delivery = consumer();
     if(restart) {
       await expect(delivery.drain(f.input.evidence.document)).rejects.toThrow("relay restarted");
-      expect(methods).not.toContain("liveApplication.ownerOutbox");
+      // Only the seed check read the queue; the pass drained nothing.
+      expect(methods.filter(method => method === "liveApplication.ownerOutbox")).toHaveLength(1);
+      expect(methods.at(-1)).toBe("liveApplication.settle");
       delivery = consumer();
     }
     expect(await delivery.drain(f.input.evidence.document)).toMatchObject({kind: "done",terminalReceipt: {journalCursor: 8}});
-    expect(methods.indexOf("liveApplication.settle")).toBeLessThan(methods.indexOf("liveApplication.ownerOutbox"));
+    // A seedless adoption still settles its cut, between the seed check and the drain.
+    const settledAt = methods.lastIndexOf("liveApplication.settle");
+    expect(methods[settledAt - 1]).toBe("liveApplication.ownerOutbox");
+    expect(methods.slice(settledAt + 1)).toContain("liveApplication.ownerOutbox");
     expect(next!.payload.payloadBeforeBlobSha256).toBe(first.markdownSha);
     await delivery.settle(f.input.evidence.document);
     await prepare(f,[next!.op]);

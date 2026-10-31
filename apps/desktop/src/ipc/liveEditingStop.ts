@@ -1,13 +1,17 @@
 export const LIVE_STOP_EDITS_PENDING = "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.";
+/** A Stop with no answer, which dohc keeps and sends again. The cause stays out of the words. */
+export const LIVE_STOP_WAITING = "dohc is waiting for the server to stop live editing and will keep trying.";
+/** A server-only document's Stop the server can't prepare yet, such as during a restore. Nothing sends it again. */
+export const LIVE_STOP_SERVER_NOT_READY = "The server isn't ready to stop live editing yet. Try again in a moment.";
 export const LIVE_STOP_EDITS_PENDING_RESUME = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
 
 export const HOST_STOP_REFUSALS = {
   "host-paused": {message: LIVE_STOP_EDITS_PENDING_RESUME, action: "resume"},
   "host-diverged": {message: "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.", action: "none"},
-  "host-no-edit-grant": {message: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.", action: "retry"},
-  "host-moved": {message: "Live editing didn't stop. The server's session host may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.", action: "retry"},
-  "host-start-failed": {message: "Live editing didn't stop. The server's session host couldn't start and may hold recent edits. Contact the server's operator, then try again.", action: "retry"},
-  "host-not-loaded": {message: "Live editing didn't stop. The server's session host hasn't loaded this document yet and may hold recent edits. Try again in a moment.", action: "retry"},
+  "host-no-edit-grant": {message: "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.", action: "retry"},
+  "host-moved": {message: "Live editing didn't stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.", action: "retry"},
+  "host-start-failed": {message: "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.", action: "retry"},
+  "host-not-loaded": {message: "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.", action: "retry"},
 } as const;
 
 type HostStopCode = keyof typeof HOST_STOP_REFUSALS;
@@ -63,7 +67,20 @@ function knownSessionHost(value: unknown, path?: unknown): value is string {
 }
 
 export function liveStopHostCopy(code: HostStopCode, sessionHost: unknown, path?: unknown): string {
-  return `${liveStopMessage({code, ...(typeof path === "string" ? {path} : {})})}${knownSessionHost(sessionHost, path) ? `\nSession host: ${sessionHost}` : ""}`;
+  return `${liveStopMessage({code, ...(typeof path === "string" ? {path} : {})})}${knownSessionHost(sessionHost, path) ? `\nServer: ${sessionHost}` : ""}`;
+}
+
+const LIVE_STOP_WAITING_ERROR = "LiveStopWaitingError";
+
+/** A Stop with no answer. `cause` stays in main, since Electron passes only the name and message. */
+export function liveStopWaitingError(cause: unknown): Error {
+  const error = new Error(LIVE_STOP_WAITING, {cause});
+  error.name = LIVE_STOP_WAITING_ERROR;
+  return error;
+}
+
+export function isLiveStopWaiting(error: unknown): boolean {
+  return error instanceof Error && `${error.name}: ${error.message}`.includes(`${LIVE_STOP_WAITING_ERROR}: `);
 }
 
 // Electron preserves Error.toString(), so keep the code and metadata in its name.
