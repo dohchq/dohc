@@ -2244,7 +2244,7 @@ p { text-wrap: pretty; }
 .not-found-zero canvas {
   position: absolute;
   left: calc(50% + 0.03em);
-  top: calc(50% + 0.048em);
+  top: calc(50% + 0.026em);
   width: 1.3em;
   height: 1.3em;
   transform: translate(-50%, -50%);

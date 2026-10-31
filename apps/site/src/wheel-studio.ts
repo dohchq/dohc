@@ -7,7 +7,7 @@ import { createWheel } from './wheel-model';
  * face stays readable and the tread shows on one side. */
 const view = new T.Vector3(-Math.sin(.42), .12, Math.cos(.42)).normalize();
 /** Share of the canvas height the wheel fills. */
-const fill = .516;
+const fill = .55;
 
 export async function mountWheelStudio(host: HTMLElement) {
   // A 256 by 128 copy of the home page's studio: the same metal at 105 KB.
@@ -58,13 +58,13 @@ export async function mountWheelStudio(host: HTMLElement) {
     previous = performance.now(); frame = requestAnimationFrame(draw);
   }
   function fit() {
-    const width = host.clientWidth, height = host.clientHeight;
+    const { clientWidth: width, clientHeight: height } = renderer.domElement;
     if (!width || !height) return;
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix(); requestDraw();
   }
-  const resize = new ResizeObserver(fit); resize.observe(host);
+  const resize = new ResizeObserver(fit); resize.observe(renderer.domElement);
   const intersection = new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
     if (visible) requestDraw(); else { cancelAnimationFrame(frame); frame = 0; }
