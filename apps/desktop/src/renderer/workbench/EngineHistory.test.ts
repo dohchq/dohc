@@ -315,6 +315,11 @@ describe("groupTimeline", () => {
     // Another person, or an agent, starts a new row.
     expect(groupEngineMoments([byPerson("m3"), byPerson("m2", {}, "jun"), byAgent("m1")])
       .map((group) => group.moments.length)).toEqual([1, 1, 1]);
+    // A person the owner shared with, writing directly, folds by their user id.
+    const byNamed = (id: string, userId = "ana") =>
+      moment({ id, authors: [{ kind: "named", userId, grantId: "g-1", grantGeneration: 1 }] });
+    expect(groupEngineMoments([byNamed("m4"), byNamed("m3"), byNamed("m2", "lee"), byPerson("m1")])
+      .map((group) => group.moments.map((entry) => entry.id))).toEqual([["m4", "m3"], ["m2"], ["m1"]]);
   });
 
   it("never folds a delete, a restore, kept typing, a multi-file pass, another day, or edits with no single author", () => {

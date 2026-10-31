@@ -154,35 +154,6 @@ export function engineMomentSourceLabel(
     : engineOriginLabel(moment.origin);
 }
 
-// Where a moment came from, as one line of History. An automation's name
-// and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
-export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
-  testId: string;
-  id?: string;
-}) {
-  const { moment } = props;
-  if (moment.automationAuthor) {
-    return (
-      <span id={props.id} data-testid={props.testId} className="inline-flex items-center gap-1 text-muted">
-        <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-        <span className="sr-only">Automation </span>
-        {engineMomentSourceLabel(moment)}
-      </span>
-    );
-  }
-  // Agent-authored moments speak in the olive attribution voice; everything
-  // else is a neutral origin in ink.
-  return (
-    <span
-      data-testid={props.testId}
-      className={moment.agentAuthorName !== undefined ? "text-agent" : "text-muted"}
-    >
-      {engineMomentSourceLabel(moment)}
-    </span>
-  );
-}
-
 // The group-level author: the shared agent author name when every moment in
 // the group carries the same one, else undefined (mixed or neutral groups
 // stay unlabeled — never a guessed attribution).
@@ -202,6 +173,8 @@ function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
   if (author === undefined || others.length > 0) return undefined;
   if (author.kind === "agent") return `agent:${author.agentId}`;
+  // A person the owner shared with, writing directly.
+  if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
 }
 
@@ -469,12 +442,6 @@ export function OriginMark(props: { moment: CreditedMoment }) {
       {Icon ? <Icon size={14} strokeWidth={1.9} /> : <span className="size-1 rounded-full bg-subtle" />}
     </span>
   );
-}
-
-// A row's title: the engine's own summary, else the file's name. The
-// operation stays in the title only when it is not an edit.
-export function momentRowTitle(moment: EngineMomentRecord): string {
-  return moment.summary || moment.operation !== "write" ? engineMomentSummary(moment) : basenameOf(moment.path);
 }
 
 // What a change did, in one file's History, where the file goes without

@@ -365,7 +365,11 @@ export function EngineMomentDiffPage({
       return;
     }
     registerActiveUndo({
-      run: undoRestore,
+      // The Undo shortcut on Undo restore hands the focus back as a press does.
+      run: () => {
+        if (document.activeElement === actionRef.current) actionPressed.current = true;
+        return undoRestore();
+      },
       acceptsEvent: (event) => {
         if (isEditableShortcutTarget(event.target)) return false;
         const page = pageRef.current;
