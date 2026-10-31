@@ -21,7 +21,7 @@ import type {OrdinaryActivationValidator} from "./ordinaryActivationValidation";
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
-import { predecessorAcceptedThrough, readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
@@ -130,14 +130,9 @@ export class ServiceActivationStore {
         throw new Error("Native adoption acknowledgement differs from activation.");
       }
       // The predecessor's accepted-before-Stop suffix runs through F. After it, the journal holds at most this activation's own seed.
+      serviceActivationSeed(this.storage,row);
       const where = `WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`;
       const params = [input.document.workspaceId,input.document.mainVersionId,input.document.objectId,input.document.lineageClaimId];
-      const seeded = this.storage.db.prepare(`SELECT update_digest,principal_kind,principal_id FROM ${LIVE_JOURNAL_TABLE} ${where} AND journal_cursor>? ORDER BY journal_cursor LIMIT 2`)
-        .all(...params,predecessorAcceptedThrough(this.storage,row));
-      if (seeded.length > 1 || (seeded.length === 1 && (seeded[0]!.update_digest !== row.state_digest ||
-          seeded[0]!.principal_kind !== "owner" || seeded[0]!.principal_id !== row.owner_user_id))) {
-        throw new Error("Service activation journal holds another update after its predecessor's.");
-      }
       // The host applied every row through the document's last, by its own ACKs.
       const last = this.storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM ${LIVE_JOURNAL_TABLE} ${where}
         ORDER BY journal_cursor DESC LIMIT 1`).get(...params);

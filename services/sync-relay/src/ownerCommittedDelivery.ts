@@ -141,9 +141,12 @@ export class OwnerCommittedDelivery {
             progress = this.#store.ownerDeliveryProgress(latest);
           }
         }
-        // The engine settles nothing before a queued seed is accepted. Applying
-        // that seed below moves the terminal past the cut, so it needs no settle.
-        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
+        // The engine refuses the cut settle while this adoption's seed is
+        // queued, or acknowledged first and still unapplied as the journal's
+        // next row. Applying that seed below moves the terminal past the cut,
+        // so it needs no settle.
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) &&
+          !(next && this.#store.isPendingActivationSeed(latest, next.metadata.accepted.receipt)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
           registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
           assertCurrent: latest.assertCurrent})) {
           const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {

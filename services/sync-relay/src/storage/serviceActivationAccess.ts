@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateReceipt, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate } from "./types";
@@ -77,6 +77,22 @@ export function predecessorAcceptedThrough(storage: StorageContext, row: NonNull
   const cursor = predecessor?.retire_accepted_cursor;
   if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Service activation predecessor is unavailable.");
   return cursor;
+}
+
+/**
+ * The activation's own seed, the one journal row after F, which only its owner's
+ * update to the captured state may be. Null before the journal admits it.
+ */
+export function serviceActivationSeed(storage: StorageContext, row: NonNullable<ReturnType<typeof readServiceActivation>>): LiveUpdateReceipt | null {
+  const seeded = storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,principal_kind,principal_id FROM ${LIVE_JOURNAL_TABLE}
+    WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor>? ORDER BY journal_cursor LIMIT 2`)
+    .all(row.workspace_id, row.main_version_id, row.object_id, row.lineage_claim_id, predecessorAcceptedThrough(storage, row));
+  const seed = seeded[0];
+  if (seeded.length > 1 || (seed && (seed.update_digest !== row.state_digest || seed.principal_kind !== "owner" || seed.principal_id !== row.owner_user_id))) {
+    throw new Error("Service activation journal holds another update after its predecessor's.");
+  }
+  return seed ? parseLiveUpdateReceipt({deliveryId: seed.delivery_id, updateDigest: seed.update_digest, journalCursor: seed.journal_cursor,
+    acceptingHostEpoch: seed.accepting_host_epoch}) : null;
 }
 
 export function allowsServiceActivationCandidate(storage: StorageContext, request: CurrentLiveBindingRequest,
