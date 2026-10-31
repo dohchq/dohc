@@ -4149,6 +4149,7 @@ export function ChatsView(props: {
           <MentionComposer
             testIdPrefix="chats-dm-new"
             composerId="chats-dm-new-composer"
+            pinned
             value={dmDraft}
             sending={startingDm}
             placeholder="Write the first message…"
