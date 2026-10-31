@@ -304,11 +304,11 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     expect(momentTextsForPath(temp.rootPath, recovered!)).toEqual([copy]);
     await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "notice");
     // History explains the sibling on screen, not only in the database: the
-    // row names the recovery and credits the live edit, not a person.
+    // row names the recovery in words, and the person whose typing it holds.
     await openHistoryView(desktop.page);
     const recoveredRow = desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-path="${recovered!}"]`).first();
     await expect(recoveredRow).toContainText(`Recovered unsaved edits from ${path} after a later write changed the file.`);
-    await expect(recoveredRow.getByTestId("engine-moment-source")).toHaveText("Live edit");
+    await expect(recoveredRow.getByTestId("engine-moment-source")).toHaveText("You");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
