@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {errorResponse} from "./errors.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -4368,7 +4368,7 @@ it("fails the fence and ends the block when the host connection is replaced duri
 });
 
 // Proves: a host that closes while the engine prepares fences nothing, and
-// ends the block before it stops.
+// ends the block before it stops. Stop waits, as while edits remain.
 it("fences nothing and ends the block when the host closes during preparation", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -4377,8 +4377,32 @@ it("fences nothing and ends the block when the host closes during preparation", 
   await parked.entered.promise;
   const closing = o.host.close();
   parked.release.resolve();
-  await expect(stopping).rejects.toThrow();
+  await expect(stopping).resolves.toBe("waiting");
   await closing;
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+});
+
+// Proves: a Stop whose host request passes its deadline waits, and does not
+// fail with the connection's abort. The deadline retires the connection,
+// which fences nothing and ends the block, so the document stays live.
+it.each([
+  ["its drain", "liveApplication.ownerState"],
+  ["its preparation", "liveApplication.prepareRetirement"],
+])("waits to stop when %s passes its deadline and retires the host connection", async (_step, method) => {
+  const o = await enrolledServiceHost({frameChanges: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const send = o.client().sendRequest, answer = send.getMockImplementation()!;
+  let late = true;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    if (late && request.method === method) {late = false; throw new EngineRequestDeadlineError(request.id, request.method, 1_000);}
+    return answer(request);
+  });
+  await expect(hostStop(o)).resolves.toBe("waiting");
+  expect(late).toBe(false);
+  expect(o.host.invalidated.aborted).toBe(true);
   expect(o.engine.prepared).toBeUndefined();
   stillLive(o);
 });

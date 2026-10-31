@@ -1439,7 +1439,8 @@ export async function startServiceLiveHost(options: {
        * new local edits of the activation Stop retires. In the document's work
        * it drains the document within its budgets, then prepares that
        * activation for this connection. `waiting` while edits or a Try again
-       * remain, with nothing blocked or fenced. With no activation to retire, as
+       * remain, or once this connection ends before the fence, with nothing
+       * blocked or fenced. With no activation to retire, as
        * after a first Stop, or none this host holds, `fence` runs unprepared,
        * and the relay refuses an activation that needs a preparation. The block
        * ends unless the fence recorded that activation's retirement.
@@ -1501,6 +1502,12 @@ export async function startServiceLiveHost(options: {
               if (reconnect) abort();
             }
           }));
+        } catch (error) {
+          // A host request past its deadline ends this connection, so Stop's
+          // drain or preparation fails with the connection's abort reason.
+          // Nothing was fenced, so Stop waits, as while edits remain.
+          if (signal.aborted && error === signal.reason) return "waiting";
+          throw error;
         } finally {changes?.notify(value);}
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
