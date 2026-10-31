@@ -46,6 +46,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
+  GetWorkspaceUiStateResult,
 } from "../ipc/bridgeContract";
 import {
   activityPathsAffectWorkspaceListing,
@@ -122,6 +123,7 @@ import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
+import { useSavedTabsReread } from "./shell/useSavedTabsReread";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -270,6 +272,7 @@ import {
   HISTORY_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
+  mergeSavedTabs,
   moveTab,
   moveTabToGroup,
   openTab,
@@ -289,6 +292,7 @@ import {
   siteTabPath,
   setCollectionActiveView,
   setFolderExpanded,
+  setExplorerMode,
   setOpenEditorsHeight,
   setView,
   showView,
@@ -299,6 +303,7 @@ import {
   SHARING_VIEW_ID,
   type ActivityViewId,
   type EditorGroup,
+  type ExplorerMode,
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
@@ -376,6 +381,8 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
+// How long after admission the opening cover says it waits for the saved tabs.
+export const COVER_WAIT_LINES_MS = 5_000;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -892,6 +899,7 @@ export function DesktopWorkspaceShell(props: {
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
+    showSavedTabsNotice,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -1315,8 +1323,9 @@ export function DesktopWorkspaceShell(props: {
   // or the defaults when there is none or the read fails. The stored state
   // replaces whatever changed under the cover, and file opens wait for it, so
   // nothing done under the cover loses the saved tabs. Writes start once the
-  // read answers, and never after a failed read, which can't say what is
-  // saved, so a default-state write can never clobber the stored one.
+  // read answers. A failed read can't say what is saved, so after one, writes
+  // wait for a later read to apply the saved tabs, and a default-state write
+  // can never clobber the stored one.
   const uiStateLoaded = useRef(false);
   const restoredActiveFileSurface = useRef<{
     selectionGeneration: number;
@@ -1473,12 +1482,19 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, setAppPinned, workspaceId],
   );
 
+  // A failed read is read again once the workspace opens (useSavedTabsReread).
+  const layoutReadStartedAt = useRef(0);
+  const [layoutReadFailure, setLayoutReadFailure] = useState<{
+    admission: typeof workspaceAdmission;
+    startedAt: number;
+  } | null>(null);
   useAsyncResponseEffect(
     async () => {
       await workspaceAdmission.promise;
       if (workspaceAdmission.superseded) {
         throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      layoutReadStartedAt.current = Date.now();
       return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
@@ -1516,10 +1532,44 @@ export function DesktopWorkspaceShell(props: {
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
+        setLayoutReadFailure({
+          admission: workspaceAdmission,
+          startedAt: layoutReadStartedAt.current,
+        });
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
+  // The saved layout replaces the defaults, and tabs opened since stay open
+  // beside the saved ones, the one in view still in view. A file open in both
+  // keeps its saved place. Past the tab limit, saved tabs make room. Saving
+  // starts, with what's shown when nothing was saved.
+  const applySavedLayout = useCallback((stored: GetWorkspaceUiStateResult) => {
+    const shown = wbRef.current;
+    if (stored) {
+      const saved = parseUiState(stored);
+      writeWb(mergeSavedTabs(saved, shown));
+      setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
+    } else {
+      writeWb({ ...shown });
+    }
+    uiStateLoaded.current = true;
+  }, [writeWb]);
+  useSavedTabsReread({
+    workspaceId,
+    failed: layoutReadFailure?.admission === workspaceAdmission ? layoutReadFailure : null,
+    tabsOpen: () => allTabs(wbRef.current).length > 0,
+    apply: applySavedLayout,
+    show: showSavedTabsNotice,
+  });
+  // The cover's lines for a saved layout that is slow to load.
+  const [coverWaitedFor, setCoverWaitedFor] = useState<typeof workspaceAdmission | null>(null);
+  useEffect(() => {
+    if (!workspaceIsReady || workbenchRestored) return;
+    const timer = setTimeout(() => setCoverWaitedFor(workspaceAdmission), COVER_WAIT_LINES_MS);
+    return () => clearTimeout(timer);
+  }, [workspaceAdmission, workspaceIsReady, workbenchRestored]);
+  const coverWaits = workspaceIsReady && coverWaitedFor === workspaceAdmission;
   useEffect(() => {
     if (
       restoredSurfaceCommit?.selectionGeneration !==
@@ -1760,8 +1810,14 @@ export function DesktopWorkspaceShell(props: {
       quiet,
     }),
   });
-  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
   const workspaceApps = useApps(workspaceId, listingsSettled, aboutNotices, workspaceIsReady && !shareViewEnded);
+  // Every app folder: the listed apps, and any read before the list arrives.
+  const appFolders = useMemo(() => {
+    const folders = new Set(folderApps.keys());
+    const listed = workspaceApps.state;
+    if (listed.status === "ready" && listed.workspaceId === workspaceId) for (const app of listed.apps) folders.add(app.root);
+    return folders;
+  }, [folderApps, workspaceApps.state, workspaceId]);
   // The app folder of each entry file, so a file view shows Run.
   const appEntries = useMemo(() => {
     const entries = new Map<string, string>();
@@ -2676,7 +2732,7 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string) => {
+    (path: string, recent = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
@@ -2693,7 +2749,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       clearTabLimitError();
-      mutateWb(() => next);
+      mutateWb(() => (recent ? recordRecentFile(next, path) : next));
     },
     [
       clearTabLimitError,
@@ -2713,7 +2769,7 @@ export function DesktopWorkspaceShell(props: {
   // other dohc surface — MAX_OPEN_TABS refusal included.
   const openCollectionTab = useCallback(
     (path: string) => {
-      openVirtualTab(collectionTabPath(path));
+      openVirtualTab(collectionTabPath(path), true);
     },
     [openVirtualTab],
   );
@@ -2850,7 +2906,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
-      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId));
+      openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
     },
     [openVirtualTab],
   );
@@ -3718,11 +3774,11 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
   );
 
-  // Reveal-then-create: the inline editbox lives in the explorer view, so
-  // make that view visible first (never setView — re-selecting the active
+  // Reveal-then-create: the inline editbox lives in the explorer's Files
+  // tree, so make it visible first (never setView — re-selecting the active
   // view toggles the panel).
   const requestExplorerFolder = useCallback(() => {
-    mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+    mutateWb((state) => setExplorerMode({ ...state, activeView: "explorer", sidebarVisible: true }, "files"));
     setNewFolderRequest((current) => (current ?? 0) + 1);
   }, [mutateWb]);
 
@@ -3735,8 +3791,17 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
     [mutateWb],
   );
+  // An app folder's pin is its sidebar pin, kept in the settings file.
+  // Anything else is pinned in Home, in the workspace's ui-state.
   const toggleExplorerPin = useCallback(
-    (path: string) => mutateWb((state) => togglePinned(state, path)),
+    (path: string) => {
+      if (appFolders.has(path)) void setAppPinned(path, !pinnedRoots.includes(path));
+      else mutateWb((state) => togglePinned(state, path));
+    },
+    [appFolders, mutateWb, pinnedRoots, setAppPinned],
+  );
+  const setExplorerModeInWb = useCallback(
+    (mode: ExplorerMode) => mutateWb((state) => setExplorerMode(state, mode)),
     [mutateWb],
   );
   const collapseExplorerFolders = useCallback(() => {
@@ -3866,7 +3931,7 @@ export function DesktopWorkspaceShell(props: {
   const [appsReveal, setAppsReveal] = useState<string | null>(null);
   const clearAppsReveal = useCallback(() => setAppsReveal(null), []);
   const showAppsInExplorer = useCallback(() => {
-    mutateWb((state) => showView(state, "explorer"));
+    mutateWb((state) => setExplorerMode(showView(state, "explorer"), "home"));
     setAppsReveal(workspaceId);
   }, [mutateWb, workspaceId]);
   const explorerApps = useMemo<ExplorerApps>(
@@ -5107,6 +5172,10 @@ export function DesktopWorkspaceShell(props: {
     <>
       <Explorer
         workspaceId={workspaceId}
+        mode={wb.explorerMode}
+        onModeChange={setExplorerModeInWb}
+        listed={fileListingCommit !== null}
+        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}
@@ -5114,6 +5183,7 @@ export function DesktopWorkspaceShell(props: {
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
         tabLabels={tabLabels}
+        tabGlyphs={chatEditors.glyphs}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -5307,6 +5377,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
+        ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
     [shellErrors, reportFacts],
   );
@@ -5964,6 +6035,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      tabGlyphs={chatEditors.glyphs}
                       files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
@@ -6568,10 +6640,20 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          {/* The check is over while the saved layout loads. Hidden, not
-              removed, so the heading does not move. */}
-          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
-            dohc is checking your existing files before editing starts.
+          {/* The check is over while the saved layout loads, and a load that
+              takes a while says what it waits for and the way out. Lines are
+              hidden, not removed, in slots as tall as their tallest text, so
+              the heading does not move. */}
+          <div className="grid text-xs text-muted">
+            <p className={`col-start-1 row-start-1 ${workspaceIsReady ? "invisible" : ""}`}>
+              dohc is checking your existing files before editing starts.
+            </p>
+            <p className={`col-start-1 row-start-1 ${coverWaits ? "" : "invisible"}`}>
+              dohc is still waiting for this workspace to open, so it can bring back your saved tabs.
+            </p>
+          </div>
+          <p className={`text-xs text-muted ${coverWaits ? "" : "invisible"}`}>
+            Choose another workspace from the title bar.
           </p>
         </div>
       ) : null}

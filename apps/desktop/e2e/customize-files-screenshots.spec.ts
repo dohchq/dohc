@@ -8,7 +8,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openExplorerView,
+  openExplorerHome,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   writeWorkspaceFiles,
@@ -67,9 +67,11 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     // The seeded manifest names no computer for the Collections, so keep them here.
+    await openExplorerHome(page);
     const collections = page.getByRole("region", { name: "Collections", exact: true });
     await collections.getByRole("button", { name: "Use this computer", exact: true }).click();
     await expect(collections.getByTestId("collections-refusal")).toBeHidden();
+    await page.getByTestId("explorer-mode-files").click();
 
     // A file-backed Collection with automations.yaml, then keyboard focus on
     // the first row's controls after Close.
@@ -108,8 +110,8 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
 
     // The Explorer without apps, which has no Apps section, and then with an
     // app, which brings the section.
-    await openExplorerView(page);
-    await expect(page.getByTestId("explorer-files-section")).toBeVisible();
+    await openExplorerHome(page);
+    await expect(page.getByTestId("explorer-pages")).toBeVisible();
     await expect(page.getByTestId("explorer-apps-section")).toHaveCount(0);
     await shoot(page, "apps-empty");
     await writeWorkspaceFiles(temp, [{ path: "demo/index.html", contents: "<!doctype html><title>Demo</title><h1>Demo</h1>\n" }]);

@@ -4,7 +4,7 @@ import { MAX_POLL_CHOICE_LENGTH, MAX_POLL_CHOICES, repeatedPollChoices, trimChoi
 import { isComposingKey } from "../ui/keys";
 
 const GHOST_ICON =
-  "grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-40";
+  "grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-40";
 
 // A poll's choices while it is written. Each row looks like the choice it
 // posts as. Enter moves to the next choice, adding one at the end while there
@@ -127,7 +127,7 @@ export function ComposerPoll(props: {
             type="button"
             data-testid={`${props.testIdPrefix}-poll-add`}
             onClick={add}
-            className="-ml-1.5 flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible"
+            className="-ml-1.5 flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
           >
             <Plus size={12} aria-hidden />
             Add a choice

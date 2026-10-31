@@ -62,7 +62,7 @@ const PARTS = [
   "sharing",
   "usage-record",
   "word-diff",
-  "apps-shelf",
+  "explorer-home",
   "chat-rows",
   "settings-frame",
   "theme-picker",
@@ -237,9 +237,11 @@ async function withDesktop(
 // Every element marked `data-force-state` under `scope` gets that
 // pseudo-class forced through the browser, so the part's own :hover,
 // :focus-visible or :focus rules apply. `data-force-target` names a
-// descendant to force instead.
+// descendant to force instead. Focus draws only while the keyboard moves, so
+// the root takes the keyboard's mark first.
 type Cdp = Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
 async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
+  await cdp.send("Runtime.evaluate", { expression: "document.documentElement.toggleAttribute('data-keyboard-nav', true)" });
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
   const { nodeIds } = await cdp.send("DOM.querySelectorAll", {
     nodeId: root.nodeId,

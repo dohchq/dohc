@@ -7,10 +7,12 @@ import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
 import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
 import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
+import { ExplorerModeSwitch } from "../../desktop/src/renderer/workbench/ExplorerModeSwitch";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 import { VIEW_IDENTITY } from "../../desktop/src/renderer/workbench/viewIdentity";
+import type { ExplorerMode } from "../../desktop/src/renderer/workbench/workbenchState";
 
 // The demo has no engine, so no folder is a collection.
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
@@ -89,6 +91,7 @@ export function DemoSidebar(props: {
 }) {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
+  const [explorerMode, setExplorerMode] = useState<ExplorerMode>("home");
   const [expandedFolders, setExpandedFolders] = useState<string[]>([
     "notes",
     "projects",
@@ -155,12 +158,19 @@ export function DemoSidebar(props: {
   return (
     <SidePanel
       title={VIEW_IDENTITY[props.activePanel].label}
+      heading={
+        props.activePanel === "explorer" ? <ExplorerModeSwitch mode={explorerMode} onChange={setExplorerMode} /> : undefined
+      }
       width={width}
       onWidthChange={setWidth}
     >
       {props.activePanel === "explorer" ? (
         <Explorer
           workspaceId="marketing-demo"
+          mode={explorerMode}
+          onModeChange={setExplorerMode}
+          listed
+          recentFiles={props.openTabs}
           shareView={null}
           files={files}
           folders={folders}

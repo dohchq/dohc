@@ -22,11 +22,11 @@ const KIND_TONE: Record<StartKind, string> = {
   app: "text-hue-amber",
 };
 
-// What a person can make, in tile order. A file kind takes its name from the
-// kind registry. The registry names no Collection or App, so those two labels
-// live only here.
+// What a person can make, in tile order. A drawing takes its name from the
+// kind registry. A Markdown file is a Page, as the Explorer's Home calls it.
+// The registry names no Collection or App, so those labels live only here.
 const START_KINDS: readonly { kind: StartKind; label: string; glyph: ReactNode; shortcut?: "new-file" }[] = [
-  { kind: "markdown", label: FILE_KIND_RECORDS.markdown.name, shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
+  { kind: "markdown", label: "Page", shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
   { kind: "collection", label: "Collection", glyph: <ObjectGlyph kind="collection" size={16} className={KIND_TONE.collection} /> },
   { kind: "drawing", label: FILE_KIND_RECORDS.drawing.name, glyph: <KindGlyph kind={FILE_KIND_RECORDS.drawing} size={16} className={KIND_TONE.drawing} /> },
   { kind: "app", label: "App", glyph: <ObjectGlyph kind="app" size={16} className={KIND_TONE.app} /> },
@@ -109,7 +109,7 @@ export function EmptyEditorGroup(props: {
                 type="button"
                 aria-keyshortcuts={tile.shortcut ? ariaShortcut(tile.shortcut, props.platform) : undefined}
                 onClick={() => run(tile.create)}
-                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left focus-visible:outline-offset-4"
+                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left"
               >
                 <span aria-hidden className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2">
                   {START_TILE_ART[tile.kind]}
@@ -142,7 +142,7 @@ export function EmptyEditorGroup(props: {
                       type="button"
                       title={file.path.includes("/") ? file.path : undefined}
                       onClick={() => props.onOpen(file.path)}
-                      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                     >
                       <FileGlyph kind={kind} icon={file.icon} size={16} className={fileTone(kind)} />
                       <span className="min-w-0 truncate">{fileName(file.path)}</span>

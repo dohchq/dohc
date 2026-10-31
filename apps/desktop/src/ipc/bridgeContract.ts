@@ -93,6 +93,7 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  EXPLORER_MODES,
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
@@ -5787,6 +5788,8 @@ export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
+  // The message the live run answers, so its working line sits under it.
+  liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   // The conversation's latest run, when dohc's restart or quit stopped it.
@@ -5915,10 +5918,12 @@ export const UpdateStateEvent = z.object({
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
   // The step that failed, while its state stands; `message` says why. A new
-  // id is a new failure to report.
+  // id is a new failure to report. `notInstalled` is the version of an update
+  // a person chose that dohc opened without.
   failure: z.object({
     step: z.enum(["check", "download", "install"]),
     id: z.number().int().positive(),
+    notInstalled: z.string().min(1).max(200).optional(),
   }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
@@ -6075,6 +6080,8 @@ export const WorkspaceUiState = z.object({
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
   // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+  // Which view the Explorer shows: Home, or the folder tree.
+  explorerMode: z.enum(EXPLORER_MODES).optional().catch(undefined),
   // Which view each collection tab shows, keyed by the collection folder path.
   collectionViews: z
     .record(PATH_STRING, z.string().min(1).max(4096))

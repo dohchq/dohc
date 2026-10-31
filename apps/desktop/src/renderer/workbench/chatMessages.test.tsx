@@ -196,7 +196,8 @@ describe("chat authorship display", () => {
     for (const at of [1, 3]) {
       const { createdAtMs } = messages[at]!;
       expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
-      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["w-9", "shrink-0", "justify-end"]));
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["justify-end"]));
+      expect(items[at]!.querySelector(".group")!.className).toContain("grid-cols-[36px_minmax(0,1fr)]");
       const time = slot(items[at]!).querySelector("time")!;
       expect(time.textContent).toBe(formatClockDigits(createdAtMs));
       expect(time.textContent).not.toMatch(/AM|PM/i);

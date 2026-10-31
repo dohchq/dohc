@@ -2724,8 +2724,11 @@ export function createWorkspaceEngineCapture(
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
-    ): Promise<EngineYdocProviderSession> =>
-      await sessions.run(
+    ): Promise<EngineYdocProviderSession> => {
+      // A stopped capture has closed the workspace's engine session, and
+      // nothing would close one opened now.
+      if (stopped) throw closedError();
+      return await sessions.run(
         workspace,
         async (binding) => {
           const generation = ++generations;
@@ -2878,6 +2881,7 @@ export function createWorkspaceEngineCapture(
           retryInitialCapture: true,
         },
       );
+    };
 
     // Reconcile a freshly opened generation against the canonical doc and
     // install it: daemon-side edits land in the canonical doc first, then every
@@ -3776,19 +3780,31 @@ export function createWorkspaceEngineCapture(
   async function settleAndCloseLiveYDocSessions(
     match: (path: string) => boolean,
     summary: string,
+    // A workspace close tries every session before it reports the first
+    // failure: the engine session closes next, and no session reopens it.
+    { tryEvery = false } = {},
   ): Promise<void> {
+    const failures: unknown[] = [];
     for (const entry of [...liveYDocSessions.values()]) {
       if (!match(entry.path)) continue;
-      // A healthy session flushes the CRDT to disk + projection first. A
-      // failing-close entry skips only the settle — its flush was attempted
-      // and may have been refused — because the release below hands over
-      // anything the engine is still missing whatever `settle` says, and
-      // refuses to release while it is behind (ydocProviderSession `close`).
-      if (entry.status === "live") {
-        await entry.session.settleNow({ summary, ifNeeded: true });
+      try {
+        // A healthy session flushes the CRDT to disk + projection first. A
+        // failing-close entry skips only the settle — its flush was attempted
+        // and may have been refused — because the release below hands over
+        // anything the engine is still missing whatever `settle` says, and
+        // refuses to release while it is behind (ydocProviderSession `close`).
+        // A workspace close also settles a dead generation, which revives it:
+        // nothing after this close can save its text.
+        if (entry.status === "live" || (tryEvery && entry.status === "dead-generation")) {
+          await entry.session.settleNow({ summary, ifNeeded: true });
+        }
+        await entry.close({ settle: false });
+      } catch (error) {
+        if (!tryEvery) throw error;
+        failures.push(error);
       }
-      await entry.close({ settle: false });
     }
+    if (failures.length > 0) throw failures[0];
     // Detached locked-write debts are not touched here. This
     // vacate runs for version operations and content refreshes that remove
     // nothing, and its callers have only attempted their operation at this
@@ -6496,6 +6512,7 @@ export function createWorkspaceEngineCapture(
         settleAndCloseLiveYDocSessions(
           () => true,
           "Saved latest edits before closing the workspace",
+          { tryEvery: true },
         ),
       );
     },
