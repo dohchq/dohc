@@ -151,10 +151,10 @@ export class ServiceActivationDriver {
   }
   /** Forgets a document the engine no longer holds, so a later pass activates it from its retained source. */
   removeTarget(target:ServiceActivationTarget){this.#forget(targetKey(target));}
-  /** The document and consumer of the owner a restore step built through a moved document's route, if one did. */
+  /** The document of the owner a restore step built through a moved document's route, if one did. */
   movedOwner(target:ServiceActivationTarget,objectId:string){
     const slot=movedKey(target,objectId);
-    for(const [document,owner] of this.#owners)if(owner.target===slot)return {document:parseLiveDocumentKey(JSON.parse(document)),consumer:owner.consumer};
+    for(const [document,owner] of this.#owners)if(owner.target===slot)return {document:parseLiveDocumentKey(JSON.parse(document))};
     return undefined;
   }
   /** Forgets the target of a moved document's restore, which `restoreConsumer` and `retire` were given as moved. */

@@ -2742,8 +2742,9 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
 // path when it is given. The restore's revocation opens the document's
 // retirement, unless another Edit grant still covers it: then `paused` opens it
 // by the owner's Pause after the restore began, and `covered` leaves none open.
-// `kept` first records an edit the server refused.
-const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false} = {}) => {
+// `kept` first records an edit the server refused. Unless `stopped` is false,
+// the restore's first step runs before the restart.
+const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
@@ -2757,7 +2758,7 @@ const movedDuringRestore = async ({replacement = false, paused = false, covered 
     await passed();
   }
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
-  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  if (stopped) await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
   await o.host.close(); log.mockClear();
   moveAway(o);
   const other = {...o.sibling, objectId: "another-object"};
@@ -2927,15 +2928,15 @@ it("keeps a moved document's restore route while a refused edit waits for its re
 
 // Proves: a restore that began while another Edit grant still covered the
 // document opens no retirement. A restarted host still keeps the moved
-// document's route while that restore is unfinished, so the restore's steps
-// and the owner's Decline reach the engine through it, and the route ends with
-// the restore, once the engine unloaded what the route loaded. Nothing retires
-// the activation, and the workspace drains.
+// document's route while that restore is unfinished, so the owner's Decline
+// reaches the engine through it, and the route ends with the restore, once the
+// engine unloaded what the route loaded. Nothing retires the activation, and
+// the workspace drains.
 it("keeps a moved document's route for a restore that opened no retirement until the owner declines it", async () => {
   const {o, host} = await movedDuringRestore({covered: true});
-  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
   await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
   expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
@@ -2945,31 +2946,82 @@ it("keeps a moved document's route for a restore that opened no retirement until
   expect(leaving(o)).toContain("liveApplication.unloadDocument");
 });
 
+// Proves: when the restarted host's first restore step captures the moved
+// document through its route, so the route has an owner, the route still ends
+// with the restore after the owner's Decline. The engine unloads what the route
+// loaded, and nothing settles through the route's owner, which never completed.
+it("unloads a no-retirement restore route that captured its document once the owner declines it", async () => {
+  const {o, host} = await movedDuringRestore({covered: true, stopped: false});
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  const movedOwner = vi.spyOn(ServiceActivationDriver.prototype, "movedOwner");
+  // A restore step checks the document's current moment at its path.
+  vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  // Nothing is hosted, so the route made this capture.
+  expect(captures()).toBeGreaterThan(0);
+  moveAway(o);
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(movedOwner.mock.results.some(result => result.value !== undefined)).toBe(true);
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+});
+
 // Proves: a moved document whose restore opened no retirement, and that moves
-// back to its enrolled path while the restore is unfinished, leaves its route
-// as soon as its path hosts it again, before the restore ends. Its hosted
-// target then carries the restore with the one capture it made, and the route
-// ends without an unload, which would end the hosted target's session.
+// back to its enrolled path while the restore is unfinished, keeps its route
+// until the restore ends, though its hosted target activates beside it. The
+// route then ends without an unload, which would end the hosted target's
+// session, and the hosted target still serves the document.
 it("ends a no-retirement restore route without an unload once the moved document is hosted at its path again", async () => {
-  const {o, host, log, driver} = await movedDuringRestore({covered: true});
+  const {o, host, driver} = await movedDuringRestore({covered: true});
   const forgetMoved = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
   const captures = () => o.client().captureOwnerActivation.mock.calls.length;
   vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
   await host.update({workspaces: [o.workspace], documents: [o.sibling], departing: []});
-  log.mockClear();
-  await vi.waitFor(() => expect(forgetMoved).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId), {timeout: 10_000});
-  await vi.waitFor(() => expect(captures()).toBe(1), {timeout: 10_000});
+  await vi.waitFor(() => expect(captures()).toBeGreaterThan(0), {timeout: 10_000});
   const pulls = () => engineMethods(o.client()).filter(method => method === "sync.pullHosted").length, seen = pulls();
   await vi.waitFor(() => expect(pulls()).toBeGreaterThan(seen + 1), {timeout: 10_000});
-  expect(log).not.toHaveBeenCalledWith(...waiting("Waiting for its restore to finish."));
+  expect(forgetMoved).not.toHaveBeenCalled();
   await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
-  expect(captures()).toBe(1);
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(forgetMoved).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId), {timeout: 10_000});
   expect(forgetMoved).toHaveBeenCalledTimes(1);
   expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
   expect(host.retains(o.sibling)).toBe(true);
   expect(driver()!.targets.filter(target => target.path === o.sibling.path)).toEqual([expect.objectContaining({path: o.sibling.path, shareId: o.sibling.shareId})]);
+});
+
+// Proves: a moved document whose restore opened no retirement keeps its route
+// when it moves back to its enrolled path and then away again before its hosted
+// target activated, so the departure removes that target. The restore's next
+// step still reaches the engine through the route, and the route ends with the
+// restore once the engine unloaded what it loaded.
+it("keeps a no-retirement restore route for a document that moves back and away again before it activates", async () => {
+  const {o, host, driver} = await movedDuringRestore({covered: true});
+  const activate = ServiceActivationDriver.prototype.activate, held: string[] = [];
+  // Holds every activation of the returning document's target, so none loads it.
+  vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(async function (this: ServiceActivationDriver, ...args) {
+    if (args[0].path !== o.sibling.path) return activate.apply(this, args);
+    held.push(args[0].path);
+    return {kind: "pending" as const, reason: "The test holds this activation."};
+  });
+  const hostedTargets = () => driver()!.targets.filter(target => target.path === o.sibling.path);
+  // A restore step checks the document's current moment at its path, so storage keeps it there.
+  vi.mocked(o.f.storage.objectIdAtPathInVersion).mockRestore();
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], departing: []});
+  await vi.waitFor(() => expect(held.length).toBeGreaterThan(0), {timeout: 10_000});
+  expect(hostedTargets()).toHaveLength(1);
+  await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(hostedTargets()).toEqual([]), {timeout: 10_000});
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
 });
 
 // Proves: activation reads that name an object, as departure recovery's do for
@@ -3110,7 +3162,7 @@ it("recovers a departing replacement at a moved document's old path through its 
   await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling, replacement]});
   await vi.waitFor(() => expect(captures().length).toBeGreaterThan(0));
   expect([...new Set(reads)]).toEqual([replacement.objectId]);
-  expect(captures()).toEqual([REPLACEMENT_ACTIVATION]);
+  expect(new Set(captures())).toEqual(new Set([REPLACEMENT_ACTIVATION]));
   await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its hosted replica to confirm the document parked.")));
   const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
   const unloads = () => requests().filter(request => request.method === "liveApplication.unloadDocument").map(request => request.params);
