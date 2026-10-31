@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ComponentProps } from "react";
-import type { CloudStatusResult, ListRelayShareLinksResult } from "../ipc/bridgeContract";
+import type { CloudStatusResult, ListRelayShareLinksResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { deferred } from "../testing/deferred";
 import { OwnerAppPublication as Control } from "./OwnerAppPublication";
@@ -22,6 +22,7 @@ const row: ListRelayShareLinksResult["links"][number] = {
   revokedAtMs: null, lastUsedAtMs: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
 };
 const page: ListRelayShareLinksResult = { supportedLinkAccess: ["view", "comment"], links: [row], independentGrants: [] };
+const syncedStatus: SyncStatusResult = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null, liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false };
 async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult> {
   if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
   if (request.action === "listLocal") return { kind: "localListed", publications: [] };
@@ -40,6 +41,7 @@ const api = {
   publishOwnerApp: vi.fn(answer),
   openExternalUrl: vi.fn(async () => undefined),
   cloudStatus: vi.fn(async (): Promise<CloudStatusResult> => ({ connected: true, workspaceSynced: true })),
+  getSyncStatus: vi.fn(async (): Promise<SyncStatusResult> => syncedStatus),
 };
 const actions = (action: OwnerAppPublicationRequest["action"]) => api.publishOwnerApp.mock.calls.map(([input]) => input).filter(input => input.action === action);
 
@@ -66,6 +68,7 @@ describe("owner app publication", () => {
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.listRelayShareLinks.mockResolvedValue(page);
     api.publishOwnerApp.mockImplementation(answer);
     api.cloudStatus.mockResolvedValue({ connected: true, workspaceSynced: true });
+    api.getSyncStatus.mockResolvedValue(syncedStatus);
     api.dataset.mockImplementation(datasetAnswer);
   });
 
@@ -987,20 +990,96 @@ describe("owner app publication", () => {
       expect(await screen.findByText("Published on a share link")).toBeTruthy();
     });
 
+    // How main's list failures reach the renderer: the relay's copy behind Electron's prefix.
+    const listFailure = (cause: string) => new Error(`Error invoking remote method 'desktop:publish-owner-app': ${cause}`);
+    const failingList = (cause: string) => async (request: OwnerAppPublicationRequest) =>
+      request.action === "list" ? Promise.reject(listFailure(cause)) : local([localRow])(request);
+    const linksLine = "The server didn't return this app's links.";
+
     it.each([
       ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false })],
-      ["the server refuses the publications list", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? Promise.reject(new Error("Not found")) : local([localRow])(request))],
+      // main answers listUnavailable for a relay 404 or 403.
+      ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request))],
+      ["the sync status says the server is disconnected", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "cloud-disconnected" });
+      }],
+      ["the sync status says the server is unreachable", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
+      }],
     ])("hides Share links when %s", async (_, arrange) => {
+      const reportError = vi.fn();
       api.publishOwnerApp.mockImplementation(local([localRow]));
       arrange();
-      renderLocal();
+      renderLocal({ reportError });
       await openLocal();
       expect(await stateText()).toBe("Approved on this device");
       await waitFor(() => expect(api.cloudStatus).toHaveBeenCalled());
       await waitFor(() => expect(actions("list").length).toBeGreaterThan(0));
       await act(async () => undefined);
+      await act(async () => undefined);
       expect(screen.queryByRole("heading", { name: "Share links" })).toBeNull();
+      expect(screen.queryByText(linksLine)).toBeNull();
       expect(screen.queryByRole("alert")).toBeNull();
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a 5xx", "Error: Sharing failed (503)."],
+      ["a timeout", "TimeoutError: The operation was aborted due to timeout"],
+    ])("keeps Share links with one line and Try again after %s, and Try again reloads the list", async (_, cause) => {
+      const reportError = vi.fn();
+      const retry = deferred<OwnerAppPublicationResult>();
+      let lists = 0;
+      api.publishOwnerApp.mockImplementation(async request => request.action !== "list" ? local([localRow])(request)
+        : ++lists === 1 ? Promise.reject(listFailure(cause)) : retry.promise);
+      renderLocal({ reportError });
+      await openLocal();
+      const line = await screen.findByText(linksLine);
+      const section = screen.getByRole("region", { name: "Share links" });
+      expect(section.contains(line)).toBe(true);
+      expect(within(section).queryByRole("button", { name: "Publish on a link" })).toBeNull();
+      expect(api.getSyncStatus).toHaveBeenCalledWith({ workspaceId: "ws-trip" });
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(reportError).not.toHaveBeenCalled();
+
+      await userEvent.setup().click(within(section).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(actions("list")).toHaveLength(2));
+      expect(actions("list")[1]).toEqual({ action: "list", workspaceId: "ws-trip", appRoot: "trip" });
+      // The line stays while the list reloads, so the dialog does not jump.
+      expect(screen.getByText(linksLine)).toBeTruthy();
+      expect(within(section).getByRole("button", { name: "Try again" }).getAttribute("aria-busy")).toBe("true");
+
+      await act(async () => retry.resolve({ kind: "listed", publications: [datasetRow], nextCursor: null }));
+      expect(screen.queryByText(linksLine)).toBeNull();
+      expect(await screen.findByText("Published on a share link")).toBeTruthy();
+      expect(within(screen.getByRole("region", { name: "Share links" })).getByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["workspace", { workspaceId: "ws-other" }],
+      ["app", { appRoot: "trip-two" }],
+    ])("ignores a links answer for the %s the dialog no longer shows", async (_, next) => {
+      const stale = deferred<OwnerAppPublicationResult>();
+      api.publishOwnerApp.mockImplementation(async request => {
+        if (request.action === "list" && request.workspaceId === "ws-trip" && request.appRoot === "trip") return stale.promise;
+        const answer = await local([localRow])(request);
+        // This device approved whichever app the dialog shows.
+        if (answer.kind === "localListed" && request.action === "listLocal") return { ...answer, publications: [{ ...localRow, appRoot: request.appRoot }] };
+        if (answer.kind === "localChecked" && request.action === "checkLocal") return { ...answer, appRoot: request.appRoot };
+        return answer;
+      });
+      const props = { workspaceId: "ws-trip", appRoot: "trip", title: "Trip planner", localApproval: "tab" as const, open: true, onOpenChange: () => undefined, testId: "app-view-review" };
+      const view = render(<Control {...props} />);
+      await waitFor(() => expect(actions("list")).toHaveLength(1));
+      view.rerender(<Control {...props} {...next} />);
+      expect(await screen.findByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      await act(async () => stale.reject(listFailure("Error: Sharing failed (503).")));
+      expect(screen.queryByText(linksLine)).toBeNull();
+      expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(api.getSyncStatus).not.toHaveBeenCalled();
     });
 
     it("ignores an approvals answer that arrives after the workspace changed", async () => {

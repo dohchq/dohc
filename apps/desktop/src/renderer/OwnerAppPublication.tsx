@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 
 import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, Globe, Link as LinkIcon, Pencil, Table2, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
-import type { RelayShareLinkRow } from "../ipc/bridgeContract";
+import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
 import { CollectionMoveNote, type CollectionServer } from "./collections/CollectionMoveNote";
@@ -12,6 +12,7 @@ import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
+import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
 const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
@@ -264,6 +265,10 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const collectionMoves = collectionKeys.flatMap(key => { const server = collectionPlaces.get(key); return server ? [{ key, server }] : []; });
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
+  // Share links stays hidden when the server does not publish apps here, or when the sync status already says it is unreachable.
+  const [linksHidden, setLinksHidden] = useState(false);
+  // The server failed to return this app's links. Share links then keeps its label with one line and Try again.
+  const [linksFailed, setLinksFailed] = useState(false);
   // Local approvals need no host, so they load and fail independently of links and shared publications.
   const [localReview, setLocalReview] = useState<LocalReview>({ status: "loading" });
   const [localReload, setLocalReload] = useState(0);
@@ -342,7 +347,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   useEffect(() => {
     let current = true;
-    setPublicationsLoading(true); setPublicationsError(null);
+    setPublicationsLoading(true); setPublicationsError(null); setLinksHidden(false);
     void (async () => {
       const rows: Publication[] = [];
       const seen = new Set<string>();
@@ -350,6 +355,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       do {
         const page = await api.publishOwnerApp({ action: "list", workspaceId: props.workspaceId, appRoot: props.appRoot, ...(cursor ? { cursor } : {}) });
         if (!current) return;
+        if (page.kind === "listUnavailable") { setPublications([]); setLinksHidden(true); setLinksFailed(false); return; }
         if (page.kind !== "listed") throw new Error("dohc could not load app publications. Reload the publications.");
         for (const row of page.publications) {
           if ((row.manifestUnavailable || row.appRoot === props.appRoot) && !rows.some(value => value.publicationId === row.publicationId)) rows.push(row);
@@ -358,9 +364,17 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         if (cursor && seen.has(cursor)) throw new Error("The publication list changed. Reload the publications.");
         if (cursor) seen.add(cursor);
       } while (cursor);
-      if (current) setPublications(rows);
-    })().catch(error => { if (current) setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications. Reload the publications.")); })
-      .finally(() => { if (current) setPublicationsLoading(false); });
+      if (current) { setPublications(rows); setLinksFailed(false); }
+    })().catch(async error => {
+      if (!current) return;
+      // Offline: the sync status already reports the server, so Share links adds nothing of its own.
+      let status: SyncStatusResult | null = null;
+      try { status = await api.getSyncStatus({ workspaceId: props.workspaceId }); } catch { /* Without a status, the line shows. */ }
+      if (!current) return;
+      setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications. Reload the publications."));
+      const offline = syncNamesServer(status);
+      setLinksHidden(offline); setLinksFailed(!offline);
+    }).finally(() => { if (current) setPublicationsLoading(false); });
     return () => { current = false; };
   }, [api, props.workspaceId, props.appRoot, publicationsReload]);
 
@@ -607,10 +621,11 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const boxCapabilities = !review ? null : !needsCandidate && approval ? [approvedCapability(approval)] : localCandidate?.capabilities ?? null;
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
-  // Share links show once the server answers for this app's publications. A server that does not allow publishing
-  // refuses that list, so the box stays hidden there. Publishing on a link never needs approval on this device.
+  // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
+  // the server does not publish apps here, or the sync status reports the server unreachable. Any other failure keeps
+  // the label with one line and Try again, which stays while it reloads. Publishing on a link never needs approval here.
   const linkRows = publications.filter(publication => publication.active || publication.operatorTakedown);
-  const showLinks = !!review && synced === true && !publicationsLoading && !publicationsError;
+  const showLinks = !!review && synced === true && !linksHidden && (!publicationsLoading || linksFailed);
   const status = <>
     {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
     {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
@@ -653,7 +668,11 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : void prepareLocalCandidate()} />
         {showLinks ? <section aria-labelledby="app-links-title">
           <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">Share links</h3>
-          <ul className="m-0 list-none divide-y divide-line rounded-lg border border-line bg-bg p-0">
+          {linksFailed ? <div data-testid="app-links-failed" className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[13px]">
+            <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+            <p className="m-0 min-w-0 flex-1 text-ink" title={publicationsError ?? undefined}>The server didn't return this app's links.</p>
+            <SecondaryButton size="row" aria-busy={publicationsLoading} onClick={() => { if (!publicationsLoading) setPublicationsReload(value => value + 1); }}>Try again</SecondaryButton>
+          </div> : <ul className="m-0 list-none divide-y divide-line rounded-lg border border-line bg-bg p-0">
             {linkRows.map(publication => <li key={publication.publicationId} className="flex items-center gap-2 px-3 py-2 text-[13px]">
               <LinkIcon size={12} aria-hidden className="shrink-0 text-muted" />
               <span className={`min-w-0 flex-1 truncate ${publication.operatorTakedown || !publication.linkCurrent ? "text-warning" : "text-ink"}`}>
@@ -666,7 +685,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
               {linkRows.length === 0 ? <><LinkIcon size={12} aria-hidden className="shrink-0 text-muted" /><span className="flex-1 text-muted">Not on a link</span></> : <span className="flex-1" />}
               <SecondaryButton size="row" disabled={!!busy || responsesBusy} onClick={() => { setError(null); setNotice(null); setView("links"); }}>Publish on a link</SecondaryButton>
             </li>
-          </ul>
+          </ul>}
         </section> : null}
         {status}
         {/* A failed action shows right above the button that retries it, so the two stay one part. */}
