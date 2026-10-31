@@ -2193,7 +2193,7 @@ it('retries a retiring application until its owner applied it, confirms its auth
     expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
     const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
     const record={kind:'application',relayDatabaseNamespace:'history',eventCount:Number(row.accepted_event_count),evidenceDigest:String(row.accepted_evidence_digest),
-      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,
+      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,cancelledRestores:[],
       contentCoordinate:{originId:HOST_ORIGIN,originSeq:0}}
     expect(record.metadata.authorSnapshot??[]).toEqual([])
     const bytes=new TextEncoder().encode(JSON.stringify(record));await r.upload(bytes)
