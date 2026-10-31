@@ -8,7 +8,7 @@ export interface DriveModel {
   dispose: () => void;
 }
 
-function batchAssemblies(assemblies: T.Group[]) {
+export function batchAssemblies(assemblies: T.Group[]) {
   const moving = new Set(assemblies.slice(1));
   const originals = new Set<T.BufferGeometry>();
   assemblies[0].updateMatrixWorld(true);
@@ -41,7 +41,7 @@ function batchAssemblies(assemblies: T.Group[]) {
   originals.forEach(geometry => geometry.dispose());
 }
 
-function workshop() {
+export function workshop() {
   const root = new T.Group();
   const textures: T.Texture[] = [];
   const materials: T.Material[] = [];
@@ -108,7 +108,7 @@ function workshop() {
     materials.forEach(material => material.dispose());
     textures.forEach(texture => texture.dispose());
   };
-  return { root, silver, bright, steel, dark, cast, brass, section, mesh, box, cylinder, ring, bolt, dispose };
+  return { root, metal, silver, bright, steel, dark, cast, brass, section, mesh, box, cylinder, ring, bolt, dispose };
 }
 
 interface GearSpec { teeth: number; inner: number; outer: number; height: number; cone: number; twist?: number; bore?: number; thickness?: number }
