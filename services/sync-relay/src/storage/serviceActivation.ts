@@ -300,20 +300,21 @@ export class ServiceActivationStore {
     }
   }
 
-  read(workspaceId: string, path: string, maxBytes: number) {
+  /** The activation retained at the path, the live document's registered one. With `objectId`, only that document's. */
+  read(workspaceId: string, path: string, maxBytes: number, objectId?: string) {
     requireLiveJournalHistory(this.storage, this.history);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Invalid service activation read budget.");
+    const where = `WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL
+      AND (? IS NULL OR a.object_id=?)`, params = [this.history.namespace, workspaceId, path, objectId ?? null, objectId ?? null];
     return this.storage.readTx(() => {
     const size = this.storage.db.prepare(`SELECT length(a.state_bytes)+length(d.baseline_bytes)+length(CAST(a.source_json AS BLOB)) AS bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
-      .get(this.history.namespace,workspaceId,path);
+      ${where}`).get(...params);
     if (!size) return null;
     if (typeof size.bytes !== "number" || size.bytes > maxBytes) throw new Error("Retained service activation exceeds its read budget.");
     const row = this.storage.db.prepare(`SELECT a.*,d.baseline_bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
-      .get(this.history.namespace, workspaceId, path);
+      ${where}`).get(...params);
     if (!row) return null;
     const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
     const document = key(source);

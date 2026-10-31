@@ -2702,6 +2702,78 @@ const restartedHost = async (o: Enrolled) => {
 };
 const waiting = (reason: string) => ["Service activation pass failed.", `Departing live document is waiting: ${reason}`];
 
+// The owner's restore opens the document's retirement and fences. The document
+// then moves from its enrolled path, and the host restarts.
+const movedDuringRestore = async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  o.beginRestore();
+  await o.depart();
+  await passed();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  await o.host.close(); log.mockClear();
+  const at = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input => input.path === o.sibling.path ? "another-object" : at(input));
+  const captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.ownerCalls().length;
+  const host = await restartedHost(o);
+  // The engine requests that reconcile, release or unload the document, and its captures, since the restart.
+  const retiring = () => o.calls(sent).filter(method => method === "liveApplication.reconcileActivation" || method === "liveApplication.releaseActivation" ||
+    method === "liveApplication.unloadDocument");
+  const captured = () => o.client().captureOwnerActivation.mock.calls.slice(captures).map(call => (call as unknown[])[4]);
+  await passed();
+  expect(retiring()).toEqual([]);
+  expect(host.retains(o.sibling)).toBe(true);
+  expect(host.drained("workspace")).toBe(false);
+  return {o, host, retiring, captured};
+};
+
+// Proves: a restarted host keeps the route of a moved document's unfinished
+// restore, by its object, though the document left its enrolled path. Its
+// retirement waits for the restore, and nothing activates or settles it at the
+// old path. The owner's Decline then reaches the engine through that route, and
+// the retirement at the generation it restored retires the document.
+it("keeps a moved document's restore route after a restart until the owner declines it, then retires it", async () => {
+  const {o, host, retiring, captured} = await movedDuringRestore();
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(retiring()).toContain("liveApplication.releaseActivation");
+  expect(retiring()).not.toContain("liveApplication.unloadDocument");
+  expect(captured().every(activationId => activationId === ACTIVATION)).toBe(true);
+  expect(host.retains(o.sibling)).toBe(false);
+});
+
+// Proves: a moved document's restore that the relay admitted, which no Decline
+// can end, completes through the restarted host's route. Its retirement then
+// runs at the key the restore left and retires the document, and the route
+// ends. Owner delivery's completion stands in for the restore's own steps; the
+// relay finishing an admitted restore after a rename, and completing its
+// retirement, is proved in liveRestoreDrain.test.ts.
+it("completes a moved document's admitted restore through a restarted host, then retires it", async () => {
+  const {o, host, retiring, captured} = await movedDuringRestore();
+  let finished = false;
+  const progress = o.f.storage.serviceRestoreInProgress.bind(o.f.storage);
+  vi.spyOn(o.f.storage, "serviceRestoreInProgress").mockImplementation(document => !finished && progress(document));
+  const completed = {phase: "resumed"} as never;
+  const completeRestore = vi.spyOn(OwnerCommittedDelivery.prototype, "completeRestore").mockImplementation(async () => {finished = true; return completed;});
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement").mockReturnValue({status: "retired", replayed: false});
+  cleanup.push(async () => {completeRestore.mockRestore(); complete.mockRestore();});
+  const open = readServiceActivationRetirement(o.f.storage as StorageContext, o.document)!;
+  await expect(host.completeRestore(stopLookup, "proposal")).resolves.toBe(completed);
+  expect(completeRestore).toHaveBeenCalledWith(stopLookup, "proposal", expect.any(AbortSignal));
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({key: {objectId: open.objectId, lineageClaimId: open.lineageClaimId,
+    activationId: ACTIVATION, restoreFenceGeneration: open.restoreFenceGeneration, acceptedThrough: open.acceptedThrough}}));
+  expect(retiring()).toContain("liveApplication.releaseActivation");
+  expect(retiring()).not.toContain("liveApplication.unloadDocument");
+  expect(captured().every(activationId => activationId === ACTIVATION)).toBe(true);
+  expect(host.retains(o.sibling)).toBe(false);
+  await expect(host.completeRestore(stopLookup, "proposal")).rejects.toThrow("Service restore source is unavailable.");
+});
+
 // Proves: reconciliation that names deliveries the engine cannot prove gets the
 // journal's answer for each in its next request: the receipt of one the relay
 // accepted, and absence for one it never did. The retirement then completes.
