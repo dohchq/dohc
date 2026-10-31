@@ -12,6 +12,7 @@ export interface WorkspaceActivityScope {
   paths?: readonly string[];
   pathSetChanged?: boolean;
   summaryChanged?: true;
+  liveDocumentStopped?: string;
 }
 
 /** Independent capture and observation wakes share one bounded IPC window. */
@@ -82,7 +83,8 @@ export function workspaceActivityPayload(
       : undefined;
   return { workspaceId: scope.workspaceId, ...(paths ? { paths } : {}),
     ...(scope.pathSetChanged !== undefined ? { pathSetChanged: scope.pathSetChanged } : {}),
-    ...(scope.summaryChanged ? { summaryChanged: true } : {}) };
+    ...(scope.summaryChanged ? { summaryChanged: true } : {}),
+    ...(scope.liveDocumentStopped ? { liveDocumentStopped: scope.liveDocumentStopped } : {}) };
 }
 
 // One send decision for the workspace-activity channel: a scoped event

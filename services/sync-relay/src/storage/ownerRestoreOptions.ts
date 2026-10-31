@@ -9,9 +9,9 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {authorityInteger, canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {liveJournalHistoryNamespace} from "./liveJournalHistory";
 import {retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
-import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
+import {LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE} from "./liveRestoreOperationSchema";
 import type {StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestoreRecipient} from "./liveRestoreOperation";
-import {readStopRestoreInTransaction} from "./liveRestoreOperation";
+import {readStopRestoreInTransaction, requireStopRestorable} from "./liveRestoreOperation";
 import type {StorageContext} from "./context";
 import type {SyncRelayShareRow} from "./types";
 import {ticketRecord} from "../liveTicketInputs";
@@ -39,6 +39,12 @@ export type OwnerRestoreOptions = {
   nextGrantCursor: OwnerRestoreGrantCursor | null;
   pendingOperation: Pick<OwnerRestoreStatus, "operationId" | "phase" | "proposalDigest"> | null;
 };
+
+// One restore the owner has not finished or declined, at its file's current path.
+export type OwnerUnfinishedRestore = Pick<OwnerRestoreStatus, "operationId" | "path" | "phase" | "proposalDigest">;
+// `unreadable` counts this page's restores whose status could not be read.
+export type OwnerUnfinishedRestores = {restores: OwnerUnfinishedRestore[]; unreadable: number; nextCursor: string | null};
+const UNFINISHED_RESTORE_PAGE = 50;
 
 /** The longest account email the route adds to a grant or an author. */
 export const MAX_RESTORE_EMAIL_BYTES = 320;
@@ -168,6 +174,32 @@ function statusInTransaction(storage: StorageContext, input: StopRestoreLookup):
   return status;
 }
 
+/** The workspace's unfinished restores, one per document, in operation ID order. */
+export function readOwnerUnfinishedRestores(storage: StorageContext, input: {workspaceId: string; ownerUserId: string; after?: string}): OwnerUnfinishedRestores {
+  return storage.readTx(() => {
+    owned(storage, input.workspaceId, input.ownerUserId);
+    const workspaceId = parseLiveUpdateIdentifier(input.workspaceId), namespace = liveJournalHistoryNamespace(storage);
+    const after = input.after === undefined ? "" : parseLiveUpdateIdentifier(input.after);
+    const rows = storage.db.prepare(`SELECT operation_id,(SELECT current_path FROM sync_relay_live_documents d WHERE d.workspace_id=o.workspace_id AND
+      d.main_version_id=o.main_version_id AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id) AS current_path
+      FROM ${LIVE_RESTORE_OPERATIONS} o WHERE relay_database_namespace=? AND workspace_id=? AND ${UNFINISHED_RESTORE} AND operation_id>?
+      ORDER BY operation_id LIMIT ?`).all(namespace, workspaceId, after, UNFINISHED_RESTORE_PAGE + 1);
+    const page = rows.slice(0, UNFINISHED_RESTORE_PAGE), restores: OwnerUnfinishedRestore[] = [];
+    // One restore whose status fails its checks is counted, not listed, so
+    // the rest stay findable.
+    for (const row of page) {
+      try {
+        const status = statusInTransaction(storage, {workspaceId, ownerUserId: input.ownerUserId, operationId: parseLiveUpdateIdentifier(row.operation_id)});
+        restores.push({operationId: status.operationId, path: String(row.current_path), phase: status.phase, proposalDigest: status.proposalDigest});
+      } catch {}
+    }
+    const result = {restores, unreadable: page.length - restores.length,
+      nextCursor: rows.length > UNFINISHED_RESTORE_PAGE ? String(page.at(-1)!.operation_id) : null};
+    bounded(Buffer.byteLength(JSON.stringify(result)));
+    return result;
+  });
+}
+
 export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRestoreOptionsInput): OwnerRestoreOptions {
   return storage.readTx(() => {
     owned(storage, input.workspaceId, input.ownerUserId);
@@ -188,14 +220,14 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
     const result: OwnerRestoreOptions = {document, path: input.path, grants: [], points: [], authors: [], nextBeforeCursor: null,
       nextGrantCursor: null, pendingOperation: null};
     const pending = storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS}
-      WHERE relay_database_namespace=? AND ${whereDocument} AND phase<>'resumed' ORDER BY invalidated_at_ms DESC LIMIT 2`)
+      WHERE relay_database_namespace=? AND ${whereDocument} AND ${UNFINISHED_RESTORE} ORDER BY invalidated_at_ms DESC LIMIT 2`)
       .all(namespace, ...key(document));
     if (pending.length > 1) throw relayError("conflict", "More than one restore operation is pending.");
     if (pending[0]) {
       const status = statusInTransaction(storage, {workspaceId, ownerUserId: input.ownerUserId,
         operationId: parseLiveUpdateIdentifier(pending[0].operation_id)});
       result.pendingOperation = {operationId: status.operationId, phase: status.phase, proposalDigest: status.proposalDigest};
-    }
+    } else requireStopRestorable(storage, document);
     let bytes = Buffer.byteLength(JSON.stringify(result));
     const charge = (value: unknown, reserve = 0) => {bytes += Buffer.byteLength(JSON.stringify(value)) + 1 + reserve; bounded(bytes);};
     // Grants leave room for a restore point, the baseline, and the cursors.

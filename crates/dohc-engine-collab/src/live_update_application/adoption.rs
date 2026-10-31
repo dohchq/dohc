@@ -17,8 +17,14 @@ pub struct OwnerAdoptionCut {
     pub expected_local_sequence: i64,
     pub events: Vec<AdmittedLiveUpdate>,
     pub terminal_receipt: Option<LiveUpdateReceipt>,
+    /// The released prefix a successor adopts, with no events after it. None
+    /// for a lineage's first adoption.
+    pub retained_prefix: Option<RetainedPrefix>,
     /// Native host configuration, never decoded from the relay cut.
     pub outbox_limits: crate::OwnerOutboxLimits,
+    /// Native host configuration: a successor reconstructs its prefix's
+    /// accepted state within it.
+    pub reconstruction: NativeHistoryReconstruction,
 }
 
 #[cfg(test)]
@@ -30,6 +36,23 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     include!("adoption_restore_tail_tests.rs");
     include!("activation_tests.rs");
+    include!("owner_activations_tests.rs");
+    include!("retirement_tests.rs");
+    include!("successor_tests.rs");
+    include!("inherited_tests.rs");
+    include!("resume_tests.rs");
+    include!("released_capture_tests.rs");
+    include!("released_protection_tests.rs");
+    include!("rename_tests.rs");
+    include!("retired_outbox_tests.rs");
+    include!("restore_cancel_tests.rs");
+
+    /// What a held proof's memory peaks at, beside what it reserved.
+    #[cfg(feature = "held-proof-memory")]
+    mod held_proof_memory {
+        use super::*;
+        include!("held_proof_memory_tests.rs");
+    }
 
     struct Fixture {
         store: EngineStore,
@@ -43,18 +66,28 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::new_before_host(|_, _| {})
+        }
+        /// As [`new`](Self::new), with `before` run on the document before
+        /// its host registers it.
+        fn new_before_host(before: impl FnOnce(&mut EngineStore, &LiveObjectBinding)) -> Self {
             let fixture: Value = serde_json::from_str(include_str!(
                 "../../tests/owner-source/owner-source-seed.json"
             ))
             .unwrap();
             let text = fixture["markdown"].as_str().unwrap().to_owned();
             let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-            Self::with_source(text, bytes)
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()], before)
         }
         fn with_source(text: String, bytes: Vec<u8>) -> Self {
-            Self::with_source_selectors(text, bytes, vec!["owner.md".into()])
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()], |_, _| {})
         }
-        fn with_source_selectors(text: String, bytes: Vec<u8>, selectors: Vec<String>) -> Self {
+        fn with_source_selectors(
+            text: String,
+            bytes: Vec<u8>,
+            selectors: Vec<String>,
+            before: impl FnOnce(&mut EngineStore, &LiveObjectBinding),
+        ) -> Self {
             let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
             let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
             VersionedTextStore::new(&mut store)
@@ -115,6 +148,7 @@ mod tests {
                 selector_paths: selectors,
                 restore_fence_generation: 0,
             };
+            before(&mut store, &binding);
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
             let handle = owner
                 .register(
@@ -143,9 +177,13 @@ mod tests {
                 expected_local_sequence: 0,
                 events: vec![],
                 terminal_receipt: None,
+                retained_prefix: None,
                 outbox_limits: crate::OwnerOutboxLimits {
                     max_pending_bytes: 1_000_000,
                     max_pending_age_ms: 100_000,
+                },
+                reconstruction: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
                 },
             };
             Self {
@@ -653,6 +691,7 @@ mod tests {
                         "owner.md",
                         outcome.seq,
                         &bytes,
+                        &Default::default(),
                         11,
                     )
                 },
@@ -1048,6 +1087,7 @@ mod tests {
                         "owner.md",
                         outcome.seq,
                         &update,
+                        &Default::default(),
                         5,
                     )
                 },
@@ -1193,6 +1233,19 @@ mod tests {
                 f.store.table_row_count("live_owner_adoptions").unwrap(),
                 i64::from(committed)
             );
+            // The registration names whatever the durable binding row names.
+            let named: Option<String> = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT activation_id FROM live_device_application_bindings",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(named, committed.then(|| "adoption".to_owned()));
+            assert_eq!(f.handle.activation_id(), named);
             let path = f._scratch.join("engine.db");
             drop(f.store);
             f.store = EngineStore::open(&path, 10).unwrap();
@@ -1251,6 +1304,13 @@ pub(super) fn validate_cut(
     {
         return Err(invalid("owner adoption baseline or capacity"));
     }
+    // A successor's cut is its prefix: no events, and the prefix's terminal.
+    if let Some(prefix) = &cut.retained_prefix {
+        prefix.validate()?;
+        if !cut.events.is_empty() || cut.terminal_receipt != prefix.terminal_receipt {
+            return Err(invalid("owner adoption prefix"));
+        }
+    }
     let mut size = cut.baseline_bytes.len();
     let mut cursor = 0;
     let mut deliveries = std::collections::HashSet::new();
@@ -1283,25 +1343,32 @@ pub(super) fn validate_cut(
         identities.push(&event.metadata);
     }
     if size > max_bytes
-        || cut.events.last().map(|e| &e.metadata.accepted.receipt) != cut.terminal_receipt.as_ref()
+        || (cut.retained_prefix.is_none()
+            && cut.events.last().map(|e| &e.metadata.accepted.receipt)
+                != cut.terminal_receipt.as_ref())
     {
         return Err(invalid("owner adoption terminal or capacity"));
     }
-    Ok(bounded_evidence(
-        &(
-            binding,
-            &cut.relay_database_namespace,
-            &cut.source_moment_id,
-            &cut.source_digest,
-            cut.source_byte_length,
-            cut.baseline_moment_relay_sequence,
-            cut.baseline_registered_at_ms,
-            cut.expected_local_sequence,
-            identities,
-        ),
-        max_bytes,
-    )?
-    .1)
+    let evidence = (
+        binding,
+        &cut.relay_database_namespace,
+        &cut.source_moment_id,
+        &cut.source_digest,
+        cut.source_byte_length,
+        cut.baseline_moment_relay_sequence,
+        cut.baseline_registered_at_ms,
+        cut.expected_local_sequence,
+        identities,
+    );
+    // The prefix is the tenth element, only when present, so a first
+    // adoption's evidence keeps its nine.
+    Ok(match &cut.retained_prefix {
+        None => bounded_evidence(&evidence, max_bytes)?.1,
+        Some(prefix) => {
+            let (b, n, m, d, l, s, r, e, i) = evidence;
+            bounded_evidence(&(b, n, m, d, l, s, r, e, i, prefix), max_bytes)?.1
+        }
+    })
 }
 
 fn bounded_evidence(
@@ -1363,12 +1430,17 @@ type AdoptionSourceMetadata = (
     Option<super::activation::ImportedOwnerSource>,
 );
 
+/// The adoption's verified source. A note the reader built proves its file
+/// as its capture did, the released boundary's exception included, within
+/// `max_bytes` of boundary proof. Once the adoption committed, that
+/// exception proves it at the boundary the adoption recorded.
 pub(super) fn read_adoption_source(
     conn: &Connection,
     namespace: &str,
     adoption_id: &str,
     binding: &LiveObjectBinding,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
+    max_bytes: usize,
 ) -> Result<Option<VerifiedAdoptionSource>, ApplicationError> {
     let Some((moment, digest, length, imported)) =
         read_adoption_source_metadata(conn, namespace, adoption_id, binding)?
@@ -1389,13 +1461,14 @@ pub(super) fn read_adoption_source(
             if !doc.has_reader_source() {
                 return Err(ApplicationError::Corrupt);
             }
-            crate::reader_snapshot::resolve(
+            let key = DocKey::new(
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+            )?;
+            match crate::reader_snapshot::resolve(
                 conn,
-                &DocKey::new(
-                    &binding.workspace_id,
-                    &binding.main_version_id,
-                    &binding.object_id,
-                )?,
+                &key,
                 &doc,
                 &doc.project(ContentKind::Richdoc)?.content,
                 &crate::reader_snapshot::SnapshotIdentity {
@@ -1407,7 +1480,28 @@ pub(super) fn read_adoption_source(
                     authority: adoption_id,
                 },
                 resolver,
-            )?;
+            ) {
+                Ok(_) => {}
+                Err(CollabError::MarkdownReaderUnavailable) => {
+                    super::activation::reader_settled_at_boundary(
+                        conn,
+                        namespace,
+                        &key,
+                        &binding.current_path,
+                        &binding.lineage_claim_id,
+                        Some(adoption_id),
+                        &doc,
+                        (
+                            &source.source_moment_id,
+                            &source.source_digest,
+                            source.source_byte_length,
+                        ),
+                        max_bytes,
+                        resolver,
+                    )?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     let text: String = text::read_sized(conn, &digest, length).map_err(read_sql)?;
@@ -1524,12 +1618,17 @@ pub fn adopt_owner_committed(
         i64,
     ) -> Result<(), ApplicationError>,
 ) -> Result<OwnerAdoptionAck, ApplicationError> {
-    let held = handle
+    let mut held = handle
         .registration
         .lock()
         .map_err(|_| ApplicationError::Interrupted)?;
     if !held.live {
         return Err(ApplicationError::Interrupted);
+    }
+    // A retired activation never adopts, so nothing commits whose answer is
+    // withheld. The durable intent refuses it below, after a restart too.
+    if handle.retired.contains(&cut.adoption_id) {
+        return Err(ApplicationError::Conflict);
     }
     if cut.relay_database_namespace != held.namespace {
         return Err(ApplicationError::Conflict);
@@ -1540,6 +1639,7 @@ pub fn adopt_owner_committed(
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let result = store.write_with(faults, |tx| {
         require_workspace(tx, &held)?;
+        retirement::require_not_retiring(tx, &held.namespace, &cut.adoption_id)?;
         if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| available && binding == *b && coordinate == held.coordinate) {
             return Err(ApplicationError::Interrupted);
         }
@@ -1553,7 +1653,7 @@ pub fn adopt_owner_committed(
         let present:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path) WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text')",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path],|r|r.get(0)).map_err(read_sql)?;
         if !present { return Err(ApplicationError::Conflict); }
-        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b,resolver)?
+        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b,resolver,max_bytes)?
             .ok_or(invalid("owner adoption source evidence missing"))?;
         let evidence_digest = if let Some(source) = &imported_source {
             if source.native_head_sequence != cut.expected_local_sequence { return Err(ApplicationError::Conflict); }
@@ -1570,60 +1670,157 @@ pub fn adopt_owner_committed(
             || get_binary_blob(tx, &b.lineage_claim_id)?.as_deref() != Some(cut.baseline_bytes.as_slice()) {
             return Err(ApplicationError::Conflict);
         }
-        let previous: Option<(String,String,i64,i64,String,i64)> = tx.query_row(
-            "SELECT evidence_digest,binding_json,local_ydoc_sequence,terminal_cursor,coverage_digest,covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-            params![held.namespace,cut.adoption_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+        // A replay matches the activation this adoption made, while it is current.
+        let previous = owner_activations::activation_by_id(tx,&held.namespace,&cut.adoption_id)?;
         let binding_json=serde_json::to_string(b).map_err(|_| ApplicationError::Corrupt)?;
-        if let Some((saved_digest,saved_binding,sequence,cursor,coverage,covered_sequence)) = previous {
-            let (bytes,age): (i64,i64) = tx.query_row("SELECT max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-                params![held.namespace,cut.adoption_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
-            if cut.outbox_limits.max_pending_bytes < bytes || cut.outbox_limits.max_pending_age_ms < age {
+        if let Some(previous) = previous {
+            let Some(saved) = previous.adoption.filter(|_| !previous.released) else { return Err(ApplicationError::Conflict) };
+            if cut.outbox_limits.max_pending_bytes < saved.max_pending_bytes || cut.outbox_limits.max_pending_age_ms < saved.max_pending_age_ms {
                 return Err(ApplicationError::ConfiguredBudgetMismatch);
             }
             let origin = read_origin(tx,&held)?.ok_or(ApplicationError::Corrupt)?;
             if origin.terminal != cut.terminal_receipt { return Err(ApplicationError::Corrupt); }
-            if saved_digest != evidence_digest || saved_binding != binding_json || sequence != cut.expected_local_sequence
+            let (sequence,cursor) = (saved.local_ydoc_sequence,saved.terminal_cursor);
+            if saved.evidence_digest != evidence_digest || previous.binding_json != binding_json || sequence != cut.expected_local_sequence
                 || marker.head_update_seq < sequence || cursor != cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor) {
                 return Err(ApplicationError::Conflict);
             }
-            if outbox_coverage(tx,b,&cut.events,max_events,Some(covered_sequence))? != (coverage,covered_sequence) { return Err(ApplicationError::Corrupt); }
+            // A successor's coverage held when it adopted; its carried entries
+            // apply after that. Its evidence binds the prefix it adopted.
+            if cut.retained_prefix.is_none() && outbox_coverage(tx,&held,&key,&cut.events,max_events,Some(saved.covered_outbox_sequence))? != (saved.coverage_digest,saved.covered_outbox_sequence) { return Err(ApplicationError::Corrupt); }
             return Ok(OwnerAdoptionAck {adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:sequence,terminal_cursor:cursor,adoption_replayed:true});
         }
-        let existing_document: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
-        if existing_document { return Err(ApplicationError::Conflict); }
+        // Opus, round 3b: a retirement still settling the document decides
+        // which activation follows it, so nothing adopts until it releases.
+        if retirement::retiring(tx, &key)? || held.activation_id.as_ref().is_some_and(|id| *id != cut.adoption_id) {
+            return Err(ApplicationError::Conflict);
+        }
+        // A lineage adopts once. After that only the exact successor of its
+        // released chain tail activates it, under the same origin. A first
+        // adoption follows exactly the released tail its capture named, and
+        // one without a capture only a lineage that released nothing.
+        let captured_predecessor = imported_source.as_ref().and_then(|source| source.predecessor_activation_id.clone());
+        let succession = match &cut.retained_prefix {
+            None if owner_activations::lineage_origin_id(tx,None,&key,&b.lineage_claim_id)?.is_some() => return Err(ApplicationError::Conflict),
+            None => {
+                if owner_activations::released_chain_tail(tx,&held.namespace,&key,&b.lineage_claim_id)? != captured_predecessor {
+                    return Err(ApplicationError::Conflict);
+                }
+                None
+            }
+            Some(prefix) => Some(require_succession(tx, &held, &key, prefix, imported_source.as_ref(), max_events)?),
+        };
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
         require_local_replay_budget(tx, &key, max_bytes)?;
         let local = durable::load_doc_in(tx, &key)?;
-        if let Some(source) = &imported_source {
-            if !super::activation::matches_imported_state(tx, &local, source, max_bytes)? {
-                return Err(ApplicationError::Conflict);
+        let encode_full = || local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+            .ok_or(ApplicationError::ConfiguredByteBudgetExceeded);
+        let full = match &imported_source {
+            Some(source) => {
+                if !super::activation::matches_imported_state(tx, &local, source, max_bytes)? {
+                    return Err(ApplicationError::Conflict);
+                }
+                Some(encode_full()?)
             }
-        }
-        let journal = Ydoc::wire();
-        journal.apply(&cut.baseline_bytes)?;
-        if imported_source.as_ref().is_some_and(|source| source.reader_source) {
-            journal.validate_reader_baseline(&cut.baseline_bytes)?;
-        } else {
-            journal.validate_public_baseline(&cut.baseline_bytes)?;
-        }
-        for event in &cut.events { journal.apply(&event.update_bytes)?; }
-        if local.has_missing_updates() || journal.has_missing_updates() {
+            None => None,
+        };
+        if local.has_missing_updates() {
             return Err(invalid("owner adoption journal does not account for durable state"));
         }
-        let (coverage,covered_sequence) = outbox_coverage(tx, b, &cut.events, max_events,None)?;
-        if !crate::replay_parity::structurally_equal_v2(&local, &journal)? {
-            let existing_outbox: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-                params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get(0)).map_err(read_sql)?;
-            if existing_outbox || !cut.events.is_empty() || cut.terminal_receipt.is_some() {
-                return Err(invalid("owner adoption journal does not account for durable state"));
+        let (coverage,covered_sequence,seed,current_outbox,retired) = match &succession {
+            None => {
+                let journal = Ydoc::wire();
+                journal.apply(&cut.baseline_bytes)?;
+                if imported_source.as_ref().is_some_and(|source| source.reader_source) {
+                    journal.validate_reader_baseline(&cut.baseline_bytes)?;
+                } else {
+                    journal.validate_public_baseline(&cut.baseline_bytes)?;
+                }
+                for event in &cut.events { journal.apply(&event.update_bytes)?; }
+                if journal.has_missing_updates() {
+                    return Err(invalid("owner adoption journal does not account for durable state"));
+                }
+                let (coverage,covered_sequence) = outbox_coverage(tx, &held, &key, &cut.events, max_events,None)?;
+                let seed = !crate::replay_parity::structurally_equal_v2(&local, &journal)?;
+                if seed {
+                    let existing_outbox: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+                        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get(0)).map_err(read_sql)?;
+                    if existing_outbox || !cut.events.is_empty() || cut.terminal_receipt.is_some() {
+                        return Err(invalid("owner adoption journal does not account for durable state"));
+                    }
+                }
+                (coverage,covered_sequence,seed,None,Vec::new())
             }
-            let seed = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-            let append_key = format!("owner-adoption:{}",hex_sha256(&serde_json::to_vec(&(&cut.adoption_id,marker.head_update_seq,hex_sha256(&seed))).map_err(|_|ApplicationError::Corrupt)?));
+            Some(succession) => {
+                // The accepted state at B, which local state must contain:
+                // merging it into a copy of local state adds nothing.
+                let through = succession.prefix.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
+                // Adoption still answers a missing dependency as a conflict.
+                let accepted = accepted_history::read_state(tx, &held, through, cut.reconstruction)
+                    .map_err(|error| match error {
+                        ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                        error => error,
+                    })?;
+                let accepted_full = accepted.encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
+                    .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
+                let merged = Ydoc::wire();
+                merged.apply(full.as_deref().ok_or(ApplicationError::Corrupt)?)?;
+                merged.apply(&accepted_full)?;
+                if accepted.has_missing_updates() || merged.has_missing_updates()
+                    || !crate::replay_parity::structurally_equal_v2(&merged, &local)? {
+                    return Err(ApplicationError::Conflict);
+                }
+                let retained = retained_outbox_coverage(tx, &held, &key, succession, max_events)?;
+                (retained.digest,retained.covered_sequence,!crate::replay_parity::structurally_equal_v2(&local, &accepted)?,retained.current,retained.retired)
+            }
+        };
+        let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
+        // From adoption on, the interval names only authors of accepted
+        // content. Carry the authors of local edits no settlement named yet.
+        crate::author_coverage::fold_in(tx, &key, i64::MAX)?;
+        if cut.events.iter().any(|event| {
+            event.metadata.author_snapshot.as_ref().is_none_or(Vec::is_empty)
+        }) {
+            crate::author_coverage::admit_accepted_in(tx, &key, &[])?;
+        }
+        let terminal_json = serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?;
+        let host_json = serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?;
+        match &succession {
+            None => {
+                tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
+                    VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                    params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,terminal_json,host_json,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
+                tx.execute(owner_activations::ACTIVATE_ADOPTION,params![held.namespace,cut.adoption_id,captured_predecessor]).map_err(write_sql)?;
+            }
+            Some(succession) => {
+                tx.execute("INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,boundary_json)
+                    VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+                    params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,succession.root,succession.prefix.predecessor_activation_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,host_json,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,terminal_json,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms,
+                        serde_json::to_string(&succession.prefix).map_err(|_|ApplicationError::Corrupt)?]).map_err(write_sql)?;
+            }
+        }
+        tx.execute("UPDATE live_device_application_bindings SET activation_id=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,cut.adoption_id]).map_err(write_sql)?;
+        for outbox in &retired {
+            retire_outbox(tx, outbox, b)?;
+        }
+        match &current_outbox {
+            Some(CurrentOutbox::Reopen(outbox)) => reopen_outbox(tx, outbox)?,
+            Some(CurrentOutbox::Open) => crate::owner_outbox::open_successor_outbox_in_tx(tx, b, now_ms)
+                .map_err(|error| match error {
+                    crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
+                    _ => ApplicationError::Corrupt,
+                })?,
+            None => {}
+        }
+        // The activation row exists first, so the seed is this activation's
+        // own delivery, under its limits, and no released lineage's.
+        if seed {
+            let full = match full { Some(full) => full, None => encode_full()? };
+            let append_key = format!("owner-adoption:{}",hex_sha256(&serde_json::to_vec(&(&cut.adoption_id,marker.head_update_seq,hex_sha256(&full))).map_err(|_|ApplicationError::Corrupt)?));
             let entry = crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
-                binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:seed,
+                binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:full,
                 limits:cut.outbox_limits.clone(),created_at_ms:now_ms,
             }).map_err(|error| match error {
                 crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
@@ -1635,26 +1832,27 @@ pub fn adopt_owner_committed(
                 update_digest:entry.update_digest.clone(),origin:crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed,
             }).map_err(|_|ApplicationError::Corrupt)?;
         }
-        let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
-        // From adoption on, the interval names only authors of accepted
-        // content. Carry the authors of local edits no settlement named yet.
-        crate::author_coverage::fold_in(tx, &key, i64::MAX)?;
-        if cut.events.iter().any(|event| {
-            event.metadata.author_snapshot.as_ref().is_none_or(Vec::is_empty)
-        }) {
-            crate::author_coverage::admit_accepted_in(tx, &key, &[])?;
+        // A successor continues the lineage's accepted history as it is.
+        if succession.is_none() {
+            accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
+            for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         }
-        tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
-            params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
-        accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
-        for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         follow_up(tx, &held.namespace, b, cut.events.len() as i64)?;
         Ok(OwnerAdoptionAck { adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:marker.head_update_seq,terminal_cursor,adoption_replayed:false })
     })?;
     match result {
-        TxnOutcome::Committed(ack) => Ok(ack),
-        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+        TxnOutcome::Committed(ack) => {
+            held.activation_id = Some(ack.adoption_id.clone());
+            Ok(ack)
+        }
+        // The binding row names the activation once the commit is durable,
+        // so the registration names it too.
+        TxnOutcome::Crashed { committed } => {
+            if committed {
+                held.activation_id = Some(cut.adoption_id.clone());
+            }
+            Err(ApplicationError::Interrupted)
+        }
     }
 }
 
@@ -1699,16 +1897,25 @@ pub(super) fn require_local_replay_budget(
     usize::try_from(total).map_err(|_| ApplicationError::Corrupt)
 }
 
+/// A first adoption's coverage of the outbox at its binding: each entry
+/// through the terminal sequence either an Owner receipt from the cut, in
+/// journal order, or a strictly refused draft. A first adoption follows no
+/// adopted chain, so a refused native source refuses it. Entries keep the
+/// representation a successor's coverage has.
 fn outbox_coverage(
     conn: &Connection,
-    b: &LiveObjectBinding,
+    held: &Registration,
+    key: &DocKey,
     events: &[AdmittedLiveUpdate],
     max_events: usize,
     replay_sequence: Option<i64>,
 ) -> Result<(String, i64), ApplicationError> {
+    let b = &held.binding;
+    let selectors =
+        serde_json::to_string(&b.selector_paths).map_err(|_| ApplicationError::Corrupt)?;
     let parent: Option<(String,String,String,i64,i64)> = conn.query_row(
-        "SELECT outbox_id,state,base_update_digest,pending_bytes,next_sequence FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND restore_fence_generation=?6",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,b.restore_fence_generation],
+        "SELECT outbox_id,state,base_update_digest,pending_bytes,next_sequence FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,selectors,b.restore_fence_generation],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?;
     let receipts: std::collections::HashMap<_, _> = events
         .iter()
@@ -1732,7 +1939,7 @@ fn outbox_coverage(
         {
             return Err(invalid("owner adoption outbox is not drained"));
         }
-        let mut query = conn.prepare("SELECT sequence,delivery_id,update_digest,pending FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence<=?2 ORDER BY sequence LIMIT ?3").map_err(read_sql)?;
+        let mut query = conn.prepare("SELECT sequence,delivery_id,update_digest,pending,terminal_reason IS NOT NULL OR terminal_blob_digest IS NOT NULL FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence<=?2 ORDER BY sequence LIMIT ?3").map_err(read_sql)?;
         let rows = query
             .query_map(params![id, terminal, max_events as i64 + 1], |r| {
                 Ok((
@@ -1740,32 +1947,60 @@ fn outbox_coverage(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, bool>(4)?,
                 ))
             })
             .map_err(read_sql)?;
+        let mut cursor = 0;
         for row in rows {
-            let (sequence, delivery, digest, pending) = row.map_err(read_sql)?;
+            let (sequence, delivery, digest, pending, terminal) = row.map_err(read_sql)?;
             if sequence != coverage.len() as i64 + 1 || pending != 0 {
                 return Err(ApplicationError::Conflict);
             }
-            let accepted = receipts
-                .get(&delivery)
+            let Some(accepted) = receipts.get(&delivery) else {
+                let refusal = retirement::refused_entry(
+                    conn,
+                    &held.namespace,
+                    key,
+                    &b.lineage_claim_id,
+                    &id,
+                    sequence,
+                )?
                 .ok_or(invalid("owner adoption receipt coverage missing"))?;
+                if refusal.source.is_some() {
+                    return Err(ApplicationError::Conflict);
+                }
+                coverage.push((
+                    id.clone(),
+                    sequence,
+                    retirement::Disposition::Refused {
+                        delivery_id: refusal.delivery_id,
+                        update_digest: refusal.update_digest,
+                        terminal_reason: refusal.terminal_reason,
+                    },
+                ));
+                continue;
+            };
             let receipt = &accepted.receipt;
-            if receipt.update_digest != digest
+            // Acceptance evidence beside terminal evidence contradicts itself.
+            if terminal
+                || receipt.update_digest != digest
                 || !matches!(
                     accepted.authority,
                     ServerDerivedLiveUpdateAuthority::Owner { .. }
                 )
-                || coverage
-                    .last()
-                    .is_some_and(|(_, previous): &(i64, LiveUpdateReceipt)| {
-                        previous.journal_cursor >= receipt.journal_cursor
-                    })
+                || receipt.journal_cursor <= cursor
             {
                 return Err(ApplicationError::Conflict);
             }
-            coverage.push((sequence, receipt.clone()));
+            cursor = receipt.journal_cursor;
+            coverage.push((
+                id.clone(),
+                sequence,
+                retirement::Disposition::Receipt {
+                    receipt: receipt.clone(),
+                },
+            ));
         }
         if coverage.len() as i64 != terminal {
             return Err(invalid("owner adoption retained outbox coverage missing"));
@@ -1782,12 +2017,627 @@ fn outbox_coverage(
     ))
 }
 
+/// What a successor proved about the released chain it follows.
+struct Succession {
+    /// The lineage's immutable origin, which the successor keeps.
+    root: String,
+    prefix: RetainedPrefix,
+    /// The chain, walked once within its budget.
+    chain: ChainBindings,
+    /// The chain's Carried deliveries, each at its original entry.
+    carried: Vec<retirement::InheritedEntry>,
+}
+
+/// A successor follows exactly its namespace's released chain tail, at the
+/// boundary that tail kept, while no namespace holds the lineage and its
+/// accepted history still ends there. Only a captured source names the
+/// activation it follows. The chain fits `max_events` before anything
+/// resolves through it.
+fn require_succession(
+    tx: &Transaction<'_>,
+    held: &Registration,
+    key: &DocKey,
+    prefix: &RetainedPrefix,
+    source: Option<&super::activation::ImportedOwnerSource>,
+    max_events: usize,
+) -> Result<Succession, ApplicationError> {
+    let lineage = &held.binding.lineage_claim_id;
+    let predecessor = prefix.predecessor_activation_id.as_str();
+    if source.and_then(|source| source.predecessor_activation_id.as_deref()) != Some(predecessor) {
+        return Err(ApplicationError::Conflict);
+    }
+    let root = owner_activations::lineage_origin_id(tx, Some(&held.namespace), key, lineage)?
+        .ok_or(ApplicationError::Conflict)?;
+    if owner_activations::current_activation(tx, None, key, lineage)?.is_some()
+        || owner_activations::released_chain_tail(tx, &held.namespace, key, lineage)?.as_deref()
+            != Some(predecessor)
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let (boundary, _) = retirement::released_tail(tx, &held.namespace, predecessor)?;
+    if boundary.as_ref() != Some(&prefix.body())
+        || retirement::accepted_endpoint(tx, &held.namespace, key, lineage)? != prefix.body()
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let chain = chain_bindings(tx, &held.namespace, key, lineage, predecessor, max_events)?;
+    let carried = retirement::inherited_in_chain(
+        tx,
+        &held.namespace,
+        key,
+        lineage,
+        predecessor,
+        &chain.activations,
+    )?;
+    Ok(Succession {
+        root,
+        prefix: prefix.clone(),
+        chain,
+        carried,
+    })
+}
+
+/// The quarantines a relay refusal leaves, the reasons the relay keeps an
+/// owner's refused edits for. Restore and binding quarantines recover only
+/// through enrollment.
+const RELAY_REFUSALS: [&str; 4] = [
+    "provenance-refused",
+    "delivery-conflict",
+    "capacity-refused",
+    "invalid-update",
+];
+
+/// Whether a retirement kept one of the outbox's refused entries, after the
+/// relay's journal proved it absent.
+fn retirement_kept(tx: &Transaction<'_>, outbox_id: &str) -> Result<bool, ApplicationError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_reason=?2)",
+        params![outbox_id, crate::owner_outbox::RETIREMENT_KEPT],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
+
+/// The quarantine a successor's adoption gives each outbox its coverage
+/// proved at an earlier binding of its restore generation, so the outbox at
+/// its own binding is the generation's one writable outbox. The observed
+/// binding names that successor.
+pub(crate) const SUCCESSION_RETIRED: &str = "succession-retired";
+
+/// What a successor's adoption does to the outbox at its binding.
+#[derive(Debug, PartialEq, Eq)]
+enum CurrentOutbox {
+    /// Reopen the one a relay refusal or an earlier succession quarantined.
+    Reopen(String),
+    /// Open it beside the outboxes the chain left at earlier bindings of this
+    /// restore generation, so the successor's own deliveries have one.
+    Open,
+}
+
+/// A successor's coverage of the outboxes its released chain left.
+struct RetainedOutboxes {
+    /// Each covered entry's outbox, sequence and disposition, hashed.
+    digest: String,
+    /// The high-water mark of the outbox at the successor's binding.
+    covered_sequence: i64,
+    current: Option<CurrentOutbox>,
+    /// Covered outboxes at earlier bindings that are still open, which the
+    /// adoption retires.
+    retired: Vec<String>,
+}
+
+/// A successor's coverage of every outbox its released chain left in the
+/// document's lineage, under one budget: the outbox at its exact binding, and
+/// each at a binding an adopted activation of the chain held at this restore
+/// generation. Each binding the chain held must be one this document held
+/// before, so an arbitrary one refuses. The coverage takes no outbox at an
+/// earlier generation, which stays behind its restore fence. Any other
+/// outbox in this generation refuses the succession, even an empty one.
+/// A quarantined outbox counts only when its totals show nothing pending and
+/// - a relay refusal quarantined it, at its own binding, and its retirement
+///   kept a refused entry or strictly abandoned the seed; or
+/// - an earlier succession retired it, and the binding it names is one an
+///   adopted activation of the chain held after this outbox's.
+///
+/// The successor reopens either at its binding. Every other quarantine
+/// refuses the succession. Each open outbox at an earlier binding, drained,
+/// is retired.
+fn retained_outbox_coverage(
+    tx: &Transaction<'_>,
+    held: &Registration,
+    key: &DocKey,
+    succession: &Succession,
+    max_events: usize,
+) -> Result<RetainedOutboxes, ApplicationError> {
+    let b = &held.binding;
+    let chain = &succession.chain;
+    require_historical(tx, held, key, &chain.bindings(), max_events)?;
+    type Row = (
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+        i64,
+    );
+    let rows: Vec<Row> = {
+        let mut query = tx.prepare(
+            "SELECT outbox_id,current_path,selector_paths_json,restore_fence_generation,state,base_update_digest,
+                quarantine_reason,observed_binding_json,pending_bytes,oldest_entry_at_ms,pending_entry_count
+             FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4
+             ORDER BY outbox_id LIMIT ?5",
+        ).map_err(read_sql)?;
+        let limit = i64::try_from(max_events)
+            .map_err(|_| over_budget())?
+            .saturating_add(1);
+        let rows = query
+            .query_map(
+                params![
+                    b.workspace_id,
+                    b.main_version_id,
+                    b.object_id,
+                    b.lineage_claim_id,
+                    limit
+                ],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .map_err(read_sql)?
+            .collect::<Result<_, _>>()
+            .map_err(read_sql)?;
+        rows
+    };
+    if rows.len() > max_events {
+        return Err(over_budget());
+    }
+    let (mut current, mut retained, mut abandoning, mut retired) =
+        (None, Vec::new(), Vec::new(), Vec::new());
+    // Whether the chain left an outbox at an earlier binding of this
+    // generation.
+    let mut moved = false;
+    for (id, path, selectors, generation, state, base, reason, observed, pending, oldest, count) in
+        rows
+    {
+        if generation != b.restore_fence_generation {
+            continue;
+        }
+        let binding = LiveObjectBinding {
+            workspace_id: b.workspace_id.clone(),
+            main_version_id: b.main_version_id.clone(),
+            object_id: b.object_id.clone(),
+            lineage_claim_id: b.lineage_claim_id.clone(),
+            current_path: path,
+            selector_paths: serde_json::from_str(&selectors)
+                .map_err(|_| ApplicationError::Corrupt)?,
+            restore_fence_generation: generation,
+        };
+        let at_binding = binding == *b;
+        if (!at_binding && !chain.contains(&binding)) || base != b.lineage_claim_id {
+            return Err(ApplicationError::Conflict);
+        }
+        let drained = pending == 0 && oldest.is_none() && count == 0;
+        let observed = observed
+            .map(|json| serde_json::from_str::<LiveObjectBinding>(&json))
+            .transpose()
+            .map_err(|_| ApplicationError::Corrupt)?;
+        let quarantined = match (state.as_str(), reason.as_deref()) {
+            ("active" | "sealed", _) if at_binding => false,
+            ("active" | "sealed", _) if drained => {
+                retired.push(id.clone());
+                false
+            }
+            ("quarantined", Some(SUCCESSION_RETIRED))
+                if drained
+                    && observed
+                        .as_ref()
+                        .is_some_and(|observed| chain.followed(&binding, observed)) =>
+            {
+                true
+            }
+            ("quarantined", Some(reason))
+                if drained
+                    && RELAY_REFUSALS.contains(&reason)
+                    && observed
+                        .as_ref()
+                        .is_none_or(|observed| *observed == binding) =>
+            {
+                if !retirement_kept(tx, &id)? {
+                    abandoning.push(id.clone());
+                }
+                true
+            }
+            _ => return Err(ApplicationError::Conflict),
+        };
+        if !at_binding {
+            moved = true;
+        } else if current.replace((id.clone(), quarantined)).is_some() {
+            return Err(ApplicationError::Conflict);
+        }
+        retained.push(id);
+    }
+    let coverage = retirement::retained_coverage(
+        tx,
+        &held.namespace,
+        key,
+        &b.lineage_claim_id,
+        &retained,
+        &succession.prefix,
+        &succession.carried,
+        &chain.activations,
+        max_events,
+    )?;
+    let abandoned = |outbox: &String| {
+        coverage.iter().any(|(id, _, disposition)| {
+            id == outbox && *disposition == retirement::Disposition::Abandoned
+        })
+    };
+    if !abandoning.iter().all(abandoned) {
+        return Err(ApplicationError::Conflict);
+    }
+    let covered_sequence = coverage
+        .iter()
+        .filter(|(id, ..)| current.as_ref().is_some_and(|(current, _)| current == id))
+        .count() as i64;
+    let current = match current {
+        Some((id, quarantined)) => quarantined.then_some(CurrentOutbox::Reopen(id)),
+        None => moved.then_some(CurrentOutbox::Open),
+    };
+    Ok(RetainedOutboxes {
+        digest: hex_sha256(&serde_json::to_vec(&coverage).map_err(|_| ApplicationError::Corrupt)?),
+        covered_sequence,
+        current,
+        retired,
+    })
+}
+
+/// The bindings the adopted activations of a released chain held, each with
+/// the nearest and farthest distance from the chain's tail an activation
+/// held it at, and every activation the chain walk visited.
+struct ChainBindings {
+    bindings: Vec<(LiveObjectBinding, usize, usize)>,
+    index: std::collections::HashMap<LiveObjectBinding, usize>,
+    activations: std::collections::HashSet<String>,
+}
+
+impl ChainBindings {
+    fn bindings(&self) -> Vec<&LiveObjectBinding> {
+        self.bindings.iter().map(|(binding, ..)| binding).collect()
+    }
+
+    fn contains(&self, binding: &LiveObjectBinding) -> bool {
+        self.index.contains_key(binding)
+    }
+
+    /// Whether an activation holding `later` followed one holding `earlier`.
+    fn followed(&self, earlier: &LiveObjectBinding, later: &LiveObjectBinding) -> bool {
+        match (self.index.get(earlier), self.index.get(later)) {
+            (Some(&earlier), Some(&later)) => self.bindings[later].1 < self.bindings[earlier].2,
+            _ => false,
+        }
+    }
+}
+
+/// The error for coverage, or the proof it rests on, past its budget.
+fn over_budget() -> ApplicationError {
+    invalid("owner adoption retained outbox coverage exceeds its budget")
+}
+
+/// The bindings the adopted activations of the released chain ending at
+/// `tail` held in this document's lineage. The walk counts every activation
+/// it visits, however many held one binding, and refuses past `max_events`
+/// rather than take a cut-off chain as whole.
+fn chain_bindings(
+    conn: &Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage: &str,
+    tail: &str,
+    max_events: usize,
+) -> Result<ChainBindings, ApplicationError> {
+    let mut query = conn
+        .prepare(
+            "WITH RECURSIVE chain(activation_id,depth) AS (SELECT ?2,0 UNION ALL
+               SELECT v.predecessor_activation_id,c.depth+1 FROM chain c JOIN live_owner_activations v
+                 ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
+               WHERE v.predecessor_activation_id IS NOT NULL LIMIT ?7)
+             SELECT c.depth,c.activation_id,v.binding_json FROM chain c LEFT JOIN live_owner_activations v
+               ON v.relay_database_namespace=?1 AND v.activation_id=c.activation_id
+               AND v.workspace_id=?3 AND v.main_version_id=?4 AND v.object_id=?5 AND v.lineage_claim_id=?6
+               AND v.released_at_ms IS NOT NULL AND v.evidence_digest IS NOT NULL
+             ORDER BY c.depth",
+        )
+        .map_err(read_sql)?;
+    let limit = i64::try_from(max_events)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .saturating_add(1);
+    let rows = query
+        .query_map(
+            params![
+                namespace,
+                tail,
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage,
+                limit
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .map_err(read_sql)?;
+    let mut chain = ChainBindings {
+        bindings: Vec::new(),
+        index: std::collections::HashMap::new(),
+        activations: std::collections::HashSet::new(),
+    };
+    for (visited, row) in rows.enumerate() {
+        let (depth, activation, json) = row.map_err(read_sql)?;
+        if visited >= max_events {
+            return Err(over_budget());
+        }
+        chain.activations.insert(activation);
+        let Some(json) = json else { continue };
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        let depth = usize::try_from(depth).map_err(|_| ApplicationError::Corrupt)?;
+        match chain.index.get(&binding) {
+            Some(&at) => chain.bindings[at].2 = depth,
+            None => {
+                chain.index.insert(binding.clone(), chain.bindings.len());
+                chain.bindings.push((binding, depth, depth));
+            }
+        }
+    }
+    Ok(chain)
+}
+
+/// Each binding the released chain held must be one this document held
+/// before the registration's: at its path, or one lineage-preserving renames
+/// moved it from, and at its restore generation, or one that resumed restores
+/// led from to it. Rename and restore history are each walked once, for
+/// every binding.
+fn require_historical(
+    conn: &Connection,
+    held: &Registration,
+    key: &DocKey,
+    chain: &[&LiveObjectBinding],
+    max_events: usize,
+) -> Result<(), ApplicationError> {
+    let b = &held.binding;
+    for historical in chain {
+        settlement::validate_historical_binding(historical, historical)?;
+    }
+    let moved_from: std::collections::HashSet<&str> = chain
+        .iter()
+        .map(|historical| historical.current_path.as_str())
+        .filter(|path| *path != b.current_path)
+        .collect();
+    let renamed = renamed_from(conn, key, &b.current_path, &moved_from, max_events)?;
+    let resumed = if chain
+        .iter()
+        .any(|historical| historical.restore_fence_generation != b.restore_fence_generation)
+    {
+        resumed_generations(conn, held, max_events)?
+    } else {
+        std::collections::HashSet::new()
+    };
+    for historical in chain {
+        let mut moved = (*historical).clone();
+        if historical.current_path != b.current_path {
+            if !renamed.contains(&historical.current_path) {
+                return Err(ApplicationError::Conflict);
+            }
+            moved.current_path = b.current_path.clone();
+            moved.selector_paths = b.selector_paths.clone();
+        }
+        restore_resume::validate_origin_binding(conn, held, &moved)?;
+        if !resumed.contains(&historical.restore_fence_generation)
+            && historical.restore_fence_generation != b.restore_fence_generation
+        {
+            return Err(ApplicationError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+/// The generations resumed restores, or restores cancelled after their
+/// fences, of this document's lineage led from to the registration's, its
+/// own included. The walk counts every generation it visits and refuses past
+/// `max_events`.
+fn resumed_generations(
+    conn: &Connection,
+    held: &Registration,
+    max_events: usize,
+) -> Result<std::collections::HashSet<i64>, ApplicationError> {
+    let b = &held.binding;
+    let mut query = conn
+        .prepare(
+            "WITH RECURSIVE resumed(generation,cancelled) AS (SELECT ?6,0 UNION ALL
+               SELECT f.old_generation,f.cancelled_json IS NOT NULL FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
+               WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
+                 AND f.lineage_claim_id=?5 AND (f.resume_receipt_json IS NOT NULL OR f.cancelled_json IS NOT NULL) LIMIT ?7)
+             SELECT generation,cancelled FROM resumed",
+        )
+        .map_err(read_sql)?;
+    let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let limit = i64::try_from(max_events)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .saturating_add(1);
+    let rows = query
+        .query_map(
+            params![
+                held.namespace,
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                b.restore_fence_generation,
+                limit
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .map_err(read_sql)?;
+    let mut generations = std::collections::HashSet::new();
+    for (visited, row) in rows.enumerate() {
+        let (generation, cancelled) = row.map_err(read_sql)?;
+        if visited >= max_events {
+            return Err(over_budget());
+        }
+        // A cancellation carried the lineage from this generation to the next.
+        if cancelled
+            && restore_fence::cancelled_at(
+                conn,
+                &held.namespace,
+                &doc,
+                Some(&b.lineage_claim_id),
+                generation + 1,
+                None,
+            )?
+            .is_none()
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        generations.insert(generation);
+    }
+    Ok(generations)
+}
+
+/// The paths renames of this document moved it from to `to`, keeping its
+/// object and its text. Walking back from `to`, each rename landed on the path
+/// the walk reached; any other move ends the proof. The walk ends once it has
+/// proved each path in `needed`, and refuses rather than read more than
+/// `max_events` renames.
+fn renamed_from(
+    conn: &Connection,
+    key: &DocKey,
+    to: &str,
+    needed: &std::collections::HashSet<&str>,
+    max_events: usize,
+) -> Result<std::collections::HashSet<String>, ApplicationError> {
+    let mut proved = std::collections::HashSet::new();
+    if needed.is_empty() {
+        return Ok(proved);
+    }
+    let mut query = conn
+        .prepare(
+            "SELECT payload_before_path,path,after_content_kind='text' AND after_blob_sha256 IS before_blob_sha256
+             FROM moments WHERE workspace_id=?1 AND object_id=?2 AND version_id=?3 AND operation='rename'
+             ORDER BY moment_order DESC LIMIT ?4",
+        )
+        .map_err(read_sql)?;
+    let limit = i64::try_from(max_events)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .saturating_add(1);
+    let mut rows = query
+        .query(params![
+            key.workspace_id,
+            key.object_id,
+            key.version_id,
+            limit
+        ])
+        .map_err(read_sql)?;
+    let (mut path, mut remaining, mut read) = (to.to_owned(), needed.len(), 0);
+    while let Some(row) = rows.next().map_err(read_sql)? {
+        read += 1;
+        if read > max_events {
+            return Err(over_budget());
+        }
+        let (before, after, kept): (Option<String>, String, bool) = (
+            row.get(0).map_err(read_sql)?,
+            row.get(1).map_err(read_sql)?,
+            row.get(2).map_err(read_sql)?,
+        );
+        let Some(before) = before.filter(|_| kept && after == path) else {
+            break;
+        };
+        if needed.contains(before.as_str()) && proved.insert(before.clone()) {
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        path = before;
+    }
+    Ok(proved)
+}
+
+/// Reopen the outbox a successor's coverage proved, keeping its entries,
+/// sequence, receipts and refusals. Its totals must still be zero.
+fn reopen_outbox(tx: &Transaction<'_>, outbox_id: &str) -> Result<(), ApplicationError> {
+    let reopened = tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL,retry_delivery_id=NULL
+         WHERE outbox_id=?1 AND state='quarantined' AND pending_bytes=0 AND oldest_entry_at_ms IS NULL
+           AND pending_entry_count=0",
+        [outbox_id],
+    ).map_err(write_sql)?;
+    if reopened != 1 {
+        return Err(ApplicationError::Conflict);
+    }
+    // Every refusal recorded here was of a head its predecessor's retirement
+    // ended, so none can name this successor's work.
+    tx.execute(
+        "DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+        [outbox_id],
+    )
+    .map_err(write_sql)?;
+    Ok(())
+}
+
+/// Retire an outbox a successor's coverage proved at an earlier binding,
+/// keeping its entries, sequence, receipts and refusals. Nothing may be
+/// pending in it; the successor's binding is what it observed.
+fn retire_outbox(
+    tx: &Transaction<'_>,
+    outbox_id: &str,
+    successor: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let retired = tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,observed_binding_json=?3
+         WHERE outbox_id=?1 AND state IN ('active','sealed') AND pending_bytes=0 AND oldest_entry_at_ms IS NULL
+           AND pending_entry_count=0",
+        params![
+            outbox_id,
+            SUCCESSION_RETIRED,
+            serde_json::to_string(successor).map_err(|_| ApplicationError::Corrupt)?
+        ],
+    ).map_err(write_sql)?;
+    if retired != 1 {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
 pub(super) struct AdoptedOrigin {
     pub binding: LiveObjectBinding,
     pub source_moment: String,
     pub source_digest: String,
     pub sequence: i64,
     pub terminal: Option<LiveUpdateReceipt>,
+    /// It adopted its released chain's retained prefix.
+    pub successor: bool,
 }
 
 pub(super) fn read_origin(
@@ -1797,8 +2647,9 @@ pub(super) fn read_origin(
     read_origin_with(conn, held, None)
 }
 
-/// With a budget, the adoption row, its source metadata, the original
-/// snapshot, and any resumed generation are charged before they are read.
+/// The current activation's adopted origin. With a budget, its row, source
+/// metadata, the original snapshot, and any resumed generation are charged
+/// before they are read.
 pub(super) fn read_origin_with(
     conn: &Connection,
     held: &Registration,
@@ -1807,23 +2658,33 @@ pub(super) fn read_origin_with(
     let b = &held.binding;
     if let Some(budget) = budget.as_deref_mut() {
         let length: i64 = conn.query_row(
-            "SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.adoption_id AS BLOB))
-               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.adoption_id),0)
+            &format!("SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.activation_id AS BLOB))
+               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.activation_id),0)
                +coalesce((SELECT sum(length(CAST(o.source_moment_id AS BLOB))+length(CAST(o.source_blob_sha256 AS BLOB))) FROM ydoc_owner_base_sources o WHERE o.workspace_id=a.workspace_id AND o.version_id=a.main_version_id AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id),0)
                +coalesce((SELECT sum(length(CAST(n.snapshot_blob_sha256 AS BLOB))) FROM ydoc_snapshots n WHERE n.workspace_id=a.workspace_id AND n.version_id=a.main_version_id AND n.object_id=a.object_id AND n.up_to_seq=0),0)
-             FROM live_owner_adoptions a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)",
+             FROM {} a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)", owner_activations::CURRENT_ACTIVATIONS),
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
             |r| r.get(0),
         ).map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
-    let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
-        "SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,adoption_id FROM live_owner_adoptions
-         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+    type OriginRow = (String, String, String, i64, i64, String, String, bool);
+    // Only the columns charged above.
+    let raw: Option<OriginRow> = conn.query_row(
+        &format!("SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,activation_id,boundary_json IS NOT NULL FROM {}
+         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5", owner_activations::CURRENT_ACTIVATIONS),
         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(read_sql)?;
-    let Some((binding, source_moment, source_digest, sequence, cursor, terminal, adoption_id)) =
-        raw
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(read_sql)?;
+    let Some((
+        binding,
+        source_moment,
+        source_digest,
+        sequence,
+        cursor,
+        terminal,
+        adoption_id,
+        successor,
+    )) = raw
     else {
         return Ok(None);
     };
@@ -1866,5 +2727,6 @@ pub(super) fn read_origin_with(
         source_digest,
         sequence,
         terminal,
+        successor,
     }))
 }

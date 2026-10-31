@@ -99,7 +99,7 @@ impl Worker {
             .current_dir(cwd.path())
             .arg("--permission")
             .arg(read_grant)
-            .arg("--max-old-space-size=256")
+            .arg("--max-old-space-size=512")
             .arg(&c.bundle)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -1222,12 +1222,12 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
     },
-    // A document edited while live editing was off offers no Resume either:
-    // the server's copy misses that edit.
+    // A document whose server copy is missing an owner edit resumes there too:
+    // its Resume tries that edit again.
     {
       reason: "live-edit-unadmitted" as const,
-      title: "Live editing can't resume",
-      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      title: "Live editing stopped",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
     {
       reason: "conflict-parent-withheld" as const,

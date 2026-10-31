@@ -1,4 +1,5 @@
 use super::*;
+use crate::ydoc_apply::DrainReporting;
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{StorageError, TxnOutcome};
 
@@ -13,6 +14,15 @@ pub struct OpenArtifactDrain {
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub conflicts_opened: i64,
+    /// The hold each document whose recovery drained is left with, by object
+    /// id: one a drain left held for released retained work keeps its queued
+    /// work queued, and none clears any hold an earlier drain reported.
+    pub holds: std::collections::BTreeMap<String, Option<crate::HostedHold>>,
+    /// Recovery stopped at a document whose drain waits for released-tail
+    /// validation. The documents before it keep their rows queued and
+    /// report nothing; once validation completes, recovery runs again and
+    /// reports them.
+    pub waiting: Option<Box<dohc_engine_collab::live_update_application::PendingValidation>>,
 }
 
 pub(super) fn enqueue(
@@ -36,7 +46,7 @@ const RECOVERY_STATE_SQL: &str = "SELECT json_array(d.head_update_seq,d.head_sna
          (SELECT latest_moment_id FROM snapshots s WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id), \
          (SELECT json_array(COUNT(*),MAX(rowid)) FROM ydoc_deferred_updates u WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id), \
          (SELECT EXISTS(SELECT 1 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id)), \
-         (SELECT group_concat(operation_id || COALESCE(resume_receipt_json,'')) FROM live_restore_fences f WHERE f.workspace_id=d.workspace_id AND f.main_version_id=d.version_id AND f.object_id=d.object_id), \
+         (SELECT group_concat(operation_id || COALESCE(resume_receipt_json,cancelled_json,'')) FROM live_restore_fences f WHERE f.workspace_id=d.workspace_id AND f.main_version_id=d.version_id AND f.object_id=d.object_id), \
          (SELECT COUNT(*) FROM conflicts c WHERE c.workspace_id=d.workspace_id AND c.target_version_id=d.version_id AND c.status='open' AND (c.current_object_id=d.object_id OR c.incoming_object_id=d.object_id))) \
          FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3";
 
@@ -134,6 +144,46 @@ pub fn drain_open_document_artifacts(
     leases: &dyn LeaseProbe,
     faults: &dyn FaultInjector,
 ) -> Result<OpenArtifactDrain, SyncError> {
+    recover(
+        store,
+        cache,
+        workspace_id,
+        leases,
+        DrainReporting::Returned,
+        faults,
+    )
+}
+
+/// [`drain_open_document_artifacts`] in a pass: the transaction that removes
+/// a document's queued rows writes what they committed as drain reports, so
+/// a later wait, an abandoned pass or a restart loses none of it. The answer
+/// keeps only refusals, holds, a wait, and a head an earlier attempt wrote
+/// that this one removed no row for.
+pub(crate) fn drain_open_document_artifacts_durably(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+) -> Result<OpenArtifactDrain, SyncError> {
+    recover(
+        store,
+        cache,
+        workspace_id,
+        leases,
+        DrainReporting::Durable,
+        faults,
+    )
+}
+
+fn recover(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+    reporting: DrainReporting,
+    faults: &dyn FaultInjector,
+) -> Result<OpenArtifactDrain, SyncError> {
     let keys = store.read_with(|conn| {
         let mut stmt = conn.prepare("SELECT version_id,object_id FROM ydoc_pending_artifacts WHERE workspace_id=?1 ORDER BY rowid")
             .map_err(SyncError::corrupt)?;
@@ -141,6 +191,10 @@ pub fn drain_open_document_artifacts(
             .map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)
     })?;
     let mut result = OpenArtifactDrain::default();
+    // Each drain's rows stay queued, with what they committed, until no
+    // document's drain waits: a request that never resumes, or a restart,
+    // then leaves them for the next recovery to report.
+    let mut completed = Vec::new();
     let mut pending = None;
     for (version, object) in keys {
         let key = DocKey::new(workspace_id, version, object).map_err(SyncError::corrupt)?;
@@ -168,36 +222,41 @@ pub fn drain_open_document_artifacts(
                 TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
                 TxnOutcome::Committed(true) => {}
             }
-            let before = store.read_with(|conn| {
-                select_snapshot_by_object(conn, workspace_id, &key.version_id, &key.object_id)
-            })?;
-            let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+            let before = crate::ydoc_apply::drained_head(store, &key)?;
+            let (drained, cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
                 store, cache, &key, leases, faults,
             )?;
-            let after = store.read_with(|conn| {
-                select_snapshot_by_object(conn, workspace_id, &key.version_id, &key.object_id)
-            })?;
-            let change = after
-                .filter(|after| {
-                    before
-                        .as_ref()
-                        .is_none_or(|before| before.latest_moment_id != after.latest_moment_id)
-                })
-                .map(|head| MomentMaterializationChange {
-                    version_id: key.version_id.clone(),
-                    path: head.path,
-                    operation: "write",
-                    content_kind: "text",
-                });
-            Ok(Some((drained, change)))
+            if drained.waiting.is_some() {
+                return Ok(Some((drained, cleanup, Vec::new())));
+            }
+            let changes =
+                crate::ydoc_apply::drained_changes(store, &key, &drained, before.as_ref())?;
+            Ok(Some((drained, cleanup, changes)))
         })();
         match attempt {
-            Ok(Some((drained, change))) => {
-                result.changes.extend(change);
-                result.record_facts.extend(drained.record_facts);
-                result.refusals.extend(drained.refusals);
-                result.sharing_declined.extend(drained.sharing_declined);
-                result.conflicts_opened += drained.conflicts_opened;
+            Ok(Some((mut drained, cleanup, changes))) => {
+                // A drain that waits committed nothing it reports: every
+                // drain's rows stay queued for the recovery that runs after
+                // validation.
+                if drained.waiting.is_some() {
+                    result.waiting = drained.waiting;
+                    cache.remove(&key);
+                    return Ok(result);
+                }
+                let left = match drained
+                    .released_hold
+                    .take()
+                    .or(drained.archived_hold.take())
+                {
+                    Some(hold) => Some(hold),
+                    None => crate::ydoc_apply::standing_released_hold(store, &key, Some(&cleanup))?,
+                };
+                // A hold any version of a document leaves stands for it.
+                let hold = result.holds.entry(key.object_id.clone()).or_insert(None);
+                if left.is_some() {
+                    *hold = left;
+                }
+                completed.push((key.clone(), drained, cleanup, changes));
             }
             Ok(None) => continue,
             Err(
@@ -207,26 +266,45 @@ pub fn drain_open_document_artifacts(
                 pending.get_or_insert(error);
                 continue;
             }
-            Err(error) => {
-                if !isolate_document_failure(error)? {
-                    continue;
-                }
-                let recorded = store.write_with(faults, |tx| {
-                    if leases.is_live(&key) {
-                        return Ok(());
-                    }
-                    remember_attempt_in_tx(tx, &key)?;
-                    record_recovery_failure_in_tx(tx, &key)?;
-                    Ok::<_, SyncError>(())
-                })?;
-                if matches!(recorded, TxnOutcome::Crashed { .. }) {
-                    return Err(SyncError::FaultCrash);
-                }
-            }
+            Err(error) => record_failure(store, &key, leases, faults, error)?,
         }
         cache.remove(&key);
     }
+    let mut completed_rows = false;
+    for (key, mut drained, mut cleanup, mut changes) in completed {
+        // In a pass, what the rows the cleanup removes committed becomes
+        // their drain reports in that transaction; a drain that removes no
+        // row reports only a head an earlier attempt wrote.
+        let consumes_rows = !cleanup.consumed().is_empty();
+        if reporting == DrainReporting::Durable && consumes_rows {
+            cleanup.report_durably(crate::drain_report::DrainExtras {
+                conflicts_opened: std::mem::take(&mut drained.conflicts_opened),
+                sharing_declined: std::mem::take(&mut drained.sharing_declined),
+                changes: std::mem::take(&mut changes),
+                ..Default::default()
+            });
+            drained.record_facts.clear();
+        }
+        match crate::ydoc_apply::complete_ended_session_cleanup(
+            store, &key, leases, cleanup, faults,
+        ) {
+            Ok(refusal) => {
+                completed_rows |= consumes_rows;
+                result.changes.extend(changes);
+                result.record_facts.extend(drained.record_facts);
+                result.refusals.extend(drained.refusals);
+                result.refusals.extend(refusal);
+                result.sharing_declined.extend(drained.sharing_declined);
+                result.conflicts_opened += drained.conflicts_opened;
+            }
+            Err(error) => {
+                result.holds.remove(&key.object_id);
+                record_failure(store, &key, leases, faults, error)?;
+            }
+        }
+    }
     if let Some(error) = pending
+        && !completed_rows
         && result.changes.is_empty()
         && result.record_facts.is_empty()
         && result.refusals.is_empty()
@@ -236,6 +314,33 @@ pub fn drain_open_document_artifacts(
         return Err(error);
     }
     Ok(result)
+}
+
+/// Record that recovering `key` failed with `error`, a failure of the
+/// document's own. One its next attempt can get past records nothing, and
+/// one of the store fails the recovery.
+fn record_failure(
+    store: &mut EngineStore,
+    key: &DocKey,
+    leases: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+    error: SyncError,
+) -> Result<(), SyncError> {
+    if !isolate_document_failure(error)? {
+        return Ok(());
+    }
+    let recorded = store.write_with(faults, |tx| {
+        if leases.is_live(key) {
+            return Ok(());
+        }
+        remember_attempt_in_tx(tx, key)?;
+        record_recovery_failure_in_tx(tx, key)?;
+        Ok::<_, SyncError>(())
+    })?;
+    if matches!(recorded, TxnOutcome::Crashed { .. }) {
+        return Err(SyncError::FaultCrash);
+    }
+    Ok(())
 }
 
 fn isolate_document_failure(error: SyncError) -> Result<bool, SyncError> {

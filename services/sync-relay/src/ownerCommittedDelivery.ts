@@ -4,15 +4,16 @@ import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.j
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
-import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
+import {drainOwnerOutbox,ownerOutboxHeadIsSeed,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
 import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations} from "./liveHostRegistration";
+import type {ServiceSeedDelivery} from "./serviceOwnerTransport";
 
 type OwnerDeliveryOutcome = CommittedDeliveryOutcome & {continueDrain: boolean};
 // The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
@@ -33,6 +34,8 @@ export class OwnerCommittedDelivery {
     ownerAdmission: OwnerOutboxAdmission;
     restore?: LiveRestorePreparation;
     publish?(signal?: AbortSignal): Promise<unknown>;
+    /** A native service transport's permission to acknowledge its adoption seed before applying it. */
+    seedDelivery?(): ServiceSeedDelivery | undefined;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
     this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);
@@ -138,7 +141,15 @@ export class OwnerCommittedDelivery {
             progress = this.#store.ownerDeliveryProgress(latest);
           }
         }
-        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+        // The engine refuses the cut settle while this adoption's seed is
+        // queued, or admitted and unapplied. Any admitted seed is unapplied
+        // here: it follows F, and the terminal is still the cut at B <= F.
+        // applyPending applies the predecessor's rows after B and then the
+        // seed, moving the terminal past the cut without a settle.
+        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) &&
+          !(next && this.#store.hasPendingActivationSeed(latest)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
+          registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
+          assertCurrent: latest.assertCurrent})) {
           const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
             registrationId,terminalReceipt: {...progress.adoptionTerminal},
           }},signal),progress.adoptionTerminal);
@@ -201,6 +212,7 @@ export class OwnerCommittedDelivery {
       };
       const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
         registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent,
+        seedDelivery: c.seedDelivery?.(),
         adoption: {...recorded, applied: () => {if (this.#adopted.get(key) === adopted) this.#seedApplied.set(key, recorded.adoptionId);}},
         applyThrough: async receipt => {
           await applyPending(receipt);
@@ -275,6 +287,15 @@ export class OwnerCommittedDelivery {
     if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
     this.#active.add(key);
     try {return await restore.confirm({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal}, proposalDigest);}
+    finally {this.#active.delete(key);}
+  }
+
+  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await cancelStopRestore({store: this.#store, lookup, connection: this.connection, signal});}
     finally {this.#active.delete(key);}
   }
 

@@ -4,7 +4,8 @@ import {configRecord} from "./deviceLiveHostConfig";
 import {liveValidation} from "./liveValidation.js";
 import {LiveRestoreBusy, type LiveRestoreValidator} from "./liveRestoreValidation.js";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup, type StopRestoreOutcome} from "./liveRestoreDelivery";
+import type {StopRestoreContinuation} from "./storage/liveRestoreOperation";
 import {parseLiveUpdateDigest} from "@dohc/live-session-contract/live-update-admission";
 import {snapshotHostCoordinate} from "./liveTicketInputs";
 
@@ -79,15 +80,28 @@ export class LiveRestorePreparation {
     } finally {release();}
   }
 
+  // Ends a restore that Decline or its departed path ended, through the fencing host's cancellation.
+  async #end(options: Parameters<typeof deliverStopRestore>[0], continuation: Exclude<StopRestoreContinuation, "continue">): Promise<Extract<StopRestoreOutcome, {kind: "pending"}>> {
+    if (continuation === "cancel") {
+      const ended = await cancelStopRestore({...options, lookup: snapshotStopRestoreLookup(options.lookup)});
+      if (ended.kind === "pending") return ended;
+      if (ended.kind === "refused") throw new Error(ended.reason);
+    }
+    return {kind: "pending", reason: "The restore was declined."};
+  }
+
   async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
     const config = this.config, lookup = snapshotStopRestoreLookup(options.lookup), signal = options.signal;
     const check = () => {if (signal?.aborted) throw signal.reason;};
+    const {store, connection} = options;
+    const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
     return this.#reserved(signal, async () => {
+      let continuation = store.continueStopRestore(input, Date.now());
+      if (continuation !== "continue") return this.#end(options, continuation);
       const stopped = await deliverStopRestore({...options, lookup});
       check();
       if (stopped.kind === "pending") return stopped;
-      const {store, connection} = options;
-      const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
       const validation = () => validationSignal(signal, connection.deadlineMs);
       const saved = await store.readStopRestoreProposal(input, this.#validator, validation());
       if (saved) return {kind: "prepared" as const, proposalDigest: saved.proposalDigest,
@@ -97,7 +111,9 @@ export class LiveRestorePreparation {
       const bytes = encodeNativeRestoreInput(Buffer.from(json), config.maxBytes);
       const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
         deadlineMs: connection.deadlineMs}, "prepare", bytes, config.maxBytes, signal);
-      check(); selected.assertCurrent();
+      check();
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
+      selected.assertCurrent();
       const recorded = await store.recordStopRestoreProposal(input, output.bytes, this.#validator, Date.now(), validation());
       return {kind: "prepared" as const, ...recorded};
     });
@@ -155,6 +171,9 @@ export class LiveRestorePreparation {
       maxBytes: config.maxBytes, maxEvents: config.maxEvents};
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
+      // Admission loses to a recorded Decline or a departed path. An admitted restore needs its workspace identity.
+      const continuation = store.continueStopRestore(input, Date.now());
+      if (continuation !== "continue") throw new Error((await this.#end({...options, connection}, continuation)).reason);
       const retained = store.readStopRestoreLifecycle(input);
       const validation = validationSignal(signal, connection.deadlineMs);
       let current = retained ?? await (requireReview
@@ -193,7 +212,7 @@ export class LiveRestorePreparation {
       }
       verify();
       if (current.phase !== "resumed" || !current.resume) throw new Error("Restore continuation did not resume.");
-      return {kind: "resumed" as const, proposalDigest, receipt: current.resume};
+      return {kind: "resumed" as const, proposalDigest, receipt: current.resume, moved: store.stopRestoreFinishedAtMovedPath(input)};
     });
   }
 }

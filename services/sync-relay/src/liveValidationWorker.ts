@@ -2,7 +2,7 @@ import {createLiveMarkdownRegistrationValidator} from "@dohc/ydoc-projection/liv
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import type {LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
-import { validateOrdinaryActivation } from "./storage/ordinaryActivationSource.js";
+import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 import { runLiveRestoreWork } from "./liveRestoreValidation.js";
 const send = process.send?.bind(process);
 if (!send) throw new Error("Live validation requires a child process.");

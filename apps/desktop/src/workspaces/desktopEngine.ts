@@ -130,6 +130,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   noteNoAtomicPlacement(workspaceId: string): void;
   noteWriteDeferred(workspaceId: string, path: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
+  // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
+  notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -177,7 +179,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
-  const ownerStopFailures = new Map<string, Map<string,{path:string;detail:string}>>();
+  const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -354,10 +356,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     stopsChanged=true;
                     const failures=ownerStopFailures.get(workspaceId) ?? new Map();
                     const detail=error instanceof Error ? error.message : String(error);
-                    failures.set(row.document.objectId,{path:row.document.currentPath,detail});
+                    failures.set(row.document.objectId,{objectId:row.document.objectId,path:row.document.currentPath,detail});
                     ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
                   },
-                  onComplete:row => {stopsChanged=true;if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  onComplete:row => {stopsChanged=true;dependencies.notifyOwnerLiveStopped?.(workspaceId,row.document.objectId);if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
                   retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
                 // A Stop that finished or failed in the background changes what the
                 // notices say, even when no live document remains to deliver.
@@ -381,7 +383,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.
-              // One that changed while live editing was off follows both: no Resume continues it.
+              // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
               // A diverged server copy goes first: only the server's operator can continue it.
               const reason = diverged === true ? "session-host-diverged" :
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :

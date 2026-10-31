@@ -1,4 +1,4 @@
-import { decodeHostedSyncResult, type HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
+import { decodeHostedSyncResult, hostedWindowCovers, type HostedWindow, type HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
@@ -27,16 +27,35 @@ export function parseServiceHostedReplicationConfig(value: unknown): ServiceHost
 
 type HostedPass = HostedSyncMethodResultMap["sync.pullHosted"];
 export type ServiceHostedHold = HostedPass["held"][number];
+export type ServiceHostedNewlyHeld = HostedPass["newlyHeld"][number];
 export interface ServiceHostedPullPage {
   /** False when the pass adopted a new scope, or the scope moved before its commit: none of it committed. */
   readonly committed: boolean;
+  /** The pass adopted a new scope instead of reading, so it says nothing of any document. */
+  readonly adoptedScope: boolean;
   readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
   readonly refusals: HostedPass["refusals"];
   readonly sharingDeclined: readonly SharingDeclined[];
   /** The paths the page wrote or deleted, in any version. */
   readonly changedPaths: readonly string[];
-  /** The documents the pass fetched and left held. None may be edited live until a later capture succeeds. */
+  /** How many of each report did not fit the engine's answer. The engine keeps them all. */
+  readonly omitted: {readonly refusals: number; readonly sharingDeclined: number; readonly changedPaths: number};
+  /** The documents the pass left held within `heldWindow`. None may be edited live until a later capture succeeds. */
   readonly held: readonly ServiceHostedHold[];
+  /** Where `held` speaks for every document. Past it, the page says nothing of what is held. */
+  readonly heldWindow: HostedWindow;
+  /**
+   * Documents the pass moved from ready to held, wherever they fall. Unless
+   * `complete`, it may leave some out: the pass left some out, or an earlier
+   * pass's page never arrived, though that pass may have held documents.
+   */
+  readonly newlyHeld: {readonly listed: readonly ServiceHostedNewlyHeld[]; readonly complete: boolean};
+  /**
+   * The documents that left the scope and are not gone from the replica,
+   * within `window`, after the commit's parking when it read them. Inside
+   * the window, a document not listed is not departed.
+   */
+  readonly departed: {readonly listed: readonly string[]; readonly window: HostedWindow};
 }
 
 const isDivergence = (error: unknown) => error instanceof EngineRequestError &&
@@ -53,7 +72,13 @@ export class ServiceHostedReplication {
   #created = false;
   #running = false;
   #diverged = false;
-  #departed: ReadonlySet<string> | null = null;
+  #departedNone = false;
+  // Where the next pass lists held and departed documents from: after the last one a cut list named,
+  // so every one is named within a few passes however many there are. Each moves once activation heard the page.
+  #heldAfter: string | undefined;
+  #departedAfter: string | undefined;
+  // Whether a pass ran whose page never reached activation, as when its reply or its commit's was lost.
+  #unheard = false;
   constructor(readonly connection: {
     client: Pick<EngineClient, "sendRequest">; workspace: string; workspaceId: string;
     nextRequestId(): number; deadlineMs: number; signal: AbortSignal; assertCurrent(): void;
@@ -66,12 +91,8 @@ export class ServiceHostedReplication {
   get diverged(): boolean { return this.#diverged; }
   /** Whether the replica checked its origin: a create on this instance succeeded. */
   get checked(): boolean { return this.#created; }
-  /**
-   * The documents that left the scope and are not gone from the replica, as
-   * the last reply that read them said; null before one did. A document
-   * leaves this set only once retirement removed its rows and its file.
-   */
-  get departed(): ReadonlySet<string> | null { return this.#departed; }
+  /** Whether the last page's departed list, from the first to the last, names no document. */
+  get departedNone(): boolean { return this.#departedNone; }
   #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
   async #request(method: string, params: Record<string, string | {kind: string; token: string}>, signal: AbortSignal) {
     this.#check(signal);
@@ -112,16 +133,27 @@ export class ServiceHostedReplication {
   }
   /**
    * Runs up to maxPagesPerPull hosted passes. `onPage` hears each pass once it
-   * committed, or committed nothing, before the next is asked for. A
-   * retirement that failed after its commit fails the pull; the next pull
+   * committed, or committed nothing, before the next is asked for. Each pass
+   * lists the held and departed documents after where the last such list
+   * `onPage` heard stopped, and from the first once a list reached the last.
+   * A retirement that failed after its commit fails the pull; the next pull
    * retries it first.
    */
   async pull(callerSignal?: AbortSignal, onPage?: (page: ServiceHostedPullPage) => void) {
     return this.#run(callerSignal, async signal => {
       const pages: ServiceHostedPullPage[] = [];
       for (let index = 0; index < this.#config.maxPagesPerPull; index++) {
-        const pass = decodeHostedSyncResult("sync.pullHosted", await this.#request("sync.pullHosted", {}, signal));
-        this.#departed = new Set(pass.departed);
+        const after = this.#heldAfter, departedAfter = this.#departedAfter, unheard = this.#unheard;
+        this.#check(signal);
+        this.#unheard = true;
+        const pass = decodeHostedSyncResult("sync.pullHosted", await this.#request("sync.pullHosted",
+          {...after === undefined ? {} : {heldAfter: after}, ...departedAfter === undefined ? {} : {departedAfter}}, signal));
+        const heldWindow = {after, through: pass.heldThrough};
+        let departed = {listed: pass.departed, window: {after: departedAfter, through: pass.departedThrough}};
+        const within = ({listed, window}: typeof departed) => listed.every(objectId => hostedWindowCovers(window, objectId));
+        if (!pass.held.every(hold => hostedWindowCovers(heldWindow, hold.objectId)) || !within(departed)) {
+          throw new Error("hosted sync.pullHosted result: documents before where their list starts");
+        }
         const sharingDeclined = [...pass.sharingDeclined];
         // A pass that adopted a scope, or whose scope moved, applied nothing: pull again.
         let committed = false, hasMore = true, retirement: HostedSyncMethodResultMap["sync.commitCursor"]["retirement"] = null;
@@ -132,16 +164,25 @@ export class ServiceHostedReplication {
           this.#check(signal);
           const commit = decodeHostedSyncResult("sync.commitCursor", await this.#request("sync.commitCursor", {pendingCursor}, signal));
           ({committed, retirement} = commit);
-          // Unread, it keeps the pass's set: only a retirement removes a document from it.
-          if (commit.departed) this.#departed = new Set(commit.departed);
+          // Its list starts where the pass's did. Unread, the pass's stands: only a retirement removes a document from it.
+          if (commit.departed) {
+            departed = {listed: commit.departed, window: {after: departedAfter, through: commit.departedThrough}};
+            if (!within(departed)) throw new Error("hosted sync.commitCursor result: documents before where their list starts");
+          }
           hasMore = !committed || pass.hasMore || commit.hasMore;
           sharingDeclined.push(...commit.sharingDeclined);
         }
-        const page = {committed, fetched: pass.fetched, applied: pass.applied, refused: pass.refused, skipped: pass.skipped,
-          conflictsOpened: pass.conflictsOpened, refusals: pass.refusals, sharingDeclined,
-          changedPaths: pass.changedPaths.map(row => row.path), held: pass.held};
+        const page = {committed, adoptedScope: !pendingCursor, fetched: pass.fetched, applied: pass.applied, refused: pass.refused, skipped: pass.skipped,
+          conflictsOpened: pass.conflictsOpened, refusals: pass.refusals, sharingDeclined, changedPaths: pass.changedPaths.map(row => row.path),
+          omitted: {refusals: pass.refusalsOmitted, sharingDeclined: pass.sharingDeclinedOmitted, changedPaths: pass.changedPathsOmitted},
+          held: pass.held, heldWindow, newlyHeld: {listed: pass.newlyHeld, complete: !unheard && pass.newlyHeldOmitted === 0}, departed};
         pages.push(page);
         onPage?.(page);
+        // A pass that adopted a scope says nothing of any document, so what an earlier one never said waits for the next.
+        this.#unheard = page.adoptedScope && unheard;
+        this.#heldAfter = pass.heldThrough ?? undefined;
+        this.#departedAfter = departed.window.through ?? undefined;
+        this.#departedNone = departedAfter === undefined && departed.window.through === null && departed.listed.length === 0;
         if (retirement) throw new Error(`Hosted retirement failed: ${retirement.message}`);
         if (!hasMore) return {hasMore: false, pages};
       }

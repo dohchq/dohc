@@ -1,3 +1,5 @@
+import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
+
 /** Shared live-edit transport bounds. */
 export function selfHostLiveProfile() {
   const MiB = 1024 * 1024;
@@ -5,8 +7,7 @@ export function selfHostLiveProfile() {
     receive: {maxFrameBytes: 64 * 1024, maxStateVectorBytes: 128 * 1024, maxUpdateBytes: 2 * MiB, maxSyncBytes: 4 * MiB},
     maxQueuedBytes: 4 * MiB, maxQueuedFrames: 128, maxControlBytes: 128 * 1024, maxControlFrames: 16, maxAssemblyBytes: 4 * MiB,
   };
-  const validation = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
-    maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
+  const validation = {...WORKER_LIVE_VALIDATION_POLICY};
   const requests = {maxPendingRequests: 32, maxRequestBytes: 16 * 1024, maxResponseBytes: 64 * 1024, timeoutMs: 30_000};
   const connections = {maxConnections: 128, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 16, maxConnectionsPerSession: 6, maxConnectionsPerPrincipal: 12, maxConnectionsPerGrant: 80,
     maxBufferedBytes: 128 * MiB, maxPendingBytes: 256 * 1024, maxFragments: 16, maxBufferedChunks: 128, upgradeTimeoutMs: 30_000, idleTimeoutMs: 60_000, drainTimeoutMs: 1_000};

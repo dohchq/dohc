@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import TestRecordReporter from "./test-record-reporter.mjs";
 import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
+import { flakyFixtureFiles } from "./flaky-fixture.mjs";
+
+test("flaky fixtures include every relative module imported at load time", () => {
+  const copied = new Set(flakyFixtureFiles.map(file => new URL(`../../${file}`, import.meta.url).href));
+  for (const file of copied) {
+    const source = readFileSync(new URL(file), "utf8");
+    // Static imports and re-exports load with the module; import() runs only when called.
+    const imports = /^\s*(?:import|export)\s+(?:[^;]*?\s+from\s+)?["'](\.[^"']+)["']/gmu;
+    for (const [, specifier] of source.matchAll(imports)) {
+      assert.ok(copied.has(new URL(specifier, file).href), `${file} imports ${specifier}, which flakyFixtureFiles does not copy`);
+    }
+  }
+});
 
 test("nextest's FLAKY lines name each test once", () => {
   const log = [
@@ -115,6 +128,9 @@ test("each failed test maps to the command that reruns it alone, and a test with
     `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=dohc-engine-sync) & test(=tests::file_export_lane::lane_delete)"`);
   assert.equal(command("rust", "dohc-engine-runtime::owner_publication accepted_prefix_settles"),
     `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=dohc-engine-runtime::owner_publication) & test(=accepted_prefix_settles)"`);
+  // A reader regression reruns through the gate's reader phase, which stages the reader and selects ignored tests.
+  assert.equal(command("rust", "dohc-engine-collab live_update_application::adoption::tests::a_reader_built_lineage_adopts_its_successor"),
+    "node tools/rust-engine-program/reader-tests.mjs");
   for (const [step, test] of [["repository", "times out under load"], ["self-host-native", "src/a.test.ts › proof"], ["rust", "dohc-engine-sync"],
     ["@dohc/desktop", "C:\\w\\a.test.ts › absolute"], ["@dohc/desktop", null], [null, "src/a.test.ts › a"]]) assert.equal(command(step, test), null, `${step}: ${test}`);
   // A lane receipt is read back from disk, so a row can be anything.

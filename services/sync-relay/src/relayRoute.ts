@@ -6,6 +6,7 @@ import type {LinkAppCollectionRoute} from "./appCollectionRoutes";
 import type {OwnerAppPublicationRoute} from "./ownerAppPublicationRoutes";
 import type {OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import type {OwnerRestoreRoute} from "./ownerRestoreRoutes";
+import {MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute} from "./heldDocumentRoutes";
 import type {LinkChatRoute} from "./linkChatRoutes";
 import type {LinkReadRoute} from "./linkReadRoutes";
 import type {NoticeRoute} from "./noticeRoutes";
@@ -34,6 +35,7 @@ type SyncRelayRoute =
   | OwnerAppPublicationRoute
   | OwnerAppResponseRoute
   | OwnerRestoreRoute
+  | HeldDocumentRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
   | { route: "link-handoff" }
@@ -266,13 +268,21 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     }
     throw notFound();
   }
+  if (parts[2] === "held-documents") {
+    if (parts.length === 3) return {route: "held-documents", workspaceId};
+    if (parts.length === 4) return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS)};
+    if (parts.length === 5 && (parts[4] === "markdown" || parts[4] === "contributions")) {
+      return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS), read: parts[4]};
+    }
+    throw notFound();
+  }
   if (parts[2] === "live-restores") {
     if (parts.length === 3) return {route: "owner-restore", workspaceId, action: "begin"};
-    if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options")) return {route: "owner-restore", workspaceId, action: parts[3]};
+    if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options" || parts[3] === "unfinished")) return {route: "owner-restore", workspaceId, action: parts[3]};
     const operationId = parseString(parts[3], "operationId", 512);
     if (parts.length === 4) return {route: "owner-restore", workspaceId, operationId, action: "status"};
     const action = parts[4];
-    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm")) {
+    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm" || action === "decline")) {
       return {route: "owner-restore", workspaceId, operationId, action};
     }
     throw notFound();

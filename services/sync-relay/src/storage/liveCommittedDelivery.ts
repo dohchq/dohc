@@ -1,10 +1,15 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
+import {restorePublicationFits,restorePublicationReservation} from "./hostedSettlement";
+
+import {RestoreAdmissionReads} from "./restoreAdmissionReads";
+import {relayError} from "../errors";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
-import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import { hasServiceActivation, readServiceActivation, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
+import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
-import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
+import {retainedRestoreLifecycle,validateRestoreLifecycle,requireFinishedRestoreBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
 import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHistoryDelivery, requireAcceptedHistoryProof, RestoreHistoryBudget} from "./liveAcceptedHistory";
 import {captureSqliteReadRevision} from "./readRevision";
@@ -14,7 +19,8 @@ import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVe
 import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
-import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
+import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource, RetainedPrefix, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -66,14 +72,15 @@ import {
   verifyJournalRow,
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
-import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
-import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
-import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
+import { adoptLiveDeliveryPrefix, bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
+import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
+  stopRestoreDeclineRecorded, stopRestoreFinishedAtMovedPath, stopRestoreHoldsFrozenPath, stopRestoreIdentityHolds, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
-import type {LiveRestoreProposalEvidence, LiveRestoreValidator} from "../liveRestoreValidation";
+import {LiveRestoreTooLarge, type LiveRestoreProposalEvidence, type LiveRestoreValidator} from "../liveRestoreValidation";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
-import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES } from "./liveRestoreOperationSchema";
+import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 
 type RestoreProposalInput = StopRestoreLookup & {host: LiveHostConnectionCoordinate} & RestoreProofBudget;
 type PreparedRestoreProposal = {saved: {bytes: Uint8Array; proposalDigest: string; candidateDigest: string; recordedAtMs: number};
@@ -255,6 +262,25 @@ function ownerCutDigest(capture: OwnerCutCapture): string {
     events: events.map(event => ({ metadata: event.metadata,digest: digest(event.updateBytes) })) })));
 }
 
+/**
+ * The evidence native adoption hashes for `cut` (adoption.rs `validate_cut`).
+ * A successor's prefix is the tenth element, only when present, so a first
+ * adoption's evidence keeps its nine.
+ */
+export function ownerAdoptionCutEvidenceDigest(binding: LiveObjectBinding, cut: LiveOwnerAdoptionCut): string {
+  const evidence: unknown[] = [binding, cut.relayDatabaseNamespace, cut.sourceMomentId, cut.sourceDigest, cut.sourceByteLength,
+    cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
+    cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))];
+  const prefix = cut.retainedPrefix;
+  if (prefix) {
+    const terminal = prefix.terminalReceipt;
+    evidence.push({terminalReceipt: terminal && {deliveryId: terminal.deliveryId, updateDigest: terminal.updateDigest,
+      journalCursor: terminal.journalCursor, acceptingHostEpoch: terminal.acceptingHostEpoch},
+    eventCount: prefix.eventCount, historyEvidenceDigest: prefix.historyEvidenceDigest, predecessorActivationId: prefix.predecessorActivationId});
+  }
+  return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+}
+
 /** Internal storage consumer. Authentication and namespace provisioning belong to its caller. */
 export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
@@ -295,6 +321,17 @@ export class LiveCommittedDeliveryStore {
     return {sourceMomentId: parseLiveUpdateIdentifier(source.moment_id,"source moment ID"), sourceDigest: authority.projectedDigest,
       sourceByteLength: authority.projectedLength, activation: null};
   }
+  // A successor's retained prefix: the boundary its retired predecessor released, or none when that chain never adopted.
+  #retainedPrefix(source: NativeOwnerActivationSource | undefined): RetainedPrefix | null {
+    const predecessorActivationId = source?.predecessorActivationId;
+    if (predecessorActivationId === undefined) return null;
+    const row = this.#storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(this.#history.namespace, predecessorActivationId);
+    integrity(row);
+    const boundary = JSON.parse(String(row.retired_boundary_json)) as RetainedPrefixBody | null;
+    return boundary && {terminalReceipt: boundary.terminalReceipt, eventCount: boundary.eventCount,
+      historyEvidenceDigest: boundary.historyEvidenceDigest, predecessorActivationId};
+  }
   // The owner row's adoption against the live document row: its baseline, its
   // source and its original binding. Live authority is the caller's to check.
   #ownerOrigin(document: LiveDocumentKey, owner: Record<string, unknown>) {
@@ -322,7 +359,7 @@ export class LiveCommittedDeliveryStore {
       const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
       const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)},this.activation);
       integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
-      requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
+      requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
       return {row,origin: String(owner.origin_json),binding: current.binding,source};
     };
     const initial = this.#storage.readTx(read);
@@ -362,7 +399,7 @@ export class LiveCommittedDeliveryStore {
   }
   /**
    * The adoption's owner delivery once its owner lost live authority, as after
-   * Stop or the loss of the last Edit grant. It needs this connection's standing
+   * Pause, Stop or the loss of the last Edit grant. It needs this connection's standing
    * and the adoption's exact binding, not the document's live authority, so
    * what the host already applied can settle. Null when the host never adopted it.
    */
@@ -404,7 +441,7 @@ export class LiveCommittedDeliveryStore {
     integrity(origin.adoptionId === adoptionId);
     // Without live authority the adoption's own binding stands, at the document's current restore generation.
     const binding = parseLiveObjectBinding({...originalBinding,currentPath: row.current_path,restoreFenceGeneration: row.restore_fence_generation});
-    requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,binding);
+    requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,originalBinding,binding);
     const tip = this.#ownerTip(owner);
     const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? ORDER BY journal_cursor LIMIT 1`)
       .get(...documentParams(document),tip?.journalCursor ?? 0);
@@ -427,6 +464,18 @@ export class LiveCommittedDeliveryStore {
     if (!raw) {integrity((progress.terminal?.journalCursor ?? 0) === highWater); return undefined;}
     const row = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,row); verifyJournalRow(row);
     return row.admitted;
+  }
+  /**
+   * Whether the journal admitted a seed for the pending service activation
+   * this delivery adopted for. It reads only relay rows.
+   */
+  hasPendingActivationSeed(capture: OwnerDeliveryCapture): boolean {
+    const {document} = this.#ownerDelivery(capture), {adoptionId} = this.ownerDeliveryProgress(capture);
+    return this.#storage.readTx(() => {
+      const row = readServiceActivation(this.#storage,document);
+      return serviceActivationState(row) === "pending" && row!.activation_id === adoptionId && row!.relay_database_namespace === this.#history.namespace &&
+        serviceActivationSeed(this.#storage,row!) !== null;
+    });
   }
   acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
     this.#acknowledgeOwnerApplication(capture,value);
@@ -493,33 +542,41 @@ export class LiveCommittedDeliveryStore {
     const requestedCursor = input.throughCursor === undefined ? undefined : authorityInteger(input.throughCursor);
     const captured = this.#storage.readTx(() => {
       this.#standing(host);
-      const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
-      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
       const result = liveJournalCut(this.#storage, document);
       if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
       const authority = result.cut.authorityHistory.find(row => row.current)!;
       const authorized = input.actor ? currentLiveDocumentBinding(this.#storage,{document,actor: input.actor},this.activation) : undefined;
       if (authorized && (authorized.kind !== "current" || !isDeepStrictEqual(authorized.host,host))) throw new Error("Owner standing changed.");
-      const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
       const source = this.#ownerSource(document,adoptionId,authority);
+      // Without an actor, as when a retirement recovers an adoption whose ACK was lost, a service activation keeps the binding it was granted.
+      const binding = authorized?.kind === "current" ? authorized.binding : source.activation?.binding ?? authority.binding;
       integrity(!source.activation || source.activation.source.nativeHeadSequence === sequence);
+      const prefix = this.#retainedPrefix(source.activation?.source);
       const events: AdmittedLiveUpdate[] = [];
       let bytes = authority.baselineBytes.byteLength;
-      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
-        const row = decodeJournalRow(this.#storage.db, raw);
-        assertJournalCheckpointPosition(this.#storage.db, row);
-        verifyJournalRow(row);
-        bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
-        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
-        events.push(row.admitted);
+      if (prefix) {
+        // A successor adopts at its predecessor's released boundary; ordinary delivery then brings what the journal accepted after it.
+        // Before adoption the engine reports no cursor of its own.
+        integrity(requestedCursor === undefined || requestedCursor === 0 || requestedCursor === (prefix.terminalReceipt?.journalCursor ?? 0));
+      } else {
+        const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
+        if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
+        for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
+          const row = decodeJournalRow(this.#storage.db, raw);
+          assertJournalCheckpointPosition(this.#storage.db, row);
+          verifyJournalRow(row);
+          bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+          if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
+          events.push(row.admitted);
+        }
+        integrity((events.at(-1)?.metadata.accepted.receipt.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
       }
-      const terminal = events.at(-1)?.metadata.accepted.receipt ?? null;
-      integrity((terminal?.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
+      const terminal = prefix ? prefix.terminalReceipt : events.at(-1)?.metadata.accepted.receipt ?? null;
       const cut: LiveOwnerAdoptionCut = { relayDatabaseNamespace: this.#history.namespace, adoptionId,
         sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
         sourceByteLength: source.sourceByteLength, baselineMomentRelaySequence: authority.baselineSequence,
         baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
-        terminalReceipt: terminal, baselineBytes: new Uint8Array(authority.baselineBytes), events };
+        terminalReceipt: terminal, retainedPrefix: prefix, baselineBytes: new Uint8Array(authority.baselineBytes), events };
       const { events: _events, baselineBytes: _baseline, ...header } = cut;
       if (bytes + Buffer.byteLength(JSON.stringify({ ...header, eventCount: events.length })) + 8 > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
       return { journal: result.cut, authority: structuredClone(authority), binding: structuredClone(binding), source: { ...source }, cut };
@@ -555,16 +612,15 @@ export class LiveCommittedDeliveryStore {
     const { host,document,activation } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
     integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
-    const { baselineBytes: _baseline,events: _events,...header } = cut;
-    const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
-      cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
-      cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))])).digest("hex");
+    // The evidence digest binds a successor's prefix, so the origin keeps only its count and history.
+    const { baselineBytes: _baseline,events: _events,retainedPrefix: prefix,...header } = cut;
+    const cutEvidenceDigest = ownerAdoptionCutEvidenceDigest(capture.binding, cut);
     // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
     const originEvidenceDigest = activation === null ? cutEvidenceDigest
       : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
-    const originEventCount = cut.events.length;
-    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata),
-      initialAcceptedHistoryDigest(this.#history.namespace, document));
+    const originEventCount = prefix ? prefix.eventCount : cut.events.length;
+    const originHistoryEvidenceDigest = prefix ? prefix.historyEvidenceDigest : cut.events.reduce((previous, event, index) =>
+      nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata), initialAcceptedHistoryDigest(this.#history.namespace, document));
     const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex"),
       originEvidenceDigest, originEventCount, originHistoryEvidenceDigest,originalBinding:structuredClone(capture.binding) });
     this.#storage.tx(() => {
@@ -579,10 +635,16 @@ export class LiveCommittedDeliveryStore {
       integrity(!this.#storage.db.prepare(`SELECT 1 FROM ${BOOTSTRAPS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`).get(this.#history.namespace,...documentParams(document),host.hostId));
       const previous = this.#ownerRow(host,document);
       if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      // A service activation adopts on one host, once: it retires only there.
+      if (activation && this.#storage.db.prepare(`SELECT 1 FROM ${OWNERS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id<>?
+          AND json_extract(origin_json,'$.adoptionId')=? LIMIT 1`).get(this.#history.namespace,...documentParams(document),host.hostId,cut.adoptionId)) {
+        throw new Error("Service activation adopted on another host.");
+      }
       const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
       const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,0,charge,true);
+      if (prefix) adoptLiveDeliveryPrefix(this.#storage,document,host.hostId,cursor);
       for (const event of cut.events) {
         consumeLiveDeliveryReservation(this.#storage,document,host.hostId,event.metadata.accepted.receipt.journalCursor,1,true);
         this.#refundOwner(document.workspaceId,1);
@@ -646,7 +708,7 @@ export class LiveCommittedDeliveryStore {
       );
     integrity(row);
     const b = capture.baseline;
-    requireResumedBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(row.binding_json))),b.binding);
+    requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(row.binding_json))),b.binding);
     integrity(
       row.bootstrap_id === b.bootstrapId &&
         row.bootstrap_moment_id === b.bootstrapMomentId &&
@@ -773,6 +835,14 @@ export class LiveCommittedDeliveryStore {
           return;
         }
         if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
+        // A retired owner adoption on this host consumed the lineage's adoption reservation and covers what it applied.
+        if (this.#storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNER_HISTORY} WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...documentParams(document),host.hostId)) {
+          throw new Error("Committed delivery follows a retired owner adoption.");
+        }
+        // A service activation's lineage is delivered only through its owner adoption, and is funded only for that.
+        if (hasServiceActivation(this.#storage, document)) {
+          throw new Error("Committed delivery cannot bootstrap a service activation's lineage.");
+        }
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,
@@ -1181,7 +1251,22 @@ export class LiveCommittedDeliveryStore {
   }
   /** With `maxOutputBytes`, validation also projects the owner review. */
   async #prepareStopRestoreProposal(input: RestoreProposalInput, validator: LiveRestoreValidator, signal: AbortSignal | undefined,
-    maxOutputBytes?: number): Promise<PreparedRestoreProposal | null> {
+    maxOutputBytes?: number, reads?: RestoreAdmissionReads): Promise<PreparedRestoreProposal | null> {
+    const read = () => this.#captureStopRestoreProposalInput(input);
+    const prepared = reads ? reads.capture(read) : read();
+    if (!prepared) return null;
+    const {saved, decoded, budget} = prepared;
+    const original = prepared.capture;
+    const assertCurrentInTransaction = reads ? () => reads.assertCurrent() : prepared.assertCurrentInTransaction;
+    const capture = reads ? {...original, selected: {...original.selected,
+      artifact: (digest: string) => reads.capture(() => original.selected.artifact(digest))},
+      assertCurrent: () => this.#storage.readTx(assertCurrentInTransaction)} : original;
+    const validated = await validator.proposal(capture, decoded.bytes, {...budget,
+      ...(maxOutputBytes === undefined ? {} : {maxOutputBytes}), ...(reads ? {admission: true} : {})}, signal);
+    integrity(validated.content.candidateDigest === saved.candidateDigest);
+    return {saved, capture, validated, assertCurrentInTransaction};
+  }
+  #captureStopRestoreProposalInput(input: RestoreProposalInput) {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1213,9 +1298,7 @@ export class LiveCommittedDeliveryStore {
     };
     const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson,
       decoded.bytes.nativeSourceBytes, proposalCurrent);
-    const validated = await validator.proposal(capture, decoded.bytes, maxOutputBytes === undefined ? budget : {...budget, maxOutputBytes}, signal);
-    integrity(validated.content.candidateDigest === saved.candidateDigest);
-    return {saved, capture, validated, assertCurrentInTransaction};
+    return {saved, capture, decoded, budget, assertCurrentInTransaction};
   }
   captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
     return this.#captureStopRestoreProposal(input, receiptJson).capture;
@@ -1224,9 +1307,9 @@ export class LiveCommittedDeliveryStore {
   async readStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, validator: LiveRestoreValidator, signal?: AbortSignal) {
     return (await this.#prepareStopRestoreReview(input, validator, signal))?.review ?? null;
   }
-  async #prepareStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, validator: LiveRestoreValidator, signal: AbortSignal | undefined) {
+  async #prepareStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, validator: LiveRestoreValidator, signal: AbortSignal | undefined, reads?: RestoreAdmissionReads) {
     const request = lifecycleInput(input), maxOutputBytes = authorityInteger(input.maxOutputBytes, 1);
-    const prepared = await this.#prepareStopRestoreProposal(request, validator, signal, maxOutputBytes);
+    const prepared = await this.#prepareStopRestoreProposal(request, validator, signal, maxOutputBytes, reads);
     if (!prepared) return null;
     const {saved, capture, validated, assertCurrentInTransaction} = prepared;
     const historyBudget = () => {
@@ -1243,13 +1326,8 @@ export class LiveCommittedDeliveryStore {
     const budget = historyBudget();
     const content = validated.review;
     integrity(content);
-    const history = readHistory(budget);
-    // The owner reviewed this history too, so admission compares it again before writing.
-    const assertReviewCurrent = () => {
-      let current: typeof history;
-      try {current = readHistory(historyBudget());} catch (cause) {throw new Error("Relay evidence changed during validation.", {cause});}
-      if (!isDeepStrictEqual(current, history)) throw new Error("Relay evidence changed during validation.");
-    };
+    const history = reads ? reads.capture(() => readRestoreReviewHistory(this.#storage, {document: capture.selected.binding,
+      namespace: this.#history.namespace, proposalDigest: saved.proposalDigest, receipt: capture.receipt}, budget)) : readHistory(budget);
     const review = {operationId: request.operationId, workspaceId: request.workspaceId, binding: capture.selected.binding,
       proposalDigest: saved.proposalDigest, candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs,
       point: capture.receipt.point, frozenTerminal: capture.receipt.acceptedHistory.terminal,
@@ -1259,7 +1337,7 @@ export class LiveCommittedDeliveryStore {
     const outputBytes = Buffer.byteLength(JSON.stringify(review));
     if (outputBytes > maxOutputBytes) throw new Error("Restore review exceeds its output budget.");
     budget.chargeBytes(outputBytes);
-    return {review, prepared, assertReviewCurrent};
+    return {review, prepared};
   }
   /** `proposalCurrent` checks any stored proposal the receipt came from along with the rest of the evidence. */
   #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[], proposalCurrent?: () => void) {
@@ -1303,7 +1381,7 @@ export class LiveCommittedDeliveryStore {
         const b = this.#storage.db.prepare(`SELECT * FROM ${BOOTSTRAPS} WHERE bootstrap_id=?`).get(operation.applied!.sourceId);
         integrity(b && b.relay_database_namespace === operation.basis.namespace && b.workspace_id === lookup.workspaceId &&
           b.object_id === document.objectId && b.lineage_claim_id === document.lineageClaimId && b.host_id === host.hostId);
-        requireResumedBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(b.binding_json))),receipt.fence.operation.oldBinding);
+        requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(b.binding_json))),receipt.fence.operation.oldBinding);
         origin = {bootstrapId: b.bootstrap_id, bootstrapMomentId: b.bootstrap_moment_id,
           baselineMomentRelaySequence: b.baseline_moment_relay_seq, baselineRegisteredAtMs: b.baseline_registered_at_ms,
           baselineDigest: b.baseline_digest, baselineByteLength: b.baseline_byte_length,
@@ -1349,8 +1427,10 @@ export class LiveCommittedDeliveryStore {
         : {journalCursor: operation.terminal?.journalCursor ?? 0, receiptDigest: operation.terminal?.updateDigest ?? authority.baselineDigest};
       const binding = operation.intent.deliveryKind === "owner" ? operation.basis.ownerBinding : operation.basis.binding;
       integrity(binding);
+      // History with no checkpoint starts where the lineage registered, at generation 1, not at this binding's.
+      // A restore declined after its fence moves the generation without a checkpoint.
       const historyInput = {document: operation.intent.document, namespace: operation.basis.namespace, through: point.journalCursor,
-        baseline: authority.baselineBytes, baselineDigest: authority.baselineDigest, originBinding: binding};
+        baseline: authority.baselineBytes, baselineDigest: authority.baselineDigest, originBinding: {...binding, restoreFenceGeneration: 1}};
       const history = readAcceptedHistory(this.#storage, historyInput, budget);
       integrity((history.proof.terminal?.updateDigest ?? authority.baselineDigest) === point.receiptDigest);
       return {operation, binding, historyInput, ...history, point};
@@ -1423,39 +1503,46 @@ export class LiveCommittedDeliveryStore {
     const {operation,lifecycle}=saved,document=operation.intent.document;
     const row=this.#storage.db.prepare(`SELECT restore_fence_generation,current_path,lineage_state,admission_state FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`)
       .get(...documentParams(document));
+    // current_path is the lineage's registered path. A rename after admission doesn't end the restore; it finishes at its frozen path.
     integrity(row && row.restore_fence_generation===operation.newFence && row.current_path===lifecycle.admitted.accepted.binding.currentPath &&
       row.lineage_state==="current" && row.admission_state==="closed");
-    const grant=this.#storage.getShareGrant(operation.intent.grantId);
-    integrity(grant && grant.status==="revoked" && grant.generation===operation.revokedGeneration && grant.revokedAtMs===operation.invalidatedAtMs);
+    integrity(stopRestoreRevocationHolds(this.#storage,operation) && stopRestoreIdentityHolds(this.#storage,operation));
     const tip=this.#storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
     integrity(tip?.journal_cursor===lifecycle.admitted.accepted.receipt.journalCursor);
-    const active=this.#storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`)
+    const active=this.#storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`)
       .get(document.workspaceId,document.mainVersionId,document.objectId);
     integrity(active?.operation_id===operation.intent.operationId);
   }
   async admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, validator: LiveRestoreValidator, now:number,
     signal?: AbortSignal):Promise<RestoreLifecycle> {
-    return this.#admitStopRestoreProposal(input, expectedProposalDigest, now, () => this.#prepareStopRestoreProposal(input, validator, signal));
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, validator, now, undefined, signal);
   }
   async admitReviewedStopRestoreProposal(input: RestoreProposalInput & {maxOutputBytes: number}, expectedProposalDigest: string,
     validator: LiveRestoreValidator, now: number, signal?: AbortSignal): Promise<RestoreLifecycle> {
-    signal?.throwIfAborted();
-    const prepared = await this.#prepareStopRestoreReview(input, validator, signal);
-    integrity(prepared && prepared.review.proposalDigest === expectedProposalDigest);
-    return this.#admitStopRestoreProposal(input, expectedProposalDigest, now, async () => prepared.prepared,
-      {signal, assertCurrent: prepared.assertReviewCurrent});
+    return this.#admitStopRestoreProposal(input, expectedProposalDigest, validator, now, authorityInteger(input.maxOutputBytes, 1), signal);
   }
-  /** With `review`, a review that changed or was cancelled before the write admits nothing. */
-  async #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, now:number,
-    prepare: () => Promise<PreparedRestoreProposal | null>, review?: {signal?: AbortSignal; assertCurrent(): void}):Promise<RestoreLifecycle> {
+  async #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, validator: LiveRestoreValidator,
+    now:number, maxOutputBytes?: number, signal?: AbortSignal):Promise<RestoreLifecycle> {
+    signal?.throwIfAborted();
     input=lifecycleInput(input);
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
     const historical=this.readStopRestoreLifecycle(input);
     if (historical) {integrity(historical.proposalDigest===expectedProposalDigest);return historical;}
-    const prepared=await prepare();integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
-    const assertTailCurrent=captureSqliteReadRevision(this.#storage.db);
-    review?.assertCurrent();
-    const {saved:proposal,capture,validated,assertCurrentInTransaction}=prepared;
+    const reads = new RestoreAdmissionReads(this.#storage.db);
+    let prepared: PreparedRestoreProposal | null;
+    try {
+      prepared = maxOutputBytes === undefined
+        ? await this.#prepareStopRestoreProposal(input, validator, signal, undefined, reads)
+        : (await this.#prepareStopRestoreReview({...input, maxOutputBytes}, validator, signal, reads))?.prepared ?? null;
+    } catch (error) {
+      if (error instanceof LiveRestoreTooLarge) {
+        throw relayError("payload_too_large","The server can't confirm this restore: the restored file is too large for it to check. Decline this restore.");
+      }
+      throw error;
+    }
+    signal?.throwIfAborted();
+    integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
+    const {saved:proposal,capture,validated}=prepared;
     const updateBytes=validated.candidateBytes,checkpointBytes=validated.content.stateUpdate;
     const checkpointDigest=createHash("sha256").update(checkpointBytes).digest("hex"),at=authorityInteger(now);
     const {fence,point,nativeSourceManifestDigest}=capture.receipt,document=journalDocument({workspaceId:fence.operation.oldBinding.workspaceId,mainVersionId:fence.operation.oldBinding.mainVersionId,objectId:fence.operation.oldBinding.objectId,lineageClaimId:fence.operation.oldBinding.lineageClaimId});
@@ -1479,11 +1566,13 @@ export class LiveCommittedDeliveryStore {
       authorSnapshot: [], firstSeen: validated.content.replacementRanges, firstSeenDeletes: validated.content.firstSeenDeletes});
     integrity(!authorWindow.refused);
     this.#storage.tx(()=>{
-      review?.signal?.throwIfAborted();
-      assertTailCurrent();
-      assertCurrentInTransaction();
+      signal?.throwIfAborted();
+      this.#storage.captureStanding();
+      this.#standing(host);
+      reads.assertCurrent();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
-      integrity(operation.phase==="native-fenced");
+      // The same writer records a Decline, so exactly one of them takes the fenced restore.
+      integrity(operation.phase==="native-fenced" && !stopRestoreDeclineRecorded(this.#storage,operation) && stopRestoreHoldsFrozenPath(this.#storage,operation));
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
         updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
@@ -1505,7 +1594,9 @@ export class LiveCommittedDeliveryStore {
         settlementId:id,momentId:id,markdownDigest:"f".repeat(64),localHeadSequence:integer,recordedAtMs:integer};
       const reservation=Buffer.byteLength(JSON.stringify(application))+2*Buffer.byteLength(JSON.stringify(settlement))+Buffer.byteLength(JSON.stringify(resume));
       const values=[this.#history.namespace,input.operationId,document.workspaceId,input.maxBytes,admissionJson,restoreDigest(admission)];
-      const charge=Buffer.byteLength(JSON.stringify(values))+reservation;
+      // The restore's publication must land, so admission funds it too, apart from the evidence limit.
+      const publication=restorePublicationReservation(this.#history.namespace,binding);
+      const charge=Buffer.byteLength(JSON.stringify(values))+reservation+publication;
       const sourceRows=sourceRanges.map(range=>{
         const values=[this.#history.namespace,input.operationId,...documentParams(document),range.sourceOrdinal,range.clientId,range.startClock,range.endClock,
           expectedProposalDigest,range.sourceDigest];
@@ -1513,15 +1604,20 @@ export class LiveCommittedDeliveryStore {
       });
       const total=charge+sourceRows.reduce((n,row)=>n+row.charge,0);
       assertWorkspaceQuota(this.#storage,document.workspaceId,total);
-      integrity(this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_LIFECYCLES}(relay_database_namespace,operation_id,workspace_id,max_evidence_bytes,admission_json,admission_sha256,receipt_reservation_bytes,accounted_bytes)
-        VALUES (?,?,?,?,?,?,?,?)`).run(...values,reservation,charge).changes===1);
+      integrity(this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_LIFECYCLES}(relay_database_namespace,operation_id,workspace_id,max_evidence_bytes,admission_json,admission_sha256,receipt_reservation_bytes,publication_reservation_bytes,accounted_bytes)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(...values,reservation,publication,charge).changes===1);
       const insert=this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_SOURCE_RANGES}(relay_database_namespace,operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_ordinal,client_id,start_clock,end_clock,proposal_sha256,source_sha256,accounted_bytes)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const row of sourceRows) integrity(insert.run(...row.values,row.charge).changes===1);
       integrity(this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(total,document.workspaceId).changes===1);
       integrity(this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase='relay-admitted' WHERE relay_database_namespace=? AND operation_id=? AND phase='native-fenced'`)
         .run(this.#history.namespace,input.operationId).changes===1);
+      // The fence carried the open retirement to this generation. It now names the restore's own accepted row.
+      carryServiceActivationRetirement(this.#storage,document,fence.operation.newFence,admitted.metadata.accepted.receipt.journalCursor);
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
+      if (!restorePublicationFits(this.#storage,this.#history.namespace,fence.operation.oldBinding,binding,admitted.metadata.accepted.receipt.journalCursor)) {
+        throw relayError("payload_too_large","The server can't confirm this restore: too many changes to this file haven't been confirmed yet. Decline this restore.");
+      }
     });
     return this.readStopRestoreLifecycle(input)!;
   }
@@ -1638,6 +1734,45 @@ export class LiveCommittedDeliveryStore {
       integrity(changed.changes === 1);
       return structuredClone(receipt);
     });
+  }
+  /** The native cancellation a recorded Decline needs from this host, or null once answered. */
+  pendingStopRestoreCancellation(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): NativeRestoreCancellation | null {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.readTx(() => {
+      this.#cancellingHost(input, host);
+      return readStopRestoreCancellation(this.#storage, input);
+    });
+  }
+  acknowledgeStopRestoreCancellation(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, answer: NativeRestoreCancellationAnswer, now: number): StopRestoreOperation {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.tx(() => {
+      this.#cancellingHost(input, host);
+      return acknowledgeStopRestoreCancellation(this.#storage, input, answer, now);
+    });
+  }
+  /** Whether this resumed restore's file moved before it finished, so it finished at the path the file left. */
+  stopRestoreFinishedAtMovedPath(input: StopRestoreLookup): boolean {
+    return this.#storage.readTx(() => {
+      const operation = readStopRestoreInTransaction(this.#storage, input); integrity(operation);
+      return stopRestoreFinishedAtMovedPath(this.#storage, operation);
+    });
+  }
+  /** Whether this host goes on with the restore, or ends it through its cancellation because Decline or a departed path ended it. */
+  continueStopRestore(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, now: number): StopRestoreContinuation {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.tx(() => {
+      const operation = this.#cancellingHost(input, host);
+      requireLiveJournalHistory(this.#storage);
+      return continueStopRestoreInTransaction(this.#storage, operation, now);
+    });
+  }
+  // Cancellation does not recheck the frozen cut: a Decline ends the restore
+  // even where that cut no longer describes the current file.
+  #cancellingHost(input: StopRestoreLookup, host: LiveHostConnectionCoordinate): StopRestoreOperation {
+    this.#standing(host);
+    const operation = readStopRestoreInTransaction(this.#storage, input); integrity(operation);
+    integrity(operation.basis.namespace === this.#history.namespace && operation.basis.hostId === host.hostId && operation.basis.hostMode === host.mode);
+    return operation;
   }
   closeStopRestoreCut(capture: StopRestoreCutCapture): void {
     const saved = this.#restores.get(capture);

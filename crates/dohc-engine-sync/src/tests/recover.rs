@@ -462,7 +462,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
             }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         assert!(matches!(
-            apply_moment_envelope(engine, &shared_base, &NoFaults, &NoLiveLeases),
+            apply_moment_envelope(engine, &shared_base, &NoFaults, &NoLiveLeases, &dohc_engine_collab::live_update_application::ReleasedTails::default()),
             Ok(ApplyOutcome {
                 primary: ApplyDisposition::Applied(_),
                 refusals: ref outcome_refusals,
@@ -471,7 +471,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         ));
     }
     assert!(matches!(
-        apply_moment_envelope(&mut peer_a, &original_op, &NoFaults, &NoLiveLeases),
+        apply_moment_envelope(&mut peer_a, &original_op, &NoFaults, &NoLiveLeases, &dohc_engine_collab::live_update_application::ReleasedTails::default()),
         Ok(ApplyOutcome {
             primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
@@ -479,7 +479,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_moment_envelope(&mut peer_a, &recovered_op, &NoFaults, &NoLiveLeases),
+        apply_moment_envelope(&mut peer_a, &recovered_op, &NoFaults, &NoLiveLeases, &dohc_engine_collab::live_update_application::ReleasedTails::default()),
         Ok(ApplyOutcome {
             primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
@@ -487,7 +487,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_moment_envelope(&mut peer_b, &recovered_op, &NoFaults, &NoLiveLeases),
+        apply_moment_envelope(&mut peer_b, &recovered_op, &NoFaults, &NoLiveLeases, &dohc_engine_collab::live_update_application::ReleasedTails::default()),
         Ok(ApplyOutcome {
             primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
@@ -495,7 +495,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
-        apply_moment_envelope(&mut peer_b, &original_op, &NoFaults, &NoLiveLeases),
+        apply_moment_envelope(&mut peer_b, &original_op, &NoFaults, &NoLiveLeases, &dohc_engine_collab::live_update_application::ReleasedTails::default()),
         Ok(ApplyOutcome {
             primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,

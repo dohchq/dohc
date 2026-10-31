@@ -279,6 +279,7 @@ impl RelayTransport for FakeRelay {
         Ok(PushResponse {
             settlement_refusals,
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -592,6 +593,7 @@ impl RelayTransport for PagedRelay {
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted,
             skipped: accepted - inserted,
@@ -870,6 +872,7 @@ impl RelayTransport for PagedShareRelay {
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -1059,6 +1062,7 @@ pub(crate) mod owner_publication;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;
+mod released_copy;
 mod remote_changes;
 mod secret;
 mod share_direct_write;

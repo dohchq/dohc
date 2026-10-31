@@ -15,6 +15,7 @@ import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
   AgentRunStatusResult,
@@ -851,6 +852,12 @@ export function makeBridge(
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
       if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
       throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
+    }),
+    // The synced workspace lists its unfinished restores when it opens; the
+    // restore tests swap in their own.
+    ownerRestore: vi.fn(async (request: OwnerRestoreRequest): Promise<unknown> => {
+      if (request.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
+      throw new Error(`Unexpected owner restore action in shell fixture: ${request.action}`);
     }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",

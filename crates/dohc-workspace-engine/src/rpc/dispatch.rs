@@ -34,6 +34,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "documents.keepRetainedVersion"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -119,6 +120,9 @@ impl EngineService {
                 | "sync.push"
                 | "sync.createHostedReplica"
                 | "sync.pullHosted"
+                // Read only; each handler checks the caller and attachment again.
+                | "sync.heldDocuments"
+                | "sync.heldDocument"
                 // The claim ledger, so the relay's automations can run the
                 // field changes this host claims when it accepts a live frame.
                 // Nothing that writes files, chats, schedules, or presses.
@@ -143,6 +147,10 @@ impl EngineService {
                     | "liveApplication.openRecoveryStore"
                     | "liveApplication.closeRecoveryStore"
                     | "liveApplication.unloadDocument"
+                    | "liveApplication.prepareRetirement"
+                    | "liveApplication.releaseRetirementPreparation"
+                    | "liveApplication.reconcileActivation"
+                    | "liveApplication.releaseActivation"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -151,6 +159,7 @@ impl EngineService {
                     | "liveApplication.appliedRead"
                     | "liveApplication.settle"
                     | "liveApplication.fenceRestore"
+                    | "liveApplication.cancelRestoreFence"
                     | "liveApplication.prepareRestore"
                     | "liveApplication.applyRestore"
                     | "liveApplication.settleRestore"
@@ -278,6 +287,10 @@ impl EngineService {
                 blob_egress,
             });
         }
+        if request.method == "sync.heldDocument" {
+            return Box::pin(self.sync_held_document(&ctx, request.workspace, request.params, id))
+                .await;
+        }
         if request.method == "versionedText.readBlob" {
             let (result, blob_egress) = self
                 .versioned_text_read_blob(&ctx, request.workspace, request.params, id)
@@ -370,6 +383,38 @@ impl EngineService {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
                     .await?
             }
+            "liveApplication.prepareRetirement" => {
+                Box::pin(self.live_application_prepare_retirement(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
+            "liveApplication.releaseRetirementPreparation" => {
+                Box::pin(self.live_application_release_retirement_preparation(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
+            "liveApplication.reconcileActivation" => {
+                Box::pin(self.live_application_reconcile(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "liveApplication.releaseActivation" => {
+                Box::pin(self.live_application_release(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "liveApplication.cancelRestoreFence" => {
+                Box::pin(self.live_application_cancel_restore_fence(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
@@ -451,7 +496,25 @@ impl EngineService {
                     .await?
             }
             "sync.pullHosted" => {
-                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
+                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params, request.id))
+                    .await?
+            }
+            "sync.heldDocuments" => {
+                Box::pin(self.sync_held_documents(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.id,
+                ))
+                .await?
+            }
+            "documents.keepRetainedVersion" => {
+                Box::pin(self.documents_keep_retained_version(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -1205,6 +1268,12 @@ impl EngineService {
                     "received shares do not host live applications",
                 ));
             }
+            if method == "documents.keepRetainedVersion" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not keep retained versions",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1334,6 +1403,8 @@ mod tests {
             "sync.push",
             "sync.createHostedReplica",
             "sync.pullHosted",
+            "sync.heldDocuments",
+            "sync.heldDocument",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1610,6 +1681,7 @@ mod tests {
             "conflicts.list",
             "conflicts.open",
             "conflicts.resolve",
+            "documents.keepRetainedVersion",
             "engine.ping",
             "history.page",
             "keptCopies.list",
@@ -1650,6 +1722,8 @@ mod tests {
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.createHostedReplica",
+            "sync.heldDocument",
+            "sync.heldDocuments",
             "sync.probe",
             "sync.pull",
             "sync.pullHosted",

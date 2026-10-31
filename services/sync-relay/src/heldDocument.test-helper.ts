@@ -25,6 +25,8 @@ export async function heldDocumentFixture(workspaceId = ticketScope.workspaceId,
       holdReason: () => held ? "hosted-conflict-parent-withheld" as const : undefined,
       reconcile() {if (f.storage.readServiceHostEnrollment(workspaceId, binding.currentPath)?.retired) held = false;},
       keptEdits: {async page() {return null;}, async retry() {return "unavailable" as const;}, async copied() {}},
+      // No activation is retained here, so Stop needs no preparation.
+      async stop<T>(_document: unknown, fence: () => T) {return fence();},
     };
     const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
       history: createLiveJournalHistoryAuthority({namespace: "held-document-test", reconciled: true}), host,

@@ -58,6 +58,18 @@ pub enum SyncError {
     CoordinateDiverged,
     #[error("replication state is not ready: {reason}")]
     RetryableState { reason: &'static str },
+    /// A released chain's tail protects the lineage, and the update could
+    /// destroy what it retains. It holds with the binding admission built;
+    /// nothing records a refusal.
+    #[error("replication state is not ready: released-lineage-unsettled")]
+    ReleasedLineageUnsettled(
+        Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
+    ),
+    /// The decision waits for its lineage's released tails to be validated
+    /// on committed state. Its transaction rolled back; nothing applied or
+    /// held, and it decides again once validation completes.
+    #[error("replication state is not ready: released-tails-validating")]
+    ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error(
         "Y.Doc projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )]
@@ -128,6 +140,13 @@ pub enum SyncError {
     },
     #[error("injected crash")]
     FaultCrash,
+    /// A read stopped because nobody waits for it any more.
+    #[error("the read was cancelled")]
+    Cancelled,
+    /// One failure several callers share, such as a held proof's: each
+    /// answers with the original's class and message.
+    #[error(transparent)]
+    Shared(std::sync::Arc<SyncError>),
 }
 
 /// What a share pull does with a refusal the boundary answered with.
@@ -152,8 +171,9 @@ impl SyncError {
     /// decides which it is. That is the whole reason this is a function on the
     /// error rather than a list of classes at each lane: a list can be
     /// forgotten, and forgetting it costs the share, not the count.
-    pub(crate) const fn share_disposition(&self) -> ShareDisposition {
+    pub(crate) fn share_disposition(&self) -> ShareDisposition {
         match self {
+            SyncError::Shared(original) => original.share_disposition(),
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
@@ -175,14 +195,18 @@ impl SyncError {
             | SyncError::SequenceGap
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
+            | SyncError::ReleasedLineageUnsettled(_)
+            | SyncError::ValidationPending(_)
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. }
-            | SyncError::FaultCrash => ShareDisposition::Abort,
+            | SyncError::FaultCrash
+            | SyncError::Cancelled => ShareDisposition::Abort,
         }
     }
 
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
+            SyncError::Shared(original) => original.code(),
             SyncError::MarkdownReaderPending(_) => "retryable-state",
             SyncError::MarkdownWriteHeld { .. } => "markdown-write-held",
             SyncError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
@@ -191,7 +215,9 @@ impl SyncError {
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
-            SyncError::RetryableState { .. } => "retryable-state",
+            SyncError::RetryableState { .. }
+            | SyncError::ReleasedLineageUnsettled(_)
+            | SyncError::ValidationPending(_) => "retryable-state",
             SyncError::ProjectionTooLarge { .. } => "projection-too-large",
             SyncError::UnsupportedOperation => "invalid-input",
             // The boundary class is "the share does not cover this op". The
@@ -211,6 +237,16 @@ impl SyncError {
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. } => "invalid-input",
             SyncError::FaultCrash => "injected-crash",
+            SyncError::Cancelled => "cancelled",
+        }
+    }
+
+    /// The failure this one carries the class of: itself, or the original a
+    /// shared failure wraps.
+    pub fn original(&self) -> &SyncError {
+        match self {
+            SyncError::Shared(original) => original.original(),
+            error => error,
         }
     }
 
@@ -351,6 +387,7 @@ impl RelayError {
             // would drop content the next pull would have applied.
             | RelayError::StoreBusy
             | RelayError::HostedRefusal(_)
+            | RelayError::ValidationPending(_)
             | RelayError::Local(_) => None,
         }
     }
@@ -358,6 +395,46 @@ impl RelayError {
 
 pub(crate) fn local_corruption(reason: &'static str) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(reason)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::live_update_application::{
+        IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+    };
+
+    /// A released lineage's hold is retryable state that carries its
+    /// binding: a share pull aborts on it, nothing records it as a refusal,
+    /// and its message names no part of the binding.
+    #[test]
+    fn a_released_lineage_hold_is_retryable_state_and_never_a_refusal() {
+        let error = SyncError::ReleasedLineageUnsettled(Box::new(ReleasedLineageBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "a".repeat(64),
+            current_path: Some("private/plan.md".into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 3,
+                relay_seq: 9,
+            },
+            head_digest: "b".repeat(64),
+            tails: std::sync::Arc::new(ProtectedTails::Invalid),
+        }));
+        assert_eq!(error.code(), "retryable-state");
+        assert_eq!(error.share_disposition(), ShareDisposition::Abort);
+        assert!(crate::apply::refusal_reason(&error).is_none());
+        assert_eq!(
+            error.to_string(),
+            "replication state is not ready: released-lineage-unsettled"
+        );
+    }
 }
 
 /// Relay transport errors preserve the TS class-per-condition contract while
@@ -498,6 +575,11 @@ pub enum RelayError {
     /// which callers are shown.
     #[error("{0}")]
     HostedRefusal(&'static str),
+    /// The operation waits for released tails to be validated on committed
+    /// state ([`SyncError::ValidationPending`]). Its caller awaits
+    /// validation and runs it again with the progress it kept.
+    #[error("released tails are validating")]
+    ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error("local sync state failed: {0}")]
     Local(String),
 }

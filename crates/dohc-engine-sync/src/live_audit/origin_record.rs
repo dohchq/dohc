@@ -155,10 +155,28 @@ pub(super) fn read(
             binding,
         )
     };
-    if serde_json::from_str::<LiveObjectBinding>(&stored_binding).map_err(SyncError::corrupt)?
-        != *binding
-    {
+    // A restore cancelled after its fence moves the generation but keeps the
+    // origin; a genuine restore does not.
+    let stored: LiveObjectBinding =
+        serde_json::from_str(&stored_binding).map_err(SyncError::corrupt)?;
+    let from = stored.restore_fence_generation;
+    let same = LiveObjectBinding {
+        restore_fence_generation: binding.restore_fence_generation,
+        ..stored
+    };
+    if same != *binding {
         return Err(invalid("historical origin binding differs"));
+    }
+    if from != binding.restore_fence_generation {
+        use dohc_engine_collab::live_update_application::{
+            ApplicationError, require_crossed_cancellations,
+        };
+        require_crossed_cancellations(conn, namespace, binding, from).map_err(
+            |error| match error {
+                ApplicationError::Storage(error) => SyncError::Storage(error),
+                _ => invalid("historical origin binding differs"),
+            },
+        )?;
     }
     Ok(source)
 }
@@ -170,8 +188,23 @@ impl OriginRecord {
         host_id: &str,
         evidence: &str,
     ) -> Result<bool, SyncError> {
+        Ok(self.names(origin, host_id)
+            && match self {
+                Self::Bootstrap { source, .. } => {
+                    hex_sha256(&serde_json::to_vec(source).map_err(SyncError::corrupt)?) == evidence
+                }
+                Self::Owner { source } => source.evidence_digest == evidence,
+            })
+    }
+
+    /// Whether a restore of the lineage names this origin, on its host.
+    pub(super) fn names(
+        &self,
+        origin: &dohc_engine_collab::live_update_application::RestoreDeliveryOrigin,
+        host_id: &str,
+    ) -> bool {
         use dohc_engine_collab::live_update_application::RestoreDeliveryOrigin;
-        Ok(match (self, origin) {
+        match (self, origin) {
             (
                 Self::Bootstrap {
                     source,
@@ -179,18 +212,33 @@ impl OriginRecord {
                     ..
                 },
                 RestoreDeliveryOrigin::Bootstrap { id },
-            ) => {
-                source.bootstrap_id == *id
-                    && host_coordinate.host_id == host_id
-                    && hex_sha256(&serde_json::to_vec(source).map_err(SyncError::corrupt)?)
-                        == evidence
-            }
+            ) => source.bootstrap_id == *id && host_coordinate.host_id == host_id,
             (Self::Owner { source }, RestoreDeliveryOrigin::Owner { id }) => {
-                source.adoption_id == *id
-                    && source.host_coordinate.host_id == host_id
-                    && source.evidence_digest == evidence
+                source.adoption_id == *id && source.host_coordinate.host_id == host_id
             }
             _ => false,
-        })
+        }
+    }
+
+    /// Whether a restore fence of the lineage came from this origin: its
+    /// bootstrap on its host, or an owner activation of `adoption`, this
+    /// origin's. The first activation is the adoption itself, on its host; a
+    /// successor fences under its own ID and host.
+    pub(super) fn fenced(
+        &self,
+        adoption: Option<&str>,
+        origin: &dohc_engine_collab::live_update_application::RestoreDeliveryOrigin,
+        host_id: &str,
+    ) -> bool {
+        use dohc_engine_collab::live_update_application::RestoreDeliveryOrigin;
+        match (self, origin, adoption) {
+            (Self::Bootstrap { .. }, RestoreDeliveryOrigin::Bootstrap { .. }, None) => {
+                self.names(origin, host_id)
+            }
+            (Self::Owner { source }, RestoreDeliveryOrigin::Owner { id }, Some(adoption)) => {
+                source.adoption_id == adoption && (*id != adoption || self.names(origin, host_id))
+            }
+            _ => false,
+        }
     }
 }

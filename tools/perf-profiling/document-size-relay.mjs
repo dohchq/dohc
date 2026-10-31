@@ -39,16 +39,6 @@ export function seedWindow(updates, windows, wallMs) {
   };
 }
 
-const policy = {
-  maxStructVisits: 1_000_000,
-  maxValueNodeVisits: 5_000_000,
-  maxDecodedPayloadByteVisits: 100_000_000,
-  maxStructClientGroupVisits: 1_000_000,
-  maxDeleteClientGroupVisits: 1_000_000,
-  maxDeleteIntervalVisits: 1_000_000,
-  maxIndexOperations: 10_000_000,
-};
-
 // Production storage, schema, authority, journal, checkpoint and worker handler. No fake validation evidence.
 export async function runRelayCase(options) {
   const checkout = resolve(options.checkout),
@@ -56,7 +46,7 @@ export async function runRelayCase(options) {
   await mkdir(directory, { recursive: true });
   const require = createRequire(join(checkout, 'services/sync-relay/package.json'));
   const load = (path) => import(pathToFileURL(join(checkout, path)).href);
-  const [Y, projection, checkpointModule, validationModule, hostModule, contextModule, deploymentModule, linkSecurity] =
+  const [Y, projection, checkpointModule, validationModule, hostModule, contextModule, deploymentModule, linkSecurity, policyModule] =
     await Promise.all([
       import(pathToFileURL(require.resolve('yjs').replace(/yjs\.cjs$/, 'yjs.mjs')).href),
       load('packages/ydoc-projection/src/import-export.ts'),
@@ -66,7 +56,10 @@ export async function runRelayCase(options) {
       load('packages/live-session-contract/src/limits.ts'),
       load('services/sync-relay/src/relayDeployment.ts'),
       load('services/sync-relay/src/linkSecurity.ts'),
+      load('packages/ydoc-projection/src/liveValidationPolicy.ts'),
     ]);
+  // The relay's own validation limits, so a measurement follows the checkout it runs.
+  const policy = policyModule.WORKER_LIVE_VALIDATION_POLICY;
   const generator = startGenerator(options);
   try {
     const generated = await generator.call('init', options);

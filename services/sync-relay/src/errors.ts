@@ -16,11 +16,19 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   collection_write_rate_limited: 429,
   conflict: 409,
   "restore-in-progress": 409,
+  "edits-pending": 409,
+  "host-diverged": 409,
+  "host-paused": 409,
+  "host-no-edit-grant": 409,
+  "host-moved": 409,
+  "host-start-failed": 409,
+  "host-not-loaded": 409,
   dependents_changed: 409,
   discussion_limit_reached: 413,
   discussion_rate_limited: 429,
   empty_selector: 400,
   epoch_superseded: 409,
+  held_read_busy: 429,
   identity_not_recognized: 409,
   identity_required: 409,
   internal_error: 500,
@@ -86,11 +94,19 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   collection_write_rate_limited: "too many direct writes",
   conflict: "conflict",
   "restore-in-progress": "Stop live editing is waiting. You can keep editing.",
+  "edits-pending": "Live editing didn't stop. Recent edits haven't reached the server yet.",
+  "host-diverged": "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.",
+  "host-paused": "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.",
+  "host-no-edit-grant": "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
+  "host-moved": "Live editing didn't stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.",
+  "host-start-failed": "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
+  "host-not-loaded": "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",
   empty_selector: "selector is empty",
   epoch_superseded: "replication epoch has been superseded",
+  held_read_busy: "another held document read is running",
   // The coordinate is unknown or newer, not proven stale: clients keep local
   // state and must not discard or reseed it.
   identity_not_recognized: "replication coordinate is not recognized",
@@ -125,6 +141,16 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   unknown_chat_op: "unrecognized chat op cannot be authorship-verified",
 });
 
+export type SessionHostState = "running without this document (server copy diverged)" | "running without this document (paused)" |
+  "running without this document (no Edit grant)" | `running without this document (moved from ${string})` |
+  "couldn't start" | "starting" | "restarting" | "running, document not loaded yet";
+
+export type SessionHostStopRefusal = Readonly<{
+  code: "host-diverged" | "host-paused" | "host-no-edit-grant" | "host-moved" | "host-start-failed" | "host-not-loaded";
+  sessionHost: SessionHostState;
+  path?: string;
+}>;
+
 /** An error the relay answers with its own status, code, and message. */
 export class RelayError extends Error {
   readonly statusCode: number;
@@ -133,8 +159,10 @@ export class RelayError extends Error {
     readonly code: RelayErrorCode,
     message: string = RELAY_ERROR_MESSAGES[code],
     statusCode: number = RELAY_ERROR_STATUSES[code],
+    readonly sessionHost?: SessionHostState,
+    readonly path?: string,
   ) {
-    super(message);
+    super(code === "host-moved" && path !== undefined ? message.replace("{path}", () => path) : message);
     this.statusCode = statusCode;
   }
 }
@@ -166,7 +194,9 @@ export function errorBody(code: RelayErrorCode): Response {
  */
 export function errorResponse(error: unknown): Response {
   if (error instanceof RelayError) {
-    return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
+    return jsonResponse({ ok: false, error: error.message, code: error.code,
+      ...(error.sessionHost === undefined ? {} : {sessionHost: error.sessionHost}),
+      ...(error.path === undefined ? {} : {path: error.path}) }, error.statusCode);
   }
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);

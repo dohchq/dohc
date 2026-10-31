@@ -8,7 +8,7 @@ import { parseCanonicalAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } 
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
-import {parseNativeRestoreFence, parseNativeRestoreFenceReceipt} from "./liveRestoreFence.js";
+import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFence, parseNativeRestoreFenceReceipt} from "./liveRestoreFence.js";
 import {parseOwnerLiveSyncConfig} from "./liveSyncConfig.js";
 
 export interface ExistingOwnerSession {
@@ -221,6 +221,21 @@ export function startExistingOwnerDeviceTransport(options: {
           if (handoffActive) await entry.owner.finishHandoff(false).catch(() => undefined);
         }
         result = {status: "fenced", receipt};
+      } else if (operation.method === "liveApplication.cancelRestoreFence") {
+        const params = configRecord(operation.params,["operationId","objectId","lineageClaimId","hostId","newFence"]);
+        if (params.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
+        const cancellation = {operationId: string(params.operationId),objectId: string(params.objectId),lineageClaimId: string(params.lineageClaimId),
+          hostId: start.host.hostId,newFence: integer(params.newFence,1)};
+        const response = await config.client.sendRequest({...request, method: operation.method, params: cancellation}, signal);
+        const answer = parseNativeRestoreCancellationAnswer(response.result);
+        const binding = answer.binding, workspaceId = workspaces.get(operation.workspace);
+        if (answer.hostId !== start.host.hostId || (binding && (binding.workspaceId !== workspaceId || binding.objectId !== cancellation.objectId ||
+          binding.lineageClaimId !== cancellation.lineageClaimId)) ||
+          (answer.status === "fenceCancelled" && (answer.receipt.fence.operation.relayDatabaseNamespace !== start.relayNamespace ||
+            answer.receipt.fence.operation.operationId !== cancellation.operationId || answer.generation !== cancellation.newFence))) {
+          throw new Error("Native restore cancellation acknowledgement mismatch.");
+        }
+        result = answer;
       } else if (operation.method === "liveApplication.register") {
         const params = configRecord(operation.params,["binding"],["resumeAdoptionId"]), binding = parseLiveObjectBinding(params.binding);
         const resumeAdoptionId = params.resumeAdoptionId === undefined ? undefined : string(params.resumeAdoptionId);
@@ -428,7 +443,7 @@ export function startExistingOwnerDeviceTransport(options: {
     if (value.type !== "request" || operations.size >= config.maxUploads) throw new Error("Owner operation capacity exceeded.");
     const id = integer(value.id,lastId+1), method = string(value.method), workspace = value.workspace == null ? "" : string(value.workspace);
     const restoring = restoreOperation(method);
-    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.quarantineOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle","liveApplication.syncOpen","liveApplication.appliedRead","liveApplication.ack"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
+    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.cancelRestoreFence","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.quarantineOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle","liveApplication.syncOpen","liveApplication.appliedRead","liveApplication.ack"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;

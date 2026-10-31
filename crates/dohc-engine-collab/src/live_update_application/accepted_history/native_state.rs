@@ -724,29 +724,36 @@ pub(super) fn restore_metadata(
     Ok(())
 }
 
+/// [`super::require_transition`] for native state: a restore's application,
+/// after any restores cancelled at `tip`, or the first event after them.
 pub(super) fn transition(
     conn: &Connection,
     held: &Registration,
     previous: &LiveObjectBinding,
+    tip: &Tip<'_>,
     next: &RelayAcceptedLiveUpdate,
     evidence: &str,
-    previous_digest: &str,
-    count: i64,
 ) -> Result<(), ApplicationError> {
-    if previous.restore_fence_generation == next.binding.restore_fence_generation {
+    let from = previous.restore_fence_generation;
+    if from == next.binding.restore_fence_generation {
         return Ok(());
     }
-    let id:String=conn.query_row("SELECT operation_id FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND application_delivery_id=?5",params![held.namespace,held.binding.workspace_id,held.binding.main_version_id,held.binding.object_id,next.receipt.delivery_id],|r|r.get(0)).map_err(read_sql)?;
-    restore_association(
-        conn,
-        held,
-        &id,
-        next,
-        Some(previous.restore_fence_generation),
-        None,
-    )?;
+    let fence:Option<(String,i64)>=conn.query_row("SELECT operation_id,old_generation FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND application_delivery_id=?5",params![held.namespace,held.binding.workspace_id,held.binding.main_version_id,held.binding.object_id,next.receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
+    let Some((id, fenced)) = fence else {
+        return restore_fence::require_cancelled(
+            conn,
+            held,
+            from,
+            next.binding.restore_fence_generation,
+            tip,
+        );
+    };
+    if fenced != from {
+        restore_fence::require_cancelled(conn, held, from, fenced, tip)?;
+    }
+    restore_association(conn, held, &id, next, Some(fenced), None)?;
     let p = parameters(held);
-    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],previous_digest,count)?;
+    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],tip.evidence,tip.count+1)?;
     if saved.accepted != *next || saved.evidence_digest != evidence {
         return Err(ApplicationError::Corrupt);
     }
@@ -786,11 +793,14 @@ pub(super) fn validate_blob_hash(conn: &Connection, digest: &str) -> Result<(), 
     Ok(())
 }
 
+/// Accepted state through `through`. Each blob it replays is charged to
+/// `budget` before it is read, on top of each record's own bound.
 pub(super) fn read(
     conn: &Connection,
     held: &Registration,
     through: i64,
     policy: NativeHistoryReconstruction,
+    budget: &mut restore_content::Budget,
 ) -> Result<Ydoc, ApplicationError> {
     if policy.working_reserve_bytes == 0 || policy.reservation_bytes().is_none() {
         return Err(ApplicationError::ConfiguredByteBudgetExceeded);
@@ -808,12 +818,9 @@ pub(super) fn read(
     )?;
     let doc = Ydoc::wire();
     {
-        let baseline = restore_content::Budget {
-            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-        }
-        .blob(conn, &c.state_digest)?;
+        let baseline = budget.blob(conn, &c.state_digest)?;
         doc.apply(&baseline)?;
-        doc.validate_public_baseline(&baseline)?;
+        validate_baseline(&doc, &baseline)?;
     }
     let p = parameters(held);
     let mut query=conn.prepare(&format!("SELECT event_count,journal_cursor,update_sha256,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 AND length(CAST(update_sha256 AS BLOB))=64 ORDER BY event_count LIMIT 4096")).map_err(read_sql)?;
@@ -830,6 +837,7 @@ pub(super) fn read(
         .map_err(read_sql)?;
     let mut count = c.event_count;
     let mut cursor = c.terminal.as_ref().map_or(0, |r| r.journal_cursor);
+    let mut terminal = c.terminal;
     let mut evidence = c.evidence_digest;
     let mut binding = c.binding;
     let mut bytes = 0;
@@ -866,16 +874,16 @@ pub(super) fn read(
             conn,
             held,
             &binding,
+            &Tip {
+                terminal: terminal.as_ref(),
+                count,
+                evidence: &evidence,
+            },
             &metadata.accepted,
             &metadata.evidence_digest,
-            &evidence,
-            ordinal,
         )?;
         {
-            let update = restore_content::Budget {
-                remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-            }
-            .blob(conn, &update)?;
+            let update = budget.blob(conn, &update)?;
             if update.is_empty() {
                 return Err(ApplicationError::Corrupt);
             }
@@ -891,6 +899,7 @@ pub(super) fn read(
         cursor = next_cursor;
         evidence = metadata.evidence_digest;
         binding = metadata.accepted.binding;
+        terminal = Some(metadata.accepted.receipt);
     }
     if cursor != through {
         return Err(ApplicationError::Conflict);

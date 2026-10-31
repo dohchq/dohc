@@ -8,7 +8,7 @@ import * as Y from "yjs";
 import { registered, host, DatabaseSync, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
 import { openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
-import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import { beginStopRestore, advanceStopRestoreFence, declineStopRestore, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import { attachLiveJournalHistory, createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { initializeLiveRestoreOperationSchema } from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import { buildRelayFixture } from "../../../services/sync-relay/scripts/build.mjs";
@@ -101,6 +101,67 @@ it("rolls back the document fence when its operation update is ignored", () => {
     expect(f.rows()).toEqual(before);
     f.write(db => { db.exec("DROP TRIGGER ignore_restore"); });
     expect(advanceStopRestoreFence(f.context, f.lookup, 50).phase).toBe("fenced");
+  } finally { f.close(); }
+});
+
+// Proves: before its fence, the owner can end a restore. Access stays revoked,
+// the document keeps its generation and stays open, and nothing can fence the
+// declined restore afterwards.
+it("declines a restore before its fence and keeps access revoked", () => {
+  const f = fixture();
+  try {
+    const invalidated = beginStopRestore(f.context, f.intent, 40);
+    const declined = declineStopRestore(f.context, f.lookup, 45);
+    expect(declined).toEqual({ ...invalidated, phase: "declined", declinedAtMs: 45 });
+    expect(f.storage.getShareGrant("grant")).toMatchObject({ status: "revoked", generation: 5 });
+    expect(f.rows().documents[0]).toMatchObject({ admission_state: "open", restore_fence_generation: 1 });
+    const after = f.rows();
+    expect(declineStopRestore(f.context, f.lookup, 46)).toEqual(declined);
+    expect(beginStopRestore(f.context, f.intent, 47)).toEqual(declined);
+    expect(() => advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow("This restore was declined.");
+    expect(f.rows()).toEqual(after);
+    expect(() => declineStopRestore(f.context, { ...f.lookup, ownerUserId: "reader" }, 51)).toThrow();
+  } finally { f.close(); }
+});
+
+// Proves: Decline and the fence advance read and write the operation in the
+// same serialized writer, so when both answer one status only one takes it.
+// A decline after the fence leaves the fence in place and only records the
+// request the fencing host must answer, charged to the restore's reservation.
+it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fence take the restore: %s first", first => {
+  const f = fixture();
+  try {
+    beginStopRestore(f.context, f.intent, 40);
+    // Both callers saw the restore before either acted.
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("authority-invalidated");
+    const decline = () => declineStopRestore(f.context, f.lookup, 45), fence = () => advanceStopRestoreFence(f.context, f.lookup, 50);
+    const won = (first === "decline" ? decline : fence)();
+    const settled = f.rows();
+    if (first === "decline") expect(fence).toThrow("This restore was declined.");
+    else expect(decline()).toEqual(won);
+    const charged = f.raw.prepare("SELECT accounted_bytes FROM sync_relay_live_restore_cancellations").all().reduce((sum, row) => sum + Number(row.accounted_bytes), 0);
+    expect(f.rows()).toEqual({...settled, operations: settled.operations.map(row => ({...row, accounted_bytes: Number(row.accounted_bytes) - charged}))});
+    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual(first === "decline" ? [] : [{outcome: null}]);
+    expect(readStopRestore(f.context, f.lookup)).toEqual(won);
+    expect(won.phase).toBe(first === "decline" ? "declined" : "fenced");
+    expect(f.rows().documents[0]).toMatchObject(first === "decline"
+      ? { admission_state: "open", restore_fence_generation: 1 } : { admission_state: "closed", restore_fence_generation: 2 });
+  } finally { f.close(); }
+});
+
+// Proves: a declined restore ends the document's unfinished restore and
+// leaves no fence to chain from, so the next restore begins at the same
+// generation, even as the document's first restore.
+it("begins a new restore after a declined one", () => {
+  const f = fixture();
+  try {
+    beginStopRestore(f.context, f.intent, 40);
+    declineStopRestore(f.context, f.lookup, 45);
+    f.write(db => { db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'").run(); });
+    const next = beginStopRestore(f.context, { ...f.intent, operationId: "after-decline", expectedGrantGeneration: 6 }, 60);
+    expect(next).toMatchObject({ phase: "authority-invalidated", previousOperationId: null, oldFence: 1, declinedAtMs: null });
+    expect(advanceStopRestoreFence(f.context, { ...f.lookup, operationId: "after-decline" }, 61)).toMatchObject({ phase: "fenced", newFence: 2 });
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("declined");
   } finally { f.close(); }
 });
 

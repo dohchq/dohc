@@ -2,13 +2,15 @@ import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 export async function runCanonicalCancellationFixture(root, sourceRoot) {
   // Keep the owners and process groups real; only external tools and builds
   // use offline adapters. No database or native build starts in this fixture.
   const put = (path, text) => { mkdirSync(dirname(join(root,path)),{recursive:true}); writeFileSync(join(root,path),text); };
   put('package.json','{"type":"module"}');
-  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','queue-supervisor.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs','flaky.mjs'])
+  copyFlakyFixture(root, sourceRoot);
+  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','queue-supervisor.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
   for(const file of ['git-read.mjs','gate-commands.mjs'])put(`tools/rust-engine-program/${file}`,readFileSync(join(sourceRoot,'tools/rust-engine-program',file)));
   put('apps/desktop/package.json','{}');

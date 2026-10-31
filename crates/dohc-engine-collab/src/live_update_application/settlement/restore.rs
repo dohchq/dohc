@@ -37,6 +37,7 @@ impl RestoreAudit {
             namespace: audit.namespace.clone(),
             coordinate: audit.coordinate.clone(),
             binding: self.input.preparation.fence.operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         }
     }
@@ -184,6 +185,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let result = store.write_with(&NoFaults, |tx| -> Result<LiveSettlementAudit, ApplicationError> {
@@ -333,16 +335,20 @@ pub(in crate::live_update_application) fn read_anchor_in(
     }))
 }
 
-// One object fence, then one settlement by its unique operation identity.
-// CROSS JOIN preserves that order when an ordinary object has no restore.
-const RESTORED_ORIGIN: &str = "SELECT s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_restore_fences f CROSS JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id WHERE f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4 AND f.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore' AND f.new_generation=?6";
+// The latest uncancelled object fence at or below the generation, then one
+// settlement by its unique operation identity. CROSS JOIN preserves that order
+// when an ordinary object has no restore.
+const RESTORED_ORIGIN: &str = "SELECT f.new_generation,s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_restore_fences f CROSS JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id WHERE f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4 AND f.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore' AND f.new_generation<=?6 AND f.cancelled_json IS NULL ORDER BY f.new_generation DESC LIMIT 1";
 
+/// The latest restore of `held`'s lineage settled at or below its generation,
+/// with the binding it settled under. Restores cancelled after their fences
+/// may lie between; the caller crosses them.
 pub(super) fn restored_origin(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<PriorAnchor>, ApplicationError> {
     let b = &held.binding;
-    let row: Option<(i64, i64)> = conn
+    let row: Option<(i64, i64, i64)> = conn
         .query_row(
             RESTORED_ORIGIN,
             params![
@@ -353,11 +359,11 @@ pub(super) fn restored_origin(
                 b.lineage_claim_id,
                 b.restore_fence_generation
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some((cursor, length)) = row else {
+    let Some((generation, cursor, length)) = row else {
         return Ok(None);
     };
     if usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?
@@ -365,8 +371,24 @@ pub(super) fn restored_origin(
     {
         return Err(ApplicationError::Corrupt);
     }
-    let anchor = read_anchor(conn, held, cursor, crate::limits::MAX_YDOC_UPDATE_BYTES)?
-        .ok_or(ApplicationError::Corrupt)?;
+    let restored = Registration {
+        workspace_id: held.workspace_id.clone(),
+        namespace: held.namespace.clone(),
+        coordinate: held.coordinate.clone(),
+        binding: LiveObjectBinding {
+            restore_fence_generation: generation,
+            ..b.clone()
+        },
+        activation_id: None,
+        live: false,
+    };
+    let anchor = read_anchor(
+        conn,
+        &restored,
+        cursor,
+        crate::limits::MAX_YDOC_UPDATE_BYTES,
+    )?
+    .ok_or(ApplicationError::Corrupt)?;
     let (application,markdown):(String,String) = conn.query_row(
         "SELECT f.application_json,json_extract(f.proposal_json,'$.point.markdownDigest') FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.settlement_id=?1 AND f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id",
         [&anchor.id],|row|Ok((row.get(0)?,row.get(1)?)),

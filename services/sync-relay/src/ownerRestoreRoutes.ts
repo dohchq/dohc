@@ -1,7 +1,8 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveRestorePreparation } from "./liveRestorePreparation";
-import { badRequest, notFound, relayError } from "./errors";
+import type { StopRestoreCancellationOutcome } from "./liveRestoreDelivery";
+import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import type { SyncRelayStorage } from "./storage";
 import type { StopRestoreIntent, StopRestoreLookup } from "./storage/liveRestoreOperation";
@@ -14,13 +15,18 @@ export type OwnerRestoreHost = {
   prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal): ReturnType<LiveRestorePreparation["prepare"]>;
   reviewRestore(lookup: StopRestoreLookup, signal?: AbortSignal): ReturnType<LiveRestorePreparation["review"]>;
   confirmRestore(lookup: StopRestoreLookup, digest: string, signal?: AbortSignal): ReturnType<LiveRestorePreparation["confirm"]>;
+  declineRestore(lookup: StopRestoreLookup, signal?: AbortSignal): Promise<StopRestoreCancellationOutcome>;
 };
 export type OwnerRestoreRoute = {route: "owner-restore"; workspaceId: string} & (
-  | {action: "options" | "plan" | "begin"}
-  | {action: "status" | "prepare" | "review" | "confirm"; operationId: string}
+  | {action: "options" | "plan" | "begin" | "unfinished"}
+  | {action: "status" | "prepare" | "review" | "confirm" | "decline"; operationId: string}
 );
 
 function publicIntent({ownerUserId: _owner, ...intent}: StopRestoreIntent) { return intent; }
+// The one cause a waiting restore names: the owner can free space to end it.
+function reason(error: unknown): {cause?: "quota"} {
+  return error instanceof RelayError && error.code === "quota_exceeded" ? {cause: "quota"} : {};
+}
 function response(value: unknown, code = 200) {
   return new Response(JSON.stringify(value), {status: code,
     headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
@@ -33,7 +39,7 @@ export function createOwnerRestoreRoutes(options: {
   return async (request: Request, route: OwnerRestoreRoute, ownerUserId: string) => {
     const {storage} = options;
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
-    if (request.method !== (route.action === "status" ? "GET" : "POST")) throw relayError("method_not_allowed");
+    if (request.method !== (route.action === "status" || route.action === "unfinished" ? "GET" : "POST")) throw relayError("method_not_allowed");
     const lookup = "operationId" in route ? {workspaceId: route.workspaceId, ownerUserId,
       operationId: parseLiveUpdateIdentifier(route.operationId)} : null;
     const read = () => {
@@ -42,8 +48,14 @@ export function createOwnerRestoreRoutes(options: {
       return saved;
     };
     if (route.action === "status") return response(read());
+    if (route.action === "unfinished") {
+      const after = new URL(request.url).searchParams.get("after");
+      return response(storage.readOwnerUnfinishedRestores({workspaceId: route.workspaceId, ownerUserId,
+        ...(after === null ? {} : {after: parseLiveUpdateIdentifier(after)})}));
+    }
     const host = options.host();
-    if (!host?.restoreConfigured) throw notFound();
+    // Declining before the fence needs no host: it ends the restore before the host takes part.
+    if (route.action !== "decline" && !host?.restoreConfigured) throw notFound();
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
     const raw = await readBoundedJson(request, MAX_PAYLOAD_JSON_BYTES, signal);
     signal.throwIfAborted();
@@ -106,17 +118,30 @@ export function createOwnerRestoreRoutes(options: {
       return response(storage.readOwnerRestoreStatus({workspaceId: route.workspaceId, ownerUserId, operationId: operation.intent.operationId}));
     }
     read();
+    if (route.action === "decline") {
+      ticketRecord(raw, []);
+      // After the fence the request holds the restore until the host that fenced it answers.
+      if (storage.declineStopRestore(lookup!, options.nowMs()).phase !== "declined") {
+        const ended = await host?.declineRestore(lookup!, signal).catch(() => signal.throwIfAborted());
+        // The relay refused the host's answer, so asking again gets the same answer.
+        if (ended?.kind === "refused") return response({status: read(), result: {kind: "refused"}}, 409);
+        // An absent host, a lost reply, or an answer that holds no binding.
+        if (ended?.kind !== "declined") throw relayError("conflict", "The restore is still being declined. Try again in a moment.");
+      }
+      return response({status: read(), result: {kind: "declined"}});
+    }
+    if (!host) throw notFound();
     if (route.action === "confirm") {
       const input = ticketRecord(raw, ["proposalDigest"]), digest = parseLiveUpdateDigest(input.proposalDigest);
       try {
         const result = await host.confirmRestore(lookup!, digest, signal);
         return response({status: read(), result});
       }
-      catch {
+      catch (error) {
         signal.throwIfAborted();
         const current = read();
         const admitted = ["relay-admitted", "native-applied", "settled", "resumed"].includes(current.phase);
-        return response({status: current, result: {kind: admitted ? "pending" : "review-required"}}, 409);
+        return response({status: current, result: {kind: admitted ? "pending" : "review-required", ...reason(error)}}, 409);
       }
     }
     ticketRecord(raw, []);
@@ -129,9 +154,9 @@ export function createOwnerRestoreRoutes(options: {
       const lease = await host.reviewRestore(lookup!, signal);
       try {return ownerRestoreReviewResponse({status: read(), result: lease.review}, lease);}
       catch (error) {lease.close(); throw error;}
-    } catch {
+    } catch (error) {
       signal.throwIfAborted();
-      return response({status: read(), result: {kind: route.action === "review" ? "review-required" : "pending"}}, 409);
+      return response({status: read(), result: {kind: route.action === "review" ? "review-required" : "pending", ...reason(error)}}, 409);
     }
   };
 }

@@ -5,6 +5,7 @@ import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
 import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
+import {listServiceActivationRetirements, type ServiceActivationRetirement} from "./serviceActivationRetirement";
 
 /** The op kinds that name one live document, and so may belong to a hosted one. */
 export const HOSTED_DOCUMENT_OP_KINDS = ["moment.append", "ydoc.update", "live.audit.application", "live.audit.settlement", "live.audit.base"] as const;
@@ -35,26 +36,35 @@ export interface ServiceHostFeedScope {
    * and that their owner has not paused or stopped. The host may read only these.
    */
   readonly shared: ReadonlyMap<string, string>;
+  /**
+   * The documents whose activation has an open retirement obligation, by
+   * object. They are neither hosted nor shared, even once Resume enabled
+   * them again, until their activation retires.
+   */
+  readonly settling: ReadonlyMap<string, ServiceActivationRetirement>;
   /** Changes whenever `shared` or the workspace identity changes. */
   readonly token: string;
 }
 
 /** Statement-level snapshots; safe both on the request path and inside a write guard. */
 export function readServiceHostFeedScope(storage: StorageContext, workspaceId: string): ServiceHostFeedScope | null {
-  const enrollments = currentServiceHostEnrollments(storage, workspaceId);
+  const all = currentServiceHostEnrollments(storage, workspaceId);
   let ownerUserId: string, replicationEpoch: string, streamIdentity: string;
-  if (enrollments.length) {
+  if (all.length) {
     // Current enrollments share the workspace's owner and identity.
-    ({ownerUserId, replicationEpoch, streamIdentity} = enrollments[0]!);
+    ({ownerUserId, replicationEpoch, streamIdentity} = all[0]!);
   } else {
-    // A Stop can leave an undrained row with enabled=0. Keep the hosted
-    // credential alive so the host can observe the empty scope and retire it.
+    // A Stop can leave an undrained row with enabled=0, and an open retirement
+    // outlasts the drain. Keep the hosted credential alive so the host can
+    // observe the empty scope and retire it, and finish that retirement.
     const workspace = storage.currentServiceHostWorkspace(workspaceId, true);
     if (!workspace) return null;
     ({ownerUserId, replicationEpoch, streamIdentity} = workspace);
     const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspace.workspaceId, replicationEpoch, streamIdentity, []])).digest("hex");
-    return Object.freeze({workspaceId: workspace.workspaceId, replicationEpoch, streamIdentity, hosted: new Map<string, string>(), departed: new Set<string>(), shared: new Map<string, string>(), token});
+    return Object.freeze({workspaceId: workspace.workspaceId, replicationEpoch, streamIdentity, hosted: new Map<string, string>(), departed: new Set<string>(),
+      shared: new Map<string, string>(), settling: settlingScope(storage, workspace.workspaceId), token});
   }
+  const settling = settlingScope(storage, workspaceId), enrollments = all.filter(row => !settling.has(row.objectId));
   const selectors = storage.db.prepare(`SELECT s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms
     FROM sync_relay_shares s INDEXED BY idx_sync_relay_shares_service_candidates WHERE s.workspace_id=? AND s.granter_user_id=?
       AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
@@ -69,11 +79,14 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     hosted.set(row.objectId, row.path);
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
-    // binding stays writable until the host releases it.
+    // enrollment takes the host's settled work until the host releases it.
     else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
-  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, token});
+  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, settling, token});
+}
+function settlingScope(storage: StorageContext, workspaceId: string): ReadonlyMap<string, ServiceActivationRetirement> {
+  return new Map(listServiceActivationRetirements(storage, workspaceId).map(row => [row.objectId, row]));
 }
 
 /** One document's rows after a relay sequence, in relay order. Callers still decide each row. */

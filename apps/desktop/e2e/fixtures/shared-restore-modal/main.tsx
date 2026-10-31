@@ -149,6 +149,9 @@ function SharedRestoreFixture() {
           onClose={() => setOpen(false)}
           onBeforeRestore={async () => ignore}
           onRestored={() => setRestored(true)}
+          onError={ignore}
+          onSettled={ignore}
+          onChanged={ignore}
         />
       ) : null}
     </main>

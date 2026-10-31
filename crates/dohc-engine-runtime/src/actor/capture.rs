@@ -1863,6 +1863,8 @@ struct PreparedCaptureRecovery {
     /// path to a different, disambiguated object.
     object_id: String,
     lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    /// Decided before the file is ingested, while its old snapshot stands.
+    outcome: dohc_engine_sync::CaptureLineage,
     preserve: bool,
     authors: Option<String>,
 }
@@ -1874,12 +1876,18 @@ fn prepare_capture_recovery_in(
     indexing: &CaptureIndexing,
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
+    let lineage = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?;
+    let outcome = dohc_engine_sync::admit_capture_in_tx(tx, &lineage, &input.path, &input.text)?;
     let mut prepared = PreparedCaptureRecovery {
         object_id: object_id.to_owned(),
-        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        lineage,
+        outcome,
         preserve: false,
         authors: None,
     };
+    if outcome == dohc_engine_sync::CaptureLineage::KeepTail {
+        return Ok(prepared);
+    }
     if let CaptureIndexing::Reader { folds, root, .. } = indexing
         && let Some(fold) = folds
             .iter()
@@ -2053,7 +2061,12 @@ fn capture_ingest_in_tx(
             },
             None => true,
         };
-        let changed = if has_ydoc_state {
+        let keeps_tail = recovery
+            .as_ref()
+            .is_some_and(|prepared| prepared.outcome == dohc_engine_sync::CaptureLineage::KeepTail);
+        let changed = if keeps_tail {
+            None
+        } else if has_ydoc_state {
             let resulting = dohc_engine_sync::ResultingHead::Text {
                 path: &result.snapshot.path,
                 text: &result.snapshot.text,

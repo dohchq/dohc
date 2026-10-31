@@ -638,7 +638,7 @@ fn markdown_hold_live_and_ended_session_drains_consume_rows_without_a_file_recei
             .unwrap()
         } else {
             assert!(matches!(
-                crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+                crate::ydoc_apply::drain_ended_session_holding_cleanup(
                     &mut f.store,
                     &mut f.cache,
                     &f.key,
@@ -648,14 +648,26 @@ fn markdown_hold_live_and_ended_session_drains_consume_rows_without_a_file_recei
                 Err(SyncError::LiveDocumentBindingActive)
             ));
             assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
-            crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+            let (mut drained, cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
                 &mut f.store,
                 &mut f.cache,
                 &f.key,
                 &NoLiveLeases,
                 &NoFaults,
             )
-            .unwrap()
+            .unwrap();
+            assert!(drained.waiting.is_none());
+            drained.refusals.extend(
+                crate::ydoc_apply::complete_ended_session_cleanup(
+                    &mut f.store,
+                    &f.key,
+                    &NoLiveLeases,
+                    cleanup,
+                    &NoFaults,
+                )
+                .unwrap(),
+            );
+            drained
         };
         assert_eq!(drained.drained, 1);
         assert_eq!(drained.refusals.len(), 1);
@@ -767,7 +779,7 @@ fn markdown_hold_deferred_base_waits_for_the_recovery_lease_and_keeps_its_claim_
     ));
     assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
     assert!(matches!(
-        crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+        crate::ydoc_apply::drain_ended_session_holding_cleanup(
             &mut f.store,
             &mut f.cache,
             &f.key,
@@ -777,7 +789,7 @@ fn markdown_hold_deferred_base_waits_for_the_recovery_lease_and_keeps_its_claim_
         Err(SyncError::LiveDocumentBindingActive)
     ));
     assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
-    let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+    let (mut drained, cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
         &mut f.store,
         &mut f.cache,
         &f.key,
@@ -785,6 +797,17 @@ fn markdown_hold_deferred_base_waits_for_the_recovery_lease_and_keeps_its_claim_
         &NoFaults,
     )
     .unwrap();
+    assert!(drained.waiting.is_none());
+    drained.refusals.extend(
+        crate::ydoc_apply::complete_ended_session_cleanup(
+            &mut f.store,
+            &f.key,
+            &NoLiveLeases,
+            cleanup,
+            &NoFaults,
+        )
+        .unwrap(),
+    );
     assert_eq!(drained.drained, 1);
     assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
     assert_eq!(

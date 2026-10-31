@@ -423,7 +423,6 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
-            crate::hosted::hold_unadmitted_in_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         if hosted {
@@ -451,6 +450,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
 
 pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
+        SyncError::Shared(original) => refusal_reason(original),
         SyncError::LiveDocumentBindingActive => Some(RefusalReason::InvalidInput {
             reason: "live document binding is still active".to_owned(),
         }),
@@ -476,13 +476,16 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled(_)
+        | SyncError::ValidationPending(_)
         | SyncError::ProjectionTooLarge { .. }
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }
         | SyncError::ShareVersionUnusable { .. }
         | SyncError::BlobInvalid
         | SyncError::BlobTooLarge { .. }
-        | SyncError::FaultCrash => None,
+        | SyncError::FaultCrash
+        | SyncError::Cancelled => None,
     }
 }
 
@@ -625,6 +628,7 @@ fn redelivered<T>(
         return Ok(Admission::Refused(refusal));
     }
     crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
+    crate::ydoc_recovery::record_released_copy_echo_in_tx(tx, envelope)?;
     Ok(Admission::Skipped)
 }
 

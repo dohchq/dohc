@@ -3,8 +3,9 @@ import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
+import { nativeSettlementId, prepareHostedSettlements, parseSettlementAuthors, settlementRecordDigest } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
+import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
 const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
 afterEach(() => logged.mockClear());
 afterEach(cleanupLiveDeliveryFixtures);
@@ -18,6 +19,13 @@ it("fits 1023 named authors and the window's marker in a settlement snapshot", (
   const marker = {kind: "unattributed"};
   expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
   expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
+});
+// The engine's `update_native_audit_fixture` writes this settlement.
+it("derives the engine's own settlement ID and record digest", () => {
+  const {payload} = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
+  const {record, recordDigest} = payload as unknown as {record: Record<string, unknown>; recordDigest: string};
+  expect(nativeSettlementId(record)).toBe(record.settlementId);
+  expect(settlementRecordDigest(record)).toBe(recordDigest);
 });
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });
@@ -188,15 +196,19 @@ function publication(
     : null;
   const namespace = String(row.relay_database_namespace),
     document = f.input.evidence.document;
+  const acceptedEventCount = Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0);
   const record = {
-    settlementId: `settlement-${id}`,
+    settlementId: "",
     relayDatabaseNamespace: namespace,
     binding: captured.metadata.binding,
+    hostCoordinate: {hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"},
     previousCursor: previous,
     terminalCursor: receipt.journalCursor,
-    acceptedEventCount:
-      Number(row.accepted_event_count) -
-      Number(prior?.accepted_event_count ?? 0),
+    previousYdocSequence: 0,
+    localYdocSequence: 1,
+    applicationCount: acceptedEventCount,
+    nativeIntervalDigest: hash(`native-interval-${id}`),
+    acceptedEventCount,
     acceptedIntervalDigest: hash(
       JSON.stringify([
         "live-settlement-accepted-interval-v1",
@@ -222,8 +234,12 @@ function publication(
     ),
     momentId: id,
     markdownDigest: markdownSha,
+    sourceStateVectorDigest: hash(`state-vector-${id}`),
     acceptedStateBlobSha256: stateSha,
+    recordedAtMs: 1,
+    restoreOperationId: null,
   };
+  record.settlementId = nativeSettlementId(record);
   const payload = {
     momentId: id,
     objectId: document.objectId,
@@ -240,7 +256,7 @@ function publication(
     recordedAtMs: 1,
     settlementReference: {
       formatVersion: 1,
-      recordDigest: hash(stableJsonStringify(record)),
+      recordDigest: settlementRecordDigest(record),
       record,
     },
   };
@@ -399,7 +415,7 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
     expect(append(f,[first.op]).settlementRefusals).toBeUndefined();
     expect(first.receipt.journalCursor).toBe(7);
     let fileDigest = f.input.evidence.projectedMarkdownSha256, terminal = first.receipt, requestId = 0;
-    let next: ReturnType<typeof publication> | undefined, failSettle = restart;
+    let next: ReturnType<typeof publication> | undefined, failSettle = restart, cutSettled = false;
     const methods: string[] = [];
     const client = {
       async sendRequest(input: Parameters<EngineClient["sendRequest"]>[0]) {
@@ -408,14 +424,16 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
         if(input.method === "liveApplication.ownerState")return {id: input.id,result: {
           adoptionId: "handover",expectedLocalSequence: 1,throughCursor: null,sessionId: "session"}};
         if(input.method === "liveApplication.ownerOutbox") {
-          // A collaborator keeps typing while this delivery pass drains the outbox.
-          next ??= publication(f,"typed-through-handover",7,fileDigest,1);
+          // A collaborator keeps typing while this delivery pass drains the
+          // outbox. The pass reads the empty queue once before the cut, too.
+          if(cutSettled) next ??= publication(f,"typed-through-handover",7,fileDigest,1);
           return {id: input.id,result: {outboxId: null,pendingBytes: 0,state: "active",retryDeliveryId: null}};
         }
         expect(input.method).toBe("liveApplication.settle");
         if(failSettle){failSettle = false;throw new Error("relay restarted before empty settle");}
         const empty = terminal.journalCursor === 7;
         fileDigest = empty ? first.markdownSha : next!.markdownSha;
+        cutSettled = true;
         return {id: input.id,result: {status: "settled",settlement: {
           settlementId: empty ? null : next!.record.settlementId,previousCursor: 7,terminalCursor: terminal.journalCursor,
           applicationCount: empty ? 0 : 1,localYDocSequence: empty ? 1 : 2,momentId: empty ? "cut" : "typed-through-handover",
@@ -441,11 +459,16 @@ it.each([false,true])("settles the cut before a receipt in the adoption pass, re
     let delivery = consumer();
     if(restart) {
       await expect(delivery.drain(f.input.evidence.document)).rejects.toThrow("relay restarted");
-      expect(methods).not.toContain("liveApplication.ownerOutbox");
+      // Only the seed check read the queue; the pass drained nothing.
+      expect(methods.filter(method => method === "liveApplication.ownerOutbox")).toHaveLength(1);
+      expect(methods.at(-1)).toBe("liveApplication.settle");
       delivery = consumer();
     }
     expect(await delivery.drain(f.input.evidence.document)).toMatchObject({kind: "done",terminalReceipt: {journalCursor: 8}});
-    expect(methods.indexOf("liveApplication.settle")).toBeLessThan(methods.indexOf("liveApplication.ownerOutbox"));
+    // A seedless adoption still settles its cut, between the seed check and the drain.
+    const settledAt = methods.lastIndexOf("liveApplication.settle");
+    expect(methods[settledAt - 1]).toBe("liveApplication.ownerOutbox");
+    expect(methods.slice(settledAt + 1)).toContain("liveApplication.ownerOutbox");
     expect(next!.payload.payloadBeforeBlobSha256).toBe(first.markdownSha);
     await delivery.settle(f.input.evidence.document);
     await prepare(f,[next!.op]);
@@ -515,6 +538,8 @@ it("refuses a changed retry of an accepted proof after stripping its client auth
 });
 it.each([
   ["before", "first-baseline-markdown"],
+  ["binding", "record-binding"],
+  ["previous-cursor", "record-previous-cursor"],
   ["state", "state-digest"],
   ["scope", "record-namespace"],
   ["moment", "moment-payload"],
@@ -549,6 +574,8 @@ it.each([
           record: Record<string, unknown>;
           recordDigest: string;
         };
+      if (field === "binding") reference.record.binding = {...first.record.binding, selectorPaths: []};
+      if (field === "previous-cursor") reference.record.previousCursor = -1;
       if (field === "before") payload.payloadBeforeBlobSha256 = "a".repeat(64);
       if (field === "state") {
         reference.record.acceptedStateBlobSha256 =
@@ -602,7 +629,9 @@ it.each([
           ...first.record.binding,
           restoreFenceGeneration: 99,
         };
-      reference.recordDigest = hash(stableJsonStringify(reference.record));
+      // Each forgery names its own settlement, so only the proof it changes refuses it.
+      reference.record.settlementId = nativeSettlementId(reference.record);
+      reference.recordDigest = settlementRecordDigest(reference.record);
       first.op.payloadJson = stableJsonStringify(payload);
       await prepare(f, [first.op]);
       const result = append(f, [first.op]);
@@ -629,6 +658,28 @@ it("exhausts the shared per-push budget retryably without consuming a coordinate
     ).rejects.toMatchObject({ code: "settlement_proof_budget" });
     expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(-1);
   } finally {
+    f.close();
+  }
+});
+// Proves: a worker that runs out of heap normalizing a single push's state
+// would on every retry, so the push is refused and the device's next op lands
+// behind it. A batch still answers retryably, so its host halves it.
+it("refuses a single push whose normalization runs its worker out of memory", async () => {
+  const f = registered({ deployment: true }), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
+  const outOfMemory = Object.assign(new Error("The worker reached its memory limit."), { code: "ERR_WORKER_OUT_OF_MEMORY" });
+  try {
+    const first = publication(f, "first"), opaque = (originSeq: number) => ({originSeq,opKind:"opaque",payloadJson:"{}",recordedAtMs:1});
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op])).toMatchObject({ inserted: 1, settlementRefusals: [{ originSeq: 0, momentId: "first" }] });
+    await prepare(f, [opaque(1)]);
+    expect(append(f, [opaque(1)])).toMatchObject({ inserted: 1, currentMaxOriginSeq: 1 });
+    const second = publication(f, "second", 0, undefined, 2);
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await expect(prepare(f, [second.op, opaque(3)])).rejects.toMatchObject({ code: "settlement_proof_budget" });
+    expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
+  } finally {
+    normalize.mockRestore();
     f.close();
   }
 });
@@ -727,9 +778,7 @@ it("rejects altered full content with the same CRDT clocks", async () => {
       createdAtMs: 1,
     });
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(
-      stableJsonStringify(first.record),
-    );
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
@@ -785,7 +834,7 @@ it("refuses a different full CRDT state even when its Markdown projection is unc
     const sha = hash(bytes);
     f.storage.putBlob({workspaceId:"workspace",sha256:sha,content:bytes,createdAtMs:1});
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(stableJsonStringify(first.record));
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
@@ -806,8 +855,8 @@ it("publishes admitted automation declaration without inferring its presser as a
     const forged = structuredClone(first.payload);
     forged.momentId = "copied-automation";
     forged.settlementReference.record.momentId = forged.momentId;
-    forged.settlementReference.record.settlementId = "copied-automation";
-    forged.settlementReference.recordDigest = hash(stableJsonStringify(forged.settlementReference.record));
+    forged.settlementReference.record.settlementId = nativeSettlementId(forged.settlementReference.record);
+    forged.settlementReference.recordDigest = settlementRecordDigest(forged.settlementReference.record);
     const copied = {...first.op, originSeq: 1, payloadJson: stableJsonStringify(forged)};
     await prepare(f, [copied]);
     expect(append(f, [copied]).settlementRefusals).toHaveLength(1);

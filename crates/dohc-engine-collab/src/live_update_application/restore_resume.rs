@@ -108,13 +108,14 @@ pub(super) fn replaced_head(
         namespace: fence.relay_database_namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: fence.old_binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let terminal = fence.terminal.as_ref().map_or(0, |r| r.journal_cursor);
     let (digest, cursor, sequence) =
         match settlement::restore::read_anchor_in(conn, &old, terminal, budget)? {
             Some(prior) => (prior.markdown, prior.cursor, prior.sequence),
-            None => origin_head(conn, &old, budget)?,
+            None => origin_head(conn, &old, &fence.origin, budget)?,
         };
     if (settled.previous_cursor, settled.previous_sequence) != (cursor, sequence) {
         return Err(ApplicationError::Corrupt);
@@ -122,44 +123,42 @@ pub(super) fn replaced_head(
     Ok(Some(digest))
 }
 
-/// The digest, cursor, and sequence of the origin `with_restore_settlement`
-/// would choose for `held`: its adoption, else its bootstrap at zero.
-fn origin_head(
+/// The digest, cursor, and sequence of the origin the fence recorded, which
+/// `with_restore_settlement` chose for `held`: that adopted activation, even
+/// one released since, else that bootstrap at zero.
+pub(super) fn origin_head(
     conn: &Connection,
     held: &Registration,
+    origin: &RestoreDeliveryOrigin,
     budget: &mut Budget,
 ) -> Result<(String, i64, i64), ApplicationError> {
     let b = &held.binding;
     let row = "WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
-    let p = params![
-        held.namespace,
-        b.workspace_id,
-        b.main_version_id,
-        b.object_id,
-        b.lineage_claim_id
-    ];
-    let adopted: bool = conn
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions {row})"),
-            p,
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
-    let json = if adopted {
-        budget.sql_json_array(
-            conn,
-            &["source_digest", "terminal_cursor", "local_ydoc_sequence"],
-            &format!("FROM live_owner_adoptions {row}"),
-            p,
-        )?
-    } else {
-        budget.sql_json_array(
-            conn,
-            &["projected_markdown_digest", "0", "0"],
-            &format!("FROM live_device_bootstraps {row}"),
-            p,
-        )?
+    let (columns, source, id) = match origin {
+        RestoreDeliveryOrigin::Owner { id } => (
+            ["source_digest", "terminal_cursor", "local_ydoc_sequence"],
+            format!("FROM live_owner_activations {row} AND activation_id=?6 AND evidence_digest IS NOT NULL"),
+            id,
+        ),
+        RestoreDeliveryOrigin::Bootstrap { id } => (
+            ["projected_markdown_digest", "0", "0"],
+            format!("FROM live_device_bootstraps {row} AND bootstrap_id=?6"),
+            id,
+        ),
     };
+    let json = budget.sql_json_array(
+        conn,
+        &columns,
+        &source,
+        params![
+            held.namespace,
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.lineage_claim_id,
+            id
+        ],
+    )?;
     serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)
 }
 
@@ -215,6 +214,7 @@ fn saved_in(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let anchor = settlement::restore::read_anchor_in(
@@ -304,6 +304,7 @@ fn native_saved(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     accepted_history::validate_resume_checkpoint(
@@ -315,11 +316,72 @@ fn native_saved(
     Ok(Some(receipt))
 }
 
+/// How a restore fence that moved the registration's generation ended.
+pub(super) enum Settled {
+    /// The restore applied and resumed.
+    Resumed(Box<NativeRestoreResumeReceipt>),
+    /// The restore was cancelled before anything applied it.
+    Cancelled(Box<NativeRestoreCancellationReceipt>),
+}
+
+impl Settled {
+    pub(super) fn operation_id(&self) -> &str {
+        match self {
+            Self::Resumed(receipt) => &receipt.operation_id,
+            Self::Cancelled(receipt) => &receipt.fence.operation.operation_id,
+        }
+    }
+
+    fn binding(&self) -> &LiveObjectBinding {
+        match self {
+            Self::Resumed(receipt) => &receipt.binding,
+            Self::Cancelled(receipt) => &receipt.binding,
+        }
+    }
+}
+
+/// The resumed restore that produced the registration's generation; None for
+/// a generation no restore produced, or one a cancelled restore did.
+#[cfg(test)]
 pub(super) fn generation(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+    Ok(match settled(conn, held)? {
+        Some(Settled::Resumed(receipt)) => Some(*receipt),
+        _ => None,
+    })
+}
+
+pub(super) fn settled(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<Option<Settled>, ApplicationError> {
     generation_with(conn, held, None)
+}
+
+/// The cancellation that ended the restore fenced into the registration's
+/// exact generation and binding, if one did.
+fn cancellation(
+    conn: &Connection,
+    held: &Registration,
+    budget: Option<&mut Budget>,
+) -> Result<Option<NativeRestoreCancellationReceipt>, ApplicationError> {
+    let b = &held.binding;
+    let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let Some(receipt) = restore_fence::cancelled_at(
+        conn,
+        &held.namespace,
+        &doc,
+        Some(&b.lineage_claim_id),
+        b.restore_fence_generation,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    settlement::validate_historical_binding(&receipt.binding, b)?;
+    Ok(Some(receipt))
 }
 
 /// Native generation reads bounded committed associations. An explicit budget
@@ -328,7 +390,7 @@ fn generation_with(
     conn: &Connection,
     held: &Registration,
     mut budget: Option<&mut Budget>,
-) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+) -> Result<Option<Settled>, ApplicationError> {
     let b = &held.binding;
     let generation = "FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6";
     let p = params![
@@ -360,11 +422,20 @@ fn generation_with(
     let Some(id) = id else {
         return Ok(None);
     };
+    if let Some(cancelled) = cancellation(conn, held, budget.as_deref_mut())? {
+        if cancelled.fence.operation.operation_id != id {
+            return Err(ApplicationError::Corrupt);
+        }
+        return Ok(Some(Settled::Cancelled(Box::new(cancelled))));
+    }
     let receipt = match budget {
         Some(budget) => saved_in(conn, held, &id, budget, None)?.map(|(receipt, ..)| receipt),
         None => native_saved(conn, held, &id)?,
     };
-    receipt.ok_or(ApplicationError::Conflict).map(Some)
+    receipt
+        .map(|receipt| Settled::Resumed(Box::new(receipt)))
+        .ok_or(ApplicationError::Conflict)
+        .map(Some)
 }
 
 pub(super) fn validate_origin_binding(
@@ -384,11 +455,13 @@ pub(super) fn validate_origin_binding_with(
     if original.restore_fence_generation == held.binding.restore_fence_generation {
         return settlement::validate_historical_binding(original, &held.binding);
     }
-    let resumed = generation_with(conn, held, budget)?.ok_or(ApplicationError::Conflict)?;
+    // A resumed restore, or one cancelled after its fence, produced the
+    // registration's generation.
+    let settled = generation_with(conn, held, budget)?.ok_or(ApplicationError::Conflict)?;
     let mut same = original.clone();
     same.restore_fence_generation = held.binding.restore_fence_generation;
     settlement::validate_historical_binding(&same, &held.binding)?;
-    if resumed.binding != held.binding {
+    if *settled.binding() != held.binding {
         return Err(ApplicationError::Conflict);
     };
     Ok(())
@@ -426,6 +499,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate: coordinate.clone(),
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         if let Some(receipt) =

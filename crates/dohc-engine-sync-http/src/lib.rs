@@ -1111,6 +1111,7 @@ impl RelayTransport for HttpRelayTransport {
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
+            redundant_recoveries: wire.redundant_recoveries,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1285,6 +1286,7 @@ impl HttpRelayTransport {
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
+            redundant_recoveries: wire.redundant_recoveries,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1484,11 +1486,19 @@ define_server_error_codes! {
     "collection_write_rate_limited" => |_| RelayError::HttpStatus(429),
     "conflict" => |_| RelayError::Conflict,
     "restore-in-progress" => |_| RelayError::Conflict,
+    "edits-pending" => |_| RelayError::Conflict,
+    "host-diverged" => |_| RelayError::Conflict,
+    "host-paused" => |_| RelayError::Conflict,
+    "host-no-edit-grant" => |_| RelayError::Conflict,
+    "host-moved" => |_| RelayError::Conflict,
+    "host-start-failed" => |_| RelayError::Conflict,
+    "host-not-loaded" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,
     "empty_selector" => |_| RelayError::BadRequest,
     "epoch_superseded" => |_| RelayError::EpochSuperseded,
+    "held_read_busy" => |_| RelayError::HttpStatus(429),
     "identity_not_recognized" => |_| RelayError::IdentityNotRecognized,
     "identity_required" => |_| RelayError::IdentityRequired,
     "settlement_proof_budget" => |_| RelayError::SettlementProofBudget,
@@ -1699,6 +1709,9 @@ struct WirePushResponse {
     /// Only the hosted log refuses ops one at a time. Sync validates which push may carry them.
     #[serde(default, rename = "refusals")]
     hosted_refusals: Vec<dohc_engine_sync::HostedPushRefusal>,
+    /// Only the owner's log names copies another device published first.
+    #[serde(default)]
+    redundant_recoveries: Vec<dohc_engine_sync::RedundantRecovery>,
     accepted: usize,
     inserted: usize,
     skipped: usize,

@@ -134,6 +134,7 @@ async fn push(actor: &ActorHandle) {
                         RelayIoResponse::Push(PushResponse {
                             settlement_refusals: Vec::new(),
                             hosted_refusals: Vec::new(),
+                            redundant_recoveries: Vec::new(),
                             accepted: 0,
                             inserted: 0,
                             skipped: 0,
@@ -147,6 +148,7 @@ async fn push(actor: &ActorHandle) {
                     RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
                         settlement_refusals: Vec::new(),
                         hosted_refusals: Vec::new(),
+                        redundant_recoveries: Vec::new(),
                         accepted: request.ops.len(),
                         inserted: request.ops.len(),
                         skipped: 0,
@@ -594,6 +596,7 @@ async fn cycle_push(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                 Ok(RelayIoResponse::Push(PushResponse {
                                     settlement_refusals: Vec::new(),
                                     hosted_refusals: Vec::new(),
+                                    redundant_recoveries: Vec::new(),
                                     accepted: n,
                                     inserted: n,
                                     skipped: 0,
@@ -921,14 +924,72 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
     supervisor.close(&path).unwrap();
 }
 
+/// Claim one row under `report` in `table`, as a pass reporting it would.
+async fn claimed_report_row(actor: &ActorHandle, table: &'static str, report: &'static str) {
+    actor
+        .run(move |store, _| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    let sql = match table {
+                        "ydoc_drain_reports" => {
+                            "INSERT INTO ydoc_drain_reports \
+                             (workspace_id,origin_id,origin_seq,report_json,report_id) \
+                             VALUES (?1,'peer',1,'{\"conflictsOpened\":1}',?2)"
+                        }
+                        _ => {
+                            "INSERT INTO relay_deferred_ops \
+                             (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity, \
+                              envelope_json,retained_bytes,report_id) \
+                             VALUES (?1,'peer',1,'epoch','stream','{}',1,?2)"
+                        }
+                    };
+                    tx.execute(sql, rusqlite::params![WORKSPACE, report])
+                        .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
-async fn cursor_settlement_report_invalidates_writer_cache_even_without_rows() {
+async fn cursor_releasing_only_drain_reports_keeps_writer_cache() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1000).unwrap().actor;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    claimed_report_row(&actor, "ydoc_drain_reports", "drain-report").await;
     let mut cursor = cycle_cursor();
-    cursor.settlement_report_id = Some("already-consumed-report".into());
+    cursor.settlement_report_id = Some("drain-report".into());
+    assert!(matches!(
+        commit_cycle(&actor, cursor).await.unwrap(),
+        RelayOperationOutcome::CursorCommitted {
+            writer_cache_changed: false,
+            ..
+        }
+    ));
+    let released = actor
+        .run(|store, _| Ok(store.table_row_count("ydoc_drain_reports").unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(released, 0, "the commit acknowledges the drain report");
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses);
+    assert_eq!(after.hits, before.hits + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_releasing_deferred_work_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    claimed_report_row(&actor, "relay_deferred_ops", "deferred-report").await;
+    let mut cursor = cycle_cursor();
+    cursor.settlement_report_id = Some("deferred-report".into());
     commit_cycle(&actor, cursor).await.unwrap();
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
     assert_eq!(after.misses, before.misses + 1);

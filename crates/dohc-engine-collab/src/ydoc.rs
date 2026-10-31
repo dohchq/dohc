@@ -529,6 +529,29 @@ impl Ydoc {
         Ok(())
     }
 
+    /// [`Ydoc::apply`], with what applying it deleted given to `deleted`
+    /// once its transaction commits, whether or not it applied whole: every
+    /// range it marked deleted, the items it integrated into an already
+    /// deleted parent and the pending deletions it could now apply among
+    /// them. Nothing is given when the bytes do not decode.
+    pub(crate) fn apply_seeing_deletions(
+        &self,
+        bytes: &[u8],
+        deleted: impl FnOnce(&IdSet),
+    ) -> Result<(), CollabError> {
+        crate::replay_parity::prevalidate_update_bytes(bytes)?;
+        let update = Update::decode_v1(bytes).map_err(|e| CollabError::MalformedUpdate {
+            reason: e.to_string(),
+        })?;
+        let mut txn = self.doc.transact_mut();
+        let applied = txn.apply_update(update);
+        txn.commit();
+        deleted(txn.delete_set());
+        applied.map_err(|e| CollabError::MalformedUpdate {
+            reason: e.to_string(),
+        })
+    }
+
     /// Apply an update only when a complete scratch replay keeps the epoch tag.
     pub fn apply_preserving_lineage_epoch(
         &self,
@@ -1313,6 +1336,57 @@ impl Ydoc {
             let el = frag.insert(txn, index, XmlElementPrelim::empty("paragraph"));
             el.insert(txn, 0, XmlTextPrelim::new(text));
         })
+    }
+
+    /// Remove the [`ROOT_BODY`] block at `index` and return the encoded v1
+    /// delta.
+    pub fn richdoc_remove_block(&self, index: u32) -> Vec<u8> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        self.with_delta(|txn| frag.remove_range(txn, index, 1))
+    }
+
+    /// Insert `text` at a UTF-16 `offset` into the text of the [`ROOT_BODY`]
+    /// block at `index` and return the encoded v1 delta. None when that block
+    /// holds no text first.
+    pub fn richdoc_insert_text(&self, index: u32, offset: u32, text: &str) -> Option<Vec<u8>> {
+        let content = self.richdoc_block_text(index)?;
+        Some(self.with_delta(|txn| content.insert(txn, offset, text)))
+    }
+
+    /// Replace `delete` UTF-16 units at `offset` in the text of the
+    /// [`ROOT_BODY`] block at `index` with `text`, as one keystroke, and
+    /// return only what that keystroke's transaction did, v1-encoded: unlike
+    /// [`Ydoc::richdoc_insert_text`], it costs its own size, not the
+    /// document's. None when that block holds no text first.
+    pub fn richdoc_keystroke(
+        &self,
+        index: u32,
+        offset: u32,
+        delete: u32,
+        text: &str,
+    ) -> Option<Vec<u8>> {
+        let content = self.richdoc_block_text(index)?;
+        let mut txn = self.doc.transact_mut();
+        if delete > 0 {
+            content.remove_range(&mut txn, offset, delete);
+        }
+        if !text.is_empty() {
+            content.insert(&mut txn, offset, text);
+        }
+        Some(txn.encode_update_v1())
+    }
+
+    /// The text the [`ROOT_BODY`] block at `index` holds first.
+    fn richdoc_block_text(&self, index: u32) -> Option<yrs::XmlTextRef> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let txn = self.doc.transact();
+        match frag.get(&txn, index) {
+            Some(XmlOut::Element(element)) => match element.get(&txn, 0) {
+                Some(XmlOut::Text(content)) => Some(content),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Rewrite the document's projected content to `markdown` and return one

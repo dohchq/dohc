@@ -6,7 +6,6 @@ import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
 import { momentDiffSides } from "./momentDiffSides";
 import { Menu, type MenuItem } from "../ui/Menu";
-import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
 import { CopyButton } from "../ui/CopyButton";
 import {
@@ -88,6 +87,7 @@ export function EngineMomentDiffPage({
   onReopenRestore,
   restoreRequested,
   onRestoreRequestTaken,
+  onOpenSharedRestore,
   steps,
   onOpenMoment,
 }: {
@@ -121,6 +121,9 @@ export function EngineMomentDiffPage({
   onReopenRestore: (momentId: string, path: string) => void;
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
+  // Opens the shell's Restore shared file for this change's file. The shell
+  // owns the dialog and its Notices rows, so they outlive this page.
+  onOpenSharedRestore: (momentId: string, path: string) => void;
   // The older and newer change to this file in the loaded History, which
   // the page opens in its place with its arrows or [ and ].
   steps?: MomentSteps | undefined;
@@ -149,7 +152,6 @@ export function EngineMomentDiffPage({
     | { status: "restored"; restored: "text" | "deleted"; message: string; undoOffered: boolean }
   >({ status: "idle" });
   const [moreOpen, setMoreOpen] = useState(false);
-  const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   // Restore and Undo restore take each other's place when one finishes, so
@@ -200,7 +202,6 @@ export function EngineMomentDiffPage({
           // The tab no longer names the file, so it shows only that a change exists.
           onPathResolved(momentId, null);
           setMoreOpen(false);
-          setSharedRestoreOpen(false);
           setState(result.status === "untracked" ? { status: "untracked" } : { status: "hidden", result });
           return;
         }
@@ -236,7 +237,6 @@ export function EngineMomentDiffPage({
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setMoreOpen(false);
-    setSharedRestoreOpen(false);
     setUndoMomentId(null);
   }, [tabPath]);
   // A step reads the next change in this page's place, which drops focus
@@ -487,7 +487,7 @@ export function EngineMomentDiffPage({
   // The rarer ways back, and the file itself, wait behind More.
   const moreItems: MenuItem[] = [
     ...(!readOnly && !isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md")
-      ? [{ id: "shared-restore", label: "Restore shared file…", testId: "engine-diff-shared-restore", disabled: restoreBusy, onSelect: () => setSharedRestoreOpen(true) }]
+      ? [{ id: "shared-restore", label: "Restore shared file…", testId: "engine-diff-shared-restore", disabled: restoreBusy, onSelect: () => onOpenSharedRestore(moment.id, moment.path) }]
       : []),
     ...(!readOnly && stopTarget
       ? [{ id: "stop-and-restore", label: "Stop and restore…", testId: "engine-diff-stop-and-restore", disabled: restoreBusy, onSelect: () => onStopAndRestore(stopTarget) }]
@@ -667,8 +667,6 @@ export function EngineMomentDiffPage({
           </>
         )}
       </div>
-      {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
-        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
     </section>
   );
 }

@@ -87,6 +87,10 @@ use yrs::{Any, ClientID, IdSet, StateVector};
 
 use crate::{CollabError, Ydoc};
 
+mod update_inspection;
+
+pub use update_inspection::{inspect_update, StructuralHold, UpdateInspection};
+
 /// The structural identity of one live non-string clock. String units are
 /// stored directly in [`IdentitySpan::StringRun`]. The kind tag plus canonical
 /// payload fingerprint covers JSON, binary, embed, format, type, doc, and any.
@@ -534,7 +538,8 @@ struct BlockDescriptor {
 enum BlockKind {
     Gc,
     Skip,
-    Item,
+    /// An item and its content ref number.
+    Item(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1968,8 +1973,8 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
 }
 
 /// Retain the complete ordered block topology and canonical subdocument
-/// options for the doc cache's differential oracle. Gate verdicts never use
-/// this scan.
+/// options for the doc cache's differential oracle and
+/// [`inspect_update`]. Gate verdicts never use this scan.
 fn scan_v2(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     scan(bytes, ScanVersion::V2)
 }
@@ -2021,7 +2026,7 @@ pub(crate) fn reader_metadata_only(checkpoint: &[u8], delta: &[u8]) -> Result<bo
             let Some(b) = block(candidate, id).or_else(|| block(base, id)) else {
                 return false;
             };
-            if b.kind != BlockKind::Item {
+            if !matches!(b.kind, BlockKind::Item(_)) {
                 return false;
             }
             if let Some(ParentDescriptor::Root(root)) = &b.parent {
@@ -2301,10 +2306,11 @@ fn scan_item(
     } else {
         (None, None)
     };
-    let len = scan_content(decoder, info & 0b0000_1111, id, structure, version)?;
+    let content_ref = info & 0b0000_1111;
+    let len = scan_content(decoder, content_ref, id, structure, version)?;
     Ok(ScannedBlock {
         len,
-        kind: BlockKind::Item,
+        kind: BlockKind::Item(content_ref),
         left_origin,
         right_origin,
         parent,

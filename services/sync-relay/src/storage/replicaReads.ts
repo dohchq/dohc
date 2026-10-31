@@ -1,5 +1,6 @@
 import type { StorageContext } from "./context";
 import { currentShareGrantSql } from "./currentShareGrant";
+import { LIVE_RESTORE_CANCELLATIONS } from "./liveRestoreCancellationSchema";
 
 const standingStatements = new WeakMap<StorageContext, ReturnType<StorageContext["db"]["prepare"]>>();
 export function readReplicaStanding(storage: StorageContext, workspaceId: string, shareGrantBindings?: string) {
@@ -8,7 +9,8 @@ export function readReplicaStanding(storage: StorageContext, workspaceId: string
   if (!statement) {
     statement = storage.db.prepare(`SELECT w.owner_user_id, w.replication_epoch, w.stream_identity, w.epoch_log_floor,
     COALESCE((SELECT MAX(relay_seq) FROM sync_relay_log WHERE workspace_id=w.workspace_id),0) AS log_seq,
-    COALESCE((SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0) AS journal_cursor,
+    MAX(COALESCE((SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0),
+      COALESCE((SELECT MAX(journal_cursor) FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE workspace_id=w.workspace_id AND journal_cursor IS NOT NULL),0)) AS journal_cursor,
     json_group_array(json_array(g.grant_id,g.generation)) AS share_grants
     FROM sync_relay_workspaces w JOIN sync_relay_shares s ON s.workspace_id=w.workspace_id
       JOIN sync_relay_share_grants g ON g.share_id=s.share_id

@@ -514,6 +514,7 @@ fn production_entrypoint_starts_empty_and_changes_membership_without_restarting(
         "liveApplication.attachWorkspace",
         "liveApplication.detachWorkspace",
         "liveApplication.unloadDocument",
+        "liveApplication.reconcileActivation",
     ]
     .into_iter()
     .enumerate()

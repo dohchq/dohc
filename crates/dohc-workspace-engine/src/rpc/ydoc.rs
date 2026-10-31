@@ -34,6 +34,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_runtime::actor::YdocCloseMaterialization;
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use serde::Deserialize;
 use serde::Serialize;
@@ -108,6 +109,8 @@ pub(crate) struct YdocSession {
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
     pub(super) restore_generation: Option<i64>,
+    /// The owner activation an imported session serves.
+    pub(super) activation_id: Option<String>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     author_settlement: AuthorSettlementQueue,
@@ -147,6 +150,7 @@ impl YdocSession {
             regime: Regime::Replicated,
             lineage_claim_id: Some(captured.source.lineage_claim_id.clone()),
             restore_generation: captured.restore_generation,
+            activation_id: Some(captured.activation_id.clone()),
             lineage_absent: false,
             first_update_pending: false,
             author_settlement: AuthorSettlementQueue::default(),
@@ -168,6 +172,7 @@ pub(super) struct YdocSessionView {
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
     pub(super) restore_generation: Option<i64>,
+    pub(super) activation_id: Option<String>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     pub(super) last_settled_sha: Option<String>,
@@ -1600,6 +1605,7 @@ impl EngineService {
                 regime: state.regime,
                 lineage_claim_id: state.lineage_claim_id,
                 restore_generation: state.restore_generation,
+                activation_id: None,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 author_settlement: AuthorSettlementQueue::default(),
@@ -2240,38 +2246,57 @@ impl EngineService {
         let close_workspace_id = open.workspace_id.clone();
         let close_task = tokio::spawn(async move {
             let _serial = serial;
-            let close_result = actor
-                .ydoc_close_session_materialized(
-                    close_root,
-                    session_key,
-                    close_self_writes,
+            let committed = actor
+                .ydoc_close_commit(
+                    session_key.clone(),
+                    Some(close_root.clone()),
                     now,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
                 )
                 .await;
+            let drains = match committed {
+                Ok((_, drains)) => drains,
+                // Reinsert only on a genuine close refusal (UnsettledClose
+                // and friends), which committed nothing — an
+                // ActorUnavailable/WorkerPanicked error means the workspace
+                // was torn down while this task ran, and resurrecting the
+                // entry would keep its embedded lease alive past the
+                // eviction, leaving the doc ydoc-session-busy for the next
+                // workspace open.
+                Err(error) => {
+                    if matches!(error, RuntimeError::Collab(_) | RuntimeError::Domain(_))
+                        && let Some(entry) = taken
+                    {
+                        lock(&sessions).insert(session_id, entry);
+                    }
+                    return Err(error);
+                }
+            };
+            if !drains {
+                return Ok(());
+            }
+            // The close committed, so the session stays closed whatever its
+            // drain answers; a retried close finds no session to close.
+            let record_facts = actor
+                .ydoc_close_drain(
+                    session_key,
+                    Some(YdocCloseMaterialization {
+                        root_dir: close_root,
+                        self_writes: close_self_writes,
+                    }),
+                    now,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await?;
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
             // committed these history rows.
-            if let Ok(closed) = &close_result {
-                for facts in &closed.record_facts {
-                    emit_record_events(&close_events, &close_workspace_id, facts);
-                }
+            for facts in &record_facts {
+                emit_record_events(&close_events, &close_workspace_id, facts);
             }
-            // Reinsert only on a genuine close refusal (UnsettledClose and
-            // friends) — an ActorUnavailable/WorkerPanicked error means the
-            // workspace was torn down while this task ran, and resurrecting
-            // the entry would keep its embedded lease alive past the
-            // eviction, leaving the doc ydoc-session-busy for the next
-            // workspace open.
-            if matches!(
-                close_result,
-                Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
-            ) && let Some(entry) = taken
-            {
-                lock(&sessions).insert(session_id, entry);
-            }
-            close_result
+            Ok(())
         });
         let close_result = close_task
             .await
@@ -2479,6 +2504,7 @@ impl EngineService {
                 regime: session.regime,
                 lineage_claim_id: session.lineage_claim_id.clone(),
                 restore_generation: session.restore_generation,
+                activation_id: session.activation_id.clone(),
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
                 last_settled_sha: session.last_settled_sha.clone(),
@@ -3278,6 +3304,21 @@ mod tests {
             .live_application_register(&ctx, Some(handle.clone()), json!({"binding":binding}))
             .await
             .unwrap();
+        let registered = |service: &EngineService| {
+            service
+                .live_application_registration(
+                    &connection.handle(),
+                    Some(&handle),
+                    registration["registrationId"].as_u64().unwrap(),
+                )
+                .unwrap()
+                .activation_id()
+        };
+        assert_eq!(
+            registered(&service),
+            None,
+            "a registration that named nothing serves no activation before its adoption"
+        );
         let cut = dohc_engine_collab::live_update_application::OwnerAdoptionCut {
             relay_database_namespace: "owner-source-relay".into(),
             adoption_id: "actual-owner".into(),
@@ -3294,6 +3335,11 @@ mod tests {
             expected_local_sequence: sequence,
             events: vec![],
             terminal_receipt: None,
+            retained_prefix: None,
+            reconstruction:
+                dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
         };
         for replay in [false, true] {
             let mut ctx = RequestContext::unbounded();
@@ -3320,7 +3366,13 @@ mod tests {
                 adopted.response.result["adoption"]["localYDocSequence"],
                 sequence
             );
-            assert!(adopted.output_guard.unwrap().is_current());
+            let guard = adopted.output_guard.unwrap();
+            assert!(guard.is_current());
+            assert_eq!(registered(&service).as_deref(), Some("actual-owner"));
+            assert!(
+                format!("{guard:?}").contains(r#"activation_id: Some("actual-owner")"#),
+                "the adoption's answer belongs to the activation it made: {guard:?}"
+            );
         }
         session = assert_adopted_owner_move_refused(
             &service,

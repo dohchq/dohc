@@ -4,8 +4,9 @@ use crate::{EngineService, lock};
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult, BootstrapResult,
-    LiveApplicationBootstrap, NativeRestoreFence, UnloadPending,
+    AdmittedLiveUpdate, ApplicationError, ApplicationHostCoordinate, ApplicationResult,
+    BootstrapResult, LiveApplicationBootstrap, NativeRestoreFence, RetiredActivations,
+    UnloadPending,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -62,6 +63,8 @@ pub(crate) struct Host {
     open: Arc<OpenWorkspace>,
     connection: ConnectionHandle,
     owner: ActorLiveApplicationOwner,
+    /// The activations a retirement tore down; shared with `owner`.
+    retired_activations: RetiredActivations,
     namespace: String,
     coordinate: ApplicationHostCoordinate,
     max_registrations: usize,
@@ -91,6 +94,10 @@ impl Host {
             && self.connection.is_current()
             && self.owner.is_current()
     }
+
+    fn retired_activations(&self) -> RetiredActivations {
+        self.retired_activations.clone()
+    }
 }
 
 pub(crate) struct Registration {
@@ -99,6 +106,14 @@ pub(crate) struct Registration {
     object_id: String,
     binding: LiveObjectBinding,
     retired: CancelSignal,
+}
+
+impl Registration {
+    /// The activation this registration serves, as its native registration
+    /// resolved it, including one its adoption made.
+    pub(crate) fn activation_id(&self) -> Option<String> {
+        self.handle.activation_id()
+    }
 }
 
 #[derive(Default)]
@@ -116,6 +131,16 @@ impl Registry {
 
     pub(super) fn has_host(&self, workspace: &WorkspaceHandle) -> bool {
         self.hosts.contains_key(workspace)
+    }
+
+    /// The activations the workspace's host retired, once it has a host.
+    pub(super) fn retired_activations(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Option<RetiredActivations> {
+        self.hosts
+            .get(workspace)
+            .map(|host| host.retired_activations())
     }
 
     pub(crate) fn retire_workspace(&mut self, workspace: &Arc<OpenWorkspace>) {
@@ -170,6 +195,8 @@ pub(crate) enum LiveApplicationOperation {
 
 struct ApplicationOutputGuard {
     registration: Arc<Registration>,
+    /// The activation the guarded output belongs to.
+    activation_id: Option<String>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
     reservation: Mutex<Option<Arc<dyn Send + Sync>>>,
@@ -184,14 +211,20 @@ impl Drop for RetireOnCancellation {
     }
 }
 
+/// Output a workspace's live host answers, withheld once the host retires:
+/// its connection ends or its workspace detaches.
 #[derive(Debug)]
-struct RestoreFenceOutputGuard {
+struct HostOutputGuard {
     host: Arc<Host>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
+    /// A read's answer, which has no side effect, so its caller is told
+    /// when it is cancelled, expires, or its host retires, rather than left
+    /// waiting, for as long as its connection lasts.
+    read: bool,
 }
 
-impl OutputGuard for RestoreFenceOutputGuard {
+impl OutputGuard for HostOutputGuard {
     fn cancel_signal(&self) -> CancelSignal {
         self.cancel.clone()
     }
@@ -215,11 +248,44 @@ impl OutputGuard for RestoreFenceOutputGuard {
         action();
         true
     }
+    fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+        let _fence = lock(&self.host.output_fence);
+        if !self.host.current(&self.host.connection) {
+            return false;
+        }
+        action();
+        true
+    }
+    fn withheld_error(&self) -> Option<WireError> {
+        if !self.read || !self.host.connection.is_current() {
+            return None;
+        }
+        // `retire` cancels `retired` before it retires the owner, so check both.
+        if self.host.retired.is_cancelled() || !self.host.current(&self.host.connection) {
+            return Some(WireError::new(
+                ErrorCode::WorkspaceUnavailable,
+                "held document answer retired",
+            ));
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "held document answer deadline elapsed",
+            ));
+        }
+        self.cancel
+            .is_cancelled()
+            .then(|| WireError::new(ErrorCode::Cancelled, "held document answer cancelled"))
+    }
 }
 
 impl std::fmt::Debug for ApplicationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApplicationOutputGuard")
+            .field("activation_id", &self.activation_id)
             .finish_non_exhaustive()
     }
 }
@@ -243,10 +309,13 @@ impl OutputGuard for ApplicationOutputGuard {
         self.deadline
     }
     fn is_current_ignoring_cancel(&self) -> bool {
-        self.registration
-            .host
-            .current(&self.registration.host.connection)
+        let host = &self.registration.host;
+        host.current(&host.connection)
             && !self.registration.retired.is_cancelled()
+            && !self
+                .activation_id
+                .as_deref()
+                .is_some_and(|id| host.retired_activations.contains(id))
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
@@ -280,14 +349,19 @@ fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
 /// The binding's queue: its ID, pending bytes, state and granted Try again.
 type OwnerOutboxRow = (String, i64, String, Option<String>);
 
+/// The outbox at the registration's exact binding. A succession leaves
+/// retired outboxes at earlier paths of the same generation, so path and
+/// selectors decide which one owner deliveries come from.
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<OwnerOutboxRow>, dohc_engine_storage::StorageError> {
     use rusqlite::OptionalExtension;
+    let selectors = serde_json::to_string(&binding.selector_paths)
+        .map_err(dohc_engine_storage::StorageError::persist_public)?;
     conn.query_row(
-        "SELECT outbox_id,pending_bytes,state,retry_delivery_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
-        rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation],
+        "SELECT outbox_id,pending_bytes,state,retry_delivery_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND selector_paths_json=?6 AND restore_fence_generation=?7",
+        rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,selectors,binding.restore_fence_generation],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )
     .optional()
@@ -295,6 +369,29 @@ fn read_owner_outbox(
 }
 
 impl EngineService {
+    /// A guard for a read `workspace`'s live host answers on `ctx`'s behalf.
+    pub(super) fn live_host_read_guard(
+        &self,
+        ctx: &RequestContext,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Arc<dyn OutputGuard>, WireError> {
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        let guard = HostOutputGuard {
+            host,
+            cancel: ctx.cancel.clone(),
+            deadline: ctx.deadline,
+            read: true,
+        };
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(Arc::new(guard))
+    }
+
     pub(super) async fn live_application_ack(
         &self,
         ctx: RequestContext,
@@ -334,6 +431,7 @@ impl EngineService {
             ));
         }
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
@@ -411,7 +509,8 @@ impl EngineService {
                 .map_err(|_| workspace_unavailable())?;
             let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
                 use rusqlite::OptionalExtension;
-                let prior: Option<(String,i64,i64)> = conn.query_row("SELECT adoption_id,local_ydoc_sequence,terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+                let prior: Option<(String,i64,i64)> = conn.query_row(&format!("SELECT activation_id,local_ydoc_sequence,terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+                    dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
                 let (outbox_id,pending_bytes,outbox_state,retry_delivery_id) = read_owner_outbox(conn,b)?.map_or((None,0,None,None),|(id,bytes,state,retry)|(Some(id),bytes,Some(state),retry));
                 if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state,"retryDeliveryId":retry_delivery_id})); }
@@ -468,12 +567,13 @@ impl EngineService {
         {
             return Err(workspace_unavailable());
         }
-        let guard = Arc::new(ApplicationOutputGuard {
+        let mut guard = ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
             reservation: Mutex::new(Some(reservation.clone())),
-        });
+        };
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
@@ -493,13 +593,15 @@ impl EngineService {
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
+        // The answer belongs to the activation this adoption made.
+        guard.activation_id = guard.registration.activation_id();
         Ok(ServiceResponse {
             response: Response {
                 id: request_id,
                 result: json!({"status":"adopted","adoption":result}),
             },
             blob_egress: None,
-            output_guard: Some(guard),
+            output_guard: Some(Arc::new(guard)),
         })
     }
     pub(super) async fn live_application_settle(
@@ -507,29 +609,39 @@ impl EngineService {
         ctx: RequestContext,
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
+        /// A registration's settlement, or a retirement's, never both.
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
-            registration_id: u64,
+            registration_id: Option<u64>,
+            retirement: Option<dohc_engine_collab::live_update_application::RetirementKey>,
             terminal_receipt:
                 Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
             #[serde(default)]
             owner_session_id: Option<String>,
         }
+        let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement");
         if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid-live-settlement",
-            ));
+            return Err(invalid());
         }
         require_caller_deadline(&request)?;
-        let params: Params = serde_json::from_value(request.params)
-            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement"))?;
+        let params: Params =
+            serde_json::from_value(request.params.clone()).map_err(|_| invalid())?;
+        let registration_id = match (params.registration_id, params.retirement) {
+            (Some(id), None) => id,
+            (None, Some(key)) => {
+                self.configured_host_caller(&ctx)?;
+                return self
+                    .live_application_settle_retirement(ctx, request, key, params.terminal_receipt)
+                    .await;
+            }
+            _ => return Err(invalid()),
+        };
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let registration = self.live_application_registration(
             connection,
             request.workspace.as_ref(),
-            params.registration_id,
+            registration_id,
         )?;
         let host = registration.host.clone();
         let cancellation = super::request::OperationCancellation::new(&ctx);
@@ -577,6 +689,7 @@ impl EngineService {
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
@@ -727,10 +840,11 @@ impl EngineService {
         let old_binding = params.operation.old_binding.clone();
         let retired_binding = old_binding.clone();
         let sessions = Arc::clone(&self.sessions);
-        let guard = Arc::new(RestoreFenceOutputGuard {
+        let guard = Arc::new(HostOutputGuard {
             host: host.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
+            read: false,
         });
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let worker_host = host.clone();
@@ -841,6 +955,83 @@ impl EngineService {
         })
     }
 
+    /// `liveApplication.cancelRestoreFence`: end a restore the relay fenced
+    /// before its admission. The params name the operation's fence:
+    /// `{operationId, objectId, lineageClaimId, hostId, newFence}`. `hostId`
+    /// is the host that fenced it and must be this one. The current host
+    /// fixes the namespace and workspace; no param names them. The answer is
+    /// durable before it is sent, and names the generation and binding the
+    /// relay's retirement key takes:
+    /// - `{"status":"cancelled","hostId":...,"generation":newFence-1,"binding":...}`:
+    ///   no fence of the operation committed, and none ever will, even one
+    ///   in flight or replayed. `generation` is the base of the cancelled
+    ///   operation. `binding` is the document's binding at that generation;
+    ///   null means the document holds none there now, released or moved on
+    ///   by a later restore, and the relay must not record it.
+    /// - `{"status":"fenceCancelled","hostId":...,"generation":newFence,"binding":...,"receipt":...}`:
+    ///   the fence committed and this cancellation ended it before any
+    ///   application. The document stays at `newFence`, live application
+    ///   unavailable, under `binding`, the fence's stopped binding; its
+    ///   content and accepted endpoint are as the fence left them.
+    ///   `receipt` is the terminal cancellation the relay journal carries to
+    ///   passive replicas. Prepare, apply and fence of the operation refuse
+    ///   from then on.
+    ///
+    /// A replay answers the same. Another key for the operation, another
+    /// host, a key the document's generation has passed or does not hold, or
+    /// a restore already admitted answers `CONFLICT`.
+    pub(super) async fn live_application_cancel_restore_fence(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{
+            RestoreFenceCancellation, RestoreFenceCancellationOutcome,
+        };
+        let input: RestoreFenceCancellation = serde_json::from_value(params).map_err(|_| {
+            WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-restore-fence-cancellation",
+            )
+        })?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
+            return Err(workspace_unavailable());
+        }
+        let now_ms = super::request::now_ms()?;
+        let host_id = input.host_id.clone();
+        let outcome = host
+            .owner
+            .cancel_restore_fence(
+                host.namespace.clone(),
+                host.coordinate.host_id.clone(),
+                input,
+                now_ms,
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(match outcome {
+            RestoreFenceCancellationOutcome::Cancelled {
+                generation,
+                binding,
+            } => {
+                json!({"status":"cancelled","hostId":host_id,"generation":generation,"binding":binding})
+            }
+            RestoreFenceCancellationOutcome::FenceCancelled(receipt) => {
+                json!({"status":"fenceCancelled","hostId":host_id,
+                    "generation":receipt.binding.restore_fence_generation,
+                    "binding":receipt.binding,"receipt":receipt})
+            }
+        })
+    }
+
     /// Trusted host setup. No RPC derives these fields from a caller's event.
     #[doc(hidden)]
     pub async fn provision_live_application(
@@ -879,6 +1070,7 @@ impl EngineService {
             retired: CancelSignal::new(),
             open,
             connection: connection.clone(),
+            retired_activations: owner.retired_activations(),
             owner,
             namespace: config.namespace,
             coordinate: config.coordinate,
@@ -920,12 +1112,17 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
             binding: LiveObjectBinding,
+            /// Only the configured session host names the activation it serves.
+            activation_id: Option<String>,
         }
         let params: Params = serde_json::from_value(params)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-registration"))?;
+        if params.activation_id.is_some() {
+            self.configured_host_caller(ctx)?;
+        }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let workspace = workspace.ok_or_else(workspace_unavailable)?;
         let host = lock(&self.live_applications)
@@ -945,7 +1142,11 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         host.owner
-            .validate_binding(params.binding.clone())
+            .validate_binding(
+                host.namespace.clone(),
+                params.binding.clone(),
+                params.activation_id.clone(),
+            )
             .await
             .map_err(map_runtime)?;
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
@@ -993,14 +1194,29 @@ impl EngineService {
         let worker_host = host.clone();
         let handle = tokio::spawn(async move {
             let _permit = permit;
-            worker_host
-                .owner
-                .register(
-                    worker_host.namespace.clone(),
-                    worker_host.coordinate.clone(),
-                    params.binding,
-                )
-                .await
+            match params.activation_id {
+                Some(activation_id) => {
+                    worker_host
+                        .owner
+                        .register_activation(
+                            worker_host.namespace.clone(),
+                            worker_host.coordinate.clone(),
+                            params.binding,
+                            activation_id,
+                        )
+                        .await
+                }
+                None => {
+                    worker_host
+                        .owner
+                        .register(
+                            worker_host.namespace.clone(),
+                            worker_host.coordinate.clone(),
+                            params.binding,
+                        )
+                        .await
+                }
+            }
         })
         .await
         .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
@@ -1033,6 +1249,8 @@ impl EngineService {
 
     /// Release one document's registrations, sessions, leases, and cache.
     /// Durable CRDT, adoption, and history stay, so the next capture reloads it.
+    /// The unload names the activation it ends: state serving another one,
+    /// or any while it names none, refuses it before anything is released.
     pub(super) async fn live_application_unload(
         &self,
         ctx: &RequestContext,
@@ -1043,10 +1261,18 @@ impl EngineService {
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
             object_id: String,
+            activation_id: Option<String>,
         }
         self.configured_host_caller(ctx)?;
         let params: Params = serde_json::from_value(params)
-            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-unload"))?;
+            .ok()
+            .filter(|params: &Params| {
+                params
+                    .activation_id
+                    .as_ref()
+                    .is_none_or(|id| (1..=1024).contains(&id.len()))
+            })
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-live-unload"))?;
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let workspace = workspace.ok_or_else(workspace_unavailable)?;
         let host = lock(&self.live_applications)
@@ -1066,13 +1292,23 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let object_id = params.object_id;
-        let mut keys: Vec<DocKey> = lock(&self.sessions)
-            .values()
-            .filter(|session| session.workspace == workspace && session.key.object_id == object_id)
-            .map(|session| session.key.clone())
-            .collect();
+        let activation_id = params.activation_id;
+        // Untagged state is ordinary and goes with any unload of its document.
+        let ends = |tag: Option<&str>| tag.is_none_or(|tag| Some(tag) == activation_id.as_deref());
+        let mut keys = Vec::new();
+        for session in lock(&self.sessions).values() {
+            if session.workspace == workspace && session.key.object_id == object_id {
+                if !ends(session.activation_id.as_deref()) {
+                    return Err(map_runtime(ApplicationError::Conflict.into()));
+                }
+                keys.push(session.key.clone());
+            }
+        }
         for registration in lock(&self.live_applications).registrations.values() {
             if Arc::ptr_eq(&registration.host, &host) && registration.object_id == object_id {
+                if !ends(registration.activation_id().as_deref()) {
+                    return Err(map_runtime(ApplicationError::Conflict.into()));
+                }
                 let b = &registration.binding;
                 keys.push(
                     DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id).map_err(
@@ -1094,9 +1330,11 @@ impl EngineService {
         let task_host = host.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
+            let ends =
+                |tag: Option<&str>| tag.is_none_or(|tag| Some(tag) == activation_id.as_deref());
             let pending = task_host
                 .owner
-                .unload(object_id.clone(), keys, root, now_ms)
+                .unload(object_id.clone(), activation_id.clone(), keys, root, now_ms)
                 .await?;
             if pending.is_none() {
                 {
@@ -1105,6 +1343,7 @@ impl EngineService {
                     registry.registrations.retain(|_, registration| {
                         if Arc::ptr_eq(&registration.host, &task_host)
                             && registration.object_id == object_id
+                            && ends(registration.activation_id().as_deref())
                         {
                             registration.retired.cancel();
                             false
@@ -1114,7 +1353,9 @@ impl EngineService {
                     });
                 }
                 lock(&sessions).retain(|_, session| {
-                    session.workspace != workspace || session.key.object_id != object_id
+                    session.workspace != workspace
+                        || session.key.object_id != object_id
+                        || !ends(session.activation_id.as_deref())
                 });
             }
             Ok::<_, dohc_engine_runtime::RuntimeError>(pending)
@@ -1132,6 +1373,336 @@ impl EngineService {
                 UnloadPending::Materialization => "materialization-pending",
             }}),
         })
+    }
+
+    /// `liveApplication.reconcileActivation`: prove what one activation the
+    /// relay fenced delivered and applied, so Stop can retire it exactly.
+    /// Its key validates first; an invalid one, and a released activation's
+    /// replay, tear nothing down. Otherwise Phase A ends the activation here
+    /// before the durable pass: its registrations, sessions, leases and cache
+    /// go, and nothing registers or answers for it again. Its binding and
+    /// retained input stay. One task runs both, so a caller that stops
+    /// waiting cannot leave Phase A half done, and a retry answers the same.
+    pub(super) async fn live_application_reconcile(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{
+            JournalEvidence, LiveUpdateReceipt, Reconciliation, RetirementKey,
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            object_id: String,
+            lineage_claim_id: String,
+            activation_id: String,
+            restore_fence_generation: i64,
+            accepted_through: i64,
+            after_receipt: Option<LiveUpdateReceipt>,
+            max_applications: usize,
+            journal: Option<JournalEvidence>,
+        }
+        self.configured_host_caller(ctx)?;
+        let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-live-reconciliation");
+        if params.get("afterReceipt").is_none() {
+            return Err(invalid());
+        }
+        let params: Params = serde_json::from_value(params).map_err(|_| invalid())?;
+        let scope = self.configured_retirement_scope(ctx, params.max_applications)?;
+        let key = RetirementKey {
+            object_id: params.object_id,
+            lineage_claim_id: params.lineage_claim_id,
+            activation_id: params.activation_id,
+            restore_fence_generation: params.restore_fence_generation,
+            accepted_through: params.accepted_through,
+        };
+        let reconciliation = self
+            .run_retirement(
+                ctx,
+                workspace,
+                scope,
+                key,
+                false,
+                "live reconciliation",
+                move |host, scope, key| async move {
+                    host.owner
+                        .reconcile_activation(scope, key, params.after_receipt, params.journal)
+                        .await
+                },
+            )
+            .await?
+            .map_err(map_runtime)?;
+        Ok(match reconciliation {
+            Reconciliation::PendingDelivery(deliveries) => {
+                json!({"status":"pending","reason":"delivery","deliveries":deliveries})
+            }
+            Reconciliation::SeedQuarantined(deliveries) => {
+                json!({"status":"pending","reason":"seed-quarantined","deliveries":deliveries})
+            }
+            Reconciliation::Reconciled {
+                adoption,
+                applications,
+                has_more_applications,
+                settle,
+            } => json!({"status":"reconciled","adoption":adoption,"applications":applications,
+                "hasMoreApplications":has_more_applications,"settle":settle}),
+        })
+    }
+
+    /// `liveApplication.releaseActivation`: release the activation the relay
+    /// fenced once its document parked, proving its delivery, application
+    /// and settlement again in the release's own transaction. A never-adopted
+    /// source may release before parking. A released activation answers
+    /// from its stored release.
+    pub(super) async fn live_application_release(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{Release, ReleasePending, RetirementKey};
+        self.configured_host_caller(ctx)?;
+        let key: RetirementKey = serde_json::from_value(params)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-release"))?;
+        let scope = self.configured_retirement_scope(ctx, 1)?;
+        let now_ms = super::request::now_ms()?;
+        let release = self
+            .run_retirement(
+                ctx,
+                workspace,
+                scope,
+                key,
+                true,
+                "live release",
+                move |host, scope, key| async move {
+                    host.owner
+                        .release_activation(scope, host.coordinate.clone(), key, now_ms)
+                        .await
+                },
+            )
+            .await?
+            .map_err(map_runtime)?;
+        Ok(match release {
+            Release::Released { replayed, boundary } => {
+                json!({"status":"released","replayed":replayed,"boundary":boundary})
+            }
+            Release::Pending(reason) => json!({"status":"pending","reason":match reason {
+                ReleasePending::Parking => "parking",
+                ReleasePending::Reconciliation => "reconciliation",
+            }}),
+        })
+    }
+
+    /// `liveApplication.prepareRetirement`: before the relay fences an
+    /// activation, check that none of its native edits waits for delivery,
+    /// then refuse its local appends until its release, its retirement's
+    /// intent, or the end of this connection. A pending answer blocks nothing.
+    pub(super) async fn live_application_prepare_retirement(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{PreparationKey, PreparationPending};
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let scope = self.configured_retirement_scope(ctx, 1)?;
+        let pending = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .prepare_retirement(scope, key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match pending {
+            None => json!({"status":"prepared"}),
+            Some(reason) => json!({"status":"pending","reason":match reason {
+                PreparationPending::NativePending => "native-pending",
+                PreparationPending::RetryOutstanding => "retry-outstanding",
+            }}),
+        })
+    }
+
+    /// `liveApplication.releaseRetirementPreparation`: reopen the local
+    /// appends this connection's preparation refused. Idempotent.
+    pub(super) async fn live_application_release_retirement_preparation(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::PreparationKey;
+        self.configured_host_caller(ctx)?;
+        let key: PreparationKey = serde_json::from_value(params).map_err(|_| {
+            WireError::new(ErrorCode::InvalidParams, "invalid-retirement-preparation")
+        })?;
+        let released = self
+            .preparing_host(ctx, workspace)?
+            .owner
+            .release_retirement_preparation(key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({"released":released}))
+    }
+
+    /// The workspace's host, when this connection owns it. Its owner's
+    /// lifetime bounds every preparation it makes.
+    fn preparing_host(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+    ) -> Result<Arc<Host>, WireError> {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .filter(|host| host.current(connection))
+            .cloned()
+            .ok_or_else(workspace_unavailable)
+    }
+
+    /// The retirement form of `liveApplication.settle`: settle the activation
+    /// a retirement names through its durable binding. It needs no live
+    /// registration and opens no session.
+    async fn live_application_settle_retirement(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        key: dohc_engine_collab::live_update_application::RetirementKey,
+        terminal: Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+    ) -> Result<ServiceResponse, WireError> {
+        let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
+        let scope = self.configured_retirement_scope(&ctx, max_applications)?;
+        let now_ms = super::request::now_ms()?;
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let token = cancellation.token();
+        let settled = self
+            .run_retirement(
+                &ctx,
+                request.workspace.clone(),
+                scope,
+                key,
+                false,
+                "live settlement",
+                move |host, scope, key| async move {
+                    host.owner
+                        .settle_retirement(
+                            scope,
+                            host.coordinate.clone(),
+                            key,
+                            terminal,
+                            max_applications,
+                            host.open.root.clone(),
+                            now_ms,
+                            Arc::new(NoFaults),
+                            token,
+                            reconstruction,
+                        )
+                        .await
+                },
+            )
+            .await?
+            .map_err(|error| match error {
+                dohc_engine_runtime::RuntimeError::Cancelled => {
+                    cancellation.interruption("live settlement")
+                }
+                error => map_runtime(error),
+            })?;
+        Ok(ServiceResponse::response(Response {
+            id: request.id,
+            result: json!({"status":"settled", "settlement":settled}),
+        }))
+    }
+
+    /// One retirement step for the configured host. Its key validates, then,
+    /// unless its activation is released, Phase A ends only this document's
+    /// state tagged with that activation on this host: its registrations and
+    /// their output, its sessions and leases, and its cache entry. Then
+    /// `step` runs the durable pass. One task holding `session_ops` runs all
+    /// of it, so a caller that stops waiting cannot leave Phase A half done,
+    /// and a retry answers the same. An invalid key tears nothing down, nor
+    /// does a `release` whose document is still in the scope.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_retirement<T, F>(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        scope: dohc_engine_runtime::actor::OwnedRetirementScope,
+        key: dohc_engine_collab::live_update_application::RetirementKey,
+        release: bool,
+        label: &'static str,
+        step: impl FnOnce(
+            Arc<Host>,
+            dohc_engine_runtime::actor::OwnedRetirementScope,
+            dohc_engine_collab::live_update_application::RetirementKey,
+        ) -> F
+        + Send
+        + 'static,
+    ) -> Result<Result<T, dohc_engine_runtime::RuntimeError>, WireError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, dohc_engine_runtime::RuntimeError>>
+            + Send
+            + 'static,
+    {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        let cancellation = super::request::OperationCancellation::new(ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption(&format!("{label} (queued)")));
+            }
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
+            return Err(workspace_unavailable());
+        }
+        let registry = Arc::clone(&self.live_applications);
+        let sessions = Arc::clone(&self.sessions);
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            let target = host
+                .owner
+                .begin_retirement(scope.clone(), host.coordinate.clone(), key.clone(), release)
+                .await?;
+            if !target.released {
+                let serves = |tag: Option<&str>| tag == Some(key.activation_id.as_str());
+                {
+                    let mut registry = lock(&registry);
+                    let _fence = lock(&host.output_fence);
+                    registry.registrations.retain(|_, registration| {
+                        if Arc::ptr_eq(&registration.host, &host)
+                            && registration.object_id == key.object_id
+                            && serves(registration.activation_id().as_deref())
+                        {
+                            registration.retired.cancel();
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+                lock(&sessions).retain(|_, session| {
+                    session.workspace != workspace
+                        || session.key.object_id != key.object_id
+                        || !serves(session.activation_id.as_deref())
+                });
+            }
+            step(host, scope, key).await
+        });
+        operation
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-retirement-interrupted"))
     }
 
     /// Run a hosted pull or commit, then drop the registrations and editor
@@ -1325,6 +1896,7 @@ impl EngineService {
         }
         // The writer command holds the permit independently of this future.
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: input.registration.activation_id(),
             registration: input.registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
@@ -1410,6 +1982,8 @@ fn pending_result(
         ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
         ApplicationPending::BindingMismatch => "binding-mismatch",
         ApplicationPending::SettlementRequired => "settlement-required",
+        ApplicationPending::DeliveryPending => "delivery-pending",
+        ApplicationPending::SeedQuarantined => "seed-quarantined",
     }})
 }
 
@@ -1470,20 +2044,28 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
+    /// Owner deliveries come from the outbox at the registration's exact
+    /// binding: not one at an earlier restore generation, nor one a
+    /// succession retired at an earlier path, nor one at its path with other
+    /// selectors, whichever sorts first.
     #[tokio::test]
-    async fn owner_state_reads_only_the_registered_restore_generation() {
+    async fn owner_state_reads_only_the_registered_binding() {
         use dohc_engine_storage::{EngineStore, StorageError};
         let (_scratch, service, _owner, workspace, _registration, mut binding) = fixture().await;
         let open = service.open(Some(&WorkspaceHandle(workspace))).unwrap();
         let mut store = EngineStore::open(open.actor.database_path(), 0).unwrap();
+        let selectors = serde_json::to_string(&binding.selector_paths).unwrap();
+        let wider = serde_json::to_string(&[binding.current_path.as_str(), "zz-other.md"]).unwrap();
         store.write_with(&NoFaults, |tx| {
-            for (id, generation, state, reason, bytes) in [
-                ("old", 0, "quarantined", Some("restore-fenced"), 64),
-                ("current", 1, "active", None, 61),
+            for (id, path, selectors, generation, state, reason, bytes) in [
+                ("old", binding.current_path.as_str(), selectors.as_str(), 0, "quarantined", Some("restore-fenced"), 64),
+                ("a-retired", "a-earlier.md", "[\"a-earlier.md\"]", 1, "quarantined", Some("succession-retired"), 3),
+                ("b-selectors", binding.current_path.as_str(), wider.as_str(), 1, "active", None, 7),
+                ("current", binding.current_path.as_str(), selectors.as_str(), 1, "active", None, 61),
             ] {
                 tx.execute(
                     "INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,2,?9,?10,0,2,?11,0)",
-                    rusqlite::params![id,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.current_path,serde_json::to_string(&binding.selector_paths).unwrap(),generation,state,bytes,reason],
+                    rusqlite::params![id,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,path,selectors,generation,state,bytes,reason],
                 ).unwrap();
             }
             Ok::<_, StorageError>(())
@@ -1498,6 +2080,13 @@ mod tests {
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
                     Some(("current".into(), 61, "active".into(), None))
+                );
+                let mut earlier = binding.clone();
+                earlier.current_path = "a-earlier.md".into();
+                earlier.selector_paths = vec!["a-earlier.md".into()];
+                assert_eq!(
+                    read_owner_outbox(conn, &earlier)?,
+                    Some(("a-retired".into(), 3, "quarantined".into(), None))
                 );
                 binding.restore_fence_generation = 2;
                 assert_eq!(read_owner_outbox(conn, &binding)?, None);
@@ -1791,10 +2380,11 @@ mod tests {
             .get(&workspace)
             .unwrap()
             .clone();
-        let guard = RestoreFenceOutputGuard {
+        let guard = HostOutputGuard {
             host: host.clone(),
             cancel: RequestContext::unbounded().cancel,
             deadline: None,
+            read: false,
         };
         assert!(guard.is_current());
         host.retire();
@@ -1808,6 +2398,64 @@ mod tests {
                 .is_err()
         );
         service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A held read whose host retires while its connection lasts is told its
+    /// workspace is unavailable, so its caller's slot frees at once rather
+    /// than at its deadline. Once the connection is gone, nothing answers, and
+    /// an acknowledgement is withheld either way.
+    #[tokio::test]
+    async fn held_read_on_a_retired_host_answers_while_its_connection_lasts() {
+        let (_scratch, service, owner, workspace, _registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let read = service
+            .live_host_read_guard(&RequestContext::unbounded(), &workspace)
+            .unwrap();
+        let acknowledgement = HostOutputGuard {
+            host: lock(&service.live_applications)
+                .hosts
+                .get(&workspace)
+                .unwrap()
+                .clone(),
+            cancel: RequestContext::unbounded().cancel,
+            deadline: None,
+            read: false,
+        };
+        assert!(read.withheld_error().is_none());
+        service.workspace_close(Some(workspace)).await.unwrap();
+        assert!(!read.is_current());
+        assert!(owner.handle().is_current());
+        assert_eq!(
+            read.withheld_error().map(|error| error.code),
+            Some(ErrorCode::WorkspaceUnavailable)
+        );
+        assert!(acknowledgement.withheld_error().is_none());
+        drop(owner);
+        assert!(read.withheld_error().is_none());
+        assert!(acknowledgement.withheld_error().is_none());
+    }
+
+    /// `Host::retire` cancels `retired` before it retires the owner. A held
+    /// read the writer withholds in that gap is still answered.
+    #[tokio::test]
+    async fn held_read_answers_once_its_host_starts_retiring() {
+        let (_scratch, service, owner, workspace, _registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let read = service
+            .live_host_read_guard(&RequestContext::unbounded(), &workspace)
+            .unwrap();
+        let host = lock(&service.live_applications)
+            .hosts
+            .get(&workspace)
+            .unwrap()
+            .clone();
+        host.retired.cancel();
+        assert!(owner.handle().is_current());
+        assert!(host.current(&host.connection));
+        assert_eq!(
+            read.withheld_error().map(|error| error.code),
+            Some(ErrorCode::WorkspaceUnavailable)
+        );
     }
 
     async fn settle_queued_interruption(deadline: bool) {
@@ -2784,6 +3432,64 @@ mod tests {
         }
     }
 
+    /// What a capture of `object_id` for `activation_id` retains.
+    fn captured(
+        object_id: &str,
+        activation_id: &str,
+    ) -> dohc_engine_collab::live_update_application::ImportedOwnerActivation {
+        let lineage = hex_sha256(&Ydoc::wire().encode_full_state());
+        dohc_engine_collab::live_update_application::ImportedOwnerActivation {
+            activation_id: activation_id.into(),
+            source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
+                version: 1,
+                reader_source: false,
+                relay_database_namespace: "unload-test".into(),
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: object_id.into(),
+                lineage_claim_id: lineage.clone(),
+                current_path: format!("{object_id}.md"),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                committed_cursor: 0,
+                base_origin_id: "origin".into(),
+                base_origin_seq: 0,
+                base_relay_seq: 0,
+                source_moment_id: "moment".into(),
+                source_digest: lineage.clone(),
+                source_byte_length: 0,
+                native_head_sequence: 0,
+                full_state_digest: lineage,
+                full_state_byte_length: 0,
+                predecessor_activation_id: None,
+            },
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        }
+    }
+
+    /// An imported session `ydoc-unload-<object_id>` serving `activation_id`,
+    /// holding the document's lease.
+    fn install_session(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        object_id: &str,
+        activation_id: &str,
+    ) {
+        let open = service.open(Some(workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", object_id).unwrap();
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &captured(object_id, activation_id),
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert(format!("ydoc-unload-{object_id}"), session);
+    }
+
     /// A configured host with "document" and "sibling" registered, and an
     /// imported session holding the lease on "document".
     async fn unload_fixture() -> (
@@ -2799,7 +3505,8 @@ mod tests {
             "version": 1, "relayNamespace": "unload-test",
             "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
-            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000}
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
         }))
         .unwrap();
         let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
@@ -2830,45 +3537,7 @@ mod tests {
                 .unwrap();
             registrations.push(registered["registrationId"].as_u64().unwrap());
         }
-        let key = DocKey::new("workspace", "main", "document").unwrap();
-        let lineage = hex_sha256(&Ydoc::wire().encode_full_state());
-        let captured = dohc_engine_collab::live_update_application::ImportedOwnerActivation {
-            activation_id: "activation".into(),
-            source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
-                version: 1,
-                reader_source: false,
-                relay_database_namespace: "unload-test".into(),
-                workspace_id: "workspace".into(),
-                main_version_id: "main".into(),
-                object_id: "document".into(),
-                lineage_claim_id: lineage.clone(),
-                current_path: "document.md".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-                committed_cursor: 0,
-                base_origin_id: "origin".into(),
-                base_origin_seq: 0,
-                base_relay_seq: 0,
-                source_moment_id: "moment".into(),
-                source_digest: lineage.clone(),
-                source_byte_length: 0,
-                native_head_sequence: 0,
-                full_state_digest: lineage,
-                full_state_byte_length: 0,
-            },
-            baseline_bytes: Vec::new(),
-            full_state: Vec::new(),
-            restore_generation: None,
-        };
-        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
-        let session = super::super::ydoc::YdocSession::imported_owner(
-            workspace.clone(),
-            key,
-            &captured,
-            lease,
-        )
-        .unwrap();
-        lock(&service.sessions).insert("ydoc-unload-document".into(), session);
+        install_session(&service, &workspace, "document", "activation");
         (
             scratch,
             service,
@@ -2879,7 +3548,16 @@ mod tests {
         )
     }
 
-    fn unload_request(workspace: &WorkspaceHandle, object_id: &str) -> Request {
+    /// An unload of `object_id` that names `activation_id`.
+    fn unload_naming(
+        workspace: &WorkspaceHandle,
+        object_id: &str,
+        activation_id: Option<&str>,
+    ) -> Request {
+        let mut params = json!({"objectId": object_id});
+        if let Some(activation_id) = activation_id {
+            params["activationId"] = json!(activation_id);
+        }
         Request {
             id: 96,
             method: "liveApplication.unloadDocument".into(),
@@ -2887,8 +3565,57 @@ mod tests {
             deadline_ms: None,
             idempotency_key: None,
             progress: false,
-            params: json!({"objectId": object_id}),
+            params,
         }
+    }
+
+    /// An unload of `object_id` as the fixture's imported session serves it.
+    fn unload_request(workspace: &WorkspaceHandle, object_id: &str) -> Request {
+        unload_naming(workspace, object_id, Some("activation"))
+    }
+
+    #[tokio::test]
+    async fn an_activation_registration_is_refused_before_the_existing_one_retires() {
+        let (_scratch, service, owner, workspace, document, _sibling) = unload_fixture().await;
+        let params = json!({"binding": unload_binding("document"), "activationId": "unknown"});
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let mut foreign = RequestContext::unbounded();
+        foreign.connection = Some(stranger.handle());
+        assert_eq!(
+            service
+                .live_application_register(&foreign, Some(workspace.clone()), params.clone())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired,
+            "only the configured session host names an activation"
+        );
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(
+            service
+                .live_application_register(&ctx, Some(workspace.clone()), params)
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
+        let open = service.open(Some(&workspace)).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
+        let available: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available FROM live_device_application_bindings WHERE object_id='document'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(available, 1);
     }
 
     #[tokio::test]
@@ -3157,6 +3884,1416 @@ mod tests {
                 .is_ok()
         );
         assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    fn host_context(owner: &dohc_engine_protocol::transport::ConnectionOwner) -> RequestContext {
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        ctx
+    }
+
+    /// Shape rows no engine path writes yet, as foreign keys allow none.
+    fn shape(service: &EngineService, workspace: &WorkspaceHandle, sql: &str) {
+        let open = service.open(Some(workspace)).unwrap();
+        let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        conn.execute_batch(sql).unwrap();
+    }
+
+    fn lineage() -> String {
+        hex_sha256(&Ydoc::wire().encode_full_state())
+    }
+
+    /// Retain the document's captured source, as its capture did.
+    fn retain_source(service: &EngineService, workspace: &WorkspaceHandle) {
+        let source = captured("document", "activation").source;
+        let descriptor = serde_json::to_string(&source).unwrap();
+        let lineage = lineage();
+        shape(
+            service,
+            workspace,
+            &format!(
+                "INSERT INTO ydoc_owner_activation_sources VALUES ('activation','unload-test','workspace',
+                 'main','document','{lineage}','moment','{lineage}','{lineage}','{descriptor}');
+                 INSERT OR IGNORE INTO binary_blobs VALUES ('{lineage}',1,x'00');
+                 INSERT OR IGNORE INTO blobs VALUES ('{lineage}',0,'')"
+            ),
+        );
+    }
+
+    /// An activation row of the document's lineage, as an adoption, or a
+    /// release after one that never adopted, leaves it.
+    fn record_activation(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        activation: &str,
+        predecessor: Option<&str>,
+        released: bool,
+    ) {
+        let lineage = lineage();
+        let binding = serde_json::to_string(&unload_binding("document")).unwrap();
+        let predecessor = predecessor.map_or("NULL".to_owned(), |id| format!("'{id}'"));
+        shape(
+            service,
+            workspace,
+            &if released {
+                format!(
+                "INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,
+                    main_version_id,object_id,lineage_claim_id,predecessor_activation_id,binding_json,
+                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,released_at_ms,
+                    released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
+                 VALUES ('unload-test','{activation}','workspace','main','document','{lineage}',{predecessor},
+                    '{binding}','moment','{lineage}',0,'{{}}',1,0,5,'null','[]')"
+            )
+            } else {
+                format!(
+                "INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,
+                    main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,
+                    binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
+                    baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
+                    covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,
+                    max_pending_bytes,max_pending_age_ms)
+                 VALUES ('unload-test','{activation}','workspace','main','document','{lineage}','activation',
+                    {predecessor},'{binding}','moment','{lineage}',0,0,0,'{{}}','{lineage}','{lineage}',0,0,0,
+                    'null',1,1)"
+            )
+            },
+        );
+    }
+
+    /// Register the document again, naming `activation` as the relay does,
+    /// or else taking the activation that now holds its lineage.
+    async fn register_document(
+        service: &EngineService,
+        owner: &dohc_engine_protocol::transport::ConnectionOwner,
+        workspace: &WorkspaceHandle,
+        activation: Option<&str>,
+    ) -> Result<u64, WireError> {
+        let mut params = json!({"binding": unload_binding("document")});
+        if let Some(activation) = activation {
+            params["activationId"] = json!(activation);
+        }
+        Ok(service
+            .live_application_register(&host_context(owner), Some(workspace.clone()), params)
+            .await?["registrationId"]
+            .as_u64()
+            .unwrap())
+    }
+
+    /// The fixture with the document's source retained and its registration
+    /// naming that activation, as the relay registers, and, when `adopted`,
+    /// the activation adopted.
+    async fn retirement_fixture(
+        adopted: bool,
+    ) -> (
+        dohc_engine_testkit::ScratchDir,
+        Arc<EngineService>,
+        dohc_engine_protocol::transport::ConnectionOwner,
+        WorkspaceHandle,
+        u64,
+        u64,
+    ) {
+        let (scratch, service, owner, workspace, _, sibling) = unload_fixture().await;
+        retain_source(&service, &workspace);
+        if adopted {
+            record_activation(&service, &workspace, "activation", None, false);
+        }
+        let document = register_document(&service, &owner, &workspace, Some("activation"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .unwrap()
+                .activation_id()
+                .as_deref(),
+            Some("activation")
+        );
+        (scratch, service, owner, workspace, document, sibling)
+    }
+
+    /// What a retirement could tear down: whether the registration stays,
+    /// the document session's activation, its binding row, and whether the
+    /// host retired the activation.
+    type Teardown = (bool, Option<Option<String>>, (i64, Option<String>), bool);
+
+    fn teardown(
+        service: &EngineService,
+        owner: &dohc_engine_protocol::transport::ConnectionOwner,
+        workspace: &WorkspaceHandle,
+        registration: u64,
+    ) -> Teardown {
+        let registered = service
+            .live_application_registration(&owner.handle(), Some(workspace), registration)
+            .is_ok();
+        let session = lock(&service.sessions)
+            .get("ydoc-unload-document")
+            .map(|session| session.activation_id.clone());
+        let open = service.open(Some(workspace)).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
+        let binding = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available,activation_id FROM live_device_application_bindings WHERE object_id='document'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        let retired = lock(&service.live_applications)
+            .retired_activations(workspace)
+            .unwrap()
+            .contains("activation");
+        (registered, session, binding, retired)
+    }
+
+    fn retirement_key(activation: &str) -> Value {
+        json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+            "restoreFenceGeneration":0,"acceptedThrough":5,"afterReceipt":null,"maxApplications":4})
+    }
+
+    fn reconcile_request(workspace: &WorkspaceHandle, params: Value) -> Request {
+        Request {
+            id: 98,
+            method: "liveApplication.reconcileActivation".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_is_only_for_the_configured_host_and_its_budget() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let before = teardown(&service, &owner, &workspace, document);
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let request = || reconcile_request(&workspace, retirement_key("activation"));
+        assert_eq!(
+            service
+                .call(host_context(&stranger), request())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        let ordinary = EngineService::new();
+        let mut unbound = request();
+        unbound.workspace = None;
+        assert_eq!(
+            ordinary
+                .call(host_context(&stranger), unbound)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden,
+            "an engine with no configured host has no retirement"
+        );
+        for budget in [0, 5] {
+            let mut key = retirement_key("activation");
+            key["maxApplications"] = json!(budget);
+            assert_eq!(
+                service
+                    .call(host_context(&owner), reconcile_request(&workspace, key))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "budget {budget}"
+            );
+        }
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Every shared guard refuses before Phase A, for an adopted activation
+    /// and a never-adopted source alike: nothing it would tear down goes.
+    #[tokio::test]
+    async fn an_invalid_reconciliation_tears_nothing_down() {
+        let lineage = lineage();
+        for adopted in [false, true] {
+            let (_scratch, service, owner, workspace, document, _) =
+                retirement_fixture(adopted).await;
+            let before = teardown(&service, &owner, &workspace, document);
+            assert_eq!((before.0, before.3), (true, false));
+            let refused = |key: Value| {
+                let service = service.clone();
+                let request = reconcile_request(&workspace, key);
+                let ctx = host_context(&owner);
+                async move { service.call(ctx, request).await.unwrap_err().code }
+            };
+            for (case, field, value) in [
+                ("document", "objectId", json!("sibling")),
+                ("lineage", "lineageClaimId", json!("f".repeat(64))),
+                ("activation", "activationId", json!("unknown")),
+                ("generation", "restoreFenceGeneration", json!(1)),
+            ] {
+                let mut key = retirement_key("activation");
+                key[field] = value;
+                assert_eq!(
+                    refused(key).await,
+                    ErrorCode::Conflict,
+                    "{case} adopted={adopted}"
+                );
+                assert_eq!(
+                    teardown(&service, &owner, &workspace, document),
+                    before,
+                    "{case}"
+                );
+            }
+            let named = before
+                .2
+                .1
+                .as_ref()
+                .map_or("NULL".to_owned(), |id| format!("'{id}'"));
+            let table = if adopted {
+                "live_owner_activations"
+            } else {
+                "ydoc_owner_activation_sources"
+            };
+            let mut shaped = vec![
+                (
+                    "binding",
+                    "UPDATE live_device_application_bindings SET activation_id='elsewhere' WHERE object_id='document'".to_owned(),
+                    format!("UPDATE live_device_application_bindings SET activation_id={named} WHERE object_id='document'"),
+                ),
+                (
+                    "namespace",
+                    format!("UPDATE {table} SET relay_database_namespace='elsewhere'"),
+                    format!("UPDATE {table} SET relay_database_namespace='unload-test'"),
+                ),
+                (
+                    "active restore",
+                    format!(
+                        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
+                            operation_id,input_json,receipt_json)
+                         VALUES ('workspace','main','document','unload-test','restore',
+                            json_object('oldBinding',json_object('lineageClaimId','{lineage}','restoreFenceGeneration',0),'newFence',1),'{{}}')"
+                    ),
+                    "DELETE FROM live_restore_fences".to_owned(),
+                ),
+                (
+                    "successor",
+                    String::new(),
+                    "DELETE FROM live_owner_activations WHERE activation_id='successor'".to_owned(),
+                ),
+            ];
+            if !adopted {
+                shaped.push((
+                    "another current activation",
+                    String::new(),
+                    "DELETE FROM live_owner_activations WHERE activation_id='other'".to_owned(),
+                ));
+            }
+            for (case, damage, repair) in shaped {
+                match case {
+                    "successor" => record_activation(
+                        &service,
+                        &workspace,
+                        "successor",
+                        Some("activation"),
+                        true,
+                    ),
+                    "another current activation" => {
+                        record_activation(&service, &workspace, "other", None, false)
+                    }
+                    _ => shape(&service, &workspace, &damage),
+                }
+                assert_eq!(
+                    refused(retirement_key("activation")).await,
+                    ErrorCode::Conflict,
+                    "{case} adopted={adopted}"
+                );
+                shape(&service, &workspace, &repair);
+                assert_eq!(
+                    teardown(&service, &owner, &workspace, document),
+                    before,
+                    "{case}"
+                );
+            }
+            // The same key, intact, retires the activation.
+            let reconciled = service
+                .call(
+                    host_context(&owner),
+                    reconcile_request(&workspace, retirement_key("activation")),
+                )
+                .await
+                .unwrap()
+                .response
+                .result;
+            assert_eq!(reconciled["status"], "reconciled", "adopted={adopted}");
+            assert_eq!(
+                reconciled["adoption"]["adoptionId"].as_str(),
+                adopted.then_some("activation")
+            );
+            let after = teardown(&service, &owner, &workspace, document);
+            assert_eq!(after, (false, None, before.2, true), "adopted={adopted}");
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
+    }
+
+    /// A released activation's replay tears nothing down, and a wrong F for
+    /// it is refused: its successor keeps its registration, session, cache
+    /// and binding.
+    #[tokio::test]
+    async fn a_released_replay_leaves_its_successor_alone() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(true).await;
+        shape(
+            &service,
+            &workspace,
+            &format!("UPDATE live_owner_activations SET released_at_ms=1,released_restore_generation=0,
+                released_accepted_cursor=5,released_boundary_json='{RELEASED_BOUNDARY}',carried_manifest_json='[]'"),
+        );
+        record_activation(&service, &workspace, "successor", Some("activation"), false);
+        let successor = register_document(&service, &owner, &workspace, None)
+            .await
+            .unwrap();
+        lock(&service.sessions)
+            .get_mut("ydoc-unload-document")
+            .unwrap()
+            .activation_id = Some("successor".into());
+        let open = service.open(Some(&workspace)).unwrap();
+        let cache = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        let before = teardown(&service, &owner, &workspace, successor);
+        assert_eq!(
+            before,
+            (
+                true,
+                Some(Some("successor".into())),
+                (1, Some("successor".into())),
+                false
+            )
+        );
+        let mut wrong = retirement_key("activation");
+        wrong["acceptedThrough"] = json!(4);
+        assert_eq!(
+            service
+                .call(host_context(&owner), reconcile_request(&workspace, wrong))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        let replayed = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(replayed["status"], "reconciled");
+        assert_eq!(teardown(&service, &owner, &workspace, successor), before);
+        assert_eq!(
+            open.actor
+                .ydoc_cache_stats_for_test()
+                .await
+                .unwrap()
+                .removes,
+            cache.removes,
+            "no cache entry was evicted"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Phase A ends only the reconciled activation: its registration, output,
+    /// session and lease go; another document's registration, output and a
+    /// session serving another activation stay, and so does its binding.
+    /// Nothing registers for it again.
+    #[tokio::test]
+    async fn phase_a_ends_only_the_reconciled_activation() {
+        let (_scratch, service, owner, workspace, document, sibling) =
+            retirement_fixture(true).await;
+        install_session(&service, &workspace, "sibling", "sibling-activation");
+        let guard = |registration: u64| {
+            let registration = service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .unwrap();
+            ApplicationOutputGuard {
+                activation_id: registration.activation_id(),
+                registration,
+                cancel: CancelSignal::new(),
+                deadline: None,
+                reservation: Mutex::new(Some(Arc::new(()))),
+            }
+        };
+        let (document_output, sibling_output) = (guard(document), guard(sibling));
+        assert!(document_output.is_current() && sibling_output.is_current());
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            reconciled,
+            json!({"status":"reconciled","adoption":{"adoptionId":"activation","localYDocSequence":0,
+                "terminalCursor":0,"adoptionReplayed":true},"applications":[],"hasMoreApplications":false,"settle":false})
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        assert!(!document_output.is_current());
+        assert!(sibling_output.is_current());
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert_eq!(
+            lock(&service.sessions)["ydoc-unload-sibling"]
+                .activation_id
+                .as_deref(),
+            Some("sibling-activation")
+        );
+        let open = service.open(Some(&workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        drop(service.leases.scoped(&open.root).acquire(&key).unwrap());
+        let registered = lock(&service.live_applications).registrations.len();
+        assert_eq!(
+            service
+                .live_application_register(
+                    &host_context(&owner),
+                    Some(workspace.clone()),
+                    json!({"binding": unload_binding("document")}),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict,
+            "the barrier refuses its registration"
+        );
+        assert_eq!(
+            lock(&service.live_applications).registrations.len(),
+            registered
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document).2,
+            (1, Some("activation".into()))
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Sol's round 3a blocker: the relay names the activation it captured
+    /// when it registers, so retiring a never-adopted activation ends that
+    /// registration too. Its old handle is refused, the activation cannot
+    /// register again, and an ordinary registration naming none stays.
+    #[tokio::test]
+    async fn a_never_adopted_retirement_ends_its_named_registration() {
+        let (_scratch, service, owner, workspace, document, sibling) =
+            retirement_fixture(false).await;
+        let held = |registration| {
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .unwrap()
+        };
+        let (old, ordinary) = (held(document), held(sibling));
+        assert_eq!(ordinary.activation_id(), None);
+        let output = |registration: &Arc<Registration>| ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
+            registration: registration.clone(),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            reservation: Mutex::new(Some(Arc::new(()))),
+        };
+        let (old_output, ordinary_output) = (output(&old), output(&ordinary));
+        let identity = || dohc_engine_collab::live_update_application::LiveApplicationAckIdentity {
+            delivery_id: "missing".into(),
+            update_digest: "00".repeat(32),
+        };
+        assert_eq!(old.handle.read_ack(identity()).await.unwrap(), None);
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            (&reconciled["status"], &reconciled["adoption"]),
+            (&json!("reconciled"), &Value::Null)
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        assert!(old.handle.read_ack(identity()).await.is_err());
+        assert!(!old_output.is_current());
+        assert_eq!(
+            register_document(&service, &owner, &workspace, Some("activation"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert!(ordinary_output.is_current());
+        assert_eq!(ordinary.handle.read_ack(identity()).await.unwrap(), None);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Opus's round 3a note: a host that reconnects mid-Stop gets a new
+    /// native owner. The retired set outlasts the old one, so the
+    /// reconnected host still refuses the retired activation.
+    #[tokio::test]
+    async fn a_reconnected_host_still_refuses_a_retired_activation() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(true).await;
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        let reconnected = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        service
+            .provision_live_application(
+                reconnected.handle(),
+                LiveApplicationHostConfig {
+                    workspace: workspace.clone(),
+                    namespace: "unload-test".into(),
+                    coordinate: ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "reconnected".into(),
+                    },
+                    max_registrations: 4,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            lock(&service.live_applications)
+                .retired_activations(&workspace)
+                .unwrap()
+                .contains("activation")
+        );
+        assert_eq!(
+            register_document(&service, &reconnected, &workspace, None)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict,
+            "the registration would serve the retired activation"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Phase A over RPC evicts the reconciled document's writer cache entry,
+    /// and only that one: the next write to it misses, and one to its
+    /// sibling still hits. The activation never adopted, so neither document
+    /// is an owner's and both take local writes.
+    #[tokio::test]
+    async fn phase_a_evicts_only_the_reconciled_documents_cache_entry() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(false).await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let docs = [("document", Ydoc::wire()), ("sibling", Ydoc::wire())];
+        let record = |object: &str, update: Vec<u8>| {
+            open.actor.ydoc_record_update(
+                DocKey::new("workspace", "main", object).unwrap(),
+                format!("{object}.md"),
+                dohc_engine_collab::ContentKind::Plaintext,
+                dohc_engine_collab::Regime::LocalOnly,
+                update,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                10,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+                None,
+            )
+        };
+        for (object, doc) in &docs {
+            record(object, doc.plaintext_insert(0, "cached"))
+                .await
+                .unwrap();
+        }
+        let before = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        let evicted = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        assert_eq!(evicted.removes, before.removes + 1, "one entry went");
+        let (_, sibling) = &docs[1];
+        record("sibling", sibling.plaintext_insert(0, "warm "))
+            .await
+            .unwrap();
+        assert_eq!(
+            open.actor.ydoc_cache_stats_for_test().await.unwrap().misses,
+            evicted.misses,
+            "the sibling's entry stayed"
+        );
+        let (_, document) = &docs[0];
+        record("document", document.plaintext_insert(0, "cold "))
+            .await
+            .unwrap();
+        assert_eq!(
+            open.actor.ydoc_cache_stats_for_test().await.unwrap().misses,
+            evicted.misses + 1,
+            "the reconciled document's entry went"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Phase A ends only the reconciled document's state: another
+    /// document's session carrying the same activation tag stays.
+    #[tokio::test]
+    async fn phase_a_leaves_another_documents_state() {
+        let (_scratch, service, owner, workspace, _, sibling) = retirement_fixture(true).await;
+        install_session(&service, &workspace, "sibling", "activation");
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        assert_eq!(
+            lock(&service.sessions)["ydoc-unload-sibling"]
+                .activation_id
+                .as_deref(),
+            Some("activation")
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A caller that drops a reconciliation once it started still gets its
+    /// Phase A and durable pass completed, and a retry, as after a reply
+    /// lost past the commit, answers the same.
+    #[tokio::test]
+    async fn a_dropped_reconciliation_finishes_and_a_retry_answers_the_same() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "reconcile-blocker".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut waiting = Box::pin(service.call(
+            host_context(&owner),
+            reconcile_request(&workspace, retirement_key("activation")),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            open.session_ops.try_lock().is_err(),
+            "it holds the session lock"
+        );
+        drop(waiting);
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        drop(Arc::clone(&open.session_ops).lock_owned().await);
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            answers.push(
+                service
+                    .call(
+                        host_context(&owner),
+                        reconcile_request(&workspace, retirement_key("activation")),
+                    )
+                    .await
+                    .unwrap()
+                    .response
+                    .result,
+            );
+        }
+        assert_eq!(answers[0]["status"], "reconciled");
+        assert_eq!(answers[0], answers[1]);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// N8: an unload names the activation it ends. Naming another, or none,
+    /// against state that serves one changes nothing.
+    #[tokio::test]
+    async fn an_unload_ends_only_the_activation_it_names() {
+        for adopted in [false, true] {
+            let (_scratch, service, owner, workspace, document, _) =
+                retirement_fixture(adopted).await;
+            let before = teardown(&service, &owner, &workspace, document);
+            for named in [None, Some("successor")] {
+                assert_eq!(
+                    service
+                        .call(
+                            host_context(&owner),
+                            unload_naming(&workspace, "document", named)
+                        )
+                        .await
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Conflict,
+                    "{named:?} adopted={adopted}"
+                );
+                assert_eq!(teardown(&service, &owner, &workspace, document), before);
+            }
+            let unloaded = service
+                .call(
+                    host_context(&owner),
+                    unload_naming(&workspace, "document", Some("activation")),
+                )
+                .await
+                .unwrap();
+            assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+            let after = teardown(&service, &owner, &workspace, document);
+            assert_eq!((after.0, after.1, after.2.0), (false, None, 0));
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
+    }
+
+    /// N8: an unload queued for a predecessor before its successor took the
+    /// document reads the activation only once it holds the session lock,
+    /// and cannot end the successor.
+    #[tokio::test]
+    async fn a_stale_predecessor_unload_cannot_end_its_successor() {
+        let (_scratch, service, owner, workspace, document, _) = unload_fixture().await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let mut waiting = Box::pin(service.call(
+            host_context(&owner),
+            unload_naming(&workspace, "document", Some("activation")),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The successor's capture takes the session while the unload waits.
+        lock(&service.sessions)
+            .get_mut("ydoc-unload-document")
+            .unwrap()
+            .activation_id = Some("successor".into());
+        let before = teardown(&service, &owner, &workspace, document);
+        drop(serial);
+        assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Conflict);
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        assert_eq!(before.1, Some(Some("successor".into())));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    fn cancel_fence_request(workspace: &WorkspaceHandle, params: Value) -> Request {
+        Request {
+            id: 98,
+            method: "liveApplication.cancelRestoreFence".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        }
+    }
+
+    /// Only the current host cancels a restore fence, and it fixes the
+    /// namespace and workspace: a param naming either refuses, and so does a
+    /// fence another host holds. A fence that never landed answers cancelled
+    /// at the generation before it, on replay too. One that committed ends
+    /// only while its document still holds what the fence left.
+    #[tokio::test]
+    async fn a_restore_fence_cancellation_names_the_generation_the_relay_keeps() {
+        use dohc_engine_collab::live_update_application::{
+            NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin,
+        };
+        let (_scratch, service, owner, workspace, _, _) = unload_fixture().await;
+        let params = json!({"operationId":"restore","objectId":"document","lineageClaimId":lineage(),"hostId":"host","newFence":1});
+        let mut unnamed = params.clone();
+        unnamed.as_object_mut().unwrap().remove("hostId");
+        assert_eq!(
+            service
+                .call(
+                    host_context(&owner),
+                    cancel_fence_request(&workspace, unnamed)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        let mut elsewhere = params.clone();
+        elsewhere["hostId"] = json!("elsewhere");
+        assert_eq!(
+            service
+                .call(
+                    host_context(&owner),
+                    cancel_fence_request(&workspace, elsewhere)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        assert_eq!(
+            service
+                .call(
+                    host_context(&stranger),
+                    cancel_fence_request(&workspace, params.clone())
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::WorkspaceUnavailable
+        );
+        for (field, value) in [
+            ("relayDatabaseNamespace", "unload-test"),
+            ("workspaceId", "workspace"),
+        ] {
+            let mut named = params.clone();
+            named[field] = json!(value);
+            assert_eq!(
+                service
+                    .call(
+                        host_context(&owner),
+                        cancel_fence_request(&workspace, named)
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "{field}"
+            );
+        }
+        let cancelled = json!({"status":"cancelled","hostId":"host","generation":0,
+            "binding":unload_binding("document")});
+        for _ in 0..2 {
+            let answered = service
+                .call(
+                    host_context(&owner),
+                    cancel_fence_request(&workspace, params.clone()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(answered.response.result, cancelled);
+        }
+        let mut wrong = params.clone();
+        wrong["newFence"] = json!(2);
+        assert_eq!(
+            service
+                .call(
+                    host_context(&owner),
+                    cancel_fence_request(&workspace, wrong)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        // A fence of the sibling that committed before its reply was lost.
+        let fence = NativeRestoreFence {
+            point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: unload_binding("sibling").lineage_claim_id,
+            },
+            operation_id: "fenced".into(),
+            relay_database_namespace: "unload-test".into(),
+            old_binding: unload_binding("sibling"),
+            host_id: "host".into(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Owner {
+                id: "activation".into(),
+            },
+            terminal: None,
+            applied_sequence: 0,
+        };
+        let receipt = NativeRestoreFenceReceipt {
+            operation: fence.clone(),
+            local_head_sequence: 0,
+            recorded_at_ms: 1,
+        };
+        shape(
+            &service,
+            &workspace,
+            &format!(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
+                   operation_id,input_json,receipt_json) VALUES ('workspace','main','sibling','unload-test','fenced','{}','{}')",
+                serde_json::to_string(&fence).unwrap(),
+                serde_json::to_string(&receipt).unwrap()
+            ),
+        );
+        // The sibling still holds its live binding at generation 0, not the
+        // stopped one the fence left, so nothing proves the fence's terminal
+        // binding: the cancellation refuses and records nothing.
+        let fenced = json!({"operationId":"fenced","objectId":"sibling","lineageClaimId":lineage(),"hostId":"host","newFence":1});
+        assert_eq!(
+            service
+                .call(
+                    host_context(&owner),
+                    cancel_fence_request(&workspace, fenced)
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        let open = service.open(Some(&workspace)).unwrap();
+        let recorded: bool = rusqlite::Connection::open(open.actor.database_path())
+            .unwrap()
+            .query_row(
+                "SELECT cancelled_json IS NOT NULL FROM live_restore_fences WHERE operation_id='fenced'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!recorded);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A fence that committed ends in its terminal cancellation. The answer
+    /// names the fenced generation, the fence's stopped binding and the
+    /// receipt the relay journal carries, ending at the bootstrap's origin,
+    /// and a replay answers the same.
+    #[tokio::test]
+    async fn a_committed_fence_answers_its_terminal_cancellation() {
+        use dohc_engine_collab::live_update_application::NativeRestoreCancellationReceipt;
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "cancel-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: hex_sha256(&fixture_baseline().0),
+            current_path: "document.md".into(),
+            selector_paths: vec!["document.md".into()],
+            restore_fence_generation: 0,
+        };
+        let registration = service
+            .live_application_register(
+                &host_context(&owner),
+                Some(workspace.clone()),
+                json!({"binding": binding}),
+            )
+            .await
+            .unwrap()["registrationId"]
+            .as_u64()
+            .unwrap();
+        bootstrap_baseline(&service, &owner, &workspace, registration).await;
+        let fenced = service
+            .call(
+                host_context(&owner),
+                fence_request(&workspace, &binding, "cancel-test"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fenced.response.result["status"], "fenced");
+        let params = json!({"operationId":"restore-rpc","objectId":"document",
+            "lineageClaimId":binding.lineage_claim_id,"hostId":"host","newFence":1});
+        let mut stopped = binding.clone();
+        stopped.restore_fence_generation = 1;
+        let answered = service
+            .call(
+                host_context(&owner),
+                cancel_fence_request(&workspace, params.clone()),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        let receipt: NativeRestoreCancellationReceipt =
+            serde_json::from_value(answered["receipt"].clone()).unwrap();
+        assert_eq!(
+            answered,
+            json!({"status":"fenceCancelled","hostId":"host","generation":1,
+                "binding":stopped,"receipt":receipt})
+        );
+        assert_eq!(receipt.binding, stopped);
+        assert_eq!(receipt.fence.operation.operation_id, "restore-rpc");
+        assert_eq!(
+            (
+                receipt.endpoint.event_count,
+                receipt.endpoint.terminal_receipt
+            ),
+            (0, None),
+            "nothing was accepted after the bootstrap"
+        );
+        let replayed = service
+            .call(
+                host_context(&owner),
+                cancel_fence_request(&workspace, params),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.response.result, answered);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// The boundary a release of the fixture's adopted activation stores:
+    /// its adopted origin, with nothing applied after it.
+    const RELEASED_BOUNDARY: &str = r#"{"terminalReceipt":null,"eventCount":0,"historyEvidenceDigest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#;
+
+    fn release_request(workspace: &WorkspaceHandle, activation: &str) -> Request {
+        Request {
+            id: 97,
+            method: "liveApplication.releaseActivation".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+                "restoreFenceGeneration":0,"acceptedThrough":5}),
+        }
+    }
+
+    /// The document as the hosted replica holds it: departed from its scope
+    /// or not, and parked or not.
+    fn host_document(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        departed: bool,
+        parked: bool,
+    ) {
+        shape(
+            service,
+            workspace,
+            &format!(
+                "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms)
+                   VALUES ('workspace','origin','epoch','stream',0);
+                 INSERT OR IGNORE INTO hosted_replicas(workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,0);
+                 INSERT OR REPLACE INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+                   VALUES ('workspace','document','document.md','{}',{})",
+                if parked { "parked" } else { "ready" },
+                if departed { 0 } else { 1 }
+            ),
+        );
+    }
+
+    fn rows(service: &EngineService, workspace: &WorkspaceHandle, table: &str) -> i64 {
+        let open = service.open(Some(workspace)).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE object_id='document'"),
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    fn bindings(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+        rows(service, workspace, "live_device_application_bindings")
+    }
+
+    /// The document's recorded retirement intents.
+    fn intents(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+        rows(service, workspace, "live_owner_retirements")
+    }
+
+    /// Release is only for the configured host, and only for a document that
+    /// left the scope: until then it tears nothing down. An adopted activation
+    /// then ends its runtime and waits to park, releases, and answers a
+    /// duplicate from its stored release. After a reconnect, nothing registers
+    /// for it, named or not.
+    #[tokio::test]
+    async fn an_adopted_release_waits_to_park_and_answers_its_replay() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        // The lineage's root adoption, which the adopted activation names.
+        let (claim, binding) = (
+            lineage(),
+            serde_json::to_string(&unload_binding("document")).unwrap(),
+        );
+        shape(
+            &service,
+            &workspace,
+            &format!(
+                "INSERT INTO live_owner_adoptions VALUES ('unload-test','activation','workspace','main','document',
+                    '{claim}','{binding}','moment','{claim}',0,0,0,'{claim}','{claim}',0,0,0,'null','{{}}',1,1)"
+            ),
+        );
+        let before = teardown(&service, &owner, &workspace, document);
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let release = |ctx| service.call(ctx, release_request(&workspace, "activation"));
+        assert_eq!(
+            release(host_context(&stranger)).await.unwrap_err().code,
+            ErrorCode::SessionExpired
+        );
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap_err().code,
+            ErrorCode::Conflict,
+            "not hosted"
+        );
+        host_document(&service, &workspace, false, false);
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap_err().code,
+            ErrorCode::Conflict,
+            "in scope"
+        );
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        assert_eq!(
+            intents(&service, &workspace),
+            0,
+            "a refused key records nothing"
+        );
+        host_document(&service, &workspace, true, false);
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"pending","reason":"parking"})
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, before.2.clone(), true),
+            "Phase A ended its runtime and kept its binding"
+        );
+        assert_eq!(intents(&service, &workspace), 1, "its intent was recorded");
+        host_document(&service, &workspace, true, true);
+        shape(
+            &service,
+            &workspace,
+            &format!(
+                "INSERT INTO live_accepted_checkpoints VALUES ('unload-test','workspace','main','document','{0}',0,0,
+                    'null','{{}}','{0}','{0}','{1}',NULL,NULL)",
+                lineage(),
+                "e".repeat(64)
+            ),
+        );
+        let boundary: Value = serde_json::from_str(RELEASED_BOUNDARY).unwrap();
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"released","replayed":false,"boundary":boundary})
+        );
+        assert_eq!(bindings(&service, &workspace), 0, "its own binding goes");
+        assert_eq!(intents(&service, &workspace), 0, "and so does its intent");
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"released","replayed":true,"boundary":boundary})
+        );
+        let reconnected = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        service
+            .provision_live_application(
+                reconnected.handle(),
+                LiveApplicationHostConfig {
+                    workspace: workspace.clone(),
+                    namespace: "unload-test".into(),
+                    coordinate: ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "reconnected".into(),
+                    },
+                    max_registrations: 4,
+                },
+            )
+            .await
+            .unwrap();
+        // Only the configured connection names an activation; the collab
+        // tests cover a named registration after a restart.
+        host_document(&service, &workspace, true, false);
+        assert_eq!(
+            register_document(&service, &reconnected, &workspace, None)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A never-adopted source releases once its document left the scope,
+    /// before parking, ending its named binding; it never registers again.
+    #[tokio::test]
+    async fn a_never_adopted_release_ends_its_binding_before_parking() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(false).await;
+        host_document(&service, &workspace, true, false);
+        let released = service
+            .call(
+                host_context(&owner),
+                release_request(&workspace, "activation"),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            released,
+            json!({"status":"released","replayed":false,"boundary":null})
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_err()
+        );
+        assert_eq!(bindings(&service, &workspace), 0);
+        assert_eq!(
+            register_document(&service, &owner, &workspace, Some("activation"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// The retirement form of settle names a retirement instead of a
+    /// registration, never both, only for the configured host. An invalid
+    /// key tears nothing down, and no form opens a session.
+    #[tokio::test]
+    async fn the_retirement_form_of_settle_needs_no_registration() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let before = teardown(&service, &owner, &workspace, document);
+        let sessions = lock(&service.sessions).len();
+        let settle = |params: Value| Request {
+            id: 95,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: Some(30_000),
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        let key = |activation: &str| {
+            json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+                "restoreFenceGeneration":0,"acceptedThrough":5})
+        };
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        for (ctx, params, code) in [
+            (
+                host_context(&owner),
+                json!({"registrationId":document,"retirement":key("activation"),"terminalReceipt":null}),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                host_context(&owner),
+                json!({"terminalReceipt":null}),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                host_context(&stranger),
+                json!({"retirement":key("activation"),"terminalReceipt":null}),
+                ErrorCode::SessionExpired,
+            ),
+            (
+                host_context(&owner),
+                json!({"retirement":key("unknown"),"terminalReceipt":null}),
+                ErrorCode::Conflict,
+            ),
+        ] {
+            assert_eq!(
+                service
+                    .call(ctx, settle(params.clone()))
+                    .await
+                    .unwrap_err()
+                    .code,
+                code,
+                "{params}"
+            );
+            assert_eq!(
+                teardown(&service, &owner, &workspace, document),
+                before,
+                "{params}"
+            );
+        }
+        // A valid key runs Phase A first; this fixture has no Y.Doc to settle.
+        assert!(
+            service
+                .call(
+                    host_context(&owner),
+                    settle(json!({"retirement":key("activation"),"terminalReceipt":null}))
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, before.2, true)
+        );
+        assert!(
+            lock(&service.sessions).len() < sessions,
+            "it ended the activation's session and opened none"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// An ordinary registration serves no activation, so its unload names none.
+    #[tokio::test]
+    async fn an_ordinary_unload_names_no_activation() {
+        let (_scratch, service, owner, workspace, document, sibling) = unload_fixture().await;
+        let unloaded = service
+            .call(
+                host_context(&owner),
+                unload_naming(&workspace, "sibling", None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 }

@@ -189,6 +189,7 @@ export const relayShareOperations = {
       OwnerRestoreActionResponse.options, OwnerRestoreActionResponse.plan,
       OwnerRestoreActionResponse.begin, OwnerRestoreActionResponse.prepare,
       OwnerRestoreActionResponse.review, OwnerRestoreActionResponse.confirm,
+      OwnerRestoreActionResponse.decline, OwnerRestoreActionResponse.unfinished,
     ]),
   },
   listOwnerLiveDocuments: {

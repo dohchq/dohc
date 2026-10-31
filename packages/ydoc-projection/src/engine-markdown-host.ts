@@ -1,13 +1,12 @@
 import {createHash} from 'node:crypto'
+import {WORKER_LIVE_VALIDATION_POLICY} from './liveValidationPolicy.js'
 import {createEngineMarkdownReader, type EngineMarkdownProof} from './engine-markdown-reader.js'
 import type {LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import {checkMarkdownWitness} from './lossy-markdown.js'
 
 const CHUNK = 65536, UPDATE = 20 * 1024 * 1024
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
-const reader = createEngineMarkdownReader({maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
-  maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
-  maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000})
+const reader = createEngineMarkdownReader(WORKER_LIVE_VALIDATION_POLICY)
 function requireWire(ok: unknown): asserts ok {if (!ok) throw new Error('invalid-frame')}
 function keys(value: unknown, names: readonly string[]): asserts value is Record<string, unknown> {
   requireWire(value && typeof value === 'object' && !Array.isArray(value)

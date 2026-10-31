@@ -171,8 +171,9 @@ pub(super) fn classify(
         let mut observed_oldest = None;
         let owner = match &operation.origin {
             RestoreDeliveryOrigin::Owner { id } => {
+                // The activation the restore recorded, even one released since.
                 let (covered,origin_generation): (i64,i64) = conn.query_row(
-                    "SELECT covered_outbox_sequence,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
+                    "SELECT covered_outbox_sequence,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_owner_activations WHERE relay_database_namespace=?1 AND activation_id=?2 AND covered_outbox_sequence IS NOT NULL",
                     params![held.namespace,id], |row|Ok((row.get(0)?,row.get(1)?)),
                 ).map_err(read_sql)?;
                 Some((

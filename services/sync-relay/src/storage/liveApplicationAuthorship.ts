@@ -5,10 +5,16 @@ import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
 import {LIVE_JOURNAL_TABLE, LIVE_APPLICATION_AUTHORSHIP_INDEX} from "./schema";
 import {readAcceptedHistoryDeliveryMetadata, RestoreHistoryBudget, RestoreHistoryBudgetExceeded} from "./liveAcceptedHistory";
+import {parseNativeRestoreCancellationReceipt} from "../liveRestoreFence";
 import {parseSettlementAuthors} from "./hostedSettlement";
 
 const PUSH_BYTES = 64_000_000;
-const RECORD_OVERHEAD_BYTES = 8192;
+// Match live_audit/chunks.rs and live_update_application::MAX_CANCELLED_RESTORES.
+const MAX_CANCELLED_RESTORES = 4095;
+const CANCELLATION_RECEIPT_BYTES = 643_576;
+const CANCELLED_RESTORE_BYTES = CANCELLATION_RECEIPT_BYTES +
+  Buffer.byteLength('{"originAdoptionId":"","cancellation":}') + 2 * 1024;
+const RECORD_OVERHEAD_BYTES = MAX_CANCELLED_RESTORES * (CANCELLED_RESTORE_BYTES + 1) + 32_768;
 const CHUNK_BYTES = 4 * 1024 * 1024;
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function require(value: unknown): asserts value {if (!value) throw new Error("Unconfirmed live application.");}
@@ -33,6 +39,18 @@ function canonicalRestore(value: Record<string, unknown> | null) {
   return result;
 }
 
+function canonicalCancellations(value: unknown) {
+  require(Array.isArray(value) && value.length <= MAX_CANCELLED_RESTORES);
+  return value.map(entry => {
+    const result = ordered(entry, ["originAdoptionId", "cancellation"]);
+    require(result.originAdoptionId === null || (typeof result.originAdoptionId === "string" &&
+      Buffer.byteLength(result.originAdoptionId) <= 1024));
+    result.cancellation = parseNativeRestoreCancellationReceipt(result.cancellation);
+    require(Buffer.byteLength(JSON.stringify(result.cancellation)) <= CANCELLATION_RECEIPT_BYTES);
+    return result;
+  });
+}
+
 const journalWhere = `workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
   AND relay_database_namespace=? AND accepted_event_count=? AND update_digest=?`;
 function journal(storage: StorageContext, workspaceId: string, payload: Record<string, unknown>) {
@@ -42,10 +60,26 @@ function journal(storage: StorageContext, workspaceId: string, payload: Record<s
       payload.relayDatabaseNamespace, payload.eventCount, payload.updateBlobSha256);
 }
 
-type Prepared = {workspaceId: string; originId: string; payloadJson: string; cursor: unknown;
+// A valid application keeps its proof even with no authors to confirm.
+type Prepared = {workspaceId: string; originId: string; payloadJson: string; cursor: number;
   coordinate: {originId: string; originSeq: number}; contentJson: string;
-  authors: NonNullable<SyncRelayLogInput["admittedAuthorSnapshot"]>};
+  authors: NonNullable<SyncRelayLogInput["admittedAuthorSnapshot"]> | null};
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
+// Audits the push's budget ran out before, and those the writer confirmed.
+const exhaustedProofs = new WeakSet<SyncRelayLogInput>();
+const confirmed = new WeakSet<SyncRelayLogInput>();
+
+/** The journal cursor an application's proof names, "exhausted" when its push's budget ran out first, or null. */
+export function preparedLiveApplication(op: SyncRelayLogInput): number | "exhausted" | null {
+  if (exhaustedProofs.has(op)) return "exhausted";
+  const proof = prepared.get(op);
+  return proof && proof.payloadJson === op.payloadJson ? proof.cursor : null;
+}
+
+/** Whether the writer confirmed the application's proof against its journal and content coordinates. */
+export function liveApplicationConfirmed(op: SyncRelayLogInput): boolean {
+  return confirmed.has(op);
+}
 
 /** Blob work is bounded across the push and runs before acquiring the writer. */
 export async function prepareLiveApplications(storage: StorageContext,
@@ -59,8 +93,9 @@ export async function prepareLiveApplications(storage: StorageContext,
   for (const op of input.ops) {
     if (op.opKind !== "live.audit.application") continue;
     prepared.delete(op);
+    exhaustedProofs.delete(op);
     delete op.admittedAuthorSnapshot;
-    if (exhausted) continue;
+    if (exhausted) {exhaustedProofs.add(op); continue;}
     if (++audits % 32 === 0) await setImmediate(undefined, {signal});
     try {
       const payloadJson = op.payloadJson;
@@ -121,19 +156,20 @@ export async function prepareLiveApplications(storage: StorageContext,
         metadata: trusted, sourceApplication: source === null ? null : {localYDocSequence: source.localYDocSequence,
           hostCoordinate: {hostId: source.hostCoordinate.hostId, hostEpoch: source.hostCoordinate.hostEpoch,
             instanceId: source.hostCoordinate.instanceId, connectionId: source.hostCoordinate.connectionId}},
-        sourceRestore: canonicalRestore(record.sourceRestore), contentCoordinate: {originId: coordinate.originId, originSeq: coordinate.originSeq}};
+        sourceRestore: canonicalRestore(record.sourceRestore), cancelledRestores: canonicalCancellations(record.cancelledRestores),
+        contentCoordinate: {originId: coordinate.originId, originSeq: coordinate.originSeq}};
       // Reject alternate key order, whitespace and extra top-level/metadata/source fields.
       require(bytes.equals(Buffer.from(JSON.stringify(canonical))));
       const authors = new Map<string, unknown>();
       for (const author of [...(trusted.authorSnapshot ?? []), ...(trusted.checkpointCoverage ?? []).map(entry => entry.author)]) {
         authors.set(JSON.stringify(author), author);
       }
-      if (authors.size) prepared.set(op, {workspaceId: input.workspaceId, originId: input.originId,
-        payloadJson, cursor: header.journal_cursor, coordinate, contentJson: String(content.payloadJson),
-        authors: parseSettlementAuthors([...authors.values()])});
+      prepared.set(op, {workspaceId: input.workspaceId, originId: input.originId,
+        payloadJson, cursor: Number(header.journal_cursor), coordinate, contentJson: String(content.payloadJson),
+        authors: authors.size ? parseSettlementAuthors([...authors.values()]) : null});
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error instanceof RestoreHistoryBudgetExceeded) exhausted = true;
+      if (error instanceof RestoreHistoryBudgetExceeded) {exhausted = true; exhaustedProofs.add(op);}
       // Exhausted budgets and mismatches retain the audit without confirmation.
     }
   }
@@ -144,6 +180,7 @@ export function confirmLiveApplication(storage: StorageContext, op: SyncRelayLog
   originId: string, batchCoordinates: ReadonlyMap<number, SyncRelayLogInput>) {
   if (op.opKind !== "live.audit.application") return;
   delete op.admittedAuthorSnapshot;
+  confirmed.delete(op);
   const proof = prepared.get(op);
   if (!proof || proof.workspaceId !== workspaceId || proof.originId !== originId || proof.payloadJson !== op.payloadJson) return;
   const payload = JSON.parse(op.payloadJson);
@@ -156,5 +193,7 @@ export function confirmLiveApplication(storage: StorageContext, op: SyncRelayLog
   const pending = proof.coordinate.originId === originId ? batchCoordinates.get(proof.coordinate.originSeq) : undefined;
   const content = pending ?? storage.db.prepare(`SELECT op_kind AS opKind,payload_json AS payloadJson FROM sync_relay_log
     WHERE workspace_id=? AND origin_id=? AND origin_seq=?`).get(workspaceId, proof.coordinate.originId, proof.coordinate.originSeq);
-  if (content?.opKind === "ydoc.update" && content.payloadJson === proof.contentJson) op.admittedAuthorSnapshot = proof.authors;
+  if (content?.opKind !== "ydoc.update" || content.payloadJson !== proof.contentJson) return;
+  confirmed.add(op);
+  if (proof.authors) op.admittedAuthorSnapshot = proof.authors;
 }

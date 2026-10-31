@@ -8,7 +8,7 @@ import { release } from "node:os";
 import { Duplex } from "node:stream";
 import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-contract";
 import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
-import { replicaFrontiers, type ReplicaJournalRow, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
+import { replicaFrontiers, type ReplicaJournalEntry, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import { ReplicaBudgetError, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { serveReplicaRelay } from "./replicaRelaySocket";
 
@@ -111,7 +111,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
           if (response.status !== 200) throw new Error(`Replica journal read failed (${response.status}).`);
           return await response.json() as ReplicaLiveJournalPage;
         }, async (after, page) => {
-          const rows: ReplicaJournalRow[] = page.rows.map(r => ({...r,
+          // A cancellation control entry carries no bytes; the engine validates it at its exact generation and endpoint.
+          const rows: ReplicaJournalEntry[] = page.rows.map(r => "cancellation" in r ? r : ({...r,
             admitted: {metadata: parseCanonicalAdmittedLiveUpdateMetadata(r.admitted.metadata), updateBytes: decodeJournalBytes(r.admitted.updateBytes)},
             restore: r.restore ? {operationId: r.restore.operationId, checkpointDigest: r.restore.checkpoint.digest,
               checkpointBytes: decodeJournalBytes(r.restore.checkpoint.bytes), proof: r.restore.proof} : null}));

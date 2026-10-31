@@ -32,3 +32,12 @@ it("returns independent capacity profiles so one caller cannot change another", 
   expect(second.frames.receive.maxFrameBytes).toBe(64 * 1024);
   expect(second.nativeIngress.ingress.aggregateBytes).toBe(512 * 1024 * 1024);
 });
+
+it("uses one policy for journal admission, activation and restores", () => {
+  const profile = selfHostLiveProfile();
+  expect(profile.service.activation.validation).toEqual(profile.namedLive.validation);
+  expect(profile.service.restore.validation).toEqual(profile.namedLive.validation);
+  expect(profile.validation).toMatchObject({maxStructVisits: 400_000, maxIndexOperations: 100_000_000});
+  profile.validation.maxIndexOperations = 1;
+  expect(selfHostLiveProfile().validation.maxIndexOperations).toBe(100_000_000);
+});

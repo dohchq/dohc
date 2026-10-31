@@ -1,8 +1,10 @@
+import { liveStopError, liveStopWaitingError } from "../ipc/liveEditingStop";
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { deferred } from "../testing/deferred";
 import {
   LiveDocumentsDialog,
@@ -11,6 +13,7 @@ import {
   type LiveDocumentStopResult,
   type LiveRefusalPage,
   type LiveRefusalRow,
+  type LiveStopWaitingNotice,
 } from "./LiveDocumentsDialog";
 
 // The server names each row's document; here, after its path.
@@ -47,7 +50,7 @@ function harness() {
     ),
     retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
-    onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
+    onError: vi.fn((message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => {}),
     saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
     readKeptEdits: vi.fn(async (workspaceId: string, objectId: string, incident: string) => {}),
   };
@@ -89,6 +92,132 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it.each(HOST_STOP_CASES.flatMap(([code, sessionHost, words, control]) =>
+    (["ready", "paused"] as const).map(status => ({code, sessionHost, words, control, status}))))(
+    "keys $code on a $status row on code alone ($sessionHost)", async ({code, sessionHost, words, control, status}) => {
+    const h = harness(), user = userEvent.setup();
+    h.load.mockResolvedValueOnce(page([row("a.md", {status, canResume: true})])).mockResolvedValue(page([row("a.md")]));
+    h.stop.mockRejectedValueOnce(hostStopWireError(code, sessionHost, "untrusted relay text"));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    const live = screen.getByTestId("live-document-row-a.md");
+    await within(live).findByText(words);
+    expect(live.children[1]?.textContent).toBe(status === "ready" ? "Live" : "Paused");
+    expect(live.querySelectorAll("p")).toHaveLength(1);
+    const buttons = within(live).queryAllByRole("button").filter(button => button.getAttribute("aria-label") !== "Copy error details");
+    if (control === "none") {
+      expect(buttons).toEqual([]);
+      expect(document.activeElement).toBe(within(live).getByText(words));
+      expect(within(live).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
+    } else {
+      const action = within(live).getByRole("button", {name: control === "resume" ? "Resume live editing for a.md" : "Try again to stop live editing for a.md"});
+      expect(buttons).toEqual([action]);
+      expect(document.activeElement).toBe(action);
+    }
+    expect(live.textContent).not.toContain("Server:");
+    await user.click(within(live).getByRole("button", {name: "Copy error details"}));
+    const copy = await navigator.clipboard.readText();
+    expect(copy).toContain(words);
+    expect(copy).toContain(`Server: ${sessionHost}`);
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+  it.each([
+    [{status: "paused", canResume: true}, "Paused"],
+    [{status: "ready", quarantine: "paused", canResume: true}, "Paused"],
+    [{status: "unavailable", reason: "live-edit-unadmitted", canResume: true}, "Server copy is missing an edit"],
+    [{status: "unavailable", reason: "live-document-without-lineage", canResume: true}, "Not started"],
+  ] as const)("offers Resume alone after a pending Stop on %j", async (overrides, label) => {
+    const h = harness();
+    h.load.mockResolvedValueOnce(page([row("a.md", overrides)])).mockResolvedValue(page([row("a.md")]));
+    h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    const note = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
+    await screen.findByText(note);
+    const live = screen.getByTestId("live-document-row-a.md");
+    expect(live.children[1]?.textContent).toBe(label);
+    expect(live.querySelectorAll("p")).toHaveLength(1);
+    expect(actions("a.md")).toEqual(["Resume live editing"]);
+    const resume = within(live).getByRole("button", {name: "Resume live editing for a.md"});
+    expect(document.activeElement).toBe(resume);
+    fireEvent.click(resume);
+    await screen.findByRole("button", {name: "Stop live editing for a.md"});
+    expect(h.resume).toHaveBeenCalledExactlyOnceWith("ws", "a.md");
+    expect(screen.queryByText(note)).toBeNull();
+  });
+  it.each([
+    {status: "paused", canResume: false},
+    ...(["workspace-changed", "document-unavailable"] as const)
+      .map(reason => ({status: "unavailable" as const, reason, canResume: false})),
+
+  ] as const)("offers Try again when a pending Stop cannot Resume: %j", async overrides => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("a.md", overrides)]));
+    h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    const live = screen.getByTestId("live-document-row-a.md");
+    await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(within(live).queryByRole("button", {name: "Resume live editing for a.md"})).toBeNull();
+    expect(document.activeElement).toBe(within(live).getByRole("button", {name: "Try again to stop live editing for a.md"}));
+  });
+  it.each(["reload", "refusal", "more"])("drops the pending Stop note when %s replaces rows", async method => {
+    const h = harness();
+    h.load.mockResolvedValueOnce(page([row("a.md")], "next"))
+      .mockResolvedValue(page([row("a.md", {status: "retired", canResume: true})]));
+    h.loadRefusals.mockResolvedValue(refusalPage([refusal("share")]));
+    h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    await screen.findByRole("button", {name: "Try again to stop live editing for a.md"});
+    if (method === "reload") fireEvent.click(screen.getByRole("button", {name: "Reload"}));
+    else if (method === "more") fireEvent.click(screen.getByTestId("live-documents-more"));
+    else fireEvent.click(screen.getByRole("button", {name: "Retry live editing for share.md"}));
+    await vi.waitFor(() => expect(screen.getByTestId("live-document-row-a.md").children[1]?.textContent).toBe("Stopped"));
+    expect(screen.getByTestId("live-document-row-a.md").textContent).not.toContain("didn't stop");
+    expect(actions("a.md")).toEqual(["Resume live editing"]);
+  });
+  it("disables recovery only for the document whose Stop waits, and not for Reload", async () => {
+    const h = harness(), stopping = deferred<LiveDocumentStopResult>(), loading = deferred<LiveDocumentPage>();
+    const documents = page([row("a.md", {quarantine: "paused"}), row("b.md", {quarantine: "paused"})]);
+    h.load.mockResolvedValueOnce(documents).mockReturnValueOnce(loading.promise).mockResolvedValue(documents);
+    h.stop.mockReturnValueOnce(stopping.promise);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    expect((screen.getByRole("button", {name: "Save recovery copy of a.md"}) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", {name: "Save recovery copy of b.md"}) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => stopping.resolve({keptEdits: "none"}));
+    await act(async () => loading.resolve(documents));
+    fireEvent.click(screen.getByRole("button", {name: "Reload"}));
+    expect((screen.getByRole("button", {name: "Save recovery copy of a.md"}) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps an edits-pending Stop in its Live row, focuses Try again, and stops on retry", async () => {
+    const h = harness(), stopping = deferred<LiveDocumentStopResult>();
+    h.load.mockResolvedValueOnce(page([row("a.md")]))
+      .mockResolvedValue(page([row("a.md", {status: "retired", canResume: true})]));
+    h.stop.mockReturnValueOnce(stopping.promise);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    const live = screen.getByTestId("live-document-row-a.md");
+    expect(screen.getByRole("status").textContent).toBe("Stopping live editing for a.md…");
+    expect(within(live).getAllByText("Stopping live editing…")).toHaveLength(1);
+    expect(within(live).queryByText("Stopping live editing for a.md…")).toBeNull();
+    expect(screen.getByRole("status").firstElementChild?.className).toBe("sr-only");
+    expect(within(live).getAllByRole("button").every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    await act(async () => stopping.reject(liveStopError({code: "edits-pending"})));
+    const retry = await screen.findByRole("button", {name: "Try again to stop live editing for a.md"});
+    expect(document.activeElement).toBe(retry);
+    expect(live.children[1]?.textContent).toBe("Live");
+    expect(live.textContent).toContain("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+    expect(actions("a.md")).toEqual(["Try again"]);
+    expect(h.onError).not.toHaveBeenCalled();
+    fireEvent.click(retry);
+    await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+    expect(h.stop.mock.lastCall).toEqual(["ws", "a.md", "object:a.md"]);
+    await vi.waitFor(() => expect(screen.getByTestId("live-document-row-a.md").children[1]?.textContent).toBe("Stopped"));
+    expect(screen.queryByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.")).toBeNull();
+  });
   it("keeps each restore queue beside the live note and offers only its own recovery copy", async () => {
     const h = harness();
     h.load.mockResolvedValue(page([row("note.md"), ...["old-1", "old-2"].map(incident =>
@@ -101,15 +230,6 @@ describe("LiveDocumentsDialog", () => {
     await userEvent.setup().click(within(first).getByRole("button", {name: "Save recovery copy of note.md"}));
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
     expect(screen.getByTestId("live-document-row-note.md-old-2")).toBeTruthy();
-  });
-  it("offers Resume on a live row with a deferred Stop after local clear failed", async () => {
-    const h=harness();
-    h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));
-    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
-    expect((await screen.findByTestId("live-document-row-a.md")).textContent).toContain("Live editing resumed.");
-    expect(actions("a.md")).toEqual(["Resume live editing"]);
-    fireEvent.click(await screen.findByRole("button",{name:"Resume live editing for a.md"}));
-    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
   });
   it.each([true, false])("uses IPC Resume availability on a ready row: %s", async canResume => {
     const h = harness();
@@ -146,6 +266,36 @@ describe("LiveDocumentsDialog", () => {
       expect(actions(path)).toEqual([]);
     }
   });
+  // Proves: a document whose server copy is missing an owner edit offers Resume,
+  // alone and with a deferred Stop, through the same path, with one Resume sentence each.
+  it("offers Resume on a document whose server copy is missing an edit, with and without a deferred Stop", async () => {
+    const h=harness(), reason="live-edit-unadmitted" as const;
+    h.load.mockResolvedValue(page([
+      row("deferred.md",{status:"unavailable",reason,canResume:true,deferredStop:{unsentEdits:2,editable:true}}),
+      row("edited.md",{status:"unavailable",reason,canResume:true}),
+    ]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const deferred=await screen.findByTestId("live-document-row-deferred.md");
+    expect(deferred.textContent).toContain("Live editing stopped. 2 unsent edits remain on this computer. Resume live editing to try sending them. You can keep editing.");
+    const held="The server hasn't applied an edit to this document. Resume live editing to try again.";
+    expect(screen.getAllByText(held)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-edited.md").textContent).toContain(held);
+    for (const path of ["deferred.md","edited.md"]) {
+      const document=screen.getByTestId(`live-document-row-${path}`);
+      expect(document.children[1]?.textContent).toBe("Server copy is missing an edit");
+      expect(document.textContent!.split("Resume live editing to").length-1).toBe(1);
+    }
+    // A deferred Stop has already run, so only the other row still offers Stop.
+    expect(actions("deferred.md")).toEqual(["Resume live editing"]);
+    expect(actions("edited.md")).toEqual(["Resume live editing","Stop live editing"]);
+    fireEvent.click(within(deferred).getByRole("button",{name:"Resume live editing for deferred.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","deferred.md"));
+    // The list reloads after a Resume, and its controls wait until it has.
+    await vi.waitFor(() => expect((screen.getByRole("button",{name:"Resume live editing for edited.md"}) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button",{name:"Resume live editing for edited.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","edited.md"));
+    expect(h.resume).toHaveBeenCalledTimes(2);
+  });
   it.each([0, 2])("does not suggest Resume for a conflict hold with %s deferred edits", async unsentEdits => {
     const h = harness();
     h.load.mockResolvedValue(page([row("held.md", {status: "unavailable", reason: "conflict-parent-withheld",
@@ -168,15 +318,31 @@ describe("LiveDocumentsDialog", () => {
     fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
     await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
   });
-  it("reports a waiting Stop through Notices and keeps its retry available", async () => {
+  it("reports a Stop with no answer through Notices by its error name, with its title and document, and keeps its retry available", async () => {
+    const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
+    // As it crosses Electron's IPC, which keeps only the name and message.
+    const error = new Error(`Error invoking remote method 'stopOwnerLiveDocument': ${String(liveStopWaitingError(new Error("fetch failed")))}`);
+    h.stop.mockRejectedValueOnce(error);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+    const [message, reported, retry, waiting] = h.onError.mock.calls[0]!;
+    expect([message, reported, waiting]).toEqual(["dohc is waiting for the server to stop live editing and will keep trying.", error,
+      {title: "Stopping live editing for a.md", objectId: "object:a.md"}]);
+    expect(retry()).toBe(true);
+    await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+  });
+  it("reports a server-only document's Stop the server isn't ready for through Notices by the relay's words, with its title and document, and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     const error = new Error("Stop live editing is waiting. You can keep editing.");
     h.stop.mockRejectedValueOnce(error);
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
     await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
-    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting for a connection or restore.", error]);
-    expect(h.onError.mock.calls[0]![2]()).toBe(true);
+    const [message, reported, retry, waiting] = h.onError.mock.calls[0]!;
+    expect([message, reported, waiting]).toEqual(["The server isn't ready to stop live editing yet. Try again in a moment.", error,
+      {title: "Live editing didn't stop for a.md", objectId: "object:a.md"}]);
+    expect(retry()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });
   it("stands lines in for the first page, and keeps the words while a Reload keeps the list", async () => {
@@ -303,7 +469,7 @@ describe("LiveDocumentsDialog", () => {
         row("docs/edited.md", {
           status: "unavailable",
           reason: "live-edit-unadmitted",
-          canResume: false,
+          canResume: true,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/held.md", {
@@ -330,18 +496,21 @@ describe("LiveDocumentsDialog", () => {
       "Stopped by the server",
       "Not started",
       "Server copy doesn't match",
-      "Can't resume",
+      "Server copy is missing an edit",
       "Can't resume",
       "Stopped",
       "Stopped",
     ]);
-    // Only a document edited while live editing was off says why it can't
-    // resume, and that its file still takes edits. It offers no Resume.
+    // Only a document whose server copy is missing an owner edit says so, and
+    // that a Resume tries it again.
     const edited =
-      "This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.";
+      "The server hasn't applied an edit to this document. Resume live editing to try again.";
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
-    expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
+    expect(actions("docs/edited.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
     const held = "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
@@ -391,18 +560,6 @@ describe("LiveDocumentsDialog", () => {
         "Stopping live editing keeps the file and its history. Share permissions stay unchanged.",
       ),
     ).toBeTruthy();
-  });
-
-  // The warning is on screen before any Stop runs.
-  it("warns before a Stop that editing the stopped file keeps live editing from resuming", async () => {
-    const h = harness();
-    h.load.mockResolvedValue(page([row("docs/a.md")]));
-    render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
-    await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
-    expect(screen.getByTestId("live-documents-stop-warning").textContent).toBe(
-      "If you edit a file while its live editing is stopped, live editing can't resume for it.",
-    );
-    expect(h.stop).not.toHaveBeenCalled();
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {
@@ -1303,4 +1460,51 @@ describe("LiveDocumentsDialog", () => {
       expect(actions("docs/a.md")).toEqual(["Resume live editing", "Save recovery copy"]);
     });
   });
+});
+
+
+it("focuses the withheld conflict cause once after Stop refuses, without retry or Resume", async () => {
+  const h = harness();
+  h.load.mockResolvedValue(page([row("held.md", {status: "unavailable", reason: "conflict-parent-withheld"})]));
+  h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+  render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+  fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for held.md"}));
+  const words = "Live editing didn't stop. A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
+  const note = await screen.findByText(words);
+  const live = screen.getByTestId("live-document-row-held.md");
+  expect(document.activeElement).toBe(note);
+  expect(live.children[1]?.textContent).toBe("Can't resume");
+  expect(live.querySelectorAll("p")).toHaveLength(1);
+  expect(actions("held.md")).toEqual([]);
+});
+it.each((["paused", "copied", "unreadable", "not-written", "cannot-write"] as const).map(quarantine => ({
+  quarantine,
+  expectation: quarantine === "unreadable" ? "hides the unreadable note and read action, then restores them after retry"
+    : `keeps the ${quarantine} note and recovery copy`,
+})))("$expectation after a non-resumable Stop refuses", async ({quarantine}) => {
+  const h = harness(), user = userEvent.setup();
+  h.load.mockResolvedValue(page([row("held.md", {quarantine, incident: "kept-1"})]));
+  h.stop.mockRejectedValueOnce(liveStopError({code: "edits-pending"}));
+  render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+  const live = await screen.findByTestId("live-document-row-held.md");
+  const cause = live.querySelector("p")!.textContent;
+  fireEvent.click(within(live).getByRole("button", {name: "Stop live editing for held.md"}));
+  const note = await within(live).findByText("Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.");
+  expect(document.activeElement).toBe(within(live).getByRole("button", {name: "Try again to stop live editing for held.md"}));
+  expect(within(live).queryByRole("button", {name: /Resume live/})).toBeNull();
+  expect([...live.querySelectorAll("p")].map(p => p.textContent)).toEqual(
+    quarantine === "unreadable" ? [note.textContent] : [note.textContent, cause]);
+  if (quarantine === "unreadable") {
+    expect(live.children[1]?.textContent).toBe("Can't read edits");
+    expect(within(live).queryByRole("button", {name: "Try again to read your kept edits for held.md"})).toBeNull();
+    await user.click(within(live).getByRole("button", {name: "Try again to stop live editing for held.md"}));
+    await within(live).findByText(cause!);
+    expect(within(live).getByRole("button", {name: "Try again to read your kept edits for held.md"})).toBeTruthy();
+  }
+  const save = within(live).getByRole("button", {name: "Save recovery copy of held.md"}) as HTMLButtonElement;
+  expect(save.disabled).toBe(quarantine === "unreadable");
+  if (!save.disabled) {
+    await user.click(save);
+    expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "held.md", "kept-1");
+  }
 });

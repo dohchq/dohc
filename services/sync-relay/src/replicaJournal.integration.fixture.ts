@@ -321,6 +321,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       const position = inspect(replicaDir, db => db.prepare("SELECT event_count,evidence_digest,journal_cursor FROM replica_documents WHERE object_id=?").get(docs.get("doc-0")!.objectId)!);
       const page = await storage.readReplicaLiveJournal({workspaceId: "workspace", after: Number(position.journal_cursor), limit: 1});
       const row = page.rows[0]!;
+      if ("cancellation" in row) throw new Error("Expected a delivery row.");
       const metadata = parseCanonicalAdmittedLiveUpdateMetadata({...row.admitted.metadata,
         accepted: {...row.admitted.metadata.accepted, binding: {...row.admitted.metadata.accepted.binding, restoreFenceGeneration: input.generation}}});
       try {
