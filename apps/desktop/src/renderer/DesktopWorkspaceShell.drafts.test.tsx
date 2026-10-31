@@ -199,9 +199,12 @@ describe("workspace switch admission", () => {
     const refused = () => new Error("dohc has not finished opening this workspace.");
     const notices = () => screen.getByTestId("notice-center-toggle").getAttribute("aria-label");
     // With no saved layout read, the Explorer opens on Home, as a new workspace does.
-    const openFile = async (user: ReturnType<typeof userEvent.setup>, path: string) => {
+    const showFiles = async (user: ReturnType<typeof userEvent.setup>) => {
       const files = await screen.findByTestId("explorer-mode-files");
       if (files.getAttribute("aria-selected") !== "true") await user.click(files);
+    };
+    const openFile = async (user: ReturnType<typeof userEvent.setup>, path: string) => {
+      await showFiles(user);
       await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
       await screen.findByTestId(`tab-${path}`);
     };
@@ -425,6 +428,7 @@ describe("workspace switch admission", () => {
       const user = userEvent.setup();
       renderShell(bridge);
       await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+      await showFiles(user);
       await screen.findAllByTestId("tree-row");
       for (const title of ["Itinerary", "Lisbon"]) {
         await user.click(screen.getByLabelText("New file"));
@@ -450,6 +454,8 @@ describe("workspace switch admission", () => {
     ])("takes back the toast and the row, and saves the tabs open, when %s", async (_, stored) => {
       const second = deferred<WorkspaceUiState | null>();
       const bridge = makeBridge(second.promise);
+      // The harness reads a missing layout as an empty Files one; this read returns it as is.
+      bridge.getWorkspaceUiState.mockImplementation(() => second.promise);
       waitOutTheOpen(bridge);
       const user = userEvent.setup();
       try {
