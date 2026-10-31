@@ -91,6 +91,13 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });
 
+it("reports no file head, so the note check still judges a shared note", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  expect(provider.headSha256).toBeNull();
+  await provider.close();
+});
+
 it("preserves exact pending state before close and retains the provider if storage fails", async () => {
   const f = fixture();
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});

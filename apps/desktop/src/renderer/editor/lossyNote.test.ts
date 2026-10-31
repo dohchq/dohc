@@ -121,6 +121,20 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(view.result.current).toBe("clear"));
   });
 
+  // As in a teammate's shared session, which has no file head on their device.
+  it("judges the witnessed source of a session with no file head", async () => {
+    const source = "Title\n=====\n\n* one\n";
+    const keeping = markdownToYDoc(source);
+    keeping.getMap("meta").set("dohcMarkdownSource", source);
+    keeping.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    keeping.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(keeping)));
+    const clear = renderHook(() => useBoundNoteCheck({ open: "a", doc: keeping, headSha256: null }));
+    await waitFor(() => expect(clear.result.current).toBe("clear"));
+    const lossyDoc = seeded();
+    const lossy = renderHook(() => useBoundNoteCheck({ open: "b", doc: lossyDoc, headSha256: null }));
+    await waitFor(() => expect(lossy.result.current).toBe("lossy"));
+  });
+
   describe("after a clear verdict", () => {
     const source = "Title\n=====\n\n* one\n";
     async function checkedClear() {
