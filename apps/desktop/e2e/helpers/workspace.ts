@@ -317,8 +317,10 @@ export async function openWorkspaceFromFirstRun(
 // A workspace opens its Explorer on Home. Most specs drive the file tree, so
 // opening a workspace and revealExplorerPath switch a shown Explorer to Files
 // once the saved layout is restored.
-// A spec that needs Home's sections calls openExplorerHome.
-async function showExplorerFiles(page: Page): Promise<void> {
+// A spec that opens a workspace another way, such as from a share or sync
+// code, calls showExplorerFiles. A spec that needs Home's sections calls
+// openExplorerHome.
+export async function showExplorerFiles(page: Page): Promise<void> {
   await expect(page.getByTestId("workspace-workbench")).not.toHaveAttribute("inert");
   const files = page.getByTestId("explorer-mode-files");
   if ((await files.count()) === 0 || (await files.getAttribute("aria-selected")) === "true") return;
