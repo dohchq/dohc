@@ -1,5 +1,6 @@
 import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
@@ -17,6 +18,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await expect(page.getByTestId("chats-channel-empty")).toBeVisible();
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`posts-empty-${theme}.png`) });
     }
     expect(await page.getByTestId("chats-feed-column").evaluate((node) => ({

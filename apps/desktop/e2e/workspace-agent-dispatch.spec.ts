@@ -253,6 +253,7 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
       await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
       }
     }
