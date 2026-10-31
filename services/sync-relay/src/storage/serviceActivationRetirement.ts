@@ -2,6 +2,7 @@ import {parseLiveUpdateReceipt, type LiveUpdateReceipt} from "@dohc/live-session
 import type {StorageContext} from "./context";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {LIVE_JOURNAL_TABLE} from "./schema";
+import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 
 // The retirement of one exact service activation, recorded on its row when
 // Pause, Stop, the loss of its document's last Edit grant, or a Resume of a
@@ -79,6 +80,17 @@ export function readServiceActivationRetirementDecision(storage: StorageContext,
       AND retire_restore_generation=? AND retire_requested_at_ms IS NOT NULL AND ${currentIdentity(SERVICE_ACTIVATIONS)}`)
     .get(document.workspaceId, document.objectId, activation.activationId, activation.lineageClaimId, activation.restoreFenceGeneration);
   return value ? retirement(value) : null;
+}
+
+/**
+ * Whether a restore of the retiring lineage began once the retirement was
+ * requested, whatever phase it is in now. A restore's revocation that opens the
+ * retirement records both at the same moment. A restore that ended before the
+ * request is not counted.
+ */
+export function retirementHadRestore(storage: StorageContext, retirement: ServiceActivationRetirement): boolean {
+  return storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?
+    AND invalidated_at_ms>=? LIMIT 1`).get(retirement.workspaceId, retirement.objectId, retirement.lineageClaimId, retirement.requestedAtMs) !== undefined;
 }
 
 /** Whether the document's activation has an open retirement obligation. */

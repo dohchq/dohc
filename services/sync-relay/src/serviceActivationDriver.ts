@@ -117,6 +117,8 @@ export class ServiceActivationDriver {
   readonly #objects=new Map<string,string>();
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
   readonly #retirements=new Map<string,number>();
+  // Each enrolled target's document, from `addTarget`. Its activation reads name it, so they never read another document's activation at the same path.
+  readonly #enrolled=new Map<string,string>();
   // Owner refusals received but not yet recorded, kept across every owner this driver replaces.
   readonly #refusals=new OwnerKnownRefusals();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -136,7 +138,7 @@ export class ServiceActivationDriver {
   /** Adds one document to activation passes, replacing an earlier target at its path. */
   addTarget(target:ServiceActivationTarget,objectId:string){
     this.#targets=[...this.#targets.filter(row=>targetKey(row)!==targetKey(target)),target];
-    this.#objects.set(targetKey(target),objectId);
+    this.#objects.set(targetKey(target),objectId);this.#enrolled.set(targetKey(target),objectId);
   }
   /** Whether this driver may have loaded the document into the engine. */
   loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
@@ -153,7 +155,7 @@ export class ServiceActivationDriver {
   forgetMoved(target:ServiceActivationTarget,objectId:string){this.#forget(movedKey(target,objectId));}
   #forget(key:string){
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);this.#enrolled.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
   }
   /**
@@ -264,7 +266,11 @@ export class ServiceActivationDriver {
   }
   /** The activation the relay retains at the target's path, which an unload of its document names. */
   activationId(target:ServiceActivationTarget){
-    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)?.activationId;
+    return this.#read(target)?.activationId;
+  }
+  /** The activation retained at the target's path, its enrolled document's when the target has one. A static target reads by path alone. */
+  #read(target:ServiceActivationTarget){
+    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes,this.#enrolled.get(targetKey(target)));
   }
   /**
    * The owner through which a restore step reaches the document. `moved` is the
@@ -334,7 +340,7 @@ export class ServiceActivationDriver {
    * Undefined when it retains none.
    */
   departing(target:ServiceActivationTarget,signal:AbortSignal){
-    const o=this.options,saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
+    const o=this.options,saved=this.#read(target);
     if(!saved)return undefined;
     if(saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     const document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
@@ -384,7 +390,7 @@ export class ServiceActivationDriver {
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
-    const document=parseLiveDocumentKey(value),saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
+    const document=parseLiveDocumentKey(value),saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes,document.objectId);
     if(!saved || saved.shareId!==target.shareId || saved.source.objectId!==document.objectId || saved.source.lineageClaimId!==document.lineageClaimId) {
       throw new Error("Retained service activation changed.");
     }
@@ -569,7 +575,7 @@ export class ServiceActivationDriver {
     if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
       return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
     }
-    let saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes);
+    let saved=this.#read(target);
     if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     if(saved)this.#objects.set(key,saved.source.objectId);
@@ -625,7 +631,7 @@ export class ServiceActivationDriver {
         }
         this.#staleLeases.delete(key);
         o.registered();
-        saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes)!;
+        saved=this.#read(target)!;
       }
       document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
         objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});

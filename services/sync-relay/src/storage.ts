@@ -501,6 +501,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}) {
     return serviceHostEnrollmentStorage.restoreInProgress(this, document.workspaceId, document.objectId);
   }
+  serviceRetirementHadRestore(retirement: ServiceActivationRetirement) {
+    return serviceActivationRetirementStorage.retirementHadRestore(this, retirement);
+  }
   serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: serviceActivationRetirementStorage.RetirableServiceActivation) {
     return serviceActivationRetirementStorage.readServiceActivationRetirementDecision(this, document, activation);
   }

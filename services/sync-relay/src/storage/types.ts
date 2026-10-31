@@ -669,6 +669,8 @@ export interface SyncRelayStorage {
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** Whether the document has a restore that has neither resumed nor been declined. */
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}): boolean;
+  /** Whether a restore of the retirement's lineage began once it was requested, finished or not. */
+  serviceRetirementHadRestore(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement): boolean;
   serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
     import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** The prepared activation a new Stop of the document would retire, once no retirement is open. */

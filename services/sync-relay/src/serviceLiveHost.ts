@@ -255,11 +255,11 @@ export async function startServiceLiveHost(options: {
   // `ended` is set once no Try again of its queues stays granted.
   const retained = new Map<string, {target: ServiceActivationTarget; objectId: string; ended?: boolean}>();
   const documentKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify([document.workspaceId, document.objectId]);
-  // Documents an earlier daemon left away from their enrolled path whose retirement waits for their unfinished restore.
-  // Each keeps its frozen target, by workspace and object, so the restore continues there and its retirement can end. It
+  // Documents an earlier daemon left away from their enrolled path whose activation had a restore and has not retired yet.
+  // Each keeps its frozen target, by workspace and object, so an unfinished restore continues there and the retirement can end. It
   // never activates and is never settled as an ordinary departure, and a document now at its old path changes nothing.
-  const restoring = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
-  const restoringKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify(["restoring", document.workspaceId, document.objectId]);
+  const movedRestores = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
+  const movedRestoreKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify(["restoring", document.workspaceId, document.objectId]);
   // Leaving documents the engine refused as not ready, with the number of the pull that must succeed before they are known parked.
   const parking = new Map<string, number>();
   // Whether an update completed on this daemon.
@@ -339,7 +339,7 @@ export async function startServiceLiveHost(options: {
     : consumers.get(document.workspaceId);
   const consumerForRestore=(lookup:StopRestoreLookup)=>{
     const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
-    return document?(attachments.has(document.workspaceId)?activation?.restoreConsumer(document,lookup,restoring.get(restoringKey(document))?.target):consumerFor(document)):undefined;
+    return document?(attachments.has(document.workspaceId)?activation?.restoreConsumer(document,lookup,movedRestores.get(movedRestoreKey(document))?.target):consumerFor(document)):undefined;
   };
   const configuredConsumer = (document: LiveDocumentKey) => {
     const consumer = consumerFor(document);
@@ -471,7 +471,7 @@ export async function startServiceLiveHost(options: {
       check();
     }
     const registerRetained = () => {
-      if (registered || (!activation?.hasRetained() && !restoring.size)) return;
+      if (registered || (!activation?.hasRetained() && !movedRestores.size)) return;
       if(!storage.registerLiveHost({...coordinate,updatedAtMs:Date.now(),guard:standing}).ok)throw new Error("Retained service host registration refused.");
       registered=true;check();
     };
@@ -524,14 +524,14 @@ export async function startServiceLiveHost(options: {
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) if (document.target.workspaceId === workspaceId) forget(key);
       for (const [key, document] of retained) if (document.target.workspaceId === workspaceId) retained.delete(key);
-      for (const [key, document] of restoring) if (document.target.workspaceId === workspaceId) forgetRestoring(key);
+      for (const [key, document] of movedRestores) if (document.target.workspaceId === workspaceId) forgetMovedRestore(key);
       changes?.notifyHost([workspaceId]);
     };
     const forget = (key: string) => {activation!.removeTarget(hosted.get(key)!.target); unhost(key);};
-    const forgetRestoring = (key: string) => {const row = restoring.get(key)!; activation!.forgetMoved(row.target, row.objectId); unhost(key);};
+    const forgetMovedRestore = (key: string) => {const row = movedRestores.get(key)!; activation!.forgetMoved(row.target, row.objectId); unhost(key);};
     const unhost = (key: string) => {
       hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key); keeping.delete(key);
-      grantsEnded.delete(key); heldOf.delete(key); observed.delete(key); restoring.delete(key);
+      grantsEnded.delete(key); heldOf.delete(key); observed.delete(key); movedRestores.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     // The unload names the activation the relay retains, so it cannot end another one's state.
@@ -690,9 +690,9 @@ export async function startServiceLiveHost(options: {
     // whatever this daemon loaded, so it never waits on an ordinary unload. Once
     // it retired, its successor activates when its document is hosted again.
     // Null while no retirement is open, or while it departs as an ordinary unload instead.
-    // A moved document waiting for its restore retires through its frozen target the same way.
+    // A moved document whose activation had a restore retires through its frozen target the same way.
     const retire = async (key: string, joined: AbortSignal): Promise<string | undefined | null> => {
-      const row = hosted.get(key) ?? restoring.get(key);
+      const row = hosted.get(key) ?? movedRestores.get(key);
       if (!row) return null;
       const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
       const open = storage.serviceActivationRetirement(document);
@@ -712,7 +712,7 @@ export async function startServiceLiveHost(options: {
       const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
       const step = await activation!.retire(row.target, row.objectId, joined, {
         departed: () => required !== undefined && reachedSince(attached!, row.objectId, required),
-        parked: () => required !== undefined && goneSince(attached!, row.objectId, required)}, restoring.has(key));
+        parked: () => required !== undefined && goneSince(attached!, row.objectId, required)}, movedRestores.has(key));
       // A seed the engine cannot abandon holds the retirement. No settlement may pass it, so the document
       // departs as an ordinary unload, with its accepted work kept for its owner's recovery copy.
       if (!step || step.kind === "held") return null;
@@ -815,15 +815,15 @@ export async function startServiceLiveHost(options: {
       }
       return gone(key, row, joined);
     };
-    // Resolves to why a moved document waiting for its restore stays, or undefined once its retirement retired it.
+    // Resolves to why a moved document whose activation had a restore stays, or undefined once its retirement retired it.
     // A retirement that departs as an ordinary unload leaves it as any moved document an earlier daemon left:
     // unsettled, and kept only while its owner has no recovery copy of edits this host refused.
-    const keepRestoring = async (key: string, joined: AbortSignal) => {
-      const row = restoring.get(key);
+    const keepMovedRestore = async (key: string, joined: AbortSignal) => {
+      const row = movedRestores.get(key);
       if (!row) return undefined;
       const waiting = await retire(key, joined);
       if (waiting !== null) return waiting;
-      forgetRestoring(key);
+      forgetMovedRestore(key);
       if (uncopied(row)) retained.set(documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId}), row);
       return undefined;
     };
@@ -1156,15 +1156,15 @@ export async function startServiceLiveHost(options: {
       // departing document's work unsettled in its store. Passes settle each
       // one still at its enrolled path, then publish and unload it. One that
       // moved is not settled there; it stays only for its owner's recovery
-      // copy, or for the unfinished restore its retirement waits for,
-      // whatever document now holds its old path.
+      // copy, or, whatever document now holds its old path, until the
+      // retirement of an activation that had a restore completes.
       if (!updated) {
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
           if (!members.has(workspaceId)) continue;
           if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
-            const moved = {workspaceId, objectId: document.objectId};
-            if (storage.serviceActivationRetirement(moved) && storage.serviceRestoreInProgress(moved)) restoring.set(restoringKey(moved), document);
+            const moved = {workspaceId, objectId: document.objectId}, open = storage.serviceActivationRetirement(moved);
+            if (open && storage.serviceRetirementHadRestore(open)) movedRestores.set(movedRestoreKey(moved), document);
             else if (uncopied(document)) retained.set(documentKey(moved), document);
             continue;
           }
@@ -1194,7 +1194,7 @@ export async function startServiceLiveHost(options: {
     }));
     const drained = (workspaceId: string) => {
       const attached = attachments.get(workspaceId);
-      return !!attached && ![...hosted.values(), ...retained.values(), ...restoring.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
+      return !!attached && ![...hosted.values(), ...retained.values(), ...movedRestores.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
         attached.hosted.departedNone && [...attached.announced.values()].every(required => required <= attached.confirmed);
     };
     if(config.activation){
@@ -1229,8 +1229,8 @@ export async function startServiceLiveHost(options: {
           const waiting=await depart(key,passSignal);
           if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
         });
-        for(const key of [...restoring.keys()])await step(async()=>{
-          const waiting=await keepRestoring(key,passSignal);
+        for(const key of [...movedRestores.keys()])await step(async()=>{
+          const waiting=await keepMovedRestore(key,passSignal);
           if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
         });
         // A document whose owner lost live authority but that has not left, as right after Stop, records
@@ -1356,7 +1356,7 @@ export async function startServiceLiveHost(options: {
        */
       retains(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
-        return hostedKey(document) !== undefined || retained.has(documentKey(document)) || restoring.has(restoringKey(document)) || !attached || required === undefined || attached.confirmed < required ||
+        return hostedKey(document) !== undefined || retained.has(documentKey(document)) || movedRestores.has(movedRestoreKey(document)) || !attached || required === undefined || attached.confirmed < required ||
           !goneSince(attached, document.objectId, required);
       },
       /**
@@ -1367,7 +1367,7 @@ export async function startServiceLiveHost(options: {
        */
       pulledAfterDeparture(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
-        return hostedKey(document) === undefined && !retained.has(documentKey(document)) && !restoring.has(restoringKey(document)) && required !== undefined && attached!.confirmed >= required &&
+        return hostedKey(document) === undefined && !retained.has(documentKey(document)) && !movedRestores.has(movedRestoreKey(document)) && required !== undefined && attached!.confirmed >= required &&
           reachedSince(attached!, document.objectId, required);
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
