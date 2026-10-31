@@ -8,7 +8,7 @@ import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
-import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
+import { publicationListUnavailable, registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -42,17 +42,19 @@ function harness() {
     return { publicationId, candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS), active: true, authorityRevision: 1, owner: {
       workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
   });
+  const relayOrUnavailable = vi.fn(async (relayCredentials: typeof credentials, path: string, init?: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }> =>
+    ({ kind: "success", body: await relay(relayCredentials, path, init) }));
   const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => ({ deferredWrites: [] as string[] }));
   const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({ credentials, credentialGeneration }));
   let handler!: (event: { sender: { id: number } }, payload: unknown) => unknown;
   registerOwnerAppPublicationIpc({ registerHandler(_channel, fn) { handler = fn; }, assertTrustedSender(event: { sender: { id: number } }) { if (event.sender.id < 0) throw new Error("untrusted"); },
     async withRendererWorkspaceOperation(_sender, _workspaceId, _message, work) { return work({ workspace, signal: controller.signal, session: { generation: rendererGeneration }, assertCurrent() { if (!current) throw new Error("retired"); } }); },
     remoteForWorkspace: remote, currentCredentialGeneration: () => credentialGeneration,
-    flushCapture: flush, withAdapter: async (_workspace, work) => work(adapter), compile, relayJson: relay, upload });
+    flushCapture: flush, withAdapter: async (_workspace, work) => work(adapter), compile, relayJson: relay, relayJsonOrUnavailable: relayOrUnavailable, upload });
   const invoke = async (input: unknown, senderId = 1) => OwnerAppPublicationResult.parse(await handler({ sender: { id: senderId } }, input));
   const prepare = async () => { const result = await invoke(prepareInput); if (result.kind !== "prepared") throw new Error("not prepared"); return result; };
   const approve = (value: Awaited<ReturnType<typeof prepare>>, digest = value.candidateDigest) => invoke({ action: "approve", workspaceId: "w", approvalId: value.approvalId, candidateDigest: digest });
-  return { remote, source, grant, controller, workspace, requests, compile, upload, relay, flush, invoke, prepare, approve,
+  return { remote, source, grant, controller, workspace, requests, compile, upload, relay, relayOrUnavailable, flush, invoke, prepare, approve,
     setBeforeCapture(fn: typeof beforeCapture) { beforeCapture = fn; }, retire() { current = false; },
     switchRenderer() { rendererGeneration++; }, switchCredential() { credentialGeneration++; } };
 }
@@ -335,6 +337,25 @@ describe("owner app publication", () => {
     const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, datasetCapability: null, collectionCapability: null, linkCurrent: true, manifestUnavailable: true };
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
+  });
+  it("counts only the relay's not_found 404 as a list the server does not publish", () => {
+    const notFound = { ok: false, error: "Not found.", code: "not_found" };
+    expect(publicationListUnavailable(404, notFound)).toBe(true);
+    // A proxy in front of a self-hosted relay can answer 403 or a bare 404 while links stay live.
+    expect(publicationListUnavailable(403, { ok: false, code: "forbidden" })).toBe(false);
+    expect(publicationListUnavailable(403, notFound)).toBe(false);
+    expect(publicationListUnavailable(404, null)).toBe(false);
+    expect(publicationListUnavailable(404, { ok: false })).toBe(false);
+    expect(publicationListUnavailable(404, { ok: false, code: "share_access_removed" })).toBe(false);
+    expect([400, 401, 409, 429, 500, 502, 503, 504].map(status => publicationListUnavailable(status, notFound))).toEqual(Array(8).fill(false));
+  });
+  it("answers listUnavailable when the relay says not found, and throws any other failure", async () => {
+    const h = harness();
+    h.relayOrUnavailable.mockResolvedValueOnce({ kind: "unavailable" });
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listUnavailable" });
+    expect(h.relayOrUnavailable).toHaveBeenLastCalledWith(expect.anything(), "/sync/w/app-publications?appRoot=app", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    h.relay.mockRejectedValueOnce(new Error("Sharing failed (503)."));
+    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).rejects.toThrow("Sharing failed (503).");
   });
 });
 

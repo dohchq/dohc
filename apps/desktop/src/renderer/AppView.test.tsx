@@ -189,18 +189,17 @@ describe("an owner app in its tab", () => {
     expect(screen.getByRole("button", { name: "Stop loading" })).toBe(screen.getByTestId("app-view-reload"));
   });
 
-  it("opens the app here once it is approved, and moves focus into it when the review closes", async () => {
+  it("opens the app here once it is approved, and moves focus into it as the review closes", async () => {
     approved = false;
     const user = userEvent.setup();
     render(<Page />);
     await user.click(await screen.findByRole("button", { name: "Review and open app" }));
-    await user.click(await screen.findByRole("button", { name: "Prepare for this device" }));
-    await user.click(await screen.findByRole("button", { name: "Approve for this device" }));
+    const approve = await screen.findByRole("button", { name: "Approve and open" }) as HTMLButtonElement;
+    await waitFor(() => expect(approve.disabled).toBe(false));
+    await user.click(approve);
     await screen.findByTestId("app-view-webview");
     expect(opens()).toBe(2);
-    // The dialog is still open, so focus waits.
-    expect(guest.focus).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Close publication" }));
+    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
     await waitFor(() => expect(guest.focus).toHaveBeenCalled());
     expect(guest.focus.mock.contexts.at(-1)).toBe(webview());
   });
@@ -249,8 +248,9 @@ describe("an owner app in its tab", () => {
     render(<Page />);
     await openedView();
     await user.click(screen.getByTestId("app-view-review"));
-    await user.click(await screen.findByRole("button", { name: "Prepare for this device" }));
-    await user.click(await screen.findByRole("button", { name: "Approve for this device" }));
+    const approve = await screen.findByRole("button", { name: "Approve and open" });
+    await waitFor(() => expect((approve as HTMLButtonElement).disabled).toBe(false));
+    await user.click(approve);
     await waitFor(() => expect(publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve" })));
     expect(opens()).toBe(1);
     emit({ viewId: viewIdOf(), kind: "approval-ended" });
