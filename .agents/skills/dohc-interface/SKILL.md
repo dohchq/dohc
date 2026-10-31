@@ -311,7 +311,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
-- So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape leaves the mark as it was.
+- So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
 - Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
