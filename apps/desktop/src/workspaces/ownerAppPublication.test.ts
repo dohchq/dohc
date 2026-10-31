@@ -57,7 +57,7 @@ describe("local app source revision", () => {
     h.sources.set("app/main.ts", "import { capacity } from './rules.ts'; document.body.textContent = String(capacity);");
     const { candidate } = await prepareLocalAppPublication(app, { ...local(h), compile: h.compile });
     h.compile.mockClear();
-    expect(await readLocalAppSource(app, local(h))).toEqual({ sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path) });
+    expect(await readLocalAppSource(app, local(h))).toEqual({ sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), declaresCollection: false });
     h.sources.set("app/rules.ts", "export const capacity: number = 30;");
     expect((await readLocalAppSource(app, local(h))).sourceRevision).not.toBe(candidate.sourceRevision);
     expect(h.compile).not.toHaveBeenCalled();
@@ -238,6 +238,14 @@ describe("owner dataset publication", () => {
     expect(h.capturePaths.flat()).not.toContain("private/dataset.json");
     expect(resolve).not.toHaveBeenCalled();
     expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("tells a local review that the app declares a Collection, without reading the Collection", async () => {
+    const h = harness();
+    h.setDeclaration(declaration);
+    const source = await readLocalAppSource({ workspaceId: "w", appRoot: "app" }, { adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: h.hooks.deferredWrites });
+    expect(source.declaresCollection).toBe(true);
+    expect(h.capturePaths.flat()).not.toContain("private/dataset.json");
   });
 
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {

@@ -76,9 +76,9 @@ describe("local app publication review", () => {
   });
   it("reads an app's current source revision after flushing waiting edits, without preparing it", async () => {
     const h = harness();
-    vi.mocked(readLocalAppSource).mockResolvedValue({ sourceRevision: hash, sourcePaths: ["app/main.ts"] });
+    vi.mocked(readLocalAppSource).mockResolvedValue({ sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
     expect(await h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation))
-      .toEqual({ kind: "localChecked", appRoot: "app", sourceRevision: hash, sourcePaths: ["app/main.ts"] });
+      .toEqual({ kind: "localChecked", appRoot: "app", sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
     expect(h.flushCapture).toHaveBeenCalledWith(h.operation.workspace);
     expect(readLocalAppSource).toHaveBeenCalledWith({ action: "checkLocal", workspaceId: "w", appRoot: "app" },
       expect.objectContaining({ signal: h.controller.signal, deferredWrites: ["app/draft.ts"] }));
@@ -93,7 +93,7 @@ describe("local app publication review", () => {
   });
   it("refuses a source revision read after its operation ended", async () => {
     const h = harness();
-    vi.mocked(readLocalAppSource).mockImplementation(async () => { h.controller.abort(); return { sourceRevision: hash, sourcePaths: ["app/main.ts"] }; });
+    vi.mocked(readLocalAppSource).mockImplementation(async () => { h.controller.abort(); return { sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: true }; });
     await expect(h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation)).rejects.toThrow();
   });
   it("launches only a loopback approved publication and refuses a late result", async () => {

@@ -54,7 +54,8 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
   z.object({ kind: z.literal("localListed"), publications: z.array(LocalPublication).max(64) }).strict(),
   // The source revision prepareLocal would capture now. It differs from an approval's sourceRevision once the app's source changed.
-  z.object({ kind: z.literal("localChecked"), appRoot: z.string().min(1).max(1024), sourceRevision: hash, sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512) }).strict(),
+  // declaresCollection is false for an app that reaches no Collection. prepareLocal refuses such an app, so it has nothing to approve here.
+  z.object({ kind: z.literal("localChecked"), appRoot: z.string().min(1).max(1024), sourceRevision: hash, sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512), declaresCollection: z.boolean() }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
   // The relay answered not found: it does not publish apps for this workspace and account.
   z.object({ kind: z.literal("listUnavailable") }).strict(),

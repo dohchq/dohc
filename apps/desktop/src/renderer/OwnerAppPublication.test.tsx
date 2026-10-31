@@ -567,7 +567,7 @@ describe("owner app publication", () => {
     const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), datasetCapability: approvedAccess, approved: true, active: true };
     const collectionRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), approved: true, active: true, collectionCapability: approvedCollection, pendingCreates: 0 };
     const checked: Extract<OwnerAppPublicationResult, { kind: "localChecked" }> = { kind: "localChecked", appRoot: "trip", sourceRevision: "b".repeat(64),
-      sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"] };
+      sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"], declaresCollection: true };
     const secondApproval = "0f6d2c1e-4b8a-4c3e-9d2f-1a2b3c4d5e6f";
     const checkFailed = "dohc could not check whether this app is approved on this device.";
 
@@ -604,7 +604,7 @@ describe("owner app publication", () => {
       await ready();
       expect(approveButton().textContent).toBe("Approve and open");
       expect(actions("prepareLocal")).toEqual([{ action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
-      expect(actions("checkLocal")).toEqual([]);
+      expect(actions("checkLocal")).toEqual([{ action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
       expect(reach("Reads")).toBe("list");
@@ -1174,6 +1174,21 @@ describe("owner app publication", () => {
       expect(screen.queryByText(linksLine)).toBeNull();
       expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
       expect(api.getSyncStatus).not.toHaveBeenCalled();
+    });
+
+    it("opens an app that reaches no Collection on its links, as a plain site opens, and never prepares it", async () => {
+      const reportError = vi.fn();
+      const answers = local();
+      api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? { ...checked, declaresCollection: false } : answers(request));
+      renderLocal({ reportError });
+      await openLocal();
+      expect(await screen.findByRole("button", { name: "Prepare app" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Publications" })).toBeTruthy();
+      expect(screen.queryByTestId("app-review-state")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+      expect(actions("prepareLocal")).toEqual([]);
+      expect(reportError).not.toHaveBeenCalled();
     });
 
     it("ignores an approvals answer that arrives after the workspace changed", async () => {

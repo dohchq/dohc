@@ -1627,7 +1627,7 @@ Compare sourceRevision with the one listLocal returns. They differ once the app'
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths, declaresCollection }`.
 
 #### `dohc app prepareLocal`
 

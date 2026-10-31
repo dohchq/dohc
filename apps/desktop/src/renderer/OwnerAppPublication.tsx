@@ -350,7 +350,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   // Signed out of the workspace's server: Share links offers Connect server instead of reading the list.
   // The links view keeps its own errors, so only the review on this device skips the list.
-  const linksSignedOut = !!props.localApproval && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
+  // An app that reaches no Collection has nothing to approve here, so it opens on its links, as a plain site does.
+  const linksOnly = localReview.status === "ready" && !localReview.approval && localReview.source?.declaresCollection === false;
+  const linksSignedOut = !!props.localApproval && !linksOnly && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
   useEffect(() => {
     let current = true;
     setPublicationsLoading(true); setPublicationsError(null); setLinksHidden(false);
@@ -407,18 +409,17 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       const rows = page.publications.filter(row => row.appRoot === props.appRoot);
       const approval = rows.find(row => row.approved) ?? null;
       // The approval is known even when its source check fails, so the dialog keeps it and treats the source as unchanged.
+      // Without an approval, a failed check leaves preparation to report the problem.
       let source: Checked | null = null;
-      if (approval) {
-        try {
-          const checked = await api.publishOwnerApp({ action: "checkLocal", workspaceId: props.workspaceId, appRoot: props.appRoot });
-          if (checked.kind !== "localChecked" || checked.appRoot !== props.appRoot) throw new Error(sourceCheckFailed);
-          source = checked;
-        } catch (error) {
-          if (!current) return;
-          report.current(sourceCheckFailed, error, () => { if (alive.current) setLocalReload(value => value + 1); else props.onReopen(); });
-        }
+      try {
+        const checked = await api.publishOwnerApp({ action: "checkLocal", workspaceId: props.workspaceId, appRoot: props.appRoot });
+        if (checked.kind !== "localChecked" || checked.appRoot !== props.appRoot) throw new Error(sourceCheckFailed);
+        source = checked;
+      } catch (error) {
         if (!current) return;
+        if (approval) report.current(sourceCheckFailed, error, () => { if (alive.current) setLocalReload(value => value + 1); else props.onReopen(); });
       }
+      if (!current) return;
       setLocalReview({ status: "ready", rows, approval, source });
     })().catch(error => {
       if (!current) return;
@@ -431,6 +432,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
   const changed = !!approval && !!review?.source && review.source.sourceRevision !== approval.sourceRevision;
+  const shownView = linksOnly ? "links" : view;
   const needsCandidate = !!review && (!approval || changed);
 
   // A first review or changed source shows the exact candidate, so approval binds what the person read.
@@ -464,7 +466,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     }
   };
   useEffect(() => {
-    if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
+    if (shownView === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
   // A retry waits in this effect for any running action, so it never takes over an approval or a removal.
   const retryPreparation = () => setCandidateState(value => value === "failed" ? "idle" : value);
@@ -634,7 +636,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     heading.current?.focus();
   };
 
-  const localView = view === "local" && !prepared;
+  const localView = shownView === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView ? (needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths : undefined;
   const shown = (path: string) => path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
@@ -818,7 +820,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
         {synced === false ? null : <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>}
         <footer className="flex justify-end gap-2">
-          {props.localApproval ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
+          {props.localApproval && !linksOnly ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
             <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
           {synced === false ? null : <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !busyPublicationId ? "Preparing app…" : "Prepare app"}</PrimaryButton>}</footer>
       </>}

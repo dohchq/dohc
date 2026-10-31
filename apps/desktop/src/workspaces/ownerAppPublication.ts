@@ -115,10 +115,13 @@ export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSel
   return prepareAppSources(input, "main", localAllowed, dependencies);
 }
 
-/** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
-export async function readLocalAppSource(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: SourceDependencies): Promise<{ sourceRevision: string; sourcePaths: string[] }> {
-  const { metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
-  return { sourceRevision: metadata.sourceDigest, sourcePaths: metadata.files.map(file => file.path) };
+/**
+ * Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's.
+ * declaresCollection is false for an app that reaches no Collection, which local preparation refuses.
+ */
+export async function readLocalAppSource(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: SourceDependencies): Promise<{ sourceRevision: string; sourcePaths: string[]; declaresCollection: boolean }> {
+  const { declared, metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
+  return { sourceRevision: metadata.sourceDigest, sourcePaths: metadata.files.map(file => file.path), declaresCollection: !!declared.dataset || !!declared.collection };
 }
 
 type SourceDependencies = Pick<AppPublicationPreparationDependencies, "adapter" | "signal" | "assertCurrent" | "deferredWrites">;
