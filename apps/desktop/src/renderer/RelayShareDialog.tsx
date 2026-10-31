@@ -6,7 +6,7 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton, PrimaryButton } from "./ui/controls";
 import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { useRelayShareLinkPane } from "./useRelayShareLinkPane";
-import { accessReasonForLane, type AccessContext, type AccessReason } from "./workbench/accessReason";
+import { accessReasonForLane, serverName, type AccessContext, type AccessReason } from "./workbench/accessReason";
 
 export type RelayShareTarget =
   | { kind: "paths"; paths: [string, ...string[]]; label?: string }
@@ -157,13 +157,4 @@ function SetupBand(props: {
       </PrimaryButton>
     </div>
   );
-}
-
-// A server by its host, as a person reads its address: sync.example.org.
-function serverName(server: string): string {
-  try {
-    return new URL(server).host;
-  } catch {
-    return server;
-  }
 }

@@ -1074,6 +1074,56 @@ describe("owner app publication", () => {
       expect(reportError).not.toHaveBeenCalled();
     });
 
+    // The shell's workspace server connection: signed out of sync.example.org, or connected to it.
+    const accessFor = (connected: boolean, connect: () => void = vi.fn()) => ({ server: "https://sync.example.org",
+      context: { facts: { cloud: { connected, workspaceSynced: true, workspaceSyncConnected: connected }, shareView: false }, openSyncSettings: vi.fn(), connect } });
+
+    it("offers Connect server in Share links while signed out, without reading the links", async () => {
+      api.publishOwnerApp.mockImplementation(local([localRow]));
+      renderLocal({ access: accessFor(false) });
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      const section = await screen.findByRole("region", { name: "Share links" });
+      const row = within(section).getByTestId("app-links-signed-out");
+      expect(row.textContent).toBe("Not connected to sync.example.orgConnect server");
+      expect(within(row).getByText("sync.example.org").className).toContain("font-medium");
+      expect(within(row).getByRole("button", { name: "Connect server" }).className).not.toContain("bg-accent");
+      expect(screen.queryByText("Others may have access.")).toBeNull();
+      expect(screen.queryByText(linksLine)).toBeNull();
+      expect(within(section).queryByRole("button", { name: "Publish on a link" })).toBeNull();
+      expect(actions("list")).toEqual([]);
+      expect(api.getSyncStatus).not.toHaveBeenCalled();
+    });
+
+    it("closes the dialog before Connect server opens its place", async () => {
+      const order: string[] = [];
+      api.publishOwnerApp.mockImplementation(local([localRow]));
+      const view = render(<Control workspaceId="ws-trip" appRoot="trip" title="Trip planner" localApproval="tab" open testId="app-view-review"
+        onOpenChange={open => order.push(open ? "open" : "close")} access={accessFor(false, () => order.push("connect"))} />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Connect server" }));
+      expect(order).toEqual(["close", "connect"]);
+      view.unmount();
+
+      const connect = vi.fn();
+      renderLocal({ access: accessFor(false, connect) });
+      await openLocal();
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Connect server" }));
+      expect(connect).toHaveBeenCalledOnce();
+      expect(dialog()).toBeNull();
+    });
+
+    it("reads the links once the workspace's server connects", async () => {
+      api.publishOwnerApp.mockImplementation(local([localRow]));
+      const view = renderLocal({ access: accessFor(false) });
+      await openLocal();
+      await screen.findByTestId("app-links-signed-out");
+      expect(actions("list")).toEqual([]);
+      view.rerender(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" title="Trip planner" localApproval="tab" access={accessFor(true)} />);
+      await waitFor(() => expect(actions("list")).toEqual([{ action: "list", workspaceId: "ws-trip", appRoot: "trip" }]));
+      expect(await screen.findByRole("button", { name: "Publish on a link" })).toBeTruthy();
+      expect(screen.queryByTestId("app-links-signed-out")).toBeNull();
+    });
+
     it.each([
       ["workspace", { workspaceId: "ws-other" }],
       ["app", { appRoot: "trip-two" }],

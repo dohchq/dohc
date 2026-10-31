@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, Globe, Link as LinkIcon, Pencil, Table2, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, Globe, Link as LinkIcon, LogIn, Pencil, Table2, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
@@ -13,6 +13,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
+import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
 const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
@@ -198,8 +199,9 @@ const More = ({ children }: { children: ReactNode }) => <p className="m-0 mt-1 t
 
 // onLocalChange runs after anything that may change this device's approvals, so other views read them again.
 // localApproval says how an app approved here opens: in its tab, in the browser, or not at all when it has no app.publish.json.
+// access: the shell's workspace server connection, and that server's address, so a signed-out Share links box can say so.
 type PublicationProps = { workspaceId: string; appRoot: string; title?: string; localApproval?: "tab" | "browser" | null;
-  onShareSource?: () => void; reportError?: ReportError; onLocalChange?: () => void };
+  onShareSource?: () => void; reportError?: ReportError; onLocalChange?: () => void; access?: { context: AccessContext; server: string | null } };
 
 type ControlProps = PublicationProps & { open: boolean; onOpenChange: (open: boolean) => void; testId: string };
 
@@ -346,9 +348,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     return () => { current = false; };
   }, [api, props.workspaceId, props.appRoot, reload]);
 
+  // Signed out of the workspace's server: Share links offers Connect server instead of reading the list.
+  // The links view keeps its own errors, so only the review on this device skips the list.
+  const linksSignedOut = !!props.localApproval && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
   useEffect(() => {
     let current = true;
     setPublicationsLoading(true); setPublicationsError(null); setLinksHidden(false);
+    if (linksSignedOut) { setPublications([]); setLinksFailed(false); setPublicationsLoading(false); return; }
     void (async () => {
       const rows: Publication[] = [];
       const seen = new Set<string>();
@@ -377,7 +383,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       setLinksHidden(offline); setLinksFailed(!offline);
     }).finally(() => { if (current) setPublicationsLoading(false); });
     return () => { current = false; };
-  }, [api, props.workspaceId, props.appRoot, publicationsReload]);
+  }, [api, props.workspaceId, props.appRoot, publicationsReload, linksSignedOut]);
 
   useEffect(() => {
     let current = true;
@@ -638,6 +644,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   // the label with one line and Try again, which stays while it reloads. Publishing on a link never needs approval here.
   const linkRows = publications.filter(publication => publication.active || publication.operatorTakedown);
   const showLinks = !!review && synced === true && !linksHidden && (!publicationsLoading || linksFailed);
+  const connect = props.access?.context.connect;
+  const server = props.access?.server ?? null;
   const status = <>
     {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
     {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
@@ -680,7 +688,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : void prepareLocalCandidate()} />
         {showLinks ? <section aria-labelledby="app-links-title">
           <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">Share links</h3>
-          {linksFailed ? <div data-testid="app-links-failed" className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[13px]">
+          {linksSignedOut && connect ? <div data-testid="app-links-signed-out" data-reason="signed-out" className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[13px]">
+            <LogIn size={12} aria-hidden className="shrink-0 text-muted" />
+            <p className="m-0 min-w-0 flex-1 truncate text-ink">Not connected to{" "}
+              {server === null ? "this workspace's server" : <span className="font-medium" title={server}>{serverName(server)}</span>}</p>
+            {/* Connect server opens its own place, so the dialog closes first. */}
+            <SecondaryButton size="compact" disabled={committing} onClick={() => { props.onClose(); connect(); }}>Connect server</SecondaryButton>
+          </div> : linksFailed ? <div data-testid="app-links-failed" className="flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-[13px]">
             <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
             <p className="m-0 min-w-0 flex-1 text-ink" title={publicationsError ?? undefined}>The server didn't return this app's links.</p>
             <SecondaryButton size="row" aria-busy={publicationsLoading} onClick={() => { if (!publicationsLoading) setPublicationsReload(value => value + 1); }}>Try again</SecondaryButton>

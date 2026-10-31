@@ -1189,6 +1189,9 @@ export function DesktopWorkspaceShell(props: {
     }),
     [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openCloud, openSettings],
   );
+  // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
+  const appServer = cloudStatus?.workspaceServerUrl ?? null;
+  const appAccess = useMemo(() => ({ context: accessContext, server: appServer }), [accessContext, appServer]);
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -5904,6 +5907,7 @@ export function DesktopWorkspaceShell(props: {
             syncStatus={syncStatus}
             chatsNavigatorProps={chatsNavigatorProps}
             setAppPinned={setAppPinned}
+            appAccess={appAccess}
             shareView={shareView}
             historyTimeline={historyTimeline}
             sharing={{
@@ -6389,6 +6393,7 @@ export function DesktopWorkspaceShell(props: {
                         onShareSite={(target) =>
                           setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
                         }
+                        access={appAccess}
                       />
                     </Suspense>
                   </ErrorBoundary>

@@ -27,3 +27,12 @@ export function accessReasonForLane(facts: AccessFacts, lane: "granted" | "recei
   if (!cloud.workspaceSyncConnected) return "other-account";
   return "unexplained";
 }
+
+// A server by its host, as a person reads its address: sync.example.org.
+export function serverName(server: string): string {
+  try {
+    return new URL(server).host;
+  } catch {
+    return server;
+  }
+}
