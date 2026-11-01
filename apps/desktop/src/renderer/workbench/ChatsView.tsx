@@ -18,6 +18,7 @@ import {
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { ThreadedChat } from "./ThreadedChat";
+import { showChat } from "./chatsOnScreen";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
@@ -3871,6 +3872,14 @@ export function ChatsView(props: {
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
+  // A post's view shows its thread, so an agent's notice about a run there
+  // is skipped while it's on screen.
+  const postThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const showPost = useCallback(
+    (node: HTMLDivElement | null) => (node && postThreadId ? showChat(postThreadId, node) : undefined),
+    [postThreadId],
+  );
+
   const editorTab = parseTab(props.editorTabPath ?? null);
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
     editorTab?.kind === "chat" && editorTab.target.kind === "dm" && !dmRestoreReady)) {
@@ -4350,6 +4359,7 @@ export function ChatsView(props: {
       dispatchState.pendingCount > 0 && liveRunId === null;
     return (
       <div
+        ref={showPost}
         data-testid="chats-thread-view"
         data-variant={variant}
         data-open-decision-count={
