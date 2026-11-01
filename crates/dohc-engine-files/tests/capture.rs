@@ -428,6 +428,47 @@ fn first_sight_deferred_delete_returns_as_a_retire() {
     assert!(after.is_empty(), "a retired candidate is not offered again");
 }
 
+// dohc#2360. A session releases a tracked document, and the next scan finds it
+// grown past what capture tracks, so capture forgets the path. The offer came
+// while the path was still tracked, and it still retires the record once the
+// file is gone.
+#[test]
+fn a_path_offered_while_tracked_retires_after_capture_forgets_it() {
+    let ws = Scratch::new();
+    ws.write("big.md", b"small");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let mut sink = IdempotentSink::default();
+    let first = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    apply_then_ack(&mut controller, &first, &mut sink, &NoFaults).expect("ack");
+    assert_eq!(controller.tracked_len(), 1);
+
+    controller.offer_retire_candidates(["big.md".to_owned()]);
+    ws.write("big.md", b"grown past what capture tracks");
+    sink.not_owned.insert("big.md".to_owned());
+    controller.mark_dirty();
+    let grown = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("grown prepare"),
+    );
+    apply_then_ack(&mut controller, &grown, &mut sink, &NoFaults).expect("ack grown");
+    assert_eq!(controller.tracked_len(), 0, "capture forgot the path");
+
+    ws.remove("big.md");
+    controller.mark_dirty();
+    let gone = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("gone prepare"),
+    );
+    assert!(matches!(gone.ops.as_slice(), [CaptureOp::Retire { path }] if path == "big.md"));
+}
+
 #[test]
 fn uncertain_batch_prefix_stays_failed_and_the_suffix_continues() {
     let ws = Scratch::new();

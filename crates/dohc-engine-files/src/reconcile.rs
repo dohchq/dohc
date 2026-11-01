@@ -497,8 +497,8 @@ pub struct ReconcileController {
     identical_degraded_count: usize,
     quarantined_paths: Vec<String>,
     deferred_paths: Vec<String>,
-    /// Paths the manifest does not track whose record may still exist. A
-    /// scan that finds one's file gone plans its retire.
+    /// Paths whose record may exist, tracked by the manifest or not. A scan
+    /// that finds an untracked one's file gone plans its retire.
     retire_candidates: BTreeSet<String>,
 }
 
@@ -606,17 +606,20 @@ impl ReconcileController {
         self.dirty_epoch = self.dirty_epoch.saturating_add(1);
     }
 
-    /// Offer paths whose record may exist without a manifest entry, such as a
-    /// document a session settled before any scan saw its file. A scan that
-    /// finds one's file gone plans its retire; a file still there keeps its
-    /// ordinary handling. Asks for that scan when an offered path is new.
+    /// Offer paths whose record may exist, such as a document a session
+    /// settled before any scan saw its file. A path the manifest tracks stays
+    /// a candidate in case capture later stops tracking it, as for a document
+    /// grown past the size cap. A scan that finds an untracked candidate's file
+    /// gone plans its retire; a file still there keeps its ordinary handling.
+    /// Asks for that scan when an untracked path is new.
     pub fn offer_retire_candidates(&mut self, paths: impl IntoIterator<Item = String>) {
         let mut offered = false;
         for path in paths {
-            if self.manifest.get(&path).is_none()
-                && !crate::floor::is_excluded_file(&path)
-                && self.retire_candidates.insert(path)
-            {
+            if crate::floor::is_excluded_file(&path) {
+                continue;
+            }
+            let untracked = self.manifest.get(&path).is_none();
+            if self.retire_candidates.insert(path) && untracked {
                 offered = true;
             }
         }
@@ -900,7 +903,6 @@ impl ReconcileController {
         for path in &result.not_owned_paths {
             next.remove(path);
         }
-        retire_candidates.retain(|path| next.get(path).is_none());
         self.retire_candidates = retire_candidates;
         self.manifest = next;
         self.generation = plan.to_generation;
