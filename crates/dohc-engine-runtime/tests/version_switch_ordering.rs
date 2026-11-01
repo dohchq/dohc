@@ -758,10 +758,15 @@ async fn switch_projection_generation_does_not_advance_moment_order() {
     );
 }
 
-/// Seal one secret into `version_id` at `.env`.
+/// Seal one secret into `version_id` at `path`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each secret fixture field varies"
+)]
 async fn write_secret(
     actor: &dohc_engine_runtime::ActorHandle,
     version_id: &str,
+    path: &str,
     text: &str,
     moment_id: &str,
     now_ms: i64,
@@ -776,7 +781,7 @@ async fn write_secret(
                 SecretWrite {
                     workspace_id: WORKSPACE.to_owned(),
                     version_id: version_id.to_owned(),
-                    path: ".env".to_owned(),
+                    path: path.to_owned(),
                     text: text.to_owned(),
                     moment_id: moment_id.to_owned(),
                     metadata_origin: "api".to_owned(),
@@ -855,6 +860,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     write_secret(
         &actor,
         "main",
+        ".env",
         &main_text,
         "switch-scan-main",
         2,
@@ -884,6 +890,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     write_secret(
         &actor,
         "feature",
+        ".env",
         &feature_text,
         "switch-scan-feature",
         4,
@@ -1103,7 +1110,8 @@ async fn switching_a_folder_to_a_same_named_file_places_the_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_untracked_file_keeps_its_folder_and_the_file_waits() {
+async fn an_untracked_file_keeps_its_folder_and_the_file_unwritten() {
+    // The helper expects the switch to succeed.
     let (scratch, database) =
         switch_folder_to_file("ws-folder-keeps-untracked", Some("notes.txt")).await;
     let plans = scratch.path().join("plans");
@@ -1117,14 +1125,103 @@ async fn an_untracked_file_keeps_its_folder_and_the_file_waits() {
         "the switch deletes main's file"
     );
     let connection = Connection::open(&database).expect("sqlite");
+    let jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-*' AND target_path = 'plans'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("switch jobs");
+    assert_eq!(jobs, 0, "no write of the file waits for the folder");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_a_secret_folder_to_a_same_named_secret_places_the_file() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WORKSPACE.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: WORKSPACE.to_owned(),
+                new_version_id: "later".to_owned(),
+                name: "Later".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("later");
+    let key_dir = scratch.path().join(".dohc/engine");
+    let key = create_key_file(&key_dir).expect("secret key");
+    write_secret(
+        &actor,
+        "later",
+        ".env",
+        "MODE=later\n",
+        "secret-folder-to-file-later",
+        3,
+        key,
+        SecretDiskIntent::Materialize,
+    )
+    .await;
+    let key = dohc_engine_crypto::load_key_file(&key_dir)
+        .expect("load key")
+        .expect("key exists");
+    write_secret(
+        &actor,
+        "main",
+        ".env/trip",
+        "TRIP=main\n",
+        "secret-folder-to-file-main",
+        4,
+        key,
+        SecretDiskIntent::AlreadyOnDisk,
+    )
+    .await;
+    std::fs::create_dir_all(scratch.path().join(".env")).expect(".env folder");
+    std::fs::write(scratch.path().join(".env/trip"), "TRIP=main\n").expect("trip");
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: WORKSPACE.to_owned(),
+                version_id: "later".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 5,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("switch");
+    supervisor.close(&database).expect("close");
+    let env = scratch.path().join(".env");
+    assert!(env.is_file(), "the secret folder gives way to the file");
+    assert_eq!(std::fs::read_to_string(env).expect(".env"), "MODE=later\n");
+    let connection = Connection::open(&database).expect("sqlite");
     let pending: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM materialization_jobs \
-             WHERE job_id GLOB 'version-switch-mat_*' AND target_path = 'plans' \
+             WHERE job_id GLOB 'version-switch-*' AND target_path = '.env' \
              AND status = 'pending'",
             [],
             |row| row.get(0),
         )
         .expect("switch jobs");
-    assert_eq!(pending, 1, "the file write waits for the folder");
+    assert_eq!(pending, 0, "the secret write does not wait");
 }

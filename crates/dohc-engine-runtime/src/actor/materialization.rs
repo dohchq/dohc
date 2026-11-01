@@ -656,14 +656,15 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     first
 }
 
-/// Whether a switch write must wait for the real folder at its path. The
-/// folder gives way only when no hold lies inside it and it holds nothing but
-/// empty folders, which go first. Anything else in it stays, and so does the
-/// pending write.
-fn switch_write_waits_for_folder(
+/// Whether a switch write meets a real folder at its path that stays. The
+/// folder gives way when no path `holds` holds lies inside it and it holds
+/// nothing but folders and files the OS writes, which go first, deepest
+/// first. The planner queues such a write only for a folder the switch
+/// clears, so anything else in it came in since.
+fn switch_folder_stays(
     store: &EngineStore,
     root_dir: &std::path::Path,
-    holds: &dohc_engine_files::PlacementHolds,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
     job: &MaterializationJob,
 ) -> bool {
     if job.operation != MaterializationOperation::Write
@@ -673,20 +674,23 @@ fn switch_write_waits_for_folder(
         return false;
     }
     let folder = job.target_path.as_str();
-    holds
-        .entries()
-        .any(|(held, _)| dohc_engine_files::path_is_held(folder, held))
-        || !(empty_folder_tree(store, root_dir, folder, false)
-            && empty_folder_tree(store, root_dir, folder, true))
+    holds.is_some_and(|holds| {
+        holds
+            .entries()
+            .any(|(held, _)| dohc_engine_files::path_is_held(folder, held))
+    }) || !(folder_tree_clears(store, root_dir, folder, &|_| false, false)
+        && folder_tree_clears(store, root_dir, folder, &|_| false, true))
 }
 
-/// Whether the folder at `rel` holds only folders and files the OS writes,
-/// such as `.DS_Store`. With `remove`, also remove it and the folders inside
-/// it, deepest first, and say whether it is gone.
-fn empty_folder_tree(
+/// Whether every file in the folder at `rel`, at any depth, is one the OS
+/// writes, such as `.DS_Store`, or a regular file whose path `cleared`
+/// accepts. With `remove`, also remove the folder and the folders inside it,
+/// deepest first, and say whether it is gone.
+pub(super) fn folder_tree_clears(
     store: &EngineStore,
     root_dir: &std::path::Path,
     rel: &str,
+    cleared: &dyn Fn(&str) -> bool,
     remove: bool,
 ) -> bool {
     let Ok(entries) = std::fs::read_dir(root_dir.join(rel))
@@ -698,12 +702,15 @@ fn empty_folder_tree(
         let Ok(name) = entry.file_name().into_string() else {
             return false;
         };
-        let empty = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            empty_folder_tree(store, root_dir, &format!("{rel}/{name}"), remove)
+        let path = format!("{rel}/{name}");
+        let kind = entry.file_type().ok();
+        let clears = if kind.is_some_and(|kind| kind.is_dir()) {
+            folder_tree_clears(store, root_dir, &path, cleared, remove)
         } else {
             dohc_engine_files::floor::names_os_metadata(&name)
+                || (kind.is_some_and(|kind| kind.is_file()) && cleared(&path))
         };
-        if !empty {
+        if !clears {
             return false;
         }
     }
@@ -1001,8 +1008,16 @@ fn replay_materializations(
                     }
                     continue;
                 }
-                if switch_secret && switch_write_waits_for_folder(store, root_dir, holds, &job) {
-                    summary.parked += 1;
+                // A secret write never waits for a folder. One that stays
+                // keeps what came into it, as a file edited since planning
+                // keeps its edit.
+                if switch_secret && switch_folder_stays(store, root_dir, None, &job) {
+                    store.mark_materialization_conflict(&job.job_id, now_ms)?;
+                    if scope.file_outcomes_settled {
+                        summary.completed += 1;
+                    } else {
+                        summary.failed += 1;
+                    }
                     continue;
                 }
                 if secret_key.is_none() {
@@ -1122,7 +1137,7 @@ fn replay_materializations(
                 continue;
             }
             if job.job_id.starts_with("version-switch-mat_")
-                && switch_write_waits_for_folder(store, root_dir, holds, &job)
+                && switch_folder_stays(store, root_dir, Some(holds), &job)
             {
                 summary.parked += 1;
                 continue;

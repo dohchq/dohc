@@ -330,9 +330,9 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
     std::fs::symlink_metadata(root_dir.join(path)).is_ok_and(|metadata| metadata.is_dir())
 }
 
-/// Whether a switch writing a file at `path` replaces a real folder there:
-/// one of the `previous` paths it deletes or holds lies inside that folder.
-/// The write then waits in replay until the folder is empty and gone.
+/// Whether a switch writing a file at `path` may replace a real folder there:
+/// one of the `previous` paths lies inside that folder.
+/// [`keep_folder_writes_the_switch_clears`] then decides.
 fn replaces_folder<'a>(
     root_dir: &std::path::Path,
     path: &str,
@@ -345,6 +345,47 @@ fn replaces_folder<'a>(
     previous
         .into_iter()
         .any(|inner| is_inside(&path_key(inner), &folder))
+}
+
+/// Keep a switch write that replaces a real folder only when the switch
+/// clears that folder: every file in it is one the switch deletes or, for a
+/// plaintext write, a held file, which the write then waits for. Folders and
+/// files the OS writes go with it. Anything else keeps the folder, and the
+/// file is not written, as for any path with untracked content.
+fn keep_folder_writes_the_switch_clears(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    holds: &PlacementHolds,
+    projections: &mut Vec<SwitchProjection>,
+) {
+    let deleted: HashSet<String> = projections
+        .iter()
+        .filter(|projection| projection.operation == MaterializationOperation::Delete)
+        .map(|projection| path_collision_key(&projection.spec.target_path))
+        .collect();
+    projections.retain(|projection| {
+        let path = projection.spec.target_path.as_str();
+        if projection.operation != MaterializationOperation::Write
+            || !matches!(projection.spec.preimage, Preimage::Absent)
+            || holds.get(path).is_some()
+            || !is_folder(root_dir, path)
+        {
+            return true;
+        }
+        let secret = projection
+            .spec
+            .job_id
+            .starts_with("version-switch-secret-mat_");
+        let cleared = |inner: &str| {
+            let held = holds.get(inner).is_some();
+            if secret {
+                !held && deleted.contains(&path_collision_key(inner))
+            } else {
+                held || deleted.contains(&path_collision_key(inner))
+            }
+        };
+        super::materialization::folder_tree_clears(store, root_dir, path, &cleared, false)
+    });
 }
 
 /// Remove each folder above `path` that is empty, nearest first, through
@@ -973,10 +1014,7 @@ fn plan_secret_switch(
                 replaces_folder(
                     root_dir,
                     &stat.path,
-                    previous
-                        .iter()
-                        .map(|file| file.path.as_str())
-                        .chain(holds.entries().map(|(path, _)| path)),
+                    previous.iter().map(|file| file.path.as_str()),
                 )
                 .then_some(Preimage::Absent)
             })
@@ -1097,6 +1135,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         token,
         &holds,
     )?;
+    keep_folder_writes_the_switch_clears(store, root_dir, &holds, &mut projections);
     if projections.is_empty() && holds.is_empty() {
         return Ok(());
     }
@@ -1210,6 +1249,7 @@ pub(super) fn switch_active_version_on_store(
         &mut secret_key,
         &holds,
     )?);
+    keep_folder_writes_the_switch_clears(store, root_dir, &holds, &mut projections);
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }

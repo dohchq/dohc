@@ -1277,8 +1277,8 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// Other origins are excluded because their content may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
 /// Matching pending rollback restores also exclude their destination heads,
-/// and so do pending switch writes with no file to replace, such as one that
-/// waits for a folder at its path to empty.
+/// and so do pending plaintext switch writes with no file to replace, such as
+/// one that waits for a held file in the folder at its path.
 ///
 /// Pending rollback deletes contribute transient last-known-disk entries when
 /// their target has no alias in this version. These entries keep that path out
