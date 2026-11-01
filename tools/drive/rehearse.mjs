@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Rehearses the Drive recipe on a disposable Linux VM without provider accounts. See "Rehearse without accounts" in docs/how-to/drive.md.
+// Rehearses the Drive recipe without provider accounts, on a new server before its deployment exists. See "Rehearse on the new server" in docs/how-to/drive.md.
 // It needs root, Docker, the release bundle, and its image. It changes only resources it creates, and removes them at the end.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -10,11 +10,11 @@ import { join, resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const usage = "sudo node tools/drive/rehearse.mjs --bundle DIR --image IMAGE --output DIR";
+const usage = "sudo node /srv/dohc-drive/tools/drive/rehearse.mjs --bundle DIR --image IMAGE --output DIR";
 const recipe = fileURLToPath(new URL(".", import.meta.url));
 const { values } = parseArgs({ options: { bundle: { type: "string" }, image: { type: "string" }, output: { type: "string" } } });
 if (!values.bundle || !values.image || !values.output) throw new Error(usage);
-if (process.platform !== "linux" || process.getuid() !== 0) throw new Error(`Run the rehearsal as root on a disposable Linux VM: ${usage}`);
+if (process.platform !== "linux" || process.getuid() !== 0) throw new Error(`Run the rehearsal as root on the new Linux server: ${usage}`);
 const bundle = resolve(values.bundle), output = resolve(values.output);
 const release = JSON.parse(readFileSync(join(bundle, "release.json"), "utf8"));
 if (release.image !== values.image) throw new Error(`The bundle records image ${release.image}, not ${values.image}.`);
@@ -45,7 +45,11 @@ async function check(name, action) {
 }
 
 const ipv6 = JSON.parse(run("ip", ["-json", "-6", "address", "show", "scope", "global"]).output || "[]").flatMap(link => link.addr_info ?? []);
-if (ipv6.length) throw new Error("This VM has a global IPv6 address, and drive.mjs refuses such a host. Use an IPv4-only VM.");
+if (ipv6.length) throw new Error("This server has a global IPv6 address, and drive.mjs refuses such a host. Create the server with IPv6 off.");
+// The rehearsal runs first on a new server. Its leftovers then cannot meet a deployment's containers, volumes or data.
+if (run("docker", ["ps", "--all", "--quiet"]).output.trim() || run("docker", ["volume", "ls", "--quiet"]).output.trim()) {
+  throw new Error("Docker already has containers or volumes on this server. Run the rehearsal first, on a new server, before the deployment exists.");
+}
 
 const drive = (command, uuid, extra = []) => run(process.execPath, [join(recipe, "drive.mjs"), command, "--bundle", bundle, "--env-file", envFile,
   "--volume-uuid", uuid, ...extra], { allowFailure: true });
@@ -55,16 +59,17 @@ const neon = (...args) => run("docker", ["compose", "--project-name", `${owner}-
   { env: neonEnv });
 const missingChecks = text => [...text.matchAll(/^\[missing\] (.+?)(?: - .*)?$/gm)].map(match => match[1]);
 // Without public DNS and a publicly trusted viewer certificate, only the release's public HTTPS checks can fail.
-const publicChecks = ["public HTTPS connection and device approval", "native executable and relay HTTPS reachability", "server automations"];
+const publicChecks = ["public HTTPS connection and device approval", "native executable and relay HTTPS reachability"];
 function startedWithoutPublicHttps(result) {
   assert.match(result.output, /\[ok\] compose startup/);
+  assert.match(result.output, /\[ok\] server automations/);
   for (const service of ["workspace-api", "sync-relay", "share-web"]) assert.match(result.output, new RegExp(`\\[ok\\] ready service:${service}`));
   const missing = missingChecks(result.output);
   assert.ok(missing.includes(publicChecks[0]), result.output);
   assert.deepEqual(missing.filter(name => !publicChecks.includes(name)), [], result.output);
 }
 
-const devices = [];
+const devices = [], images = [];
 function attach(image) {
   const device = run("losetup", ["--find", "--show", image]).output.trim();
   devices.push(device);
@@ -78,6 +83,7 @@ function detach(device) {
 }
 function volume(name) {
   const image = join(work, `${name}.img`);
+  images.push(image);
   run("truncate", ["--size", "2G", image]);
   run("mkfs.ext4", ["-q", "-F", image]);
   const device = attach(image), uuid = run("blkid", ["--match-tag", "UUID", "--output", "value", device]).output.trim();
@@ -106,8 +112,14 @@ function writeEnv(file, settings) {
 }
 function appRequest(host, path = "/") {
   return new Promise((done, fail) => {
-    const call = request({ host: "127.0.0.1", port: 443, servername: host, path, headers: { host }, ca: readFileSync(join(tls, "ca.pem")), timeout: 15_000 },
-      response => { response.resume(); response.on("end", () => done({ status: response.statusCode, fingerprint: response.socket.getPeerX509Certificate?.()?.fingerprint256 })); });
+    const call = request({ host: "127.0.0.1", port: 443, servername: host, path, headers: { host }, ca: readFileSync(join(tls, "ca.pem")), timeout: 15_000, agent: false },
+      response => {
+        // Read the certificate before the body ends: the client can release the socket at the end.
+        const fingerprint = response.socket.getPeerX509Certificate()?.fingerprint256;
+        response.on("error", fail);
+        response.on("end", () => done({ status: response.statusCode, fingerprint }));
+        response.resume();
+      });
     call.on("timeout", () => call.destroy(new Error("timeout")));
     call.on("error", fail);
     call.end();
@@ -248,7 +260,17 @@ try {
   });
   clean(mount, () => { if (run("findmnt", [mount], { allowFailure: true }).status === 0) run("umount", [mount]); });
   for (const device of [...devices]) clean(device, () => detach(device));
+  // A busy loop device detaches lazily, so check that no mount or loop device is left.
+  clean(`mounts or loop devices under ${work}`, () => {
+    const targets = run("findmnt", ["--list", "--noheadings", "--output", "TARGET"]).output.split("\n");
+    if (targets.some(target => target === work || target.startsWith(`${work}/`)) ||
+      images.some(image => run("losetup", ["--associated", image]).output.trim())) throw new Error("left over");
+  });
   if (!evidence.residual.length) clean(work, () => rmSync(work, { recursive: true, force: true }));
   writeFileSync(join(output, `${owner}.json`), `${JSON.stringify(evidence, null, 2)}\n`);
   console.log(`Evidence: ${join(output, `${owner}.json`)}`);
+  if (evidence.residual.length) {
+    process.exitCode = 1;
+    console.error(`Cleanup left ${evidence.residual.join(", ")}. Rebuild this server before you set up the deployment.`);
+  }
 }
