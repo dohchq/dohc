@@ -4907,7 +4907,7 @@ export function ChatsView(props: {
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
-                  authorName={collaboration?.displayName || "You"}
+                  authorName={viewerLabel}
                   placeholder={`What's happening in #${nav.channel.name}?`}
                   sendLabel="Start post"
                   candidates={mentionCandidates}
