@@ -3485,11 +3485,11 @@ mod tests {
                     100_000_000,
                     |_, _, _, _| Ok(()),
                 );
-                if cursor == 64 && fail_fold {
-                    assert!(matches!(result, Err(ApplicationError::Collab(_))));
-                } else {
-                    assert_eq!(ack(result.unwrap()).local_ydoc_sequence, cursor);
-                }
+                // The fold runs after the application commits. Its failure
+                // must not take back the committed acknowledgement.
+                let applied = ack(result.unwrap());
+                assert!(!applied.application_replayed);
+                assert_eq!(applied.local_ydoc_sequence, cursor);
                 deliveries.push(update);
             }
             assert_eq!(
