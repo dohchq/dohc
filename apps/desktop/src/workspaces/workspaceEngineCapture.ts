@@ -1854,7 +1854,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedDir(dir);
     const replaced = await assertLeafNotSymlink(target);
     await atomicReplaceFile(target, async (temporary) => {
-      const handle = await open(temporary, "wx", 0o666);
+      const handle = await open(temporary, "wx", replaced?.isFile() ? 0o600 : 0o666);
       try {
         if (replaced?.isFile()) await keepPermissions(handle, replaced);
         await handle.writeFile(data);
@@ -1886,7 +1886,8 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
 // The temp takes the permission bits of the file it replaces, as the engine's
 // materializer does (`Replaced::apply_to` in materialize.rs). Group and other
 // bits stay only when the temp has the file's group or the two sets match, so
-// nobody gains access. A failed copy never fails the write.
+// nobody gains access. The temp starts owner-only, so a failed copy leaves the
+// file owner-only and never fails the write.
 async function keepPermissions(handle: FileHandle, replaced: Stats): Promise<void> {
   if (process.platform === "win32") return;
   try {
