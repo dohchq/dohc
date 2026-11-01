@@ -336,4 +336,13 @@ describe("Tab order with an app beside another group", () => {
     const start = plain.indexOf(forward[0]!);
     expect(forward.map((element) => plain.indexOf(element))).toEqual(forward.map((_, index) => (start + index) % plain.length));
   });
+
+  it("goes back into a page that ends in a control, with one group", async () => {
+    const notes = siteTabPath("sites/notes");
+    await renderSplit([{ id: "primary", tabs: [notes], activeTab: notes, size: 1 }], []);
+    await waitFor(() => expect(document.querySelector('[data-root="sites/notes"] [data-testid="site-preview-frame"]')).not.toBeNull());
+    // Shift+Tab from outside the editor area reaches the preview's Logs control, not the page's end stop.
+    const { regions } = walk("primary");
+    expect(regions).toEqual(["group primary", "app primary", "guest primary", "app primary", "outside"]);
+  });
 });

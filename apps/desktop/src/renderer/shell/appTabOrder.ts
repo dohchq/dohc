@@ -33,21 +33,23 @@ export function routeAppTab(event: KeyboardEvent) {
   const step = (order: HTMLElement[]) => order[(order.indexOf(active) + (event.shiftKey ? order.length - 1 : 1)) % order.length];
   const next = step(screen);
   const page = next.closest(PAGE);
-  if (next.matches(FRAME) && event.shiftKey && !page?.contains(active)) {
-    // Shift+Tab from outside the page goes into its frame at the end: focus moves to the page's end stop, and the
-    // browser goes on from there into the frame's last control. Inside the page the browser already reaches it.
+  // Shift+Tab into a page from outside it would land on the page's end stop, which sends focus forward again.
+  const intoPage = event.shiftKey && page !== null && !page.contains(active);
+  if (intoPage && next.matches(FRAME)) {
+    // To go into a frame at its end, focus moves to the end stop, and the browser goes on from there into the
+    // frame's last control.
     entering = page?.querySelector<HTMLElement>("[data-app-stop]") ?? null;
     entering?.focus();
     entering = null;
     return;
   }
-  if (next === step(dom)) return;
+  if (next === step(dom) && !intoPage) return;
   next.focus();
   if (document.activeElement === next) event.preventDefault();
 }
 
-// Tab out of a frame's last control lands on its page's end stop, which hands focus on to what follows the page on
-// screen.
+// Tab out of a page's last control, or its frame's, lands on the page's end stop, which hands focus on to what
+// follows the page on screen.
 export function leaveAppPage(event: FocusEvent<HTMLElement>) {
   if (event.currentTarget === entering) return;
   const page = event.currentTarget.closest(PAGE);
