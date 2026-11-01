@@ -18,6 +18,9 @@ describe("startupFailureBox", () => {
   it.each([
     ["an unreadable", (path: string) => mkdir(path), "Cannot read workspace registry"],
     ["a corrupt", (path: string) => writeFile(path, "{ this is not json"), "Workspace registry is corrupt"],
+    ["a versionless", (path: string) => writeFile(path, "{}"), "Workspace registry has an unexpected version"],
+    ["a version 0", (path: string) => writeFile(path, '{"version":0}'), "Workspace registry has an unexpected version"],
+    ["a text version", (path: string) => writeFile(path, '{"version":"2"}'), "Workspace registry has an unexpected version"],
   ])("tells the person how to recover from %s registry", async (_kind, prepare, detail) => {
     const registryFile = join(await createTestScratch("dohc-startup-box-"), "dohc-workspaces.json");
     await prepare(registryFile);
