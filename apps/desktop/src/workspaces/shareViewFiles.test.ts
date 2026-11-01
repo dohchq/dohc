@@ -1843,6 +1843,37 @@ describe("ShareViewFiles", () => {
     });
   });
 
+  it("reports a path a best-effort repair gave up on after its store write landed", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "docs/note.md";
+    await mkdir(join(rootPath, "docs"), { recursive: true });
+    await writeFile(join(rootPath, path), "unsaved recipient edit\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path, text: "canonical\n" }],
+      afterWrite: () => {
+        throw new Error("moment hydration failed");
+      },
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => ({ ...target(rootPath, "view"), unsavedPaths: [path] }),
+      openStore: () => store,
+    });
+
+    const outcome = await withStaleSensitiveWorkspaceOperation(
+      rootPath,
+      (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          "repair",
+        ),
+    );
+
+    expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path }));
+    expect(outcome).toMatchObject({ kind: "repair", repairedPaths: 0, failedPaths: [path] });
+  });
+
   it("repairs tracked files without replacing recipient-owned directories", async () => {
     const rootPath = await workspaceRoot();
     const trackedPath = join(rootPath, "docs", "note.md");
