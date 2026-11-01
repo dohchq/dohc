@@ -596,10 +596,16 @@ let loginShellPathRead: Promise<void> = Promise.resolve();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
+// A closing window's webContents is destroyed before the window is, and any
+// call on it then throws, so send only while both are open.
+function sendIfOpen(window: BrowserWindow, channel: string, ...args: unknown[]): void {
+  if (!window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(channel, ...args);
+}
+
 // Each window reports it to Notices, with Try again to read the file again.
 function usageRecordStopped(): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send(CHANNELS.usageRecordStopped);
+    sendIfOpen(window, CHANNELS.usageRecordStopped);
   }
 }
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
@@ -626,7 +632,7 @@ const crashReports = createCrashReportStore({
   codeFrame: createCodeFrames(codeRoots, process.platform),
   onChanged: () => {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
+      sendIfOpen(window, CHANNELS.crashReportChanged);
     }
   },
 });
@@ -1054,7 +1060,7 @@ const ownerDatasetCopies = createOwnerDatasetCopyRegistry({
   workspaces: () => listWorkspaces().map(workspace => workspace.rootPath),
   onLeftover: () => {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(CHANNELS.collectionCopiesLeftChanged);
+      sendIfOpen(window, CHANNELS.collectionCopiesLeftChanged);
     }
   },
 });
@@ -3567,7 +3573,7 @@ const chatDispatchService = createChatDispatchService({
   onPausedChanged: (paused) => {
     void refreshDispatchTray().catch((error) => console.error("[desktop] dispatch tray:", error));
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(CHANNELS.chatDispatchPaused, { paused });
+      sendIfOpen(window, CHANNELS.chatDispatchPaused, { paused });
     }
   },
   onRunUpdated: (workspace) =>
@@ -6174,9 +6180,7 @@ const senderWorkspaceAuthority = {
 const exitRounds = createExitRounds<BrowserWindow>({
   participants: () => workspaceWindows.answering(),
   participantId: (window) => window.webContents.id,
-  send: (window, message) => {
-    if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
-  },
+  send: (window, message) => sendIfOpen(window, CHANNELS.exitRound, message),
   confirmProceed: async (kind: ExitKind) => {
     const verb = kind === "quit" ? "Quitting" : "Installing";
     const { response } = await showMessageBox({
@@ -6198,10 +6202,8 @@ const versionRounds = createVersionRounds<BrowserWindow>({
   windowsShowing: (workspaceId) => desktopWindows.workspaceWindows.answering()
     .filter((window) => rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
   windowId: (window) => window.webContents.id,
-  isGone: (window) => window.isDestroyed() || window.webContents.isCrashed(),
-  send: (window, message) => {
-    if (!window.isDestroyed()) window.webContents.send(CHANNELS.versionRound, message);
-  },
+  isGone: (window) => window.isDestroyed() || window.webContents.isDestroyed() || window.webContents.isCrashed(),
+  send: (window, message) => sendIfOpen(window, CHANNELS.versionRound, message),
 });
 
 const quitGuard = createQuitGuard({

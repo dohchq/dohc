@@ -25,7 +25,8 @@ class Contents extends EventEmitter {
   setZoomLevel = vi.fn();
   send = vi.fn();
   isDestroyed() { return this.destroyed; }
-  isCrashed() { return false; }
+  // As in Electron, a destroyed webContents throws on use.
+  isCrashed() { if (this.destroyed) throw new TypeError("Object has been destroyed"); return false; }
   getURL() { return this.url; }
   isLoadingMainFrame() { return this.loading; }
   get native(): WebContents { return this as unknown as WebContents; }
@@ -223,6 +224,17 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(utility.native)).toBeUndefined();
     const manager = f.windows.showOrCreateManagerWindow();
     expect(f.windows.targetWindow(utility.native)).toBe(manager);
+  });
+
+  // A closing window loses its webContents before the window itself goes.
+  // A quit in that gap must find no renderer to ask, not throw.
+  it("leaves a closing window's destroyed renderer out of the windows that answer", () => {
+    const f = fixture(); const closing = new Window(); const open = new Window();
+    f.windows.trackWorkspaceWindow(closing.native); f.windows.trackWorkspaceWindow(open.native);
+    closing.webContents.destroyed = true;
+    expect(f.windows.workspaceWindows.answering()).toEqual([open.native]);
+    open.destroy();
+    expect(f.windows.workspaceWindows.answering()).toEqual([]);
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
