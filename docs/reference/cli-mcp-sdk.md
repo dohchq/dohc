@@ -1665,7 +1665,7 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
 
 #### `dohc app checkLocal`
 
@@ -1676,7 +1676,7 @@ Compare sourceRevision with the one listLocal returns. They differ once the app'
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths, declaresCollection }`.
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 #### `dohc app prepareLocal`
 

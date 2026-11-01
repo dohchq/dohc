@@ -176,19 +176,33 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     await seedCloudCredentials(workspace, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, userId, token: `test:${userId}` });
     shared = await startSharedDatasetBrowser({ relayUrl: relay.baseUrl, exchangeKey });
     desktop = await launchDesktopApp({ workspace });
-    const { page } = desktop;
+    const { page, app: electronApp } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
     await keepCollectionsHere(page, workspaceId);
     await openExplorerHome(page);
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
-      // The app uses no Collection, so its tab offers a share link instead of opening here.
-      await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Publish on a link", exact: true })).toBeVisible();
-      // The moved app's old tab stays open, mounted and hidden, so only the visible tab's button counts.
+      // The app uses no Collection. It still opens in its tab on this device, without a link.
+      await page.getByTestId("site-preview-page").getByRole("button", { name: "Review and open app", exact: true }).click();
+      const publication = page.getByTestId("app-publication-dialog");
+      const approve = publication.getByTestId("app-publication-approve");
+      await expect(approve).toHaveText("Approve and open");
+      await expect(approve).toBeEnabled();
+      await expect(publication.getByTestId("app-access")).toContainText("No workspace data");
+      await approve.click();
+      await expect(publication).toBeHidden();
+      // The moved app's old tab stays open, mounted and hidden, so only the visible tab's parts count.
+      const view = page.getByTestId("app-view-webview").filter({ visible: true });
+      await expect(view).toBeVisible();
+      const guestId = await view.evaluate(element => (element as HTMLElement & { getWebContentsId(): number }).getWebContentsId());
+      await expect.poll(() => electronApp.evaluate(async ({ webContents }, id) => {
+        const frame = webContents.fromId(id)?.mainFrame.framesInSubtree.find(child => child.url === "about:srcdoc");
+        return frame ? frame.executeJavaScript("document.querySelector('h1')?.textContent ?? null", true) : null;
+      }, guestId)).toBe("Trip poll");
       const review = page.getByTestId("app-view-review").filter({ visible: true });
       await review.click();
-      const publication = page.getByTestId("app-publication-dialog");
+      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
       await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
@@ -197,6 +211,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
       await share.getByRole("button", { name: "Close", exact: true }).click();
       await review.click();
+      await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("combobox", { name: "Publication share link" }).selectOption({ index: 1 });
       await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
       await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();

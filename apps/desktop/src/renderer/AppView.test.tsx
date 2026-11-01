@@ -7,7 +7,7 @@ import type { SitePackageInfo } from "../ipc/bridgeContract";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { deferred } from "../testing/deferred";
-import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_NEEDS_LINK, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
+import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
 import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
 import { SitePreviewPage } from "./SitePreviewPage";
 
@@ -204,31 +204,20 @@ describe("an owner app in its tab", () => {
     expect(guest.focus.mock.contexts.at(-1)).toBe(webview());
   });
 
-  it("offers to publish an app that uses no Collection on a link, since it can't be approved here", async () => {
+  it("offers Review and open app for an app that reaches no workspace data, and opens it here once approved", async () => {
     approved = false;
-    const checked = { kind: "localChecked" as const, appRoot: "preorders", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"], declaresCollection: false };
+    const checked = { kind: "localChecked" as const, appRoot: "preorders", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"] };
     publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? checked : publication(request));
     const user = userEvent.setup();
     render(<Page />);
-    expect(await screen.findByText(APP_NEEDS_LINK)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Review and open app" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Publish on a link" }));
-    // Review app opens on publishing it on a link. This workspace isn't synced, so that view asks for sync first.
-    expect(await screen.findByText("Sync this workspace to publish on a share link.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Approve and open" })).toBeNull();
-    expect(publishOwnerApp.mock.calls.some(([request]) => request.action === "prepareLocal")).toBe(false);
-  });
-
-  it("still offers review when the source check fails, so Review app can report it", async () => {
-    approved = false;
-    publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "checkLocal") throw new Error("source unreadable");
-      return publication(request);
-    });
-    render(<Page />);
     expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.queryByText(APP_NEEDS_LINK)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Review and open app" }));
+    const approve = await screen.findByRole("button", { name: "Approve and open" }) as HTMLButtonElement;
+    await waitFor(() => expect(approve.disabled).toBe(false));
+    expect(within(screen.getByTestId("app-access")).getByText("No workspace data")).toBeTruthy();
+    await user.click(approve);
+    await screen.findByTestId("app-view-webview");
+    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
   });
 
   it("reports a failed open once, offers Try again in the body, and takes the notice back when the app opens", async () => {

@@ -5,13 +5,15 @@ import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
 
-export type LocalAppKind = "dataset" | "collection";
+/** What an approval reaches: a Dataset, a document Collection, or no workspace data. */
+export type LocalAppKind = "dataset" | "collection" | "unconnected";
 export type LocalAppPrepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
 export interface LocalAppStorage {
   kind: LocalAppKind;
   publicationTable: string;
   artifactTable: string;
-  resourceColumn: string;
+  /** Null for a kind that reaches no resource. Its rows have an empty resourceId. */
+  resourceColumn: string | null;
   ensureSchema(): void;
   /** Throws while a publication still has admitted work that replacing it would orphan. */
   assertRetirable?(publicationId: string): void;
@@ -42,7 +44,7 @@ export function createLocalAppStore(options: {
     storageBytes: value.storage_bytes, active: !!value.active,
   });
   const rows = (storage: LocalAppStorage, where: string, values: string[]) =>
-    (db.prepare('SELECT *, ' + storage.resourceColumn + ' AS resource_id FROM ' + storage.publicationTable + ' ' + where).all(...values) as StoredRow[]).map(value => decode(storage, value));
+    (db.prepare('SELECT *, ' + (storage.resourceColumn ?? "''") + ' AS resource_id FROM ' + storage.publicationTable + ' ' + where).all(...values) as StoredRow[]).map(value => decode(storage, value));
   const root = (appRoot: string) => db.prepare("SELECT revision,active_kind,active_publication_id FROM local_app_roots WHERE app_root=?").get(appRoot) as Root | undefined;
   function nextRevision(appRoot: string) {
     const next = (root(appRoot)?.revision ?? 0) + 1;
@@ -142,8 +144,10 @@ export function createLocalAppStore(options: {
           options.charge(previous.kind, previous.resourceId, -previous.storageBytes);
         }
         options.charge(input.kind, input.resourceId, storageBytes);
-        db.prepare('INSERT INTO ' + storage.publicationTable + '(publication_id,app_root,' + storage.resourceColumn + ',authority_revision,candidate,storage_bytes,active) VALUES(?,?,?,?,?,?,1)')
-          .run(input.publicationId, candidate.appRoot, input.resourceId, authorityRevision, json, storageBytes);
+        const resource: string[] = storage.resourceColumn === null ? [] : [input.resourceId];
+        const column = storage.resourceColumn === null ? "" : storage.resourceColumn + ",", value = resource.length ? "?," : "";
+        db.prepare('INSERT INTO ' + storage.publicationTable + '(publication_id,app_root,' + column + 'authority_revision,candidate,storage_bytes,active) VALUES(?,?,' + value + '?,?,?,1)')
+          .run(input.publicationId, candidate.appRoot, ...resource, authorityRevision, json, storageBytes);
         db.prepare('INSERT INTO local_app_approval_provenance VALUES(?,?)').run(input.publicationId, provenance);
         for (const file of files) db.prepare('INSERT INTO ' + storage.artifactTable + ' VALUES(?,?,?)').run(input.publicationId, file.path, file.bytes);
         writeRoot({ appRoot: candidate.appRoot, kind: input.kind, publicationId: input.publicationId }, authorityRevision, true);
@@ -181,6 +185,7 @@ export function createLocalAppStore(options: {
     deleteResources(kind: LocalAppKind, resourceId: string) {
       options.assertCurrent();
       const storage = source(kind);
+      if (storage.resourceColumn === null) throw new Error("Invalid app approval.");
       const publications = 'SELECT publication_id FROM ' + storage.publicationTable + ' WHERE ' + storage.resourceColumn + '=?';
       const active = 'active_kind=? AND active_publication_id IN (' + publications + ')';
       assertCanAdvance('SELECT revision FROM local_app_roots WHERE ' + active, [kind, resourceId]);
