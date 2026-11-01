@@ -1690,9 +1690,25 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
     .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, JSON.stringify(source),
       JSON.stringify(binding), source.fullStateDigest, state, shareId));
 }
+// The owner revokes the Edit grant of the share "other" outside any restore.
+const revokeOtherGrant = (f: Pick<ReturnType<typeof fixture>, "storage">, at: number) =>
+  expect(f.storage.revokeShareGrant({shareId: "other", grantId: "other-grant", revokedAtMs: at}).ok).toBe(true);
+// Enrolls the fixture document through the share "other", and makes the
+// fixture's fence revoke that share's Edit grant at 45, after the restore
+// begins and before its fence. The restore's own grant is already revoked, so
+// that grant was the last, and the revocation opens the activation's
+// retirement at the old generation.
+function revokeOtherGrantDuringRestore(f: ReturnType<typeof fixture>) {
+  hostRestoredDocument(f, "other");
+  f.fence = () => {
+    beginStopRestore(f.context, f.intent, 40);
+    revokeOtherGrant(f, 45);
+    return advanceStopRestoreFence(f.context, f.lookup, 50);
+  };
+}
 
-// Proves: a retirement recorded while a restore is unfinished, by the
-// restore's own revocation of the last Edit grant or by Pause, keeps live
+// Proves: a retirement recorded while a restore is unfinished, by the owner's
+// revocation of the last Edit grant or by Pause, keeps live
 // admission fenced. The fence carries one recorded before it to the fenced
 // generation, and relay admission names the restore's own journal cursor, the
 // key the engine accepts once the restore resumes: completion at that key
@@ -1701,11 +1717,11 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
 // begins while it is open.
 it.each(["revocation", "pause"] as const)("carries a retirement recorded during a restore to the restored generation: %s", async cause => {
   const f = contentProposalFixture("owner", "service", false, false, false, 0,
-    hosted => hostRestoredDocument(hosted, cause === "revocation" ? hosted.intent.shareId : "other"));
+    hosted => cause === "revocation" ? revokeOtherGrantDuringRestore(hosted) : hostRestoredDocument(hosted, "other"));
   try {
     const retirement = () => readServiceActivationRetirement(f.context, f.document);
-    // The revocation records it as the restore begins, before the fence; Pause after the fence.
-    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, path: "docs/a.md", requestedAtMs: cause === "revocation" ? 40 : 60};
+    // The revocation records it after the restore begins, before the fence; Pause after the fence.
+    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, path: "docs/a.md", requestedAtMs: cause === "revocation" ? 45 : 60};
     if (cause === "pause") {
       expect(retirement()).toBeNull();
       f.storage.setServiceHostEnrollmentEnabled({workspaceId: f.document.workspaceId, path: "docs/a.md", ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
@@ -1748,20 +1764,24 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
   } finally {f.close();}
 });
 
-// Proves: a restore declined before its fence leaves the retirement its
-// revocation recorded at the pre-restore key, since the generation never
-// moved, and the declined restore blocks nothing the retirement does not.
-it("keeps a retirement's pre-restore key when its restore is declined", () => {
+// Proves: a restore declined before its fence leaves a retirement recorded
+// during it at the pre-restore key, since the generation never moved, and the
+// declined restore blocks nothing the retirement does not. When the restore's
+// own revocation of the last Edit grant kept the owner's live session, the
+// Decline ends it and opens the retirement at that same key.
+it.each(["revoked during the restore", "kept by the owner's restore"] as const)("keeps a retirement's pre-restore key when its restore is declined: %s", cause => {
   const f = fixture("owner", "service");
   try {
-    hostRestoredDocument(f, f.intent.shareId);
+    hostRestoredDocument(f, cause === "revoked during the restore" ? "other" : f.intent.shareId);
     f.adopt();
     f.add("before-restore");
     const acceptedThrough = Number(f.raw.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal").get()!.cursor);
     beginStopRestore(f.context, f.intent, 40);
+    if (cause === "revoked during the restore") revokeOtherGrant(f, 42);
+    else expect(readServiceActivationRetirement(f.context, f.document)).toBeNull();
     const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, path: "docs/a.md",
-      restoreFenceGeneration: 1, acceptedThrough, requestedAtMs: 40};
-    expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
+      restoreFenceGeneration: 1, acceptedThrough, requestedAtMs: cause === "revoked during the restore" ? 42 : 45};
+    if (cause === "revoked during the restore") expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
     expect(declineStopRestore(f.context, f.lookup, 45).phase).toBe("declined");
     expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
     expect(f.raw.prepare("SELECT restore_fence_generation,admission_state FROM sync_relay_live_documents").get()).toEqual({restore_fence_generation: 1, admission_state: "open"});
@@ -1777,7 +1797,7 @@ it("keeps a retirement's pre-restore key when its restore is declined", () => {
 // moves the owner's applied tip to the restore's row. The retried push then
 // lands as retirement output and moves no projection.
 it("publishes a restore's settlement moment for a retirement once the restore resumes", async () => {
-  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
+  const f = (await admittedRestoreFixture("owner", false, "service", revokeOtherGrantDuringRestore));
   try {
     const receipt = f.admitted.admitted.accepted.receipt, feed = createServiceHostFeed(f.storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
     const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
@@ -1892,7 +1912,7 @@ async function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence
 // the document. That holds across a restart. Once the push lands it retires,
 // across a restart and a lost response to either the push or the completion.
 it("retires an activation that carries a restore only once its settlement moment is in the log", async () => {
-  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
+  const f = (await admittedRestoreFixture("owner", false, "service", revokeOtherGrantDuringRestore));
   const opened: ReturnType<typeof openSyncRelayStorage>[] = [];
   let closed = false;
   try {
@@ -1931,8 +1951,9 @@ it("retires an activation that carries a restore only once its settlement moment
 // Proves: a retirement that carries a published restore still completes after
 // a later restore is fenced and declined. Restore A completes and publishes at
 // generation 2 while another Edit grant keeps the activation running. Restore
-// B revokes that grant, which opens the retirement at A's row; B's fence moves
-// it to generation 3 and B's Decline keeps it there. A's settlement at its own
+// B begins through A's share, shared again, and the owner then revokes that
+// other grant, which opens the retirement at A's row; B's fence moves it to
+// generation 3 and B's Decline keeps it there. A's settlement at its own
 // generation is the publication the retirement waits for, across a restart.
 it("retires after a declined restore that follows a published one", async () => {
   const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other")));
@@ -1948,7 +1969,9 @@ it("retires after a declined restore that follows a published one", async () => 
     expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [published.op]})).toMatchObject({inserted: 1});
     expect(published.op).toMatchObject({settlementAdmission: {status: "accepted"}});
     const lookup = {...f.lookup, operationId: "restore-b"};
-    beginStopRestore(f.context, {...f.intent, operationId: "restore-b", shareId: "other", grantId: "other-grant", expectedGrantGeneration: 1, expectedFence: 2}, 300);
+    reshare(f, 6);
+    beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedGrantGeneration: 6, expectedFence: 2}, 300);
+    revokeOtherGrant(f, 300);
     expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: restored});
     advanceStopRestoreFence(f.context, lookup, 301);
     const capture = f.store.openStopRestoreCut(lookup);
@@ -2062,9 +2085,12 @@ it("retries a restore's publication its push ran out of proof budget for", async
     expect(state()).toEqual(before);
     f = restartRelay(first);
     await pushRestoreSettlement(f.storage, publication, false);
-    // Restore B revokes the activation's other grant, which opens its retirement at A's row.
-    expect(beginStopRestore(f.context, {...f.intent, operationId: "restore-b", shareId: "other", grantId: "other-grant", expectedGrantGeneration: 1,
+    // Restore B begins through A's share, shared again. The owner then revokes
+    // the activation's other grant, which opens its retirement at A's row.
+    reshare(f, 6);
+    expect(beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedGrantGeneration: 6,
       expectedFence: 2}, 300).previousOperationId).toBe("restore");
+    revokeOtherGrant(f, 300);
     expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: restored});
     // The retirement waits for B, which its owner declines after its fence.
     declineAfterFence(f, {...f.lookup, operationId: "restore-b"}, 301, "fenceCancelled");
@@ -2474,10 +2500,11 @@ it("removes a restore's held publication with its owner's account", async () => 
 it("refuses the fence when an open retirement's accepted-through is not its cutover", () => {
   const f = fixture("owner", "service");
   try {
-    hostRestoredDocument(f, f.intent.shareId);
+    hostRestoredDocument(f, "other");
     f.adopt();
     f.add("before-restore");
     beginStopRestore(f.context, f.intent, 40);
+    revokeOtherGrant(f, 45);
     const cutover = readServiceActivationRetirement(f.context, f.document)!.acceptedThrough;
     const accepted = (cursor: number) => f.write(db => db.prepare("UPDATE sync_relay_service_activations SET retire_accepted_cursor=?").run(cursor));
     const state = () => ({documents: f.rows().documents, operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()});
@@ -2503,10 +2530,12 @@ function cancellationAnswers(f: Pick<ReturnType<typeof readyNativeFence>, "conte
   return {cutover, cancelled, fenceCancelled};
 }
 // A restore fenced on the service host that adopted the document's
-// activation, whose revocation opened a retirement, with the native fence
-// saved when `native`.
-function serviceFence(native: boolean) {
-  const f = readyNativeFence("owner", "service", true, false, hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+// activation, with the native fence saved when `native`. The restore's own
+// revocation of the last Edit grant keeps the owner's live session. With
+// `revoked`, the owner instead revokes another share's grant, the last, while
+// the restore is unfinished, which opens the activation's retirement.
+function serviceFence(native: boolean, revoked = false) {
+  const f = readyNativeFence("owner", "service", true, false, revoked ? revokeOtherGrantDuringRestore : hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
   try {
     if (native) f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
     const answers = cancellationAnswers(f);
@@ -2516,8 +2545,8 @@ function serviceFence(native: boolean) {
   } catch (error) {f.close(); throw error;}
 }
 // The same restore, declined after its fence.
-function declinedFence(native: boolean) {
-  const f = serviceFence(native);
+function declinedFence(native: boolean, revoked = false) {
+  const f = serviceFence(native, revoked);
   try {
     expect(declineStopRestore(f.context, f.lookup, 150).phase).toBe(native ? "native-fenced" : "old-cut-applied");
     return f;
@@ -2538,15 +2567,18 @@ const documentState = (f: Pick<DeclinedFence, "raw">) => f.raw.prepare("SELECT r
 // Decline ends the restore with no fence. The document and its open
 // retirement go back to the old generation in the same write, access and
 // admission stay stopped, and the retirement completes at its old key only.
-it("ends a declined restore at the old generation when its host never fenced it", () => {
-  const f = declinedFence(false);
+// When the restore kept the owner's live session, the Decline ends it and
+// opens the retirement at that old key.
+it.each([["revoked during the restore", true], ["kept by the owner's restore", false]] as const)(
+  "ends a declined restore at the old generation when its host never fenced it: %s", (_cause, revoked) => {
+  const f = declinedFence(false, revoked);
   try {
     expect(f.store.pendingStopRestoreCancellation(f.lookup)).toEqual({operationId: "restore", objectId: f.document.objectId,
       lineageClaimId: f.document.lineageClaimId, hostId: f.receipt.operation.hostId, newFence: 2});
     const declined = f.store.acknowledgeStopRestoreCancellation(f.lookup, f.cancelled, 170);
     expect(declined).toMatchObject({phase: "declined", newFence: null, cutoverCursor: null, applied: null, nativeReceipt: null, declinedAtMs: 170});
     expect(documentState(f)).toEqual({restore_fence_generation: 1, admission_state: "closed"});
-    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 1, acceptedThrough: f.cutover, requestedAtMs: 40});
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 1, acceptedThrough: f.cutover, requestedAtMs: revoked ? 45 : 170});
     expect(f.raw.prepare("SELECT outcome,journal_cursor FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "cancelled", journal_cursor: null}]);
     expect(f.store.pendingStopRestoreCancellation(f.lookup)).toBeNull();
     // A lost reply replays; a different answer is refused.
@@ -2565,9 +2597,12 @@ it("ends a declined restore at the old generation when its host never fenced it"
 // saved the native fence's reply. The receipt takes its own journal cursor,
 // served to replicas as a control entry, and survives a restart; the
 // retirement stays at the fenced generation with its accepted-through
-// unchanged, completes there, and the old key is refused.
-it.each([false, true])("ends a declined restore at the fenced generation with its host's receipt, native fence saved=%s", async native => {
-  const f = declinedFence(native);
+// unchanged, completes there, and the old key is refused. When the restore
+// kept the owner's live session, the Decline ends it and opens the retirement
+// at the fenced generation and the same accepted-through.
+it.each([[false, true], [true, true], [false, false], [true, false]])(
+  "ends a declined restore at the fenced generation with its host's receipt, native fence saved=%s, revoked during the restore=%s", async (native, revoked) => {
+  const f = declinedFence(native, revoked);
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
   try {
     const sequence = () => Number(f.raw.prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_update_journal'").get()!.seq);
@@ -2575,7 +2610,7 @@ it.each([false, true])("ends a declined restore at the fenced generation with it
     const declined = f.store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 170);
     expect(declined).toEqual({...operation, phase: "declined", declinedAtMs: 170, nativeReceipt: f.receipt});
     expect(documentState(f)).toEqual({restore_fence_generation: 2, admission_state: "closed"});
-    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: f.cutover, requestedAtMs: 40});
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: f.cutover, requestedAtMs: revoked ? 45 : 170});
     expect(f.raw.prepare("SELECT outcome,journal_cursor FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "fence-cancelled", journal_cursor: control}]);
     expect(sequence()).toBe(control);
     const baseline = Number(f.raw.prepare("SELECT baseline_moment_relay_seq FROM sync_relay_live_documents WHERE lineage_state='current'").get()!.baseline_moment_relay_seq);
