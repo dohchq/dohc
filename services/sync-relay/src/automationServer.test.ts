@@ -16,6 +16,7 @@ import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { DaemonRefusalError, OwnerYDocOutbox, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
 import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { OwnerYDocOutboxDrainer } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import * as daemon from "@dohc/workspace-engine-client/daemon";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
@@ -901,6 +902,69 @@ describe("a server that pushes its copy of a workspace", () => {
     expect(delivering).toEqual(delivering.map(() => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
       expect.objectContaining({message: UNDELIVERED})]));
     drained.mockRestore(); readHead.mockRestore(); currentBinding.mockRestore();
+  });
+  it("confirms runs' changes sent again once a set-aside queue recovers with nothing pending", async () => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    let draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
+      baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
+      oldestEntryAtMs: 1, quarantineReason: "binding-changed", observedBinding: null, retryDeliveryId: null,
+      entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
+    const currentBinding = vi.mocked(storage.automationRecordBinding);
+    const s = await server(storage, h, {client: client as unknown as EngineClient, recordDelivery: {namespace: "relay", capture: vi.fn()}});
+    const {options} = await s.openReplica();
+    const ended = () => storage.endedAutomationServerRuns({workspaceId: WORKSPACE, incarnation: 1});
+    const reported = () => s.errors.filter(([context]) => context.startsWith("deliver automation record")).length;
+    // The record still resolves to the queue's binding, so the queue can recover and holds the run.
+    const held = payRunRecord("claim-held");
+    options.beforeEffect!(held, setStatus(0));
+    const lists = client.ownerYDocListDrafts.mock.calls.length, reports = reported();
+    options.onRunEnded!(held);
+    await vi.waitFor(() => {
+      expect(client.ownerYDocListDrafts.mock.calls.length).toBeGreaterThan(lists);
+      expect(reported()).toBeGreaterThan(reports);
+    });
+    expect(ended()).toEqual([expect.objectContaining({claimId: "claim-held"})]);
+    // Recovery leaves the queue active with nothing pending. The next sync confirms both runs.
+    draft = {...draft, pendingBytes: 0, state: "active"};
+    const after = payRunRecord("claim-after");
+    options.beforeEffect!(after, setStatus(1));
+    options.onRunEnded!(after);
+    await vi.waitFor(() => expect(ended()).toEqual([]));
+    readHead.mockRestore(); currentBinding.mockRestore();
+  });
+  it.each<[string, (binding: LiveObjectBinding) => {binding: LiveObjectBinding; shareId: string} | null]>([
+    ["the owner deleted the record", () => null],
+    ["the owner replaced the record's lineage", (binding: LiveObjectBinding) => ({binding: {...binding, lineageClaimId: "c".repeat(64)}, shareId: "share"})],
+    ["the owner revoked the share", () => {throw new Error("The shared file is unavailable. Restore access, then try again.");}],
+  ])("confirms later runs' changes sent while a set-aside queue waits that cannot recover, because %s", async (_case, current) => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    const draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
+    vi.spyOn(storage, "automationRecordBinding").mockImplementation(() => current(binding));
+    const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
+      baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
+      oldestEntryAtMs: 1, quarantineReason: "binding-changed", observedBinding: null, retryDeliveryId: null,
+      entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
+    const currentBinding = vi.mocked(storage.automationRecordBinding);
+    const s = await server(storage, h, {client: client as unknown as EngineClient, recordDelivery: {namespace: "relay", capture: vi.fn()}});
+    const {options} = await s.openReplica();
+    const ended = () => storage.endedAutomationServerRuns({workspaceId: WORKSPACE, incarnation: 1});
+    // Nothing on the server can release this queue, so holding the run would hold every later one too.
+    const later = payRunRecord("claim-later");
+    options.beforeEffect!(later, setStatus(0));
+    options.onRunEnded!(later);
+    await vi.waitFor(() => expect(ended()).toEqual([]));
+    expect(s.errors.filter(([context]) => context.startsWith("deliver automation record"))).toEqual([]);
+    readHead.mockRestore(); currentBinding.mockRestore();
   });
   it("confirms no run's changes sent while a record update it found no outbox for waits", async () => {
     clock = at(8);
