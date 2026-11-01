@@ -73,7 +73,7 @@ import {
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
 import { adoptLiveDeliveryPrefix, bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
-import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
+import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, endKeptRunAwayFromFrozenPath, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
   stopRestoreDeclineRecorded, stopRestoreFinishedAtMovedPath, stopRestoreHoldsFrozenPath, stopRestoreIdentityHolds, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
@@ -1670,6 +1670,7 @@ export class LiveCommittedDeliveryStore {
       if (stage==="resume") {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
+        endKeptRunAwayFromFrozenPath(this.#storage,saved.operation,(value as NativeRestoreResumeReceipt).recordedAtMs);
       }
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);
