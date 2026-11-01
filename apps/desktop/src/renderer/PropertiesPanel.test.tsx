@@ -185,6 +185,23 @@ describe("PropertiesPanel", () => {
     expect(parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta).toEqual({ "": "draft", status: "ready" });
   });
 
+  it("keeps a deferred property rename when the note changes from outside", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <PropertiesPanel body={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onChange={onChange} />,
+    );
+    const name = screen.getByLabelText("Property 1 name");
+    fireEvent.change(name, { target: { value: "own" } });
+    expect(name).toHaveProperty("value", "own");
+    expect(onChange).not.toHaveBeenCalled();
+
+    rerender(<PropertiesPanel body={"---\nstatus: draft\nowner: Ada\n---\n\nBody\n"} onChange={onChange} />);
+
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "own");
+    expect(propertyValue("owner")).toBe("Ada");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
