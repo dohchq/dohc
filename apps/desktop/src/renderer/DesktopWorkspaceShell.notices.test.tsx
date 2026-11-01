@@ -2351,8 +2351,12 @@ describe("file transfers", () => {
     expect(text).toContain("Skipped: 150 more");
   });
 
+  // Under the opening cover the workbench is inert and the Explorer shows
+  // Home, which takes no drop. jsdom ignores inert, so wait for the cover to
+  // lift before dropping.
   async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
     bridge.getDroppedFilePaths.mockReturnValue(paths);
+    await waitFor(() => expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false));
     const tree = await screen.findByTestId("file-tree");
     fireEvent.drop(tree, { dataTransfer: { files: [new File([], "dropped")], types: ["Files"] } });
   }

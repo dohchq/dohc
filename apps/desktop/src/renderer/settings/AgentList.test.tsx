@@ -256,6 +256,18 @@ it("says what each tool needs before it can be added", async () => {
   expect(screen.getByText("Runs on this computer. Turn an agent on for one computer per workspace.")).toBeTruthy();
 });
 
+// Codex can run without a saved login, through CODEX_API_KEY or another model
+// provider, so a sign-in dohc can't read still lets you add it.
+it("says Codex is ready when dohc can't tell whether it is signed in", async () => {
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+    workingDirectory: "C:\\Work",
+    tools: [{ tool: "codex", executable: "C:\\Tools\\codex.exe", version: "0.98", auth: "unknown", probe: "detected" }],
+  });
+  renderList();
+  await within(tile("Add Codex")).findByText("Ready");
+  expect(tile("Add Codex").disabled).toBe(false);
+});
+
 it("adds a tool that is ready, on, with an id and name of its own, then checks it", async () => {
   const { onSave } = renderList();
   await within(tile("Add Codex")).findByText("Ready");

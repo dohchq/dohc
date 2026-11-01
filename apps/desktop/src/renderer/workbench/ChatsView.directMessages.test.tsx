@@ -43,7 +43,9 @@ describe("ChatsView direct messages", () => {
     act(() => {
       fireEvent.pointerDown(window);
     });
-    expect(row.getAttribute("aria-current")).toBeNull();
+    // The view may start listening for the click a render after it marks the
+    // row. A click before that clears the mark once the view sees the count.
+    await waitFor(() => expect(row.getAttribute("aria-current")).toBeNull());
     expect(row.className).not.toContain("bg-selected");
   });
 
