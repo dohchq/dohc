@@ -1,8 +1,11 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type { Plugin } from "vite";
+import { EXCALIDRAW_ASSET_FOLDER } from "./src/renderer/excalidrawFonts";
 
 // Electron 43.3.0 ships Chromium 150 and Node 24.18. electron-vite 5.0.0
 // maps Electron targets only through major 39, so keep these explicit until
@@ -64,6 +67,54 @@ export const mainBuildEntries = {
 export const rendererAlias = {
   "decode-named-character-reference": createRequire(import.meta.url).resolve("decode-named-character-reference"),
 };
+
+// Excalidraw asks for <asset path>fonts/<family>/<file>.woff2. The renderer
+// serves the installed package's fonts under that path, so a drawing never
+// reaches for Excalidraw's CDN fallback.
+export const excalidrawFontsSource = join(
+  dirname(createRequire(import.meta.url).resolve("@excalidraw/excalidraw")),
+  "fonts",
+);
+const excalidrawFontsOutput = `${EXCALIDRAW_ASSET_FOLDER}fonts`;
+
+export async function excalidrawFontAssets(): Promise<{ fileName: string; source: string }[]> {
+  const entries = await readdir(excalidrawFontsSource, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const source = join(entry.parentPath, entry.name);
+      const name = relative(excalidrawFontsSource, source).split(sep).join("/");
+      return { fileName: `${excalidrawFontsOutput}/${name}`, source };
+    })
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+}
+
+function excalidrawFonts(): Plugin {
+  return {
+    name: "excalidraw-fonts",
+    configureServer(server) {
+      server.middlewares.use(`/${excalidrawFontsOutput}`, (request, response, next) => {
+        const file = resolve(
+          excalidrawFontsSource,
+          `.${new URL(request.url ?? "/", "http://renderer").pathname}`,
+        );
+        if (!file.startsWith(excalidrawFontsSource + sep)) {
+          next();
+          return;
+        }
+        readFile(file).then((bytes) => {
+          response.setHeader("Content-Type", "font/woff2");
+          response.end(bytes);
+        }, () => next());
+      });
+    },
+    async generateBundle() {
+      for (const asset of await excalidrawFontAssets()) {
+        this.emitFile({ type: "asset", fileName: asset.fileName, source: await readFile(asset.source) });
+      }
+    },
+  };
+}
 
 function effectFree(surface: "preload" | "renderer"): Plugin {
   return {
@@ -139,7 +190,7 @@ export default defineConfig(({ mode }) => {
     },
     renderer: {
       root: "src/renderer",
-      plugins: [effectFree("renderer"), react(), tailwindcss()],
+      plugins: [effectFree("renderer"), react(), tailwindcss(), excalidrawFonts()],
       resolve: { alias: rendererAlias },
       build: {
         target: electronRendererTarget,
