@@ -1897,6 +1897,7 @@ let appViews: ReturnType<typeof registerAppViews<DesktopRendererWorkspaceOperati
 const workspaceAuthorities = createWorkspaceAuthorityOwner({
   findWorkspace,
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
+  rootIdentity: (rootPath) => folderIdentitySync(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
   disposeState: async (state, binding, workspaceAtDisposal) => {
     await appViews?.closeWorkspace(binding.workspaceId);

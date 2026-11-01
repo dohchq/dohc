@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { caseFoldDisk } from "../testing/caseFoldDisk";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
+import { folderIdentitySync } from "./workspaceRootIdentity";
 
 interface Workspace {
   workspaceId: string;
@@ -1197,5 +1199,105 @@ describe("workspace authority owner", () => {
     const test = testOwner(null);
     expect(() => test.owner.acquire("missing")).toThrow("This workspace is not open. Open it again.");
     expect(test.canonicalizeRoot).not.toHaveBeenCalled();
+  });
+});
+
+describe("workspace authority owner on a Linux folder that ignores capitals", () => {
+  // /home ignores capitals and /srv tells them apart. canonicalizeRoot keeps
+  // the capitals it gets, as Linux realpath does.
+  const disk = caseFoldDisk({
+    "/home/sam/Notes/a.md": "file",
+    "/srv/Notes/a.md": "file",
+    "/srv/notes/a.md": "file",
+  }, { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") });
+
+  function linuxOwner(knowsInodes = true) {
+    const registry = new Map<string, Workspace>();
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: (workspaceId) => registry.get(workspaceId) ?? null,
+      canonicalizeRoot: (rootPath) => {
+        const real = disk.realPath(rootPath);
+        if (real === null) throw new Error(`ENOENT: ${rootPath}`);
+        return real;
+      },
+      rootIdentity: (rootPath) => knowsInodes ? folderIdentitySync(rootPath, disk.stat) : null,
+      createState: () => ({}),
+    });
+    const add = (workspaceId: string, rootPath: string) => {
+      registry.set(workspaceId, { workspaceId, rootPath, label: workspaceId });
+    };
+    return { owner, registry, add };
+  }
+
+  it("gives two spellings of one folder one owner", async () => {
+    const { owner, add } = linuxOwner();
+    add("first", "/home/sam/Notes");
+    const first = owner.acquire("first");
+    add("second", "/home/sam/notes");
+    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    expect(() => owner.reserveBinding({ workspaceId: "third", rootPath: "/home/sam/NOTES" }))
+      .toThrow("This folder is already attached as workspace first.");
+    first.release();
+    await owner.close();
+  });
+
+  it("keeps a retired owner's folder under every spelling until its work drains", async () => {
+    const { owner, registry, add } = linuxOwner();
+    add("first", "/home/sam/Notes");
+    const lease = owner.acquire("first");
+    const invalidating = owner.invalidate("first");
+    registry.delete("first");
+    add("second", "/home/sam/NOTES");
+    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    lease.release();
+    await invalidating;
+    const second = owner.acquire("second");
+    expect(second.binding).toMatchObject({
+      workspaceId: "second", registeredRootPath: "/home/sam/NOTES", canonicalRootPath: "/home/sam/NOTES",
+    });
+    expect(second.binding.attachmentId).not.toBe(lease.binding.attachmentId);
+    second.release();
+    await owner.close();
+  });
+
+  it("blocks every spelling of a reserved folder until its cleanup finishes", async () => {
+    const { owner, add } = linuxOwner();
+    const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/home/sam/Notes" });
+    add("second", "/home/sam/notes");
+    expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
+    let finishCleanup!: () => void;
+    const finish = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const releasing = owner.releaseReservation(reservation, () => finish);
+    expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
+    finishCleanup();
+    await releasing;
+    owner.acquire("second").release();
+    await owner.close();
+  });
+
+  it("keeps Notes and notes apart on a disk that tells capitals apart", async () => {
+    const { owner, add } = linuxOwner();
+    add("upper", "/srv/Notes");
+    add("lower", "/srv/notes");
+    const upper = owner.acquire("upper");
+    const lower = owner.acquire("lower");
+    expect(upper.binding.attachmentId).not.toBe(lower.binding.attachmentId);
+    upper.release();
+    lower.release();
+    await owner.close();
+  });
+
+  it("keys a folder by its path when the disk cannot give its identity", async () => {
+    const { owner, add } = linuxOwner(false);
+    add("upper", "/srv/Notes");
+    add("lower", "/srv/notes");
+    add("again", "/srv/Notes");
+    const upper = owner.acquire("upper");
+    owner.acquire("lower").release();
+    expect(() => owner.acquire("again")).toThrow("This folder is already attached as workspace upper.");
+    upper.release();
+    await owner.close();
   });
 });
