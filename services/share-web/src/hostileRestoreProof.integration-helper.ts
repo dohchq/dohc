@@ -212,7 +212,7 @@ export async function prepareHostileRestoreProof(input: {
         classification: unexpiredAtResponse ? "OBSERVED" : "NOT_OBSERVED", pass: unexpiredAtResponse && oldTicketStatus === 404}; save();
       await stale.close();
       const replay = await connect(input.allowedContext, await ticket(input.allowedContext, "grant-1"), "accepted-history-only");
-      await replay.sync(); expect(yDocToMarkdown(replay.doc)).toBe("Hello");
+      await replay.sync(); expect(yDocToMarkdown(replay.doc)).toBe("Hello\n");
       const acceptedOutcome = await replay.submit(accepted, deliveryIds.accepted);
       await settle(); const acceptedSnapshot = persisted("accepted-history-replay");
       const originalProvenanceRetained = beforeStop.provenance.every(row => acceptedSnapshot.provenance.some(after => JSON.stringify(after) === JSON.stringify(row))) &&

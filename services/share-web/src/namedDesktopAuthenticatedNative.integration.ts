@@ -217,7 +217,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     const first = await desktop(0, "first"), peer = await desktop(1, "peer");
     expect(first.mirror.available).toBe(true); expect(peer.mirror.available).toBe(true);
     if (!first.mirror.doc || !peer.mirror.doc) throw new Error("Missing live renderer mirrors.");
-    expect(yDocToMarkdown(first.mirror.doc)).toBe("Hello"); expect(yDocToMarkdown(peer.mirror.doc)).toBe("Hello");
+    expect(yDocToMarkdown(first.mirror.doc)).toBe("Hello\n"); expect(yDocToMarkdown(peer.mirror.doc)).toBe("Hello\n");
     const peerSeen = fieldWhen(peer.mirror.doc, "title", "desktop-over-tls"), saved = saveWhen(first, "saved-to-host");
     let localUpdate!: Uint8Array;
     first.mirror.doc.once("update", update => {localUpdate = update.slice();});

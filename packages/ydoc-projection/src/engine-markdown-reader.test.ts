@@ -26,8 +26,8 @@ const document = {workspaceId: 'workspace', mainVersionId: 'main', objectId: 'ob
 const context = {document, currentPath: 'note.md'}
 
 it.each([
-  'Changed beside the list\n\n- parent\n  - child',
-  'A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child',
+  'Changed beside the list\n\n- parent\n  - child\n',
+  'A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child\n',
 ])('constructs an exact native outside fold for %j', source => {
   const base = markdownToYDoc('Before\n\n- parent\n  - child'), imported = markdownToYDoc(source)
   try {
@@ -46,7 +46,7 @@ it.each([
 })
 
 it.each(['* parent\n  * child', '- parent\n    - child', '__bold__',
-  '- first\ncontinuation', '- parent\n  - child\n', '- parent\r\n  - child\r\n'])
+  '- first\ncontinuation', '- parent\n  - child', '- parent\r\n  - child'])
 ('refuses a non-exact native outside fold for %j', source => {
   const base = markdownToYDoc('Before')
   try {
@@ -343,8 +343,9 @@ it.each(forgedSources)('requires the actual snapshot for the #2116 vector: %s', 
 
 it.each(['literal', 'href', 'title', 'target', 'rel', 'class', 'source digest', 'projection digest', 'partial', 'stale'])(
   'refuses a forged %s even with matching canonical spelling where possible', kind => {
-    const source = '- **bold** and [label](https://example.com)\n  - child\n'
-    const doc = markdownToYDoc(kind === 'literal' ? '- \\*\\*bold\\*\\* and [label](https://example.com)\n  - child\n' : source)
+    // Without its final newline the source is not canonical, so it needs the witness.
+    const source = '- **bold** and [label](https://example.com)\n  - child'
+    const doc = markdownToYDoc(kind === 'literal' ? '- \\*\\*bold\\*\\* and [label](https://example.com)\n  - child' : source)
     try {
       if (['href', 'title', 'target', 'rel', 'class'].includes(kind)) {
         const first = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlElement

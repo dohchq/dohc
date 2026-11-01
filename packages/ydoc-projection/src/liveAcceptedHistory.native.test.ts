@@ -109,7 +109,12 @@ it.each(["small", "long"])("authenticates the native %s history through retained
     const first = JSON.parse(fixture.acceptedEvents[0]!.metadataJson);
     expect(readAcceptedHistoryDelivery(f.storage as StorageContext, {document: binding,namespace,through: receipt.fence.operation.terminal!.journalCursor,
       eventCount: receipt.acceptedHistory.eventCount,deliveryId: first.accepted.receipt.deliveryId}, new RestoreHistoryBudget(64_000_000,1))).toEqual(first);
-    expect(resolveLiveRestorePoint({target: "selected", binding, ...selected, point: receipt.point, assertCurrent() {}}, policy)).toEqual(receipt.point);
+    // The receipt is frozen from before rich notes ended with one line ending. Its
+    // point resolves the same, but the projection digest it recorded is the old one.
+    const {projectionDigest: oldProjectionDigest, ...point} = receipt.point;
+    const resolved = resolveLiveRestorePoint({target: "selected", binding, ...selected, point: receipt.point, assertCurrent() {}}, policy);
+    expect(resolved).toEqual({...point, projectionDigest: resolved.projectionDigest});
+    expect(resolved.projectionDigest).not.toBe(oldProjectionDigest);
     if (size === "long") {
       expect(selected.proof.checkpoint.eventCount).toBe(4095);
       expect(selected.events).toHaveLength(2);expect(accepted.events).toHaveLength(3);

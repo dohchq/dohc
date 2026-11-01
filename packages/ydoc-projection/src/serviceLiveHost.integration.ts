@@ -211,7 +211,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       doc.destroy(); doc = new Y.Doc();
       Y.applyUpdate(doc, restoredCut.cut.checkpoint.bytes);
       for (const event of restoredCut.cut.suffix) Y.applyUpdate(doc, event.bytes);
-      expect(yDocToMarkdown(doc)).toBe("Hello");
+      expect(yDocToMarkdown(doc)).toBe("Hello\n");
       admit("after-first-resume");
       expect(await active!.drain(document)).toMatchObject({kind: "done", terminalReceipt: {deliveryId: "after-first-resume"}});
       expect(await active!.settle(document)).toMatchObject({materialized: true});

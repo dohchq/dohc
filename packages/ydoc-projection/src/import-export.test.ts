@@ -224,7 +224,7 @@ it('preserves an NBSP paragraph after a task list without changing code whitespa
     expect(body).toMatchObject(root)
     expect(markdown).toContain('`code\u00a0space`')
     expect(markdown).toContain('\n\u00a0fenced code\n')
-    expect(yDocToMarkdown(restored)).toBe(markdown)
+    expect(yDocToMarkdown(restored)).toBe(`${markdown}\n`)
   } finally {
     restored.destroy()
   }
@@ -283,6 +283,7 @@ const RAW_HTML_SETTLED = [
   '**&lt;pre&gt;one',
   '  &#32;**',
   'two&lt;/pre&gt; and **real**.',
+  '',
 ].join('\n')
 
 function rawHtmlLiveDocument(): Y.Doc {
@@ -739,11 +740,11 @@ it.each([
         getDohcProseMirrorSchema(),
       ).toJSON()
       expect(initial.content?.[0]?.content).toHaveLength(runs.length)
-      expect(yDocToMarkdown(doc)).toBe(saved)
+      expect(yDocToMarkdown(doc)).toBe(`${saved}\n`)
       expect(parseRichdocMarkdown(saved)).toEqual(initial)
       const reopened = markdownToYDoc(saved)
       try {
-        expect(yDocToMarkdown(reopened)).toBe(saved)
+        expect(yDocToMarkdown(reopened)).toBe(`${saved}\n`)
       } finally {
         reopened.destroy()
       }
@@ -1396,15 +1397,16 @@ describe('Y.Doc markdown import/export', () => {
       '---\n\r\r\na: [\n---\nBody remains.',
     ]) {
       const restored = markdownToYDoc(markdown)
+      const saved = `${markdown}${markdown.includes('\r\n') ? '\r\n' : '\n'}`
       try {
         expect(getDohcYDocFrontmatter(restored)).toEqual({})
         expect(yDocBodyJSON(restored)).toEqual({
           type: 'doc',
           content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] }],
         })
-        expect(yDocToMarkdown(restored)).toBe(markdown)
+        expect(yDocToMarkdown(restored)).toBe(saved)
         expect(() => setFrontmatterValue(restored, 'title', 'Plan')).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
-        expect(yDocToMarkdown(restored)).toBe(markdown)
+        expect(yDocToMarkdown(restored)).toBe(saved)
       } finally {
         restored.destroy()
       }
@@ -1514,7 +1516,7 @@ describe('Y.Doc markdown import/export', () => {
     expect(vector).toBeDefined()
     const doc = markdownToYDoc(vector!.markdown)
 
-    expect(yDocToMarkdown(doc)).toBe(vector!.markdown)
+    expect(yDocToMarkdown(doc)).toBe(`${vector!.markdown}\n`)
 
     doc.getMap('frontmatter').set('priority', 'low')
     const changed = yDocToMarkdown(doc)
@@ -1525,7 +1527,7 @@ describe('Y.Doc markdown import/export', () => {
   it('rewrites only the frontmatter keys that change', () => {
     const written = [
       '---', '# Trip', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999',
-      'zero: -0', 'tags:', '- a', '---', '', 'Body',
+      'zero: -0', 'tags:', '- a', '---', '', 'Body', '',
     ].join('\n')
     const doc = markdownToYDoc(written)
     try {
@@ -1538,14 +1540,14 @@ describe('Y.Doc markdown import/export', () => {
       setFrontmatterValue(doc, 'status', 'booked')
       expect(yDocToMarkdown(doc)).toBe([
         '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
-        'zero: -0', 'tags:', '- a', 'status: booked', '---', '', 'Body',
+        'zero: -0', 'tags:', '- a', 'status: booked', '---', '', 'Body', '',
       ].join('\n'))
       frontmatter.set('rating', 5)
       frontmatter.delete('zero')
       frontmatter.delete('tags')
       expect(yDocToMarkdown(doc)).toBe([
         '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
-        'rating: 5', 'status: booked', '---', '', 'Body',
+        'rating: 5', 'status: booked', '---', '', 'Body', '',
       ].join('\n'))
     } finally { doc.destroy() }
     // A writer that sets the key directly gets the entry in place without the
@@ -1564,14 +1566,14 @@ describe('Y.Doc markdown import/export', () => {
       markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody',
       deleted: 'wifi',
       added: ['wifi', 'new'] as const,
-      settled: '---\nwifi: new\nbudget: 100\n---\n\nBody',
+      settled: '---\nwifi: new\nbudget: 100\n---\n\nBody\n',
     },
     {
       name: 'a deleted key whose value comes back',
       markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody',
       deleted: 'draft',
       added: ['featured', true] as const,
-      settled: '---\ntitle: A\nfeatured: true\n---\n\nBody',
+      settled: '---\ntitle: A\nfeatured: true\n---\n\nBody\n',
     },
   ])('never brings back the comments of $name, whoever writes it', ({ markdown, deleted, added, settled }) => {
     // Plain Y.Map writes in separate updates, in one update, and through the
@@ -1632,7 +1634,7 @@ describe('Y.Doc markdown import/export', () => {
       Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
       expect(a.getMap('meta').get('dohcFrontmatterSource')).toMatch(/# x note[\s\S]*# y note/)
       for (const key of ['x', 'y']) a.getMap('frontmatter').set(key, 'new')
-      expect(yDocToMarkdown(a)).toBe('---\nx: new\ny: new\nz:   3\n---\n\nBody')
+      expect(yDocToMarkdown(a)).toBe('---\nx: new\ny: new\nz:   3\n---\n\nBody\n')
     } finally { base.destroy(); a.destroy(); b.destroy() }
   })
 
@@ -1647,7 +1649,7 @@ describe('Y.Doc markdown import/export', () => {
     try {
       expect(frontmatterEditsRefused(doc)).toBe(true)
       expect(frontmatterEditsRefused(block)).toBe(false)
-      expect(yDocToMarkdown(doc)).toBe(flow)
+      expect(yDocToMarkdown(doc)).toBe(`${flow}\n`)
     } finally { doc.destroy(); block.destroy() }
   })
 
@@ -1661,7 +1663,7 @@ describe('Y.Doc markdown import/export', () => {
     ': note\na: 1\nb: .nan',
     '&root {}',
   ])('refuses edits to unsplittable frontmatter: %s', yaml => {
-    const markdown = `---\n${yaml}\n---\n\nBody`
+    const markdown = `---\n${yaml}\n---\n\nBody\n`
     const doc = markdownToYDoc(markdown)
     try {
       expect(markdownFrontmatterEditsRefused(markdown)).toBe(true)
@@ -1671,7 +1673,7 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it.each(['a\r: [', 'a\r\r: ['])('keeps unreadable keys containing carriage returns: %s', yaml => {
-    const markdown = `---\n${yaml}\n---\n\nBody`
+    const markdown = `---\n${yaml}\n---\n\nBody\n`
     const doc = markdownToYDoc(markdown)
     try {
       expect(yDocToMarkdown(doc)).toBe(markdown)
@@ -1682,12 +1684,12 @@ describe('Y.Doc markdown import/export', () => {
     const empty = markdownToYDoc('---\n---\n\nBody')
     const removed = markdownToYDoc('---\nz: 1\ntitle: Plan\n---\n\nBody')
     try {
-      expect(yDocToMarkdown(empty)).toBe('---\n---\n\nBody')
+      expect(yDocToMarkdown(empty)).toBe('---\n---\n\nBody\n')
       empty.getMap('frontmatter').set('title', 'Plan')
-      expect(yDocToMarkdown(empty)).toBe('---\ntitle: Plan\n---\n\nBody')
+      expect(yDocToMarkdown(empty)).toBe('---\ntitle: Plan\n---\n\nBody\n')
       removed.getMap('frontmatter').delete('z')
       removed.getMap('frontmatter').delete('title')
-      expect(yDocToMarkdown(removed)).toBe('Body')
+      expect(yDocToMarkdown(removed)).toBe('Body\n')
     } finally { empty.destroy(); removed.destroy() }
   })
 
@@ -1699,7 +1701,7 @@ describe('Y.Doc markdown import/export', () => {
     doc.getMap('meta').set('dohcFrontmatterSource', prefix)
     try {
       if (prefix.includes('injected body')) expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
-      else expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
+      else expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body\n')
     } finally { doc.destroy() }
   })
 
@@ -1757,7 +1759,7 @@ describe('Y.Doc markdown import/export', () => {
       priority: 3,
       status: 'open',
     })
-    expect(yDocToMarkdown(doc)).toBe(input)
+    expect(yDocToMarkdown(doc)).toBe(`${input}\r\n`)
   })
 
   it('keeps comment-only frontmatter as an empty map and as the text written', () => {
@@ -1765,7 +1767,7 @@ describe('Y.Doc markdown import/export', () => {
     const doc = markdownToYDoc(input)
 
     expect(getDohcYDocFrontmatter(doc)).toEqual({})
-    expect(yDocToMarkdown(doc)).toBe(input)
+    expect(yDocToMarkdown(doc)).toBe(`${input}\n`)
   })
 
   it('round-trips hostile frontmatter keys as own data properties', () => {
@@ -1928,7 +1930,7 @@ describe('Y.Doc markdown import/export', () => {
 
   it('keeps literal punctuation and explicit escapes byte-stable', () => {
     const input = 'internal_name [label] and \\*literal asterisks\\*'
-    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(`${input}\n`)
   })
 
   it('keeps malformed frontmatter visible instead of dropping it', () => {
@@ -1987,7 +1989,7 @@ describe('Y.Doc markdown import/export', () => {
 
   it('keeps an existing blank separator between frontmatter and rich markdown body', () => {
     const input = ['---', 'id: note-1', '---', '', '', '# Plan'].join('\n')
-    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(`${input}\n`)
   })
 
   it('preserves retired document-computation syntax as inert markdown', () => {
@@ -2003,7 +2005,7 @@ describe('Y.Doc markdown import/export', () => {
       '```',
     ].join('\n')
 
-    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(`${input}\n`)
   })
 
   it('preserves task lists instead of degrading them to plain bullets', () => {
@@ -2094,7 +2096,7 @@ describe('Y.Doc markdown import/export', () => {
       const doc = markdownToYDoc(`literal ${encoded}`)
       expect(yDocBodyJSON(doc).content?.[0]?.content?.[0]?.text)
         .toBe('literal &#35;')
-      expect(yDocToMarkdown(doc)).toBe('literal &amp;#35;')
+      expect(yDocToMarkdown(doc)).toBe('literal &amp;#35;\n')
     }
 
     expectStableMarkdownRoundTrip(
@@ -2117,7 +2119,7 @@ describe('Y.Doc markdown import/export', () => {
         { type: 'escapedPunctuation', attrs: { value: '&' } },
         { type: 'text', text: tail },
       ])
-      expect(yDocToMarkdown(doc)).toBe(markdown)
+      expect(yDocToMarkdown(doc)).toBe(`${markdown}\n`)
       expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
     }
 
@@ -2348,7 +2350,7 @@ describe('Y.Doc markdown import/export', () => {
         title: 'Title &#38;#35;',
       },
     })
-    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(`${markdown}\n`)
   })
 
   it('sanitizes image schemes after restoring attribute entities', () => {
@@ -2361,7 +2363,7 @@ describe('Y.Doc markdown import/export', () => {
       const paragraph = yDocBodyJSON(doc).content?.[0]
       expect(paragraph?.type).toBe('paragraph')
       expect(paragraph?.content?.[0]?.attrs?.src).toBe('')
-      expect(yDocToMarkdown(doc)).toBe('![image]()')
+      expect(yDocToMarkdown(doc)).toBe('![image]()\n')
     }
   })
 
@@ -2475,7 +2477,7 @@ describe('Y.Doc markdown import/export', () => {
       },
     ]))
 
-    expect(once).toBe('&#9;*marked tab*')
+    expect(once).toBe('&#9;*marked tab*\n')
     const reopened = markdownToYDoc(once)
     expect(yDocBodyJSON(reopened).content?.[0]?.type).toBe('paragraph')
     expect(yDocToMarkdown(reopened)).toBe(once)
@@ -2500,7 +2502,7 @@ describe('Y.Doc markdown import/export', () => {
     ]))
 
     expect(once).toBe(
-      '&#32;   **marked spaces**\n\n&#32;  \t*marked tab*',
+      '&#32;   **marked spaces**\n\n&#32;  \t*marked tab*\n',
     )
     const reopened = markdownToYDoc(once)
     expect(yDocBodyJSON(reopened).content?.map(node => node.type))
@@ -2523,7 +2525,7 @@ describe('Y.Doc markdown import/export', () => {
     ]))
 
     // The line break keeps the mark, so the text stays one italic run.
-    expect(once).toBe('*before\n&#35; heading text*')
+    expect(once).toBe('*before\n&#35; heading text*\n')
     const reopened = markdownToYDoc(once)
     expect(yDocBodyJSON(reopened).content).toEqual([{
       type: 'paragraph',
@@ -2541,7 +2543,7 @@ describe('Y.Doc markdown import/export', () => {
         type: 'paragraph',
         content: [{ type: 'text', text: source }],
       }]))
-      expect(once).toBe(expected)
+      expect(once).toBe(`${expected}\n`)
       const reopened = markdownToYDoc(once)
       expect(yDocBodyJSON(reopened).content?.map(node => node.type))
         .toEqual(['paragraph'])
@@ -2559,7 +2561,7 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(yDocFromBody([{
       type: 'paragraph',
       content: [{ type: 'text', text: ordinary }],
-    }]))).toBe(ordinary)
+    }]))).toBe(`${ordinary}\n`)
 
     for (const [source, expected] of [
       ['before\n\t===', 'before\n&#9;==='],
@@ -2569,7 +2571,7 @@ describe('Y.Doc markdown import/export', () => {
         type: 'paragraph',
         content: [{ type: 'text', text: source }],
       }]))
-      expect(once).toBe(expected)
+      expect(once).toBe(`${expected}\n`)
       const reopened = markdownToYDoc(once)
       expect(yDocBodyJSON(reopened).content?.map(node => node.type))
         .toEqual(['paragraph'])
@@ -2586,7 +2588,7 @@ describe('Y.Doc markdown import/export', () => {
         type: 'paragraph',
         content: [{ type: 'text', text: source }],
       }]))
-      expect(once).toBe(expected)
+      expect(once).toBe(`${expected}\n`)
       const reopened = markdownToYDoc(once)
       expect(yDocBodyJSON(reopened).content?.map(node => node.type))
         .toEqual(['paragraph'])
@@ -2695,14 +2697,14 @@ describe('Y.Doc markdown import/export', () => {
     )
 
     expect(output).toBe(
-      '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n',
+      '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n\n',
     )
   })
 
   it('keeps a workspace-relative image byte-identical through the round-trip', () => {
     const input = '![alt](assets/pic.png "t")'
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
     // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
@@ -2727,7 +2729,7 @@ describe('Y.Doc markdown import/export', () => {
         image = node.toJSON() as JSONContent
       })
       expect(image?.attrs).toEqual({ src: 'assets/pic.png', alt: 'alt text', title: 'Title' })
-      expect(yDocToMarkdown(doc)).toBe(markdown)
+      expect(yDocToMarkdown(doc)).toBe(`${markdown}\n`)
     } finally {
       doc.destroy()
     }
@@ -2736,7 +2738,7 @@ describe('Y.Doc markdown import/export', () => {
   it('round-trips a relative image path containing spaces via angle brackets', () => {
     const input = '![alt](<my folder/pic 1.png>)'
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
     // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
@@ -2783,7 +2785,7 @@ describe('Y.Doc markdown import/export', () => {
           },
         ]),
       ),
-    ).toBe('![split]()')
+    ).toBe('![split]()\n')
     // Backslash traversal (a Windows-style `..\secret\pic.png`) stays blocked:
     // backslashes are folded to '/' before the check and a `..` backslash path
     // is never legitimate authored markdown (unlike a forward-slash `../`,
@@ -2854,7 +2856,7 @@ describe('Y.Doc markdown import/export', () => {
             },
           ]),
         ),
-      ).toBe(markdown)
+      ).toBe(`${markdown}\n`)
     }
   })
 
@@ -2907,7 +2909,7 @@ describe('Y.Doc markdown import/export', () => {
       resizeRow(doc, 2, 120)
       const once = yDocToMarkdown(doc)
       expect(once).toBe(
-        `# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n${table}\n\nAfter.`,
+        `# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n${table}\n\nAfter.\n`,
       )
       const reopened = markdownToYDoc(once)
       expect([0, 1, 2].map(index => rowHeight(reopened, index))).toEqual([null, 84, 120])
@@ -2951,7 +2953,7 @@ describe('Y.Doc markdown import/export', () => {
     it('skips rows the table does not have and heights that are not positive', () => {
       const doc = markdownToYDoc(`<!-- dohc:table row-heights=9:84,1:0,2:5 -->\n${table}`)
       expect([1, 2].map(index => rowHeight(doc, index))).toEqual([null, 5])
-      expect(yDocToMarkdown(doc)).toBe(`<!-- dohc:table row-heights=2:5 -->\n${table}`)
+      expect(yDocToMarkdown(doc)).toBe(`<!-- dohc:table row-heights=2:5 -->\n${table}\n`)
     })
 
     it('accepts a blank line between the annotation and its table', () => {
@@ -2973,7 +2975,7 @@ describe('Y.Doc markdown import/export', () => {
       const fenced = '```\n<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n```'
       const fencedDoc = markdownToYDoc(fenced)
       expect(yDocBodyJSON(fencedDoc).content?.map(node => node.type)).toEqual(['codeBlock'])
-      expect(yDocToMarkdown(fencedDoc)).toBe(fenced)
+      expect(yDocToMarkdown(fencedDoc)).toBe(`${fenced}\n`)
     })
 
     it.each([
@@ -3090,6 +3092,7 @@ describe('Y.Doc markdown import/export', () => {
       '',
       '- parent',
       '  - nested with **bold** and [details](https://example.com)',
+      '',
     ].join('\n')
 
     const doc = markdownToYDoc(input)
@@ -3117,14 +3120,14 @@ describe('Y.Doc markdown import/export', () => {
 
   it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
     expect(expectStableMarkdownRoundTrip('Hello\n\n[x]: https://h.example "kept"\n', []))
-      .toBe('Hello\n\n&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;')
+      .toBe('Hello\n\n&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;\n')
     // marked drops a second definition of a label without a token.
     const repeated = expectStableMarkdownRoundTrip(
       '[x]: https://a.example\n[x]: https://b.example "kept"\n',
       [],
     )
     expect(repeated).toBe(
-      '&#91;x&#93;&#58; https&#58;//a&#46;example\n\n&#91;x&#93;&#58; https&#58;//b&#46;example &#34;kept&#34;',
+      '&#91;x&#93;&#58; https&#58;//a&#46;example\n\n&#91;x&#93;&#58; https&#58;//b&#46;example &#34;kept&#34;\n',
     )
     expect(yDocBodyJSON(markdownToYDoc(repeated))).toEqual(
       yDocBodyJSON(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')),
@@ -3204,10 +3207,10 @@ describe('Y.Doc markdown import/export', () => {
     ])
 
     expect(yDocToMarkdown(doc)).toBe([
-      '',
       '| Value         | Other  |',
       '| ------------- | ------ |',
       '| left \\| right | stable |',
+      '',
     ].join('\n'))
   })
 
@@ -3247,10 +3250,10 @@ describe('Y.Doc markdown import/export', () => {
     ])
 
     expect(yDocToMarkdown(doc)).toBe([
-      '',
       '| first  | row |',
       '| ------ | --- |',
       '| second | row |',
+      '',
     ].join('\n'))
   })
 
@@ -3290,10 +3293,10 @@ describe('Y.Doc markdown import/export', () => {
     ]))
 
     expect(output).toBe([
-      '',
       '| H               |',
       '| --------------- |',
       '| first<br>second |',
+      '',
     ].join('\n'))
     expect(output).not.toContain('\u001F')
     expect(output).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u)
@@ -3423,7 +3426,7 @@ describe('Y.Doc markdown import/export', () => {
 
     expect(once).toContain(expected)
     const roundTripDoc = markdownToYDoc(once)
-    expect(yDocToMarkdown(roundTripDoc)).toBe(once)
+    expect(yDocToMarkdown(roundTripDoc)).toBe(`${once}\n`)
     if (node.type !== 'escapedPunctuation') {
       const roundTripNode = yDocBodyJSON(roundTripDoc)
         .content?.[0].content?.[1].content?.[0].content?.[0].content?.[0]
@@ -3689,7 +3692,7 @@ describe('Y.Doc markdown import/export', () => {
       }],
     }).trimEnd()
 
-    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(`${once}\n`)
     expect(once).not.toMatch(/DOHC_[A-Z_]+_\d+/u)
     expect(once).not.toMatch(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}]/u)
   })
@@ -3782,7 +3785,7 @@ describe('Y.Doc markdown import/export', () => {
 
   it.each(['js', 'lang`tick'])('keeps an empty %s code block indented inside a list', language => {
     const fence = language.includes('`') ? '~~~' : '```'
-    const markdown = `- intro\n  ${fence}${language}\n  \n  ${fence}\n\nAfter`
+    const markdown = `- intro\n  ${fence}${language}\n  \n  ${fence}\n\nAfter\n`
     expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
   })
 
@@ -3815,6 +3818,7 @@ describe('Y.Doc markdown import/export', () => {
       '````',
       '',
       '``a`b`` / `` `edge` `` / `  spaced  ` / `   `',
+      '',
     ].join('\n'))
   })
 
@@ -3845,7 +3849,7 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it('keeps HTML-special characters raw inside inline code', () => {
-    const markdown = 'Compare `<tag> && value > 1` without entity expansion.'
+    const markdown = 'Compare `<tag> && value > 1` without entity expansion.\n'
     expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
   })
 
@@ -4062,7 +4066,7 @@ describe('Y.Doc markdown import/export', () => {
     ).join('\n\n')
 
     const once = yDocToMarkdown(markdownToYDoc(markdown))
-    expect(once).toBe(markdown)
+    expect(once).toBe(`${markdown}\n`)
     expect(once).not.toContain('DOHC_INLINE_CODE')
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
   })
@@ -4098,7 +4102,7 @@ describe('Y.Doc markdown import/export', () => {
     },
   ])('round-trips inline code inside $context without placeholder-sensitive output', ({ markdown }) => {
     const once = yDocToMarkdown(markdownToYDoc(markdown))
-    expect(once).toBe(markdown)
+    expect(once).toBe(`${markdown}\n`)
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
   })
 
@@ -4261,7 +4265,7 @@ describe('Y.Doc markdown import/export', () => {
   it('round-trips a callout nested inside a list item without dropping it', () => {
     const input = ['- item', '  > [!note] In list', '  > body'].join('\n')
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
     const twice = yDocToMarkdown(markdownToYDoc(once))
     expect(twice).toBe(once)
   })
@@ -4287,11 +4291,11 @@ describe('Y.Doc markdown import/export', () => {
 
   it('emits a title-only callout without a stray trailing > line', () => {
     expect(yDocToMarkdown(markdownToYDoc('> [!note] Just a title'))).toBe(
-      '> [!note] Just a title',
+      '> [!note] Just a title\n',
     )
-    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]')
+    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]\n')
     expect(yDocToMarkdown(markdownToYDoc('> [!warning]- Folded title'))).toBe(
-      '> [!warning]- Folded title',
+      '> [!warning]- Folded title\n',
     )
   })
 
@@ -4303,7 +4307,7 @@ describe('Y.Doc markdown import/export', () => {
     // First pass normalizes the lazy line to a `>`-prefixed body line inside the
     // callout (rather than reflowing it into a separate paragraph)...
     expect(once).toBe(
-      ['> [!note] Title', '> first line', '> lazy continuation'].join('\n'),
+      ['> [!note] Title', '> first line', '> lazy continuation', ''].join('\n'),
     )
     // ...and the normalized form is byte-stable thereafter.
     const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -4319,10 +4323,10 @@ describe('Y.Doc markdown import/export', () => {
         },
       ])
     // The concrete escaped form is unambiguous and reversible.
-    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==')
+    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==\n')
     // A lone `=` adjacent to the closing delimiter must also be escaped, or the
     // mark would close one char early (`==a=` → `==a===`).
-    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===')
+    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===\n')
     for (const text of [
       'a==b',
       'a ==b== c',
@@ -4340,14 +4344,14 @@ describe('Y.Doc markdown import/export', () => {
       expect(twice, `text=${JSON.stringify(text)}`).toBe(once)
       // The highlight is preserved as a single `==...==` span, never split.
       expect(once.startsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
-      expect(once.endsWith('=='), `text=${JSON.stringify(text)}`).toBe(true)
+      expect(once.endsWith('==\n'), `text=${JSON.stringify(text)}`).toBe(true)
     }
   })
 
   it('keeps adversarial raw == sequences literal and byte-stable', () => {
     for (const input of ['==a ==b== c==', 'a ==b==c== d', '==x==y==z==']) {
       const once = yDocToMarkdown(markdownToYDoc(input))
-      expect(once, `input=${JSON.stringify(input)}`).toBe(input)
+      expect(once, `input=${JSON.stringify(input)}`).toBe(`${input}\n`)
       const twice = yDocToMarkdown(markdownToYDoc(once))
       expect(twice, `input=${JSON.stringify(input)}`).toBe(once)
     }
@@ -4356,13 +4360,13 @@ describe('Y.Doc markdown import/export', () => {
   it('round-trips inline $...$ TeX math byte-for-byte', () => {
     const input = 'Euler: $e^{i\\pi} + 1 = 0$ is neat.'
     const once = expectStableMarkdownRoundTrip(input, ['$e^{i\\pi} + 1 = 0$'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('round-trips a single-line $$...$$ block byte-for-byte', () => {
     const input = '$$E = mc^2$$'
     const once = expectStableMarkdownRoundTrip(input, ['$$E = mc^2$$'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('round-trips a multi-line $$...$$ block byte-for-byte', () => {
@@ -4373,7 +4377,7 @@ describe('Y.Doc markdown import/export', () => {
       '$$',
     ].join('\n')
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
     const twice = yDocToMarkdown(markdownToYDoc(once))
     expect(twice).toBe(once)
   })
@@ -4393,7 +4397,7 @@ describe('Y.Doc markdown import/export', () => {
     // `]` and `|` in the label are backslash-escaped so the closing `]]` and the
     // target/label separator aren't matched early.
     const once = yDocToMarkdown(doc)
-    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]')
+    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]\n')
     // Re-parsing unescapes the label and re-serializing reproduces it verbatim
     // (a truncated re-parse would drop the tail and diverge here).
     const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -4403,19 +4407,19 @@ describe('Y.Doc markdown import/export', () => {
   it('round-trips an empty $$$$ block', () => {
     const input = '$$$$'
     const once = expectStableMarkdownRoundTrip(input, ['$$$$'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('keeps escaped \\$ literal instead of opening math', () => {
     const input = 'Price is \\$5 and \\$6 today.'
     const once = expectStableMarkdownRoundTrip(input, ['\\$5', '\\$6'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('does not fire inline math on prose dollar amounts like $5 and $6', () => {
     const input = 'I have $5 and $6 in my wallet.'
     const once = expectStableMarkdownRoundTrip(input, ['$5 and $6'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('round-trips inline math adjacent to marks', () => {
@@ -4430,13 +4434,13 @@ describe('Y.Doc markdown import/export', () => {
       '$x^2$',
       '*emphasis*',
     ])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('leaves a mid-paragraph $$x$$ with trailing text literal', () => {
     const input = 'inline $$x$$ trailing stays literal'
     const once = expectStableMarkdownRoundTrip(input, ['$$x$$ trailing'])
-    expect(once).toBe(input)
+    expect(once).toBe(`${input}\n`)
   })
 
   it('detects a mid-line wikilink whose label contains an escaped delimiter', () => {
@@ -4451,7 +4455,7 @@ describe('Y.Doc markdown import/export', () => {
       },
     ])
     const once = yDocToMarkdown(doc)
-    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here')
+    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here\n')
     const twice = yDocToMarkdown(markdownToYDoc(once))
     expect(twice).toBe(once)
   })
@@ -4488,7 +4492,7 @@ describe('a list nested inside a task item', () => {
 
   for (const [kind, markdown] of CASES) {
     it(`survives the Y.Doc round-trip as a ${kind} list`, () => {
-      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(`${markdown}\n`)
     })
   }
 })
@@ -4555,7 +4559,7 @@ describe('indented code fences', () => {
 
   it('normalizes an indented fence to column 0 on export', () => {
     const once = yDocToMarkdown(markdownToYDoc(' ```js\ncode\n ```'))
-    expect(once).toBe('```js\ncode\n```')
+    expect(once).toBe('```js\ncode\n```\n')
   })
 
   // An empty fence has no body. The codeBlock must be built with no content at
@@ -4570,7 +4574,7 @@ describe('indented code fences', () => {
     expect(codeText(blocks[0])).toBe('')
 
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe('```js\n\n```')
+    expect(once).toBe('```js\n\n```\n')
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
   })
 
@@ -4594,7 +4598,7 @@ describe('indented code fences', () => {
   // `round-trips fenced code inside $context` covers the quoted container in
   // the export direction only — it starts from a doc, not from markdown.
   it('keeps a fence inside a plain blockquote quoted', () => {
-    const input = ['> ```', '> code', '> ```'].join('\n')
+    const input = ['> ```', '> code', '> ```', ''].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 })

@@ -132,14 +132,14 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('keeps a blank separator between frontmatter and rich markdown body', () => {
-    const input = ['---', 'id: note-1', '---', '', '# Plan'].join('\n')
+    const input = ['---', 'id: note-1', '---', '', '# Plan', ''].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
   // Copy as Markdown and the source view fall back to this exporter when the
   // worker fails, so it must give the worker's bytes, line endings included.
   it('keeps a CRLF note CRLF, as the projection exporter does', () => {
-    const input = ['---', 'status: open', '---', '', '# Body', '', 'body text'].join('\r\n')
+    const input = ['---', 'status: open', '---', '', '# Body', '', 'body text', ''].join('\r\n')
     const doc = markdownToYDoc(input)
 
     expect(yDocToMarkdown(doc)).toBe(input)
@@ -157,6 +157,7 @@ describe('desktop editor markdown round-trip', () => {
       '```dohc-query',
       'sum(hours)',
       '```',
+      '',
     ].join('\n')
 
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)

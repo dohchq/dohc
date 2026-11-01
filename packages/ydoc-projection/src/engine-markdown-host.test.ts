@@ -157,7 +157,9 @@ it.each(['checkpoint', 'candidate', 'over-cap', 'source-digest'])('rejects a wit
   } finally {await host.close()}
 })
 it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bom => {
-  const host = await start(), row = rows.find(row => row.accepted)!, base = markdownToYDoc(row.earlier)
+  // A source that is not its own canonical file needs its witness, so a forged projection digest is refused.
+  const host = await start(), row = rows.find(row => row.accepted && !row.source.endsWith('\n'))!
+  const base = markdownToYDoc(row.earlier)
   const source = new TextEncoder().encode((bom ? '\ufeff' : '') + row.source)
   try {
     await hello(host)
@@ -358,7 +360,8 @@ it.runIf(process.platform === 'win32')('starts the bundle through a directory ju
 
 it('accepts a source of exactly 2 MiB', async () => {
   const host = await start(), base = markdownToYDoc('Earlier')
-  const source = Buffer.alloc(2 * 1024 * 1024, 97)
+  // The final newline is the last of the 2 MiB, so the canonical file is the source.
+  const source = Buffer.concat([Buffer.alloc(2 * 1024 * 1024 - 1, 97), Buffer.from('\n')])
   try {
     await hello(host); request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
     expect((await success(host, 2)).result).toMatchObject({kind: 'constructed', sourceByteLength: source.length, sourceSha256: hash(source)})

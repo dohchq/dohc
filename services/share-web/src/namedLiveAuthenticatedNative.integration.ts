@@ -268,7 +268,7 @@ it("authenticates two accounts through the production browser transport and pres
     ]);
     expect(sockets).toHaveLength(socketCount);
     results.authentication = { accountIds: users.map(user => user.id), requests, wrongAccount: wrongAccount.provider.state(), wrongGrant: wrongGrant.provider.state() };
-    expect(yDocToMarkdown(first.provider.doc)).toBe("Hello"); expect(yDocToMarkdown(peer.provider.doc)).toBe("Hello");
+    expect(yDocToMarkdown(first.provider.doc)).toBe("Hello\n"); expect(yDocToMarkdown(peer.provider.doc)).toBe("Hello\n");
     const actor = { kind: "owner", userId: "owner", shareId: "share-0" } as const;
     const current = storage.resolveCurrentLiveDocumentBinding({ document, actor }); if (current.kind !== "current") throw new Error("Current binding unavailable.");
     const capture = await active.captureNative(current.binding);

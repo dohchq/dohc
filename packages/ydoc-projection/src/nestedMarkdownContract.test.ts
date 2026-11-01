@@ -19,7 +19,8 @@ it.each(corpus.cases.filter(item => item.markedStart))('serializes marked leadin
   let paragraph: JSONContent = root
   while (paragraph.type !== 'paragraph') paragraph = paragraph.content![0]
   paragraph.content = [{ type: 'text', text: item.markedText!, marks: [item.markedStart!] }]
-  expect(serializeRichdocBody(root)).toBe(item.canonical)
+  // The corpus holds file bytes; the body serializer stops before the final newline.
+  expect(serializeRichdocBody(root)).toBe(item.canonical!.replace(/\n$/u, ''))
   expect(parseRichdocMarkdown(serializeRichdocBody(root), 'projection')).toEqual(parseRichdocMarkdown(item.source, 'projection'))
 })
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {

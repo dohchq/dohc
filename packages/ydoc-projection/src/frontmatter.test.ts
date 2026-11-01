@@ -117,7 +117,7 @@ describe('shared frontmatter edit candidates', () => {
         expect(() => writeMarkdownFrontmatter(vector.markdown, values)).toThrow(refusal)
       } else {
         edit()
-        expect(yDocToMarkdown(doc)).toBe(vector.expected)
+        expect(yDocToMarkdown(doc)).toBe('projected' in vector ? vector.projected : vector.expected)
         expect(writeMarkdownFrontmatter(vector.markdown, values)).toBe(vector.expected)
       }
     } finally { doc.destroy() }
@@ -147,7 +147,7 @@ describe('shared frontmatter values a patch writes', () => {
       expect(moved.has(key)).toBe(false)
       expect(moved.get(`${key}2`) instanceof Y.AbstractType, 'stored as the canonical writer stores it').toBe(shared)
       expect(frontmatterMapValues(moved)[`${key}2`]).toEqual(value)
-      expect(yDocToMarkdown(copy)).toBe(`${MOVED_BLOCK.replace(`\n${key}:`, `\n${key}2:`)}Body`)
+      expect(yDocToMarkdown(copy)).toBe(`${MOVED_BLOCK.replace(`\n${key}:`, `\n${key}2:`)}Body\n`)
     } finally {
       copy?.destroy()
       doc.destroy()
@@ -172,7 +172,7 @@ describe('shared frontmatter values a patch writes', () => {
       setFrontmatterValue(doc, 'value', value)
       copy = replica(doc)
       expect(frontmatterMapValues(copy.getMap('frontmatter')).value).toEqual(value)
-      expect(yDocToMarkdown(copy)).toBe(`---\nstatus: draft\n${entry}---\n\nBody`)
+      expect(yDocToMarkdown(copy)).toBe(`---\nstatus: draft\n${entry}---\n\nBody\n`)
     } finally {
       copy?.destroy()
       doc.destroy()
@@ -201,7 +201,7 @@ describe('shared frontmatter values a patch writes', () => {
         .replace('status: draft\n', `status: draft\n${entry.replace('hostile:', 'hostile2:')}`)
       expect(frontmatterAsWritten(doc, true)).toBe(settled)
       copy = replica(doc)
-      expect(yDocToMarkdown(copy)).toBe(`${settled}Body`)
+      expect(yDocToMarkdown(copy)).toBe(`${settled}Body\n`)
     } finally {
       copy?.destroy()
       doc.destroy()
@@ -320,11 +320,12 @@ describe('live property renames', () => {
       expect(updates).toHaveLength(1)
       expect(doc.getMap('frontmatter').has(from)).toBe(false)
       expect(doc.getMap('frontmatter').get(to)).toEqual(value)
-      expect(yDocToMarkdown(doc)).toBe(expected)
+      const saved = `${expected}${expected.includes('\r\n') ? '\r\n' : '\n'}`
+      expect(yDocToMarkdown(doc)).toBe(saved)
       expect(frontmatterAsWritten(doc, true)).toBe(expected.slice(0, -'Body'.length))
       const reopened = markdownToYDoc(expected)
       try {
-        expect(yDocToMarkdown(reopened)).toBe(expected)
+        expect(yDocToMarkdown(reopened)).toBe(saved)
       } finally { reopened.destroy() }
     } finally { doc.destroy() }
   })
@@ -341,9 +342,9 @@ describe('live property renames', () => {
     const doc = markdownToYDoc(budget)
     try {
       rename(doc, 'budget', 'cost', 200)
-      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 200\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 200\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n')
       setFrontmatterValue(doc, 'cost', 300)
-      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 300\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+      expect(yDocToMarkdown(doc)).toBe('---\n# Monthly\ncost: 300\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n')
     } finally { doc.destroy() }
   })
 
@@ -373,12 +374,12 @@ describe('live property renames', () => {
     try {
       patchFrontmatter(renamedOnto, new Map(), ['wifi'])
       rename(renamedOnto, 'budget', 'wifi')
-      expect(yDocToMarkdown(renamedOnto)).toBe('---\n# Monthly\nwifi: 100 # euros\n---\n\nBody')
+      expect(yDocToMarkdown(renamedOnto)).toBe('---\n# Monthly\nwifi: 100 # euros\n---\n\nBody\n')
 
       rename(recreated, 'budget', 'cost')
       patchFrontmatter(recreated, new Map(), ['cost'])
       setFrontmatterValue(recreated, 'cost', 100)
-      expect(yDocToMarkdown(recreated)).toBe('---\ncost: 100\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody')
+      expect(yDocToMarkdown(recreated)).toBe('---\ncost: 100\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n')
     } finally { renamedOnto.destroy(); recreated.destroy() }
   })
 
@@ -423,7 +424,7 @@ describe('live property renames', () => {
       setFrontmatterValue(b, 'owner', 'sam')
       Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
       Y.applyUpdate(b, Y.encodeStateAsUpdate(a))
-      const expected = '---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody'
+      const expected = '---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody\n'
       expect(yDocToMarkdown(a)).toBe(expected)
       expect(yDocToMarkdown(b)).toBe(expected)
     } finally { base.destroy(); a.destroy(); b.destroy() }
@@ -445,8 +446,8 @@ describe('live property renames', () => {
       expect(yDocToMarkdown(b)).toBe(settled)
       expect(loadMarkdownFrontmatter(settled)!.meta).toEqual({ cost: 100, network: 'hunter2' })
       expect([
-        '---\n# Monthly\ncost: 100 # euros\nnetwork: hunter2\n---\n\nBody',
-        '---\n# Wi-Fi password\nnetwork: hunter2\ncost: 100\n---\n\nBody',
+        '---\n# Monthly\ncost: 100 # euros\nnetwork: hunter2\n---\n\nBody\n',
+        '---\n# Wi-Fi password\nnetwork: hunter2\ncost: 100\n---\n\nBody\n',
       ]).toContain(settled)
     } finally { base.destroy(); a.destroy(); b.destroy() }
   })
@@ -500,12 +501,12 @@ describe('frontmatterAsWritten', () => {
       setFrontmatterValue(doc, 'status', 'ready')
       const first = frontmatterAsWritten(doc, true)
       expect(first).toBe('---\n# keep me\nstatus: ready\nowner: ice # owner note\n---\n\n')
-      expect(yDocToMarkdown(doc)).toBe(`${first}Body`)
+      expect(yDocToMarkdown(doc)).toBe(`${first}Body\n`)
 
       setFrontmatterValue(doc, 'owner', 'sam')
       const second = frontmatterAsWritten(doc, true)
       expect(second).toBe('---\n# keep me\nstatus: ready\nowner: sam\n---\n\n')
-      expect(yDocToMarkdown(doc)).toBe(`${second}Body`)
+      expect(yDocToMarkdown(doc)).toBe(`${second}Body\n`)
     } finally { doc.destroy() }
   })
 
@@ -528,7 +529,7 @@ describe('frontmatterAsWritten', () => {
       const ready = SHARED_BLOCK.replace('status: draft', 'status: ready')
       expect(frontmatterAsWritten(doc, false)).toBe(ready)
       expect(frontmatterAsWritten(doc, true)).toBe(ready)
-      expect(yDocToMarkdown(doc)).toBe(`${ready}Body`)
+      expect(yDocToMarkdown(doc)).toBe(`${ready}Body\n`)
     } finally { doc.destroy() }
   })
 
@@ -543,7 +544,7 @@ describe('frontmatterAsWritten', () => {
       expect(frontmatterAsWritten(doc, false)).toBe(KEPT_SHARED_BLOCK)
       const settled = KEPT_SHARED_BLOCK.replace('status: draft', 'status: ready')
       expect(frontmatterAsWritten(doc, true)).toBe(settled)
-      expect(yDocToMarkdown(doc)).toBe(`${settled}Body`)
+      expect(yDocToMarkdown(doc)).toBe(`${settled}Body\n`)
     } finally { doc.destroy() }
   })
 

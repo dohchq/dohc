@@ -528,7 +528,7 @@ describe("desktop editor schema parity", () => {
     const sourceBody = parseFrontmatter(item.source).body;
     const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
     const canonicalBody = parseFrontmatter(expected).body
-      .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
+      .replaceAll('\r\n', '\n').replace(/^\n+/u, '').replace(/\n$/u, '');
     const projected = 'projected' in item && item.projected
       ? markdownToYDoc(item.source, { reading: "projection" })
       : undefined;

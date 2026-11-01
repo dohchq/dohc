@@ -307,7 +307,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
       ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
       : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
     expect(isLossyMarkdown(versionB)).toBe(lossy);
-    expect(versionB).not.toBe(`${yDocToMarkdown(markdownToYDoc(versionB))}\n`);
+    expect(versionB).not.toBe(yDocToMarkdown(markdownToYDoc(versionB)));
     expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const hashA = createHash("sha256").update(versionA).digest("hex");
     const hashB = createHash("sha256").update(versionB).digest("hex");
