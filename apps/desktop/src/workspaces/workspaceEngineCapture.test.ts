@@ -4664,7 +4664,7 @@ describe("createDefaultDiskWriter symlink containment", () => {
 describe("createDefaultDiskWriter replaces a file whole", () => {
   const actualFs = () => vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   const restoreFs = () => {
-    for (const mocked of [open, rename, writeFile]) vi.mocked(mocked).mockRestore();
+    for (const mocked of [open, rename, rm, writeFile]) vi.mocked(mocked).mockRestore();
   };
 
   it("keeps the old bytes and leaves no temp file when a write fails partway", async () => {
@@ -4756,6 +4756,30 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     }
     expect((await stat(join(root, "secret.md"))).mode & 0o777).toBe(0o600);
     expect(await readFile(join(root, "secret.md"), "utf8")).toBe("new\n");
+  });
+
+  it.each([
+    ["deleted", (writer: EngineDiskWriter, path: string) => writer.deletePath(path), [] as string[]],
+    ["written again", (writer: EngineDiskWriter, path: string) => writer.writeTextFile(path, "TOKEN=rotated\n"), [".env"]],
+  ])("leaves no copy of a secret a crashed write left behind once the path is %s", async (_, next, left) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, ".env", "TOKEN=old\n");
+    const writer = createDefaultDiskWriter(root);
+    // The app stops after the temp is flushed and before the rename, so
+    // nothing renames or removes the temp.
+    vi.mocked(rename).mockRejectedValueOnce(new Error("the app stopped"));
+    vi.mocked(rm).mockResolvedValueOnce(undefined);
+    try {
+      await expect(writer.writeTextFile(join(root, ".env"), "TOKEN=secret\n")).rejects.toThrow("the app stopped");
+    } finally {
+      restoreFs();
+    }
+    const crashed = (await readdir(root)).filter((name) => name.startsWith(".dohc-write-"));
+    expect(crashed).toHaveLength(1);
+    expect(await readFile(join(root, crashed[0]!), "utf8")).toBe("TOKEN=secret\n");
+
+    await next(writer, join(root, ".env"));
+    expect(await readdir(root)).toEqual(left);
   });
 });
 
