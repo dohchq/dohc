@@ -32,13 +32,13 @@ const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, d
  * `child` is the raw output of the release command. Every command the wrapper runs is recorded in `calls`.
  */
 function driveHost({ settings = baseSettings(), release = {}, imageDetails = {}, mounted = true, otherMounts = [], devices = ["/dev/sda"],
-  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64" } = {}) {
+  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64", uid = 0 } = {}) {
   const calls = [], written = [];
   const state = { mounted };
   const releaseJson = { version: 1, revision, dirty: false, image, imageId, platform: "linux/amd64", files, archive: "services.tar", ...release };
   const folderStats = name => folders[name] === undefined ? stat("dir", { uid: 1000, gid: 1000 }) : folders[name];
   const host = {
-    platform, arch, uid: 0,
+    platform, arch, uid,
     lstat(path) {
       if (Object.hasOwn(stats, path)) return stats[path];
       if (path === envFile) return stat("file");
@@ -154,7 +154,7 @@ test("start runs a first start only when asked, and every other start as a norma
 });
 
 test("a first start refuses a database that already holds accounts, or one it cannot check, before the release runs", async () => {
-  for (const [accounts, message] of [["present", /already holds dohc accounts.*Recover from total loss/], [null, /Could not check database dohc on db\.provider\.invalid/]]) {
+  for (const [accounts, message] of [["present", /already holds dohc accounts.*run start without --first-start.*Recover from total loss/], [null, /Could not check database dohc on db\.provider\.invalid/]]) {
     const { host, calls } = driveHost({ accounts });
     await assert.rejects(runDrive(options("start", { firstStart: true }), host), message, String(accounts));
     assert.equal(releaseCall(calls), undefined);
@@ -218,9 +218,10 @@ test("a missing, moved or exposed deployment folder refuses without being create
   assert.equal(releaseCall(clone.calls), undefined);
 });
 
-test("the release bundle, its image and the host architecture must match", async () => {
+test("the commands run as root, and the release bundle, its image and the host architecture must match", async () => {
   const refusals = [
     [{ platform: "darwin" }, /runs Linux/],
+    [{ uid: 1000 }, /as root, with sudo/],
     [{ release: { dirty: true } }, /uncommitted source/],
     [{ release: { revision: "main" } }, /holds no release bundle/],
     [{ release: { platform: "linux/arm64" } }, /release is for linux\/arm64, but this host is linux\/amd64/],
