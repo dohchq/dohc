@@ -4530,6 +4530,116 @@ async fn rollback_rejects_sync_record_only_moment() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_waits_for_sync_to_send_a_save_with_a_settlement_proof() {
+    use dohc_engine_domain::{NoFaults, VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, StorageError};
+
+    const WS: &str = "ws-rpcd-unsent-proof";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    std::fs::write(scratch.path().join("signed.md"), "signed").expect("disk");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    {
+        let mut store = EngineStore::open(&db_path, 1).expect("store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main");
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, WS, "origin", "epoch", "stream", 1, &NoFaults,
+        )
+        .expect("identity");
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "signed-object".to_owned(),
+                    path: "signed.md".to_owned(),
+                    text: "signed".to_owned(),
+                    moment_id: "signed-save".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_sync::journal_moment_append_in_tx(tx, WS, "signed-save")
+                    .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE replication_log SET payload_json=json_set(payload_json,'$.settlementReference',json('{}')) \
+                     WHERE workspace_id=?1 AND op_kind='moment.append'",
+                    [WS],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES (?1,'origin',-1)",
+                    [WS],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("journal unsent save");
+    }
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WS }),
+        ),
+    )
+    .await
+    .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "versionedText.rollback",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "signed.md",
+                    "mutationMomentId": "signed-save",
+                    "origin": "restore",
+                }),
+            ),
+        )
+        .await
+        .expect_err("rollback before the relay answers");
+    assert_eq!(error.code, ErrorCode::Overloaded);
+    assert_eq!(
+        error.message,
+        "Sync has not finished sending this change. Retry the rollback after sync completes."
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            3,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": "signed.md" })
+        )
+        .await["text"],
+        "signed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn leased_doc_rejects_write_rename_delete_and_rollback() {
     let (_scratch, transport, handle) = fixture("leases").await;
     let seed = write(&transport, &handle, 2, "leased.md", "held", "lease-seed").await;

@@ -2275,6 +2275,11 @@ fn versioned_text_rollback_on_store(
         input,
         faults,
         |tx, moment| {
+            dohc_engine_sync::rollback_waits_for_publication_in_tx(
+                tx,
+                &input.workspace_id,
+                &moment.moment_id,
+            )?;
             let key = DocKey {
                 workspace_id: input.workspace_id.clone(),
                 version_id: moment.version_id.clone(),
