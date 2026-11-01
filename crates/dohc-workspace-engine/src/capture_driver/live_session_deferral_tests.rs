@@ -276,15 +276,27 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
             .acquire(&elsewhere)
             .expect("another workspace's session"),
     );
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     assert!(!files.handle().stats().await.expect("stats").dirty);
 
     // The session closes without an edit. Nothing on disk changes, and the
     // release alone brings the file back to capture.
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
         .await
         .expect("reconcile after release");
@@ -959,6 +971,7 @@ async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
 
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -1032,6 +1045,7 @@ async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
 
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -1040,6 +1054,136 @@ async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
     .await;
     assert!(harness.capture(&files.handle()).await);
     assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+
+    files.close().await;
+    harness.close();
+}
+
+/// A document session's settle records `path` before capture sees its file.
+async fn settle_new_document(harness: &Harness, path: &str) -> DocKey {
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: object_id.clone(),
+                path: path.to_owned(),
+                text: SEED.to_owned(),
+                moment_id: "moment-settled".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the session's settle writes the head");
+    harness.key(&object_id)
+}
+
+// dohc#2360. A session settles a new document, and its file is deleted before
+// any scan sees it. Capture has no entry for the path, so no scan plans a
+// retire. Once the session releases, the next scan retires the record without
+// a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_file_deleted_before_any_scan_is_retired_once_released() {
+    let harness = Harness::new();
+    let key = settle_new_document(&harness, NEW_FILE).await;
+    let lease = harness
+        .leases
+        .acquire(&key)
+        .expect("the editor still holds the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).expect("artifact");
+    std::fs::remove_file(harness.root.join(NEW_FILE)).expect("deleted before any scan");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 1, "no scan saw the file");
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "the release asks for a scan"
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        0,
+        "retired without a restart"
+    );
+
+    files.close().await;
+    harness.close();
+}
+
+// dohc#2360. A settled document too large for capture to track keeps its
+// record, and capture forgets the path. Once the session releases and the file
+// is deleted, the record retires like any other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_cap_settled_file_is_retired_once_deleted() {
+    let harness = Harness::new();
+    let key = settle_new_document(&harness, NEW_FILE).await;
+    let over_cap = vec![b'x'; (dohc_engine_files::MAX_CAPTURE_TEXT_BYTES + 1) as usize];
+    std::fs::write(harness.root.join(NEW_FILE), over_cap).expect("over-cap artifact");
+    let lease = harness
+        .leases
+        .acquire(&key)
+        .expect("the editor still holds the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "capture spares the settled record"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "the file is still there"
+    );
+
+    std::fs::remove_file(harness.root.join(NEW_FILE)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        0,
+        "retired once its file is gone"
+    );
 
     files.close().await;
     harness.close();
@@ -2435,6 +2579,7 @@ async fn a_lease_release_reoffers_deferred_outside_writes() {
     let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -2596,6 +2741,7 @@ async fn recorded_outside_write_after_release(restart: bool) {
         files.close().await;
     } else {
         offer_unrecorded_after_release(
+            &harness.actor,
             &harness.leases,
             WORKSPACE_ID,
             &mut releases_seen,
@@ -2705,8 +2851,14 @@ async fn respelled_file_waits_for_its_lease(quarantine: bool) {
     assert_eq!(head_count(&db, "Notes.md"), 0, "the new spelling waits");
 
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     assert!(files.handle().stats().await.expect("offered stats").dirty);
     pass().await;
     assert_eq!(head_count(&db, "notes.md"), 0);
@@ -2891,8 +3043,14 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
     files.handle().request_rescan();
     pass().await;
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     files.handle().request_rescan();
     pass().await;
     let deletes: Vec<String> = rusqlite::Connection::open(&db)

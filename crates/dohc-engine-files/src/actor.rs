@@ -108,6 +108,9 @@ enum Command {
         receipt: Box<(ReconcilePlan, CaptureApplyResult)>,
         reply: oneshot::Sender<Result<(), FilesError>>,
     },
+    OfferRetireCandidates {
+        paths: Vec<String>,
+    },
     Close,
 }
 
@@ -364,6 +367,16 @@ impl FilesHandle {
         self.pending_overflow.store(true, Ordering::Release);
     }
 
+    /// Offer paths whose record may exist without a manifest entry. See
+    /// [`ReconcileController::offer_retire_candidates`]. Commands run in
+    /// order, so a reconcile sent after this sees the offer.
+    pub async fn offer_retire_candidates(&self, paths: Vec<String>) -> Result<(), FilesError> {
+        self.tx
+            .send(Command::OfferRetireCandidates { paths })
+            .await
+            .map_err(|_| FilesError::ActorUnavailable)
+    }
+
     /// Snapshot reconcile + pool state.
     pub async fn stats(&self) -> Result<FilesStats, FilesError> {
         let (reply, reply_rx) = oneshot::channel();
@@ -526,6 +539,9 @@ fn worker_main(
             Command::AcknowledgeCapture { receipt, reply } => {
                 let (plan, result) = &*receipt;
                 let _ = reply.send(controller.acknowledge_capture(plan, result));
+            }
+            Command::OfferRetireCandidates { paths } => {
+                controller.offer_retire_candidates(paths);
             }
             Command::Close => {
                 state.store(LifecycleState::Draining.as_u8(), Ordering::Release);
