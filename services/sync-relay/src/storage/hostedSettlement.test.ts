@@ -7,8 +7,17 @@ import { nativeSettlementId, prepareHostedSettlements, parseSettlementAuthors, s
 import type { StorageContext } from "./context.js";
 import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
 const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
-afterEach(() => logged.mockClear());
-afterEach(cleanupLiveDeliveryFixtures);
+// Vitest leaves a timed-out attempt running into its retry. Teardown stops the attempt's preparations before the
+// retry counts refusals.
+let attempt = new AbortController();
+const preparing = new Set<Promise<void>>();
+afterEach(async () => {
+  attempt.abort();
+  await Promise.allSettled(preparing);
+  attempt = new AbortController();
+  logged.mockClear();
+  cleanupLiveDeliveryFixtures();
+});
 /** Each logged refusal as "<stage> <check>", in order. */
 const refusedChecks = () => logged.mock.calls.flatMap(([line]) =>
   /^\[sync-relay\] live settlement refused at (\w+): workspace [^,]+, settlement [^,]+, check ([a-z-]+)\.$/u
@@ -50,11 +59,7 @@ it("records deterministic settlement refusal and advances later origin operation
     ];
     const start = f.storage.maxOriginSeq("workspace", "proof") + 1;
     ops.forEach((op, index) => (op.originSeq = start + index));
-    await prepareHostedSettlements(f.storage as StorageContext, {
-      workspaceId: "workspace",
-      originId: "proof",
-      ops,
-    });
+    await prepare(f, ops);
     const result = f.storage.appendLogBatch({
       workspaceId: "workspace",
       originId: "proof",
@@ -273,11 +278,14 @@ async function prepare(
   ops: import("./types.js").SyncRelayLogInput[],
   budget?: RestoreHistoryBudget,
 ) {
-  await prepareHostedSettlements(
+  const preparation = prepareHostedSettlements(
     f.storage as StorageContext,
     { workspaceId: "workspace", originId: "proof", ops },
     budget,
+    attempt.signal,
   );
+  preparing.add(preparation);
+  try { await preparation; } finally { preparing.delete(preparation); }
 }
 function append(
   f: ReturnType<typeof registered>,

@@ -89,6 +89,8 @@ it("waits for either of two busy workers before reading a cut and acknowledges t
   const work = {document: f.document, currentPath: f.binding.currentPath, checkpoint: cut.cut.checkpoint.bytes, suffix: [], candidate: Uint8Array.of(0, 0)};
   const jobs = [Promise.resolve(validate(work)), Promise.resolve(validate(work))];
   f.read.mockClear();
+  // The workers really start, so a slow start must not end the admission deadline. This test holds that clock.
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
   const submitted = f.capture.submit(f.input, new AbortController().signal);
   cleanup.push(async () => {held.splice(0).forEach(release => release()); await Promise.allSettled([submitted, ...jobs]);});
   await entered.promise;

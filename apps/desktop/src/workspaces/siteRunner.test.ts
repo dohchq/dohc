@@ -1547,6 +1547,8 @@ describe("buildSite", () => {
     // the abort ended the build, not the build timeout, with 3x margin to
     // the measured loaded cancel on one side and to the timeout on the
     // other.
+    let spawned!: () => void;
+    const running = new Promise<void>((resolve) => (spawned = resolve));
     const building = buildSite({
       workspaceRoot: root,
       siteRoot: "site",
@@ -1554,8 +1556,15 @@ describe("buildSite", () => {
       args: ["-e", "setInterval(() => {}, 1000)"],
       timeoutMs: 30_000,
       signal: controller.signal,
+      // The build reads descendants right after spawn, so the abort lands on a running command.
+      descendantsReader: async () => {
+        spawned();
+        return [];
+      },
     });
-    setTimeout(() => controller.abort(), 50);
+    // A build that fails before spawn rejects here instead of leaving the test waiting.
+    await Promise.race([running, building]);
+    controller.abort();
 
     const result = await building;
     expect(result.ok).toBe(false);
