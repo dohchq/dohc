@@ -177,6 +177,14 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it("preserves an empty-named property when another local property is edited", () => {
+    render(<ControlledPropertiesPanel initialBody={'---\n"": draft\nstatus: pending\n---\n\nBody\n'} />);
+
+    fireEvent.change(screen.getByLabelText("Property status value"), { target: { value: "ready" } });
+
+    expect(parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta).toEqual({ "": "draft", status: "ready" });
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
