@@ -154,11 +154,8 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await page.getByTestId("app-view-review").click();
     const review = page.getByTestId("app-publication-dialog");
     await shown(review);
-    await review.getByRole("button", { name: "Prepare for this device", exact: true }).click();
-    await shown(review.getByTestId("app-publication-approve"));
+    await expect(review.getByTestId("app-publication-approve")).toBeEnabled();
     await review.getByTestId("app-publication-approve").click();
-    await shown(review.getByRole("button", { name: /^Open in browser / }));
-    await review.getByRole("button", { name: "Close publication" }).click();
     await hidden(review);
     const appTab = page.getByTestId(editorTabTestId(siteTabPath(appRoot)));
     await appTab.getByRole("button", { name: /^Close / }).click();

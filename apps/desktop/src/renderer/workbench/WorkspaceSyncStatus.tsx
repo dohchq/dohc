@@ -63,7 +63,7 @@ function liveDeliveryLabel(
 }
 
 // The sync state names the server as the problem.
-function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
   return syncStatus?.state === "cloud-disconnected" ||
     (syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable");
 }
