@@ -183,7 +183,8 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
-      await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Review and open app", exact: true })).toBeVisible();
+      // The app uses no Collection, so its tab offers a share link instead of opening here.
+      await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Publish on a link", exact: true })).toBeVisible();
       // The moved app's old tab stays open, mounted and hidden, so only the visible tab's button counts.
       const review = page.getByTestId("app-view-review").filter({ visible: true });
       await review.click();
