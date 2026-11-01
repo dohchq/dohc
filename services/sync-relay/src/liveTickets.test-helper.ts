@@ -30,6 +30,39 @@ export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, 
   return activationId;
 }
 /**
+ * Stored records of the owner's restore of `binding` that ended its last Edit
+ * grant at 30, after `retainServiceActivation`. The restore fenced generation
+ * 8 and resumed, and the activation it continued retired at 40. Its native
+ * evidence is covered by the restore suites. Returns the restore's row, for a
+ * test to change.
+ */
+export function restoredWithoutEditGrant(storage: SyncRelayStorage, raw: InstanceType<typeof DatabaseSync>, namespace: string) {
+  const activationId = `ordinary-activation-${"a".repeat(64)}`;
+  if (!storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok) throw new Error("Missing Edit grant.");
+  const document = {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+  const intent = {deliveryKind: "owner", operationId: "restore", ownerUserId: "owner-1", document, shareId: scope.shareId, grantId: scope.grantId,
+    expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 7, restorePointCursor: 0, restorePointReceiptDigest: binding.lineageClaimId};
+  const basis = {binding, ownerBinding: binding, baselineSequence: 1, namespace, ownerOrigin: JSON.stringify({adoptionId: activationId})};
+  raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
+      lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,
+      invalidated_at_ms,fenced_at_ms,accounted_bytes) VALUES ('restore',?,NULL,?,'main',?,?,?,?,'{}','{}','{}','resumed',7,8,0,5,30,30,1)`)
+    .run(namespace, binding.workspaceId, binding.objectId, binding.lineageClaimId, JSON.stringify(intent), JSON.stringify(basis));
+  raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=8 WHERE workspace_id=? AND object_id=?").run(binding.workspaceId, binding.objectId);
+  raw.prepare(`UPDATE sync_relay_service_activations SET retire_restore_generation=8,retired_at_ms=40,retired_boundary_json='{}',state_bytes=NULL
+    WHERE activation_id=? AND retire_requested_at_ms=30`).run(activationId);
+  return {activationId, update: (sql: string) => raw.prepare(`UPDATE sync_relay_live_restore_operations SET ${sql} WHERE operation_id='restore'`).run()};
+}
+/** The owner's next activation after `restoredWithoutEditGrant`, at the restored generation. */
+export function retainSuccessorActivation(raw: InstanceType<typeof DatabaseSync>, completed: boolean): string {
+  const activationId = `ordinary-activation-${"b".repeat(64)}`;
+  raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      predecessor_activation_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes)
+    SELECT relay_database_namespace,?,workspace_id,main_version_id,object_id,lineage_claim_id,activation_id,source_json,?,state_digest,x'0000',owner_user_id,share_id,?,1
+    FROM sync_relay_service_activations WHERE activation_id=?`)
+    .run(activationId, JSON.stringify({...binding, restoreFenceGeneration: 8}), completed ? "{}" : null, `ordinary-activation-${"a".repeat(64)}`);
+  return activationId;
+}
+/**
  * The owner's Stop as a running service host fences it once its engine
  * prepared the document's activation, for tests of what follows Stop. The
  * host's own preparation is tested in `serviceLiveHost.test.ts`.
