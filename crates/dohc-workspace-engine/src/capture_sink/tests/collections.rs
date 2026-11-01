@@ -859,7 +859,7 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     seed_captured_richdoc_lineage_from_markdown(
         &sink,
         "tasks/oversized.md",
-        format!("---\npadding: {canonical_padding}\n---\n\n"),
+        format!("---\npadding: {canonical_padding}\n---\n"),
     );
     let moments_before = moment_count(&db, "tasks/oversized.md");
     let updates_before = ydoc_update_count_for_object(&db, "tasks/oversized.md");
@@ -2294,7 +2294,8 @@ fn a_frontmatter_only_capture_keeps_a_nested_list_in_history_and_the_index() {
     let supervisor = WorkspaceSupervisor::new();
     let (db, mut sink) = sink_for(&scratch, &supervisor);
     let path = "tasks/nested.md";
-    let original = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n- parent\n  - child\n");
+    // A file without its final newline, so capture first records the retained projection.
+    let original = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n- parent\n  - child");
     write_file(
         scratch.path(),
         "tasks/collection.yaml",

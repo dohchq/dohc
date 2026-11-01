@@ -471,8 +471,8 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
     const OBJECT: &str = "capture-actor-record-object";
     const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
     const AGENT: &str = "agent-capture-replication";
-    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
-    let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha");
+    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha\n");
+    let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha\n");
     let source_scratch = ScratchDir::new().expect("source scratch");
     let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
