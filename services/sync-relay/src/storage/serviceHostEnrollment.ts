@@ -609,18 +609,18 @@ export const LATEST_RESTORE = {
   // Each fence is one past the one before, so the highest is the latest fenced restore.
   fenced: `${RESTORE_ROW} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND new_fence IS NOT NULL
     ORDER BY new_fence DESC LIMIT 1`,
-  // A restore that ended before its fence began at the generation an earlier fence left.
-  endedUnfencedSince: `SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=?
-    AND new_fence IS NULL AND old_fence>=? LIMIT 1`,
 } as const;
-/** The document's latest restore in the attached history, or undefined when it has none or a later restore ended before its fence. */
+/**
+ * The document's unfinished restore, or else its latest fenced restore in the
+ * attached history. A later restore that ended before its fence is not read:
+ * its revocation ended the run, or kept it and ending the restore ended it,
+ * or left the run as it found it.
+ */
 function latestRestore(storage: StorageContext, workspaceId: string, objectId: string) {
   const unfinished = storage.db.prepare(LATEST_RESTORE.unfinished).get(workspaceId, objectId);
   if (unfinished) return unfinished;
   const namespace = attachedLiveJournalHistoryNamespace(storage);
-  if (namespace === undefined) return undefined;
-  const fenced = storage.db.prepare(LATEST_RESTORE.fenced).get(namespace, workspaceId, objectId);
-  return fenced && !storage.db.prepare(LATEST_RESTORE.endedUnfencedSince).get(namespace, workspaceId, objectId, fenced.new_fence) ? fenced : undefined;
+  return namespace === undefined ? undefined : storage.db.prepare(LATEST_RESTORE.fenced).get(namespace, workspaceId, objectId);
 }
 /** Whether the host keeps a document the owner's restore kept live, from its revocation on. It admits no edit before the restore resumed. */
 export const serviceHostOwnerRetains = (storage: StorageContext, enrollment: CoveredEnrollment) => keptByRestore(storage, enrollment, false);

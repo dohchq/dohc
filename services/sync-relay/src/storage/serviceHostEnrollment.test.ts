@@ -649,9 +649,9 @@ async function kept() {
   const asOwner = {userId: "owner-1", shareId: scope.shareId};
   const covered = (storage: SyncRelayStorage = f.storage) =>
     storage.serviceHostEnrollmentCovered(storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!);
-  // The host retiring the kept activation once it released the document.
-  const retireKept = () => f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?")
-    .run(restore.activationId);
+  // The host retiring the kept activation once it released the document, no earlier than the retirement was requested.
+  const retireKept = () => f.raw.prepare(`UPDATE sync_relay_service_activations SET retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}',state_bytes=NULL
+    WHERE activation_id=?`).run(restore.activationId);
   // The same answers from the same store after a restart.
   const afterRestart = () => {
     const reopened = withHistory(openSyncRelayStorage(f.path, f.config));
@@ -667,6 +667,17 @@ function revokeKeeping(f: Awaited<ReturnType<typeof activated>>, activationId: s
     {shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30, expectedDependentGrantIds: []},
     {workspaceId: binding.workspaceId, objectId: binding.objectId, activationId, kept: () => { keeps++; }}));
   return {ok: revoked.ok, keeps};
+}
+// The owner's later restore of the kept note, unfenced at fence 8, as `beginStopRestore` leaves it when its revocation keeps the same run again.
+function laterRestoreKeepingRun(f: Kept) {
+  const atFence = {...binding, restoreFenceGeneration: 8};
+  const basis = {binding: atFence, ownerBinding: atFence, baselineDigest: binding.lineageClaimId, baselineByteLength: 1, projectedDigest: binding.lineageClaimId,
+    projectedLength: 0, baselineSequence: 1, registeredAtMs: 1, namespace: key.namespace, hostMode: "service", hostId: "host-1", ownerOrigin: null};
+  f.raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,
+    object_id,lineage_claim_id,intent_json,basis_json,phase,old_fence,revoked_generation,invalidated_at_ms,accounted_bytes)
+    SELECT 'restore-2',relay_database_namespace,'restore',workspace_id,main_version_id,object_id,lineage_claim_id,
+      json_set(intent_json,'$.operationId','restore-2','$.expectedFence',8),?,'authority-invalidated',8,6,40,1
+    FROM sync_relay_live_restore_operations WHERE operation_id='restore'`).run(JSON.stringify(basis));
 }
 
 // Proves: the owner's restore that kept the note's live session keeps it live
@@ -706,11 +717,10 @@ it.each([
   ["a declined restore", (f: Kept) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
     terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL,declined_at_ms=35`)],
   ["a restore that kept nothing", (f: Kept) => f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')")],
-  ["a later restore the owner declined before its fence", (f: Kept) => f.raw.exec(`INSERT INTO sync_relay_live_restore_operations(operation_id,
-    relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,old_fence,
-    revoked_generation,invalidated_at_ms,declined_at_ms,accounted_bytes) SELECT 'restore-2',relay_database_namespace,'restore',workspace_id,main_version_id,
-    object_id,lineage_claim_id,json_remove(intent_json,'$.keptRun'),basis_json,'declined',8,6,40,41,1 FROM sync_relay_live_restore_operations
-    WHERE operation_id='restore'`)],
+  ["a later restore the owner declined before its fence", (f: Kept) => {
+    laterRestoreKeepingRun(f);
+    expect(f.storage.declineStopRestore({operationId: "restore-2", workspaceId: scope.workspaceId, ownerUserId: "owner-1"}, 41).phase).toBe("declined");
+  }],
   ["a restore that kept an earlier run", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.runToken',9)")],
   ["a restore that kept another share", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.shareId','another-share')")],
   ["a later restore generation", (f: Kept) => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9")],
@@ -729,9 +739,11 @@ it.each([
 });
 
 // Proves: finding a note's latest restore reads only that note's restores,
-// each step through an index of the restore table and in its order.
+// each step through an index of the restore table and in its order. No
+// statement reads the restores that ended before their fence.
 it("finds a note's latest restore through an index", async () => {
   const f = await fixture();
+  expect(Object.keys(LATEST_RESTORE)).toEqual(["unfinished", "fenced"]);
   for (const sql of Object.values(LATEST_RESTORE)) {
     const parameters = Array.from(sql.matchAll(/\?/g), () => "x");
     const plan = f.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters).map(row => String(row.detail));
