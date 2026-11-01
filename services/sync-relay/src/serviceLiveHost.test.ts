@@ -2450,8 +2450,9 @@ it.each([false, true])("retires a never-adopted activation only once its documen
 // Proves: a daemon that starts after its stopped document moved away from its
 // enrolled path does not settle it there, but keeps it, with its workspace
 // attached, while its owner has no recovery copy of edits the server kept.
-// Once a copy exists it leaves, unsettled, and its rows go.
-it("keeps a document that moved while no daemon ran until its owner copies the edits the server kept", async () => {
+// Nothing retires before the copy. Once a copy exists, its retirement
+// completes without an ordinary unload, and its rows go.
+it("keeps a document that moved while no daemon ran until its owner copies the edits the server kept, then retires it", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
   await o.host.close();
@@ -2465,19 +2466,24 @@ it("keeps a document that moved while no daemon ran until its owner copies the e
   await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);
+  expect(o.calls(sent)).not.toContain("liveApplication.reconcileActivation");
+  o.engine.unproven = ["refused"];
   expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
   expect(restarted.retains(o.sibling)).toBe(false);
   expect(k.row()).toBeNull();
-  expect(departed(o.calls(sent))).toEqual([]);
+  expect(retiredRow(o).retired).toBe(true);
+  expect(o.calls(sent)).toContain("liveApplication.releaseActivation");
+  expect(o.calls(sent)).not.toContain("liveApplication.unloadDocument");
 });
 
 // Proves: retention for a recovery copy follows the moved document, not its
 // old path. With another document hosted at that path, and after that one
 // leaves too, the moved document's queue stays readable, and its workspace
-// attached, until its owner confirms a copy. The fake engine captures only the
-// fixture document, so the replacement's capture is refused: it is attempted
-// at the old path, and never prepares or releases an owner activation.
+// attached, until its owner confirms a copy. Its retirement then completes.
+// The fake engine captures only the fixture document, so the replacement's
+// capture is refused: it is attempted at the old path, and never prepares or
+// releases an owner activation.
 it("keeps a moved document's queue readable while a replacement holds its old path, and after the replacement leaves", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2501,9 +2507,11 @@ it("keeps a moved document's queue readable while a replacement holds its old pa
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);
   await readable();
+  o.engine.unproven = ["refused"];
   expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
   expect(k.row()).toBeNull();
+  expect(retiredRow(o).retired).toBe(true);
   expect(o.ownerCalls().map(([method]) => method)).not.toContain("liveApplication.releaseOwnerActivation");
   const reported = errors.mock.calls.map(call => String((call as unknown[])[1]));
   expect(reported.filter(message => message.includes("Unexpected engine request") || message.includes("Service activation is retiring."))).toEqual([]);
@@ -3174,25 +3182,6 @@ it("brings live editing back at a moved document's old path once its retirement 
   expect(o.raw.prepare("SELECT activation_id,predecessor_activation_id,completion_json IS NOT NULL AS completed FROM sync_relay_service_activations ORDER BY rowid").all())
     .toEqual([{activation_id: ACTIVATION, predecessor_activation_id: null, completed: 1}, {activation_id: SUCCESSOR, predecessor_activation_id: ACTIVATION, completed: 1}]);
   expect(o.acceptEdit("back", host.coordinate)).toMatchObject({journalCursor: tip.journalCursor + 1});
-});
-
-// Proves: a retirement finds its restore by the activation the restore
-// continues, not by when it began. A restore that began before the owner's
-// Pause opened the retirement counts. One whose saved owner origin names an
-// earlier activation of the same lineage does not, so a successor activation
-// with no restore of its own does not keep a moved route.
-it("finds a retirement's restore by the activation it continues", async () => {
-  const o = await enrolledServiceHost();
-  anotherEditGrant(o);
-  o.beginRestore();
-  o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
-  const open = o.f.storage.serviceActivationRetirement(o.document)!;
-  expect(open).toMatchObject({activationId: ACTIVATION, requestedAtMs: 60});
-  expect(o.f.storage.serviceRetirementHadRestore(open)).toBe(true);
-  const basis: {ownerOrigin: string} = JSON.parse(String(o.raw.prepare("SELECT basis_json FROM sync_relay_live_restore_operations").get()!.basis_json));
-  basis.ownerOrigin = JSON.stringify({...JSON.parse(basis.ownerOrigin), adoptionId: "earlier-activation"});
-  o.raw.prepare("UPDATE sync_relay_live_restore_operations SET basis_json=?").run(JSON.stringify(basis));
-  expect(o.f.storage.serviceRetirementHadRestore(open)).toBe(false);
 });
 
 // Proves: a moved document whose retirement waits for a recovery copy of an

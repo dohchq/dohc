@@ -2,7 +2,6 @@ import {parseLiveUpdateReceipt, type LiveUpdateReceipt} from "@dohc/live-session
 import type {StorageContext} from "./context";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {LIVE_JOURNAL_TABLE} from "./schema";
-import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 
 // The retirement of one exact service activation, recorded on its row when
 // Pause, Stop, the loss of its document's last Edit grant, or a Resume of a
@@ -81,22 +80,6 @@ export function readServiceActivationRetirementDecision(storage: StorageContext,
     .get(document.workspaceId, document.objectId, activation.activationId, activation.lineageClaimId, activation.restoreFenceGeneration);
   return value ? retirement(value) : null;
 }
-
-/**
- * Whether a restore of the retiring activation began, whatever phase it is in
- * now. The restore saved the owner origin it continues, whose adoption ID is
- * that activation, so a restore before a later Pause counts and one of an
- * earlier activation does not.
- */
-export function retirementHadRestore(storage: StorageContext, retirement: ServiceActivationRetirement): boolean {
-  return storage.db.prepare(`SELECT basis_json FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=?
-    AND lineage_claim_id=?`).all(retirement.relayDatabaseNamespace, retirement.workspaceId, retirement.objectId, retirement.lineageClaimId)
-    .some(row => restoredActivation(String(row.basis_json)) === retirement.activationId);
-}
-const restoredActivation = (basisJson: string): unknown => {
-  const origin: unknown = JSON.parse(basisJson)?.ownerOrigin;
-  return typeof origin === "string" ? JSON.parse(origin)?.adoptionId : undefined;
-};
 
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
