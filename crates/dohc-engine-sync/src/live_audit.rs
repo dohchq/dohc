@@ -7,6 +7,8 @@ use dohc_engine_storage::{EngineStore, FaultInjector, hex_sha256};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 use crate::apply::{MutationOutcome, apply_envelope_with_mutation_outcome};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx};
@@ -14,6 +16,7 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx
 mod application_record;
 mod chunks;
 pub(crate) mod enrollment;
+mod held;
 mod origin_record;
 mod restore_record;
 mod settlement_record;
@@ -23,6 +26,7 @@ pub(crate) use application_record::{
     refresh_confirmed_application_in_tx,
 };
 pub use enrollment::journal_live_event_or_defer_in_tx;
+pub(crate) use held::{WAITS_ON_HELD, hold_in_tx, holds, is_audit, refused_before, waits_on_held};
 pub use settlement_record::journal_live_settlement_in_tx;
 pub(crate) use settlement_record::{owner_settlement_cursor_in, restore_successor_settlement_in};
 
@@ -440,6 +444,11 @@ pub fn journal_live_base_in_tx(
     )?;
     tx.execute("INSERT INTO live_audit_base_publications(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,record_json,base_blob_sha256,origin_id,origin_seq) VALUES (?1,?2,?3,?4,?5,?6,?7,(SELECT origin_id FROM sync_identity WHERE workspace_id=?2),?8)",
         params![p[0],p[1],p[2],p[3],p[4],record.canonical_json()?,record.checkpoint.state_digest,sequence]).map_err(SyncError::persist)?;
+    let json = record.canonical_json()?;
+    if let Some(imported) = base_in(tx, "live_audit_bases", p)?.filter(|imported| *imported != json)
+    {
+        report_history(tx, &imported, "published", &json);
+    }
     Ok(Some(sequence))
 }
 
@@ -467,12 +476,18 @@ pub(crate) fn apply_base_envelope(
             }
             tx.execute("INSERT INTO live_audit_base_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,base_blob_sha256) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![op.workspace_id,op.origin_id,op.origin_seq,record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
+            report_history(tx, &saved_json, "conflicting", &json);
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "native event-zero audit identity contains different evidence".to_owned(),
             });
         }
         tx.execute("INSERT INTO live_audit_bases(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,record_digest,record_json,base_blob_sha256) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![p[0],p[1],p[2],p[3],p[4],record_digest,json,record.checkpoint.state_digest]).map_err(SyncError::persist)?;
+        if let Some(published) =
+            base_in(tx, "live_audit_base_publications", p)?.filter(|published| *published != json)
+        {
+            report_history(tx, &json, "published", &published);
+        }
         Ok(MutationOutcome::Applied(()))
     })
 }
@@ -503,6 +518,164 @@ fn imported_base(
         return Err(invalid("native base audit digest differs"));
     }
     Ok((record, json, parsed.record_digest))
+}
+
+fn base_in(conn: &Connection, table: &str, p: [&str; 5]) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        &format!("SELECT record_json FROM {table} WHERE {SCOPE}"),
+        p,
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// The rows one report batch reads.
+const REPORT_BATCH: i64 = 64;
+
+/// Where a history report resumes: the last publication row and the last
+/// conflict row read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryReport {
+    publications_after: i64,
+    conflicts_after: i64,
+}
+
+/// Each publication or conflict row after `?1`, with its lineage's imported
+/// record, if any.
+const REPORT_ROWS: [(&str, &str); 2] = [
+    (
+        "published",
+        "SELECT p.rowid,b.record_json,p.record_json FROM live_audit_base_publications p LEFT JOIN live_audit_bases b USING(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.rowid>?1 ORDER BY p.rowid LIMIT ?2",
+    ),
+    (
+        "conflicting",
+        "SELECT c.rowid,b.record_json,c.record_json FROM live_audit_base_conflicts c LEFT JOIN live_audit_bases b ON b.relay_database_namespace=json_extract(c.record_json,'$.relayDatabaseNamespace') AND b.workspace_id=c.workspace_id AND b.main_version_id=json_extract(c.record_json,'$.checkpoint.binding.mainVersionId') AND b.object_id=json_extract(c.record_json,'$.checkpoint.binding.objectId') AND b.lineage_claim_id=json_extract(c.record_json,'$.checkpoint.binding.lineageClaimId') WHERE c.rowid>?1 ORDER BY c.rowid LIMIT ?2",
+    ),
+];
+
+/// One bounded batch of the history report. It returns the batch's log
+/// lines and where the next batch resumes, or `None` once every row has been
+/// read.
+pub fn history_report(
+    store: &EngineStore,
+    mut after: HistoryReport,
+) -> Result<(Vec<String>, Option<HistoryReport>), SyncError> {
+    store.read_with(|conn| {
+        let mut budget = REPORT_BATCH;
+        let mut lines = Vec::new();
+        for (index, (role, sql)) in REPORT_ROWS.into_iter().enumerate() {
+            let position = if index == 0 {
+                &mut after.publications_after
+            } else {
+                &mut after.conflicts_after
+            };
+            if *position == i64::MAX {
+                continue;
+            }
+            let mut statement = conn.prepare_cached(sql).map_err(SyncError::corrupt)?;
+            let rows = statement
+                .query_map(params![*position, budget], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(SyncError::corrupt)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(SyncError::corrupt)?;
+            for (rowid, imported, other) in &rows {
+                *position = *rowid;
+                if let Some(imported) = imported.as_ref().filter(|imported| *imported != other) {
+                    lines.push(history_line(conn, imported, role, other)?);
+                }
+            }
+            budget -= rows.len() as i64;
+            if budget == 0 {
+                return Ok((lines, Some(after)));
+            }
+            *position = i64::MAX;
+        }
+        Ok((lines, None))
+    })
+}
+
+/// Logs each finding once a process. The line is best effort and never
+/// fails the write that found it.
+fn report_history(conn: &Connection, imported: &str, role: &str, other: &str) {
+    static REPORTED: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+    let key = (
+        hex_sha256(imported.as_bytes()),
+        hex_sha256(other.as_bytes()),
+    );
+    if REPORTED
+        .lock()
+        .is_ok_and(|mut reported| reported.insert(key))
+        && let Ok(line) = history_line(conn, imported, role, other)
+    {
+        eprintln!("{line}");
+    }
+}
+
+fn history_line(
+    conn: &Connection,
+    imported: &str,
+    role: &str,
+    other: &str,
+) -> Result<String, SyncError> {
+    let describe = |role: &str, json: &str| -> Result<String, SyncError> {
+        let record: BaseRecord = serde_json::from_str(json).map_err(SyncError::corrupt)?;
+        // Stored records are canonical, so this is the record's digest.
+        let digest = hex_sha256(json.as_bytes());
+        let BaseCoordinate {
+            origin_id,
+            origin_seq,
+        } = &record.base_coordinate;
+        let kind = match record.origin {
+            origin_record::OriginRecord::Bootstrap { .. } => "bootstrap",
+            origin_record::OriginRecord::Owner { .. } => "owner",
+        };
+        let time: Option<String> = conn
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ',recorded_at_ms/1000.0,'unixepoch') FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![record.checkpoint.binding.workspace_id, origin_id, origin_seq],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        Ok(format!(
+            "{role} {kind} record {digest} of state {origin_id}:{origin_seq}, state recorded {}",
+            time.as_deref().unwrap_or("at an unknown time")
+        ))
+    };
+    let binding = serde_json::from_str::<BaseRecord>(imported)
+        .map_err(SyncError::corrupt)?
+        .checkpoint
+        .binding;
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(format!(
+        "engine: live document {} history needs attention: {}; {}; workspace {}, document {}, version {}, lineage {}, dohc {}",
+        path.unwrap_or_else(|| format!("at recorded path {}", binding.current_path)),
+        describe("imported", imported)?,
+        describe(role, other)?,
+        binding.workspace_id,
+        binding.object_id,
+        binding.main_version_id,
+        binding.lineage_claim_id,
+        dohc_engine_storage::ENGINE_BUILD,
+    ))
 }
 
 #[cfg(test)]

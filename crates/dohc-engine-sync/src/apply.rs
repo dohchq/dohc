@@ -334,6 +334,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // Whether this op changed the workspace: it applied, or its refusal
         // kept its mutation.
         let mut mutation_committed = true;
+        // Refused audits a held audit waits on, held with it.
+        let mut recovered = Vec::new();
         let server_refusal = crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         let mutation_result = match server_refusal {
             Some(refusal) => Ok(MutationOutcome::RefusedRetainingMutation { reason: refusal.reason.message().to_owned() }),
@@ -359,15 +361,29 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 })
             }
             Err(error) => {
-                let Some(reason) = refusal_reason(&error) else {
-                    return Err(error);
-                };
                 mutation_committed = false;
                 tx.execute_batch(
                     "ROLLBACK TO dohc_replication_mutation; \
                      RELEASE dohc_replication_mutation",
                 )
                 .map_err(SyncError::persist)?;
+                let reason = match refusal_reason(&error) {
+                    Some(reason) => {
+                        recovered = crate::live_audit::refused_before(tx, envelope)?;
+                        reason
+                    }
+                    // An audit that waits on a held audit of its lineage is
+                    // held with it.
+                    None => match crate::live_audit::waits_on_held(tx, envelope, &error)? {
+                        Some(refused) => {
+                            recovered = refused;
+                            RefusalReason::InvalidInput {
+                                reason: crate::live_audit::WAITS_ON_HELD.to_owned(),
+                            }
+                        }
+                        None => return Err(error),
+                    },
+                };
                 Admission::Refused(ReplicationRefusal {
                     workspace_id: envelope.workspace_id.clone(),
                     origin_id: envelope.origin_id.clone(),
@@ -377,7 +393,14 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 })
             }
         };
-        if let Admission::Refused(refusal) = &admission {
+        // A held audit waits in its own table. No refused audit leaves a
+        // pending refusal.
+        let held = matches!(&admission, Admission::Refused(_))
+            && !mutation_committed
+            && crate::live_audit::holds(envelope);
+        if let Admission::Refused(refusal) = &admission
+            && !crate::live_audit::is_audit(envelope)
+        {
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
             if !exists { persist_refusal(tx, refusal)?; }
         }
@@ -402,6 +425,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             ],
         )
         .map_err(SyncError::persist)?;
+        if let Admission::Refused(refusal) = &admission
+            && held
+        {
+            crate::live_audit::hold_in_tx(tx, envelope, refusal.reason.message(), &recovered)?;
+        }
         // Every op another computer made reaches this computer here, once:
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not

@@ -60,6 +60,9 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_projection_contributions",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
+    "live_audit_held_records",
+    "live_audit_held_blobs",
+    "live_audit_held_exports",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_accepted_reader_history",
@@ -702,6 +705,9 @@ mod tests {
     fn backup_compares_live_application_tables() {
         for table in [
             "live_audit_base_publications",
+            "live_audit_held_records",
+            "live_audit_held_blobs",
+            "live_audit_held_exports",
             "live_audit_bases",
             "live_audit_base_conflicts",
             "live_accepted_updates",

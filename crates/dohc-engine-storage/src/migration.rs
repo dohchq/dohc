@@ -2982,6 +2982,64 @@ const V2_LIVE_AUDIT_EVENT_GENERATIONS_DDL: &str = "
 ALTER TABLE live_audit_events ADD COLUMN restore_generation INTEGER CHECK (restore_generation BETWEEN 0 AND 9007199254740991);
 ";
 
+const V2_LIVE_AUDIT_HELD_RECORDS_DDL: &str = "
+-- A live audit this store refused, and each later audit of its lineage that
+-- needs it, waits here with the blobs a replay reads. A held audit is never
+-- verified; its coordinate stays acknowledged in replication_log.
+CREATE TABLE live_audit_held_records (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    relay_database_namespace TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER CHECK (event_count >= 1),
+    envelope_json TEXT CHECK (json_valid(envelope_json)),
+    reason TEXT NOT NULL,
+    PRIMARY KEY (workspace_id,origin_id,origin_seq),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX live_audit_held_lineages ON live_audit_held_records(
+    relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count);
+CREATE TABLE live_audit_held_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK ((text_sha256 IS NULL) != (binary_sha256 IS NULL)),
+    UNIQUE (workspace_id,origin_id,origin_seq,text_sha256),
+    UNIQUE (workspace_id,origin_id,origin_seq,binary_sha256),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES live_audit_held_records(workspace_id,origin_id,origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_audit_held_text_blobs ON live_audit_held_blobs(text_sha256) WHERE text_sha256 IS NOT NULL;
+CREATE INDEX live_audit_held_binary_blobs ON live_audit_held_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
+-- The history lookup is keyed by workspace and document.
+CREATE INDEX live_audit_refused_applications ON replication_log(
+    workspace_id,
+    json_extract(payload_json,'$.objectId'),
+    json_extract(payload_json,'$.eventCount'))
+  WHERE op_kind='live.audit.application' AND apply_disposition='refused';
+-- An export stream whose next record this store cannot build waits here,
+-- apart from the workspace's enrollment, and is retried in retry_order. Its
+-- pending export keeps its position and defers its lineage's later audits.
+CREATE TABLE live_audit_held_exports (
+    workspace_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    retry_order INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id),
+    FOREIGN KEY (workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id)
+      REFERENCES live_audit_pending_exports(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_audit_held_export_retries ON live_audit_held_exports(workspace_id,retry_order);
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3535,6 +3593,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 80,
         id: "v2-live-audit-event-generations",
         sql: V2_LIVE_AUDIT_EVENT_GENERATIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 81,
+        id: "v2-live-audit-held-records",
+        sql: V2_LIVE_AUDIT_HELD_RECORDS_DDL,
         sets_user_version: None,
     },
 ];
@@ -5517,6 +5581,10 @@ mod tests {
                 "v2-live-audit-event-generations",
                 "9267cb5776cf80b1218c2a7c9eacb5c44544b5bc0a18be25cc36e02f3e8b69a3",
             ),
+            (
+                "v2-live-audit-held-records",
+                "fdee673de2d5851317c73cc994b08542f1af5d49e9a26d069c4e83a4e3b1efae",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -7220,6 +7288,87 @@ mod tests {
         assert_eq!(kept, None);
         assert!(event(2, Some(-1)).is_err(), "a generation below zero");
         event(2, Some(3)).unwrap();
+    }
+
+    /// A refused coordinate from before the upgrade can be held, and a held
+    /// audit keeps each blob it names until the hold ends.
+    #[test]
+    fn live_audit_held_records_upgrade_keeps_refused_coordinates() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-audit-held-records");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition)
+             VALUES ('ws','peer',4,'live.audit.application','{}',1,1,'refused')",
+            [],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let update = crate::blob::put_binary_blob(&conn, b"update").unwrap();
+        conn.execute(
+            "INSERT INTO live_audit_held_records(workspace_id,origin_id,origin_seq,relay_database_namespace,main_version_id,object_id,lineage_claim_id,event_count,reason)
+             VALUES ('ws','peer',4,'relay','main','doc','lineage',2,'refused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO live_audit_held_blobs(workspace_id,origin_id,origin_seq,binary_sha256) VALUES ('ws','peer',4,?1)",
+            [&update],
+        )
+        .unwrap();
+        let held = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert!(
+            conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&update])
+                .is_err(),
+            "a held blob is kept"
+        );
+        assert!(
+            conn.execute("DELETE FROM replication_log", []).is_err(),
+            "a held coordinate is kept"
+        );
+        conn.execute("DELETE FROM live_audit_held_records", [])
+            .unwrap();
+        assert_eq!(held("live_audit_held_blobs"), 0);
+        conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&update])
+            .unwrap();
+    }
+
+    /// Times the held-records migration on a large log of ordinary ops, and
+    /// on one of refused audits.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn held_records_migration_time_on_a_large_log() {
+        let ordinary = "'moment.append','applied',json_object('momentId',hex(randomblob(16)),'versionId','main','objectId',hex(randomblob(8)),'path','notes/'||i||'.md','sha256',hex(randomblob(32)))";
+        let refused = "'live.audit.application','refused',json_object('relayDatabaseNamespace','relay','mainVersionId','main','objectId','doc'||(i%1000),'lineageClaimId',hex(randomblob(32)),'eventCount',i/1000+1,'manifest',json_object('sha256',hex(randomblob(32))))";
+        for (log, row) in [("ordinary", ordinary), ("refused", refused)] {
+            let dir = tempdir();
+            let mut conn = open_bare(&dir.join("engine.db"));
+            let ctx = MigrationContext::current(1);
+            let before = migration_index("v2-live-audit-held-records");
+            assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+            conn.execute_batch(&format!(
+                "BEGIN; WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<999999)
+                 INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,apply_disposition,payload_json,recorded_at_ms,imported)
+                 SELECT 'ws','peer',i,{row},i,1 FROM n; COMMIT;"
+            ))
+            .unwrap();
+            let started = std::time::Instant::now();
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let elapsed = started.elapsed();
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM replication_log", [], |row| row.get(0))
+                .unwrap();
+            eprintln!("held-records migration on {rows} {log} log rows: {elapsed:?}");
+        }
     }
 
     #[test]
