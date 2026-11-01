@@ -25,6 +25,7 @@ import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
 import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {startSelfHostedLiveHost} from "./selfHostedLiveHost.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
 import {liveEditors} from "./liveEditors.js";
@@ -54,14 +55,16 @@ vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {vi.unstubAllEnvs(); vi.mocked(rm).mockReset(); for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset();});
 
-async function fixture() {
+// `selfHosted` provisions the host ID the self-host supervisor provisions, so the supervisor can run this host.
+async function fixture({selfHosted = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
   initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
   const deployment = openRelayDeployment(deploymentConfig);
-  deployment.storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard() {} });
-  const config = { version: 1, engineExecutable: process.execPath, hostId: "service", instanceId: "instance",
+  const hostId = selfHosted ? `self-host-${deployment.history.namespace}` : "service";
+  deployment.storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: 1, guard() {} });
+  const config = { version: 1, engineExecutable: process.execPath, hostId, instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
     ingress: { aggregateBytes: 200_000_000, applicationWorkingReserveBytes: 50_000_000, maxUploads: 2, uploadDeadlineMs: 1000 },
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 1000, requestDeadlineMs: 1000 } };
@@ -79,7 +82,7 @@ function clientFrom(options: { env: Record<string, string> }) {
   const client = { sendRequest: vi.fn(async (request?: {method: string}) => request?.method === "sync.createHostedReplica" ? {result: {hosted: true}} : ({
     result: { relayNamespace: config.relayNamespace, host: config.host,
       workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
-    close: vi.fn(), waitForExit: vi.fn(async () => {}) };
+    close: vi.fn(), waitForExit: vi.fn(async () => {}), onEvent: vi.fn(() => () => {}) };
   return { client, config, nativePath };
 }
 
@@ -521,9 +524,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits} = {}) {
+  maxApplications?: number; limits?: DrainLimits; selfHosted?: boolean; restore?: boolean} = {}) {
   const adopted = options.adopted ?? true;
-  const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
+  const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
     maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
@@ -559,7 +562,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
 
   // Complete the activation under the earlier connection: adoption, seed, native application. Without `adopted` it is only prepared.
-  const earlier = {mode: "service" as const, hostId: "service", hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
+  const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
   await store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
@@ -588,6 +591,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.maxApplications) Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: options.maxApplications}});
+  if (options.restore) Object.assign(f.config, {restore: RESTORE});
   if (options.empty) f.config.workspaces = [];
   await f.save();
 
@@ -1207,7 +1211,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits} = {}) {
+  limits?: DrainLimits; selfHosted?: boolean; restore?: boolean} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -1476,16 +1480,26 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // An empty host with the document shared with Edit, enrolled and ready.
-async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits} = {}) {
-  const o = await emptyServiceHost({frameChanges, maxApplications, limits});
+// With `supervised`, the self-host supervisor runs the host as its daemon,
+// configured for restore, and sends it every membership update.
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
-  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const errors: unknown[] = [];
+  let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
+  if (supervised) {
+    const data = join(o.f.root, "self-host"); await mkdir(data);
+    supervisor = await startSelfHostedLiveHost({trustedAccount: o.f.trustedAccount, storage: o.f.storage, history: o.f.history, root: data,
+      engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(16),
+      startHost: async () => o.host, onError: error => errors.push(error)});
+    cleanup.push(() => supervisor!.close());
+  } else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
   if (binding.kind !== "current") throw new Error("Missing live binding.");
   const calls = (from: number) => o.ownerCalls().slice(from).map(([method]) => method as string);
-  return {...o, binding: binding.binding, calls,
+  return {...o, binding: binding.binding, calls, supervisor, errors,
     // The owner's Stop, which fences the document at once.
     stop() {
       expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
@@ -3232,6 +3246,78 @@ it.each([
   expect(retiredRow(o).retired).toBe(true);
   expect(ownerCovers(o)).toBe(false);
   expect(ownerBinding(o).kind).toBe("refused");
+});
+
+// The owner moves the note to `path`: its object's newest moment names that path.
+const moveNote = (o: Enrolled, path: string, relaySeq: number) => o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,
+  moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) SELECT workspace_id,object_id,?,?,version_id,?,blob_sha256,content_kind,byte_length,?
+  FROM sync_relay_object_moments WHERE object_id='object' ORDER BY relay_seq DESC LIMIT 1`).run(relaySeq, `moved-${relaySeq}`, path, relaySeq);
+// The retiring host's push of the restored note, which puts the restore in the relay's ordinary history, and the
+// successor's native capture after it: the restored state, sourced from the restore's settlement moment.
+const pushRestoredNote = (o: Enrolled): NativeOwnerActivation => {
+  const ordinary = new Y.Doc({gc: false}), restored = new Y.Doc({gc: false});
+  for (const bytes of [o.engine.capture.baselineBytes, o.engine.capture.fullState]) Y.applyUpdate(ordinary, bytes);
+  // The state at the journal's last cursor, as the restore's settlement settled it.
+  Y.applyUpdate(restored, o.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1")
+    .get()!.validation_checkpoint_bytes as Uint8Array);
+  const update = Buffer.from(Y.encodeStateAsUpdate(restored, Y.encodeStateVector(ordinary))), fullState = Buffer.from(Y.encodeStateAsUpdate(restored));
+  ordinary.destroy(); restored.destroy();
+  o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(sha256(update), update.length, update);
+  o.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
+    .run(JSON.stringify({versionId: "main", objectId: "object", path: o.sibling.path, contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: o.document.lineageClaimId, updateBlobSha256: sha256(update)}));
+  const moment = o.raw.prepare("SELECT moment_id,blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='restore-publication'").get()!;
+  const head = Number(o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head);
+  return {...o.engine.capture, activationId: SUCCESSOR, fullState, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION,
+    committedCursor: head, sourceMomentId: String(moment.moment_id), sourceDigest: String(moment.blob_sha256), sourceByteLength: Number(moment.byte_length),
+    fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
+};
+
+// Proves: when the owner renames a note after a restore kept their live
+// session and resumed, the self-host supervisor retires that session through
+// its host. The host reconciles, settles and releases the activation, and
+// never unloads the note as an ordinary departure. When the owner moves the
+// note back and shares it again with Edit, the same daemon starts a successor
+// activation, and the note is ready again.
+it("retires a restored note's kept session through its host once the note is renamed, and starts a successor when it is shared again", async () => {
+  const o = await enrolledServiceHost({supervised: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const fence = o.binding.restoreFenceGeneration + 1;
+  o.beginRestore();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const proposalDigest = await admitRestore(o), {publish} = restoreEngine(o, o.host);
+  await expect(o.host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  await publish();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {restoreFenceGeneration: fence}});
+  expect(ownerCovers(o)).toBe(true);
+  // The owner renames the note, so the restore no longer keeps its session.
+  const sent = o.ownerCalls().length, membership = o.membership.length;
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
+  moveNote(o, "docs/renamed.md", 1_000_000);
+  o.supervisor!.reconcile();
+  // The supervisor releases the enrollment once the host let the note go.
+  await vi.waitFor(() => expect(o.raw.prepare("SELECT retired,host_drained_at_ms IS NOT NULL AS drained FROM sync_relay_service_host_enrollments").get())
+    .toEqual({retired: 1, drained: 1}), {timeout: 10_000});
+  expect(o.membership.slice(membership).filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  expect(o.calls(sent)).toEqual(expect.arrayContaining(retirement));
+  expect(retiredRow(o).retired).toBe(true);
+  expect(complete.mock.results.at(-1)?.value).toMatchObject({status: "retired"});
+  expect(ownerBinding(o).kind).toBe("refused");
+  // The owner moves the note back and shares it again with Edit, on the same daemon.
+  o.engine.capture = pushRestoredNote(o);
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  moveNote(o, o.sibling.path, 1_000_001);
+  anotherEditGrant(o);
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
+  o.supervisor!.reconcile();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(o.raw.prepare("SELECT activation_id,predecessor_activation_id,completion_json IS NOT NULL AS completed FROM sync_relay_service_activations ORDER BY rowid").all())
+    .toEqual([{activation_id: ACTIVATION, predecessor_activation_id: null, completed: 1}, {activation_id: SUCCESSOR, predecessor_activation_id: ACTIVATION, completed: 1}]);
+  expect(o.spawned()).toBe(1);
+  expect(o.errors).toEqual([]);
 });
 
 // Proves: a restore request cannot name a live session for the relay to keep.
