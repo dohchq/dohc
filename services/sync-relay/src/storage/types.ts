@@ -687,6 +687,8 @@ export interface SyncRelayStorage {
   /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */
   retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
     {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
+  /** Opens the retirement of a live session the owner's restore kept, once nothing covers its document. Returns whether it opened one. */
+  endLapsedServiceHostRun(enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment, nowMs: number): boolean;
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
   bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;
