@@ -79,6 +79,8 @@ describe("Chats in the left side panel", () => {
     await user.click(within(first).getByRole("button", { name: "Try again" }));
     const toast = await screen.findByTestId("workspace-shell-error");
     await within(toast).findByRole("button", { name: "Open" });
+    expect(within(toast).getByText("dohc couldn't create #launch")).toBeTruthy();
+    expect(within(toast).getByText(taken.message)).toBeTruthy();
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
 
@@ -87,6 +89,7 @@ describe("Chats in the left side panel", () => {
       await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
       await user.click(screen.getByTestId("notice-center-toggle"));
       notice = within(screen.getByTestId("notice-center")).getByText(taken.message).closest("li")!;
+      expect(within(notice).getByText("dohc couldn't create #launch")).toBeTruthy();
       expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
       expect(within(notice).getByRole("button", { name: "Copy error details" })).toBeTruthy();
     }
@@ -115,13 +118,55 @@ describe("Chats in the left side panel", () => {
     await screen.findByTestId("chats-new-channel-error");
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
     const toast = await screen.findByTestId("workspace-shell-error");
+    if (reason === "reserved name") expect(within(toast).getByText("dohc couldn't create #My agent")).toBeTruthy();
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(toast).queryByRole("button", { name: "Open" })).toBeNull();
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByTestId("notice-center");
+    if (reason === "reserved name") expect(within(notices).getByText("dohc couldn't create #My agent")).toBeTruthy();
     expect(within(notices).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(notices).queryByRole("button", { name: "Open" })).toBeNull();
+  });
+
+  it.each(["missing", "failed"])("keeps separate titled Notices rows for taken group names when the lookup is %s", async (lookup) => {
+    const user = userEvent.setup();
+    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    Object.assign(bridge, { createChatChannel: vi.fn<DohcDesktopBridge["createChatChannel"]>().mockRejectedValue(taken) });
+    renderShell(bridge);
+
+    for (const name of ["planning", "design"]) {
+      await user.click(await screen.findByTestId("chats-new-channel"));
+      if (lookup === "failed") bridge.listChatChannels.mockRejectedValue(new Error("The workspace engine is not running."));
+      await user.type(screen.getByTestId("chats-new-channel-name"), `${name}{Enter}`);
+      expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe(taken.message);
+      await user.click(screen.getByTestId("chats-new-channel-cancel"));
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(within(toast).getByText(`dohc couldn't create #${name}`)).toBeTruthy();
+      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(toast).queryByRole("button", { name: "Open" })).toBeNull();
+      await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    }
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    for (const name of ["planning", "design"]) {
+      const row = within(notices).getByText(`dohc couldn't create #${name}`).closest("li")!;
+      expect(within(row).getByText(taken.message)).toBeTruthy();
+      expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Open" })).toBeNull();
+    }
+
+    const planning = within(notices).getByText("dohc couldn't create #planning").closest("li")!;
+    await user.click(within(planning).getByRole("button", { name: "Try again" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("dohc couldn't create #planning")).toBeTruthy();
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const retried = screen.getByTestId("notice-center");
+    expect(within(retried).getAllByText("dohc couldn't create #planning")).toHaveLength(1);
+    expect(within(retried).getAllByText("dohc couldn't create #design")).toHaveLength(1);
   });
 
   it.each(["resolution failure", "deleted file"])("opens the file-chat path after %s", async outcome => {

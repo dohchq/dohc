@@ -180,9 +180,13 @@ describe("ChatsView channels", () => {
       taken,
       undefined,
       undefined,
-      expect.objectContaining({ label: "Open", run: expect.any(Function), ends: true }),
+      {
+        title: "dohc couldn't create #Launch_team",
+        identity: "group-name-taken:launch-team",
+        action: expect.objectContaining({ label: "Open", run: expect.any(Function), ends: true }),
+      },
     );
-    act(() => onError.mock.calls[1]?.[4]?.run());
+    act(() => onError.mock.calls[1]?.[4]?.action?.run());
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Launch team");
     expect(bridgeMock.listChannelThreads).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: existing.id });
     expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(2);
@@ -205,8 +209,8 @@ describe("ChatsView channels", () => {
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
 
     expect(onError.mock.calls[0]?.[2]).toBeUndefined();
-    expect(onError.mock.calls[0]?.[4]?.label).toBe("Open");
-    act(() => onError.mock.calls[0]?.[4]?.run());
+    expect(onError.mock.calls[0]?.[4]).toMatchObject({ title: "dohc couldn't create #launch", identity: "group-name-taken:launch", action: { label: "Open" } });
+    act(() => onError.mock.calls[0]?.[4]?.action?.run());
     expect(onOpenInTab).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: existing });
     expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(1);
   });
@@ -225,7 +229,9 @@ describe("ChatsView channels", () => {
     await screen.findByTestId("chats-new-channel-error");
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
 
-    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function), {
+      title: `dohc couldn't create #${name}`, identity: `group-name-taken:${slug}`,
+    });
   });
 
   it("keeps Try again when only the error words say the name is taken", async () => {

@@ -516,6 +516,8 @@ export function runnerProgram(command: string): string {
   return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
 
+export type ChatErrorNotice = Pick<ShellError, "action" | "title" | "identity">;
+
 export function ChatsView(props: {
   workspaceId: string;
   workspaces: readonly DmWorkspaceOption[];
@@ -525,9 +527,9 @@ export function ChatsView(props: {
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // A retry, when given, is the failure's Try again. An archive refused for
-  // live editing also names the bookmark's page. An action, when given,
-  // replaces Try again.
-  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, action?: ShellError["action"]) => void;
+  // live editing also names the bookmark's page. A notice can give the
+  // failure a title, an identity and an action in place of Try again.
+  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
@@ -691,7 +693,7 @@ export function ChatsView(props: {
     message: string;
     error: unknown;
     input: { name: string; type: GroupType; purpose: string };
-    action?: ShellError["action"];
+    notice?: ChatErrorNotice;
   } | null>(null);
   const resetGroupForm = useCallback(() => {
     unreportedCreateFailure.current = null;
@@ -3516,22 +3518,23 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
         return null;
       } catch (error) {
-        if (token !== liveToken.current) return null;
         // The open dialog says why and keeps the draft. Notices hears of it
         // only if the person closes the dialog without a retry that worked.
         const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
-        let action: ShellError["action"];
+        if (token !== liveToken.current) return message;
+        let notice: ChatErrorNotice | undefined;
         if (isGroupNameTaken(error)) {
           const slug = nameSlug(input.name);
-          // The engine also refuses reserved agent names, which have no group to open.
-          if (slug !== "my-agent" && !slug.startsWith("my-agent-")) {
-            const listing = await bridge().listChatChannels({ workspaceId }).catch(() => null);
-            if (token !== liveToken.current) return null;
-            const existing = listing?.channels.find((channel) => channel.kind === "channel" && channel.slug === slug);
-            if (existing) action = { label: "Open", run: () => openConversation({ level: "channel", channel: existing }), ends: true };
-          }
+          notice = {
+            title: `dohc couldn't create #${input.name}`,
+            identity: `group-name-taken:${slug}`,
+          };
+          const listing = await bridge().listChatChannels({ workspaceId }).catch(() => null);
+          if (token !== liveToken.current) return message;
+          const existing = listing?.channels.find((channel) => channel.kind === "channel" && channel.slug === slug);
+          if (existing) notice.action = { label: "Open", run: () => openConversation({ level: "channel", channel: existing }), ends: true };
         }
-        unreportedCreateFailure.current = { message, error, input, ...(action ? { action } : {}) };
+        unreportedCreateFailure.current = { message, error, input, ...(notice ? { notice } : {}) };
         return message;
       }
     },
@@ -3542,7 +3545,7 @@ export function ChatsView(props: {
     resetGroupForm();
     if (!failure) return;
     const report = (next: NonNullable<typeof failure>) => {
-      if (next.action) props.onError(next.message, next.error, undefined, undefined, next.action);
+      if (next.notice) props.onError(next.message, next.error, next.notice.action ? undefined : again, undefined, next.notice);
       else props.onError(next.message, next.error, again);
     };
     // Try again creates the same group; a failure there reports again.
