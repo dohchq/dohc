@@ -606,8 +606,8 @@ const RESTORE_ROW = `SELECT phase,new_fence,lineage_claim_id,json_extract(intent
 export const LATEST_RESTORE = {
   // A document has at most one unfinished restore, and no other can begin after it.
   unfinished: `${RESTORE_ROW} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${UNFINISHED_RESTORE}`,
-  // Each fence is one past the one before, so the highest is the latest fenced restore.
-  fenced: `${RESTORE_ROW} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND new_fence IS NOT NULL
+  // Each fence is one past the one before, so the highest is the latest fenced restore. Every fence is at least 2.
+  fenced: `${RESTORE_ROW} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND new_fence>0
     ORDER BY new_fence DESC LIMIT 1`,
 } as const;
 /**
