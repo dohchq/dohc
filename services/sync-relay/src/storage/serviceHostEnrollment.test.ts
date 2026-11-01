@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {afterEach, expect, it} from "vitest";
 import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
@@ -7,6 +8,7 @@ import {LATEST_RESTORE, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SE
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "./accountDeletion";
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./liveJournalHistory";
+import {currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {revokeShareGrantInTransaction} from "./shares";
 import type {StorageContext} from "./context";
 
@@ -539,9 +541,9 @@ async function activated() {
   const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, binding);
   const retirements = () => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_service_activations WHERE retire_requested_at_ms IS NOT NULL").get()!.count;
-  const share = (shareId: string, grantId: string, access = "edit", userId = "reader-2") => {
+  const share = (shareId: string, grantId: string, access = "edit", userId = "reader-2", paths = ["docs"]) => {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
-      .run(shareId, scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+      .run(shareId, scope.workspaceId, JSON.stringify({paths, versionId: null}));
     f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
       VALUES (?,?,'user',?,NULL,?,1,'active',0,NULL,NULL)`).run(grantId, shareId, userId, access);
   };
@@ -736,6 +738,39 @@ it.each([
   expect(f.enabled(f.asOwner, true)).toBe(false);
   expect(f.enabled(f.asOwner)).toBe(false);
   expect(f.release()).toMatchObject({enabled: false, retired: true});
+});
+
+// Proves: while the note is away from the path where its live editing began,
+// no restore of it can start, even with an Edit share that covers where it is
+// now. The attempt changes nothing, and the owner's kept session stays off.
+it("can't start a restore of a note while it's away from where live editing began", async () => {
+  const f = await kept(), runToken = f.enrolled().runToken;
+  expect(f.enabled(f.asOwner)).toBe(true);
+  expect(currentLiveDocumentMoment(f.storage as StorageContext, document, binding.currentPath)).toBeDefined();
+  // The owner's device logs the note's content at docs/a.md, then renames it to notes/a.md.
+  const content = Buffer.from("a"), sha256 = createHash("sha256").update(content).digest("hex");
+  f.storage.putBlob({workspaceId: scope.workspaceId, sha256, content, createdAtMs: 40});
+  const moment = (originSeq: number, momentId: string, change: object) => ({originSeq, opKind: "moment.append", recordedAtMs: 40,
+    payloadJson: JSON.stringify({objectId: binding.objectId, versionId: "main", momentId, recordedAtMs: 40, payloadAfterBlobSha256: sha256,
+      payloadAfterContentKind: "text", payloadAfterByteLength: 1, ...change})});
+  f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "desktop", ops: [
+    moment(0, "written", {operation: "write", payloadAfterPath: binding.currentPath}),
+    moment(1, "renamed", {operation: "rename", payloadBeforePath: binding.currentPath, payloadBeforeBlobSha256: sha256, payloadAfterPath: "notes/a.md"}),
+  ]});
+  // An Edit share of notes only, so it can't keep docs/a.md live by itself.
+  f.share("away", "away-edit", "edit", "reader-2", ["notes"]);
+  expect(f.storage.objectIdAtPathInVersion({workspaceId: scope.workspaceId, versionId: "main", path: "notes/a.md"})).toBe(binding.objectId);
+  expect(currentLiveDocumentMoment(f.storage as StorageContext, document, binding.currentPath)).toBeUndefined();
+  expect(f.raw.prepare("SELECT current_path FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=?")
+    .get(scope.workspaceId, binding.objectId)?.current_path).toBe(binding.currentPath);
+  expect(() => f.storage.beginStopRestore({deliveryKind: "owner", operationId: "restore-away", ownerUserId: "owner-1", document, shareId: "away",
+    grantId: "away-edit", expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: 8, restorePointCursor: 0,
+    restorePointReceiptDigest: binding.lineageClaimId}, 41)).toThrow("Live restore operation conflicts with current authority.");
+  expect(f.raw.prepare("SELECT operation_id FROM sync_relay_live_restore_operations").all().map(row => row.operation_id)).toEqual(["restore"]);
+  expect(f.storage.getShareGrant("away-edit")).toMatchObject({status: "active"});
+  expect(f.enrolled().runToken).toBe(runToken);
+  expect(f.enabled(f.asOwner, true)).toBe(false);
+  expect(f.enabled(f.asOwner)).toBe(false);
 });
 
 // Proves: finding a note's latest restore reads only that note's restores,
