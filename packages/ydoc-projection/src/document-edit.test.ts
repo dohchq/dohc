@@ -44,7 +44,8 @@ describe('documentMarkdown', () => {
     const markdown = '---\ntitle: Trip\n---\n\n# Kyoto\n\n- Day one\n- Day two\n\nA **bold** plan.'
     const doc = markdownToYDoc(markdown)
     expect(markdownOf(doc)).toBe(markdown)
-    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc))
+    // The file adds only its final newline.
+    expect(yDocToMarkdown(doc)).toBe(`${markdownOf(doc)}\n`)
     expect(settledDocumentMarkdown('# Kyoto\n\n* Day one\n')).toBe('# Kyoto\n\n- Day one')
   })
 })
@@ -59,6 +60,16 @@ describe('documentEditUpdate', () => {
 
     expect(markdownOf(doc)).toBe('# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.')
     expect(body.toArray()).toEqual([heading, dayOne, dayTwo])
+  })
+
+  test('saves an edited note with its final newline and no blank line above a table', () => {
+    const doc = markdownToYDoc('Intro.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nOutro.\n')
+    edited(doc, { find: 'Outro.', replacement: 'Edited.' })
+    expect(yDocToMarkdown(doc)).toBe('Intro.\n\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nEdited.\n')
+    edited(doc, { find: 'Edited.', replacement: 'Edited.\n\n| c |\n| --- |\n| 3 |' })
+    expect(yDocToMarkdown(doc)).toBe(
+      'Intro.\n\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nEdited.\n\n| c   |\n| --- |\n| 3   |\n',
+    )
   })
 
   test('adds a section written as Markdown', () => {
@@ -136,7 +147,7 @@ describe('documentCreateUpdate', () => {
     const doc = new Y.Doc()
     Y.applyUpdate(doc, documentCreateUpdate(state(doc), '# Kyoto\n\n- Day one\n- Day two', open)!)
     expect(markdownOf(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
-    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two\n')
   })
 
   test.each([

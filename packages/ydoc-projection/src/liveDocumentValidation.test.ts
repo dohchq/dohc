@@ -410,9 +410,37 @@ describe('public Markdown schema', () => {
   it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcFrontmatterSource', 1]])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
   })
-  it('rejects absent version and unobservable CRLF flags', () => {
+  it('rejects an absent version', () => {
     refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
-    refused(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
+  })
+  it('round-trips a CRLF note with a final CRLF', () => {
+    for (const markdown of ['# Title\r\n\r\nBody', '# Title\r\n\r\nBody\r\n']) {
+      const evidence = accepted(encode(markdown))
+      expect(evidence.projectedMarkdown).toBe('# Title\r\n\r\nBody\r\n')
+      expect(accepted(encode(evidence.projectedMarkdown)).projectedMarkdown).toBe(evidence.projectedMarkdown)
+    }
+    // A one-line note shows its CRLF preference in its final line ending.
+    expect(accepted(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true))).projectedMarkdown)
+      .toBe('Text\r\n')
+  })
+  it('accepts an empty note that keeps its CRLF preference, and saves CRLF once text is added', () => {
+    const doc = markdownToYDoc('First\r\n')
+    try {
+      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
+      text.delete(0, text.length)
+      expect(doc.getMap('meta').get('dohcMarkdownCrlf')).toBe(true)
+      expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe('')
+      text.insert(0, 'Second')
+      expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe('Second\r\n')
+    } finally { doc.destroy() }
+  })
+  it('saves a note with mixed line endings as all CRLF, as its import hint says', () => {
+    // Any CRLF in the file sets the hint, so every line ending saves as CRLF.
+    for (const markdown of ['LF line\nCRLF line\r\n\r\nLast', 'CRLF line\r\n\r\nLF last\n']) {
+      const evidence = accepted(encode(markdown))
+      expect(evidence.projectedMarkdown).toBe(`${markdown.replaceAll('\r\n', '\n').replace(/\n$/u, '').replaceAll('\n', '\r\n')}\r\n`)
+      expect(accepted(encode(evidence.projectedMarkdown)).projectedMarkdown).toBe(evidence.projectedMarkdown)
+    }
   })
   it('refuses frontmatter text longer than a live document', () => {
     refused(encode('---\ntitle: A\n---\n\nText', doc => {
@@ -423,7 +451,7 @@ describe('public Markdown schema', () => {
     const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
       setFrontmatterValue(doc, 'title', 'B')
     }))
-    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText')
+    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText\n')
   })
   it.each([undefined, new Uint8Array([1]), new Y.Text('discarded'), new Y.Doc()])('rejects nonpublic frontmatter values %#', value => {
     refused(encode('Text', doc => doc.getMap('frontmatter').set('value', value)))
@@ -453,11 +481,12 @@ describe('public Markdown schema', () => {
     refused(encode('Text', doc => ((doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText).format(0, 1, { unknown: {} })), 'projection-mutated')
   })
   it('accepts full 2 MiB as one text run, and refuses one UTF-8 byte over', () => {
+    // The projection ends with a final newline, which counts toward the limit.
     const limit = 2 * 1024 * 1024
-    expect(accepted(encode('x'.repeat(limit))).projectedMarkdownByteLength).toBe(limit)
-    refused(encode('x'.repeat(limit + 1)), 'capacity-refused')
-    expect(accepted(encode('é'.repeat(limit / 2))).projectedMarkdownByteLength).toBe(limit)
-    refused(encode(`${'é'.repeat(limit / 2)}x`), 'capacity-refused')
+    expect(accepted(encode('x'.repeat(limit - 1))).projectedMarkdownByteLength).toBe(limit)
+    refused(encode('x'.repeat(limit)), 'capacity-refused')
+    expect(accepted(encode(`${'é'.repeat(limit / 2 - 1)}x`)).projectedMarkdownByteLength).toBe(limit)
+    refused(encode('é'.repeat(limit / 2)), 'capacity-refused')
   }, 60_000)
   it('accepts signed int64 shared values and escaped sentinel keys', () => {
     for (const markdown of [
@@ -691,7 +720,7 @@ describe('private journal evidence and ownership', () => {
       const continued = journal({ ...input(checkpoint), suffix: [], candidate })
       expect(continued.kind).toBe('accepted')
       if (continued.kind !== 'accepted') return
-      expect(accepted(continued.evidence.stateUpdate).projectedMarkdown).toBe('Continued')
+      expect(accepted(continued.evidence.stateUpdate).projectedMarkdown).toBe('Continued\n')
       const withDeletedPrefix = journal({ ...call, suffix: [call.candidate], candidate })
       expect(withDeletedPrefix.kind).toBe('accepted')
       if (withDeletedPrefix.kind === 'accepted') expect(withDeletedPrefix.evidence.stateUpdate).toEqual(continued.evidence.stateUpdate)
@@ -1005,7 +1034,7 @@ it('refuses an update that binds a source the document does not import as, and d
     meta.set('dohcMarkdownSourceProjectionSha256', digest(projection.yDocToMarkdown(doc)))
   }
   expect(journal(journalFixture([forge]))).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
-  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text')
+  expect(accepted(encode('Text', forge)).projectedMarkdown).toBe('Text\n')
 })
 
 it('never projects a preserved source that holds text the document lacks', () => {

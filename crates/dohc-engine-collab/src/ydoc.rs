@@ -9537,7 +9537,7 @@ mod projection_tests {
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
                 .content,
-            "<!-- dohc:table row-heights=1:84,2:120 -->\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |"
+            "<!-- dohc:table row-heights=1:84,2:120 -->\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |\n"
         );
     }
 
@@ -9718,7 +9718,36 @@ mod projection_tests {
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
                 .content,
-            "\n| Metric | Value |\n| ------ | ----- |\n| apples | 10    |\n\n- parent\n  - nested"
+            "| Metric | Value |\n| ------ | ----- |\n| apples | 10    |\n\n- parent\n  - nested\n"
+        );
+    }
+
+    #[test]
+    fn an_edited_note_keeps_its_final_newline_and_no_blank_line_above_a_table() {
+        let row = |tag: &str, cells: [&str; 2]| {
+            xml_element(
+                "tableRow",
+                &[],
+                cells.map(|cell| xml_element(tag, &[], [paragraph(cell)])),
+            )
+        };
+        let doc = remote_doc_with_body([
+            paragraph("Intro."),
+            xml_element(
+                "table",
+                &[],
+                [row("tableHeader", ["a", "b"]), row("tableCell", ["1", "2"])],
+            ),
+        ]);
+        let table = "| a   | b   |\n| --- | --- |\n| 1   | 2   |";
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).unwrap().content,
+            format!("Intro.\n\n{table}\n")
+        );
+        doc.richdoc_append_paragraph("Edited.");
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).unwrap().content,
+            format!("Intro.\n\n{table}\n\nEdited.\n")
         );
     }
 
@@ -12575,7 +12604,9 @@ fn main() {}
                 assert!(result.is_ok(), "{}: {result:?}", vector["name"]);
                 assert_eq!(
                     doc.project_richdoc().unwrap(),
-                    vector["expected"].as_str().unwrap(),
+                    vector["projected"]
+                        .as_str()
+                        .unwrap_or_else(|| vector["expected"].as_str().unwrap()),
                     "{}",
                     vector["name"]
                 );
