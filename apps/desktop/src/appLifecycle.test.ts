@@ -1,11 +1,14 @@
 import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
+import { writeFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createAutomationWakeConsumer, createAutomationWakeIntents, type AutomationWakeIntent } from "./automations/automationWakeIntents";
 import { createTestScratch } from "./workspaces/testTemp";
+import { createRegistryStore } from "./workspaces/registryStore";
+import { startupFailureBox } from "./launch/startupFailureBox";
 import { createWorkspaceAuthorityOwner } from "./workspaces/workspaceAuthorityOwner";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
 import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
@@ -326,6 +329,27 @@ describe("desktop bootstrap", () => {
     expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(
       restarting ? ["report-failure", "updates", "update-check"] : ["report-failure", "updates", "update-check", "quit"],
     );
+  });
+
+  it("shows the registry guidance when the workspace list is corrupt, then checks for an update", async () => {
+    const registryFile = join(await createTestScratch("dohc-lifecycle-registry-"), "dohc-workspaces.json");
+    await writeFile(registryFile, "{ this is not json");
+    const boxes: Array<{ title: string; content: string }> = [];
+    const f = fixture((d) => {
+      d.bootstrap.registerHandlers = () => { createRegistryStore(registryFile).list(); };
+      d.bootstrap.reportFailure = vi.fn((error: unknown) => {
+        boxes.push(startupFailureBox(error));
+        f.log.push("report-failure");
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    await ready;
+    expect(boxes).toEqual([{
+      title: "dohc couldn't read its workspace registry",
+      content: expect.stringContaining(`File: ${registryFile}\n`),
+    }]);
+    expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(["report-failure", "updates", "update-check", "quit"]);
   });
 
   it("keeps activation and incoming paths deferred when the daemon cannot start", async () => {

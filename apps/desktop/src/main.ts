@@ -238,6 +238,7 @@ import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/up
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
 import { confirmDownloadDialog, confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
+import { startupFailureBox } from "./launch/startupFailureBox";
 import {
   createExitRounds,
   createQuitGuard,
@@ -5945,12 +5946,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       offerMoveToApplicationsOn(liveWorkspaceWindow());
     },
     reportFailure: (error) => {
-      const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
       console.error("[desktop] Desktop startup failed:", error);
-      dialog.showErrorBox(
-        "dohc failed to start",
-        `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
-      );
+      const box = startupFailureBox(error);
+      dialog.showErrorBox(box.title, box.content);
     },
   },
   services: {
