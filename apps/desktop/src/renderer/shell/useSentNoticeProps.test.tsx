@@ -29,6 +29,7 @@ import type { SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
 import { showChat } from "../workbench/chatsOnScreen";
+import { tellWindowFocused } from "../../testing/windowFocus";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -844,7 +845,7 @@ describe("an agent run's notice while its chat is on screen", () => {
   let shown: HTMLElement;
   let hide: () => void;
   beforeEach(() => {
-    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    tellWindowFocused(true);
     shown = document.createElement("div");
     document.body.append(shown);
     hide = showChat("thread-1", shown);
@@ -852,7 +853,7 @@ describe("an agent run's notice while its chat is on screen", () => {
   afterEach(() => {
     hide();
     shown.remove();
-    vi.mocked(document.hasFocus).mockRestore();
+    tellWindowFocused(false);
   });
 
   it("skips the toast and the row of a reply the person can see", async () => {
@@ -886,7 +887,7 @@ describe("an agent run's notice while its chat is on screen", () => {
   });
 
   it.each([
-    ["the window isn't focused", () => { vi.mocked(document.hasFocus).mockReturnValue(false); }],
+    ["the window isn't focused", () => tellWindowFocused(false)],
     ["the chat's view is hidden", () => { shown.checkVisibility = () => false; }],
     ["the chat's view is gone", () => hide()],
     ["another chat is on screen", () => {
