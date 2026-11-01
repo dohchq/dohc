@@ -12,7 +12,7 @@ import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
-import {fixture as ticketFixture, binding, scope, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, scope, keptByOwnerRestore, retainServiceActivation} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
@@ -533,29 +533,28 @@ it("keeps a document resumed before its activation retired departing until that 
   expect(f.updates.at(-1)!.departing).toEqual([]);
 });
 
-// Proves: the owner's finished restore that ended the document's last Edit
-// grant keeps it hosted, with no release. After the owner's next activation
-// exists, Pause takes it out of the hosted set and Resume brings it back once
-// the paused activation retired. Stop takes it out for good: Resume leaves it
-// out, and its enrollment retires again.
-it.each(["pause", "stop"] as const)("keeps hosting a document its owner's restore kept live through the owner's %s and Resume as decided", async action => {
+// Proves: the owner's restore that kept a note's live session through the end
+// of its last Edit grant keeps it hosted, with no release. Pause takes it out
+// of the hosted set and Resume brings it back once the paused activation
+// retired. Stop takes it out for good: Resume leaves it out, and its
+// enrollment retires again.
+it.each(["pause", "stop"] as const)("keeps hosting a note its owner's restore kept live through the owner's %s and Resume as decided", async action => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  retainServiceActivation(f.raw, namespace, true);
-  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  keptByOwnerRestore(f.raw, namespace);
   notifyRelayWrite(f.storage);
   await f.waitPasses();
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
   expect(f.updates.at(-1)!.departing).toEqual([]);
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
   expect(f.events).toEqual([]);
-  const successor = retainSuccessorActivation(f.raw, true);
   const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40, ...(action === "stop" ? {retire: true, restoreFenceGeneration: 8, prepared} : {})});
   await f.waitUpdate([]);
   await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
   expect(f.enrollment()).toMatchObject({enabled: false, retired: action === "stop", ownerStop: action === "pause" ? "pause" : "retire"});
   // The host retired the activation the Pause or Stop ended.
-  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(successor);
+  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(activationId);
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50});
   if (action === "pause") await f.waitUpdate(["docs/a.md"]);
   else {
@@ -572,7 +571,8 @@ it("retires a document after an overlapping grant's later revocation, though a r
   f.share("share-overlap", ["docs"]);
   await f.waitUpdate(["docs/a.md"]);
   retainServiceActivation(f.raw, namespace, true);
-  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  // The other grant still covered the note, so the restore kept nothing.
+  keptByOwnerRestore(f.raw, namespace).update("intent_json=json_remove(intent_json,'$.keptRun')");
   notifyRelayWrite(f.storage);
   await f.waitPasses();
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);

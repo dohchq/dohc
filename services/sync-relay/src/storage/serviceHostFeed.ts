@@ -4,7 +4,7 @@ import type {SqliteDb, SyncRelayLogRow} from "./types";
 import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
-import {currentServiceHostEnrollments, serviceHostOwnerContinues} from "./serviceHostEnrollment";
+import {currentServiceHostEnrollments, serviceHostOwnerRetains} from "./serviceHostEnrollment";
 import {listServiceActivationRetirements, type ServiceActivationRetirement} from "./serviceActivationRetirement";
 
 /** The op kinds that name one live document, and so may belong to a hosted one. */
@@ -80,8 +80,8 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    // The owner's finished restore that ended the last Edit grant keeps it shared.
-    else if (row.ownerStop === null && (selectors.some(selector => pathVisibleThroughShare(selector, row.path)) || serviceHostOwnerContinues(storage, row))) {
+    // The owner's restore that kept its live session keeps it shared.
+    else if (row.ownerStop === null && (selectors.some(selector => pathVisibleThroughShare(selector, row.path)) || serviceHostOwnerRetains(storage, row))) {
       shared.set(row.objectId, row.path);
     }
   }

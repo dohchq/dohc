@@ -502,8 +502,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentCovered(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}) {
-    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner);
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner, restoring);
   }
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);

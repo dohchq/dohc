@@ -1,11 +1,12 @@
 import {afterEach, expect, it} from "vitest";
-import {fixture as ticketFixture, binding, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation, scope} from "../liveTickets.test-helper";
-import {openSyncRelayStorage} from "../storage";
+import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "../liveTickets.test-helper";
+import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
   type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion} from "./accountDeletion";
+import {revokeShareGrantInTransaction} from "./shares";
 import type {StorageContext} from "./context";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -396,7 +397,8 @@ it("retirement frees capacity beyond 64 lifetime documents while preserving ever
   expect(() => f.setEnabled(true)).toThrow("capacity");
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   retire("docs/sixty-fifth.md");
-  expect(f.enroll()).toEqual({...first, updatedAtMs: 25});
+  // Stop at 20 ended the first run.
+  expect(f.enroll()).toEqual({...first, runToken: 20, updatedAtMs: 25});
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
 });
@@ -631,163 +633,198 @@ it("retires the activation when deleting a collaborator's account ends the last 
   expect(f.owner()).toBe("refused");
 });
 
-const SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
-// The fixture document after the owner's finished restore that ended its last Edit grant.
-async function restored() {
-  const f = await activated(), restore = restoredWithoutEditGrant(f.storage, f.raw, key.namespace);
+// The fixture document after the owner's restore that kept its live session through its own revocation.
+async function kept() {
+  const f = await activated(), restore = keptByOwnerRestore(f.raw, key.namespace);
   const enrolled = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
-  const enabled = (owner?: {userId: string; shareId: string}) => serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner);
+  const enabled = (owner?: {userId: string; shareId: string}, restoring = false) =>
+    serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner, restoring);
   const asOwner = {userId: "owner-1", shareId: scope.shareId};
-  return {...f, restore, enrolled, enabled, asOwner, covered: () => f.storage.serviceHostEnrollmentCovered(enrolled())};
+  const covered = (storage: SyncRelayStorage = f.storage) =>
+    storage.serviceHostEnrollmentCovered(storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!);
+  // The host retiring the kept activation once it released the document.
+  const retireKept = () => f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?")
+    .run(restore.activationId);
+  // The same answers from the same store after a restart.
+  const afterRestart = () => {
+    const reopened = openSyncRelayStorage(f.path, f.config);
+    try {return {covered: covered(reopened), owner: serviceHostDocumentEnabled(reopened as StorageContext, binding, asOwner)};} finally {reopened.close();}
+  };
+  return {...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart};
+}
+type Kept = Awaited<ReturnType<typeof kept>>;
+// The owner's restore revoking the last Edit grant, as `beginStopRestore` does, keeping `activationId`.
+function revokeKeeping(f: Awaited<ReturnType<typeof activated>>, activationId: string) {
+  let keeps = 0;
+  const revoked = (f.storage as StorageContext).tx(() => revokeShareGrantInTransaction(f.storage as StorageContext,
+    {shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30, expectedDependentGrantIds: []},
+    {workspaceId: binding.workspaceId, objectId: binding.objectId, activationId, kept: () => { keeps++; }}));
+  return {ok: revoked.ok, keeps};
 }
 
-// Proves: the owner's restore that ended the document's last Edit grant keeps
-// the document live for that owner once the restore resumed and its
-// activation retired. Only the enrollment's own owner and share continue; the
-// revoked recipient does not, and the grant stays revoked. Admission stays
-// closed until the owner's next activation completes.
-it("keeps a document live for its owner after their restore ended its last Edit grant", async () => {
-  const f = await restored();
+// Proves: the owner's restore that kept the note's live session keeps it live
+// for that owner alone, through the host's release and a restart. The
+// activation does not retire, and the grant stays revoked.
+it("keeps a note live for its owner after their restore, and for no one else", async () => {
+  const f = await kept();
+  expect(f.retirement()).toBeNull();
   expect(f.covered()).toBe(true);
   expect(f.enabled(f.asOwner)).toBe(true);
   expect(f.enabled()).toBe(false);
   expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
   expect(f.enabled({userId: "owner-1", shareId: "another-share"})).toBe(false);
   expect(f.release()).toBeNull();
-  expect(f.enrolled()).toMatchObject({enabled: true, retired: false, ownerStop: null});
-  expect(f.owner()).toBe("refused");
-  retainSuccessorActivation(f.raw, false);
-  expect(f.owner()).toBe("refused");
-  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(SUCCESSOR);
-  expect(f.owner()).toBe("current");
-  expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "named", userId: scope.userId, grantId: scope.grantId}}).kind).toBe("refused");
+  expect(f.enrolled()).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10});
+  expect(f.afterRestart()).toEqual({covered: true, owner: true});
   expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "named", userId: scope.userId, grantId: scope.grantId}}).kind).toBe("refused");
 });
 
-// Proves: nothing but that exact finished restore keeps the document live.
-// Each case leaves the owner without live editing, and the host's release
-// retires the enrollment as it would for any document no Edit grant covers.
+// Proves: while the restore is unfinished the host keeps the note, but the
+// owner's live editing waits for the restore to resume.
+it("keeps a note with its host during the owner's unfinished restore and admits no edit until it resumes", async () => {
+  const f = await kept();
+  f.restore.update("phase='settled'");
+  expect(f.covered()).toBe(true);
+  expect(f.enabled(f.asOwner, true)).toBe(true);
+  expect(f.enabled(f.asOwner)).toBe(false);
+  expect(f.release()).toBeNull();
+  f.restore.update("phase='resumed'");
+  expect(f.enabled(f.asOwner)).toBe(true);
+});
+
+// Proves: nothing but the latest restore's record of the current run, owner
+// and share, at the current fence, workspace and path, keeps the note live.
 it.each([
-  ["an unfinished restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("phase='settled'")],
-  ["a cancelled restore", (f: Awaited<ReturnType<typeof restored>>) => {
-    f.restore.update(`phase='authority-invalidated',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,terminal_json=NULL,applied_json=NULL,
-      native_receipt_json=NULL`);
-    f.raw.prepare(`INSERT INTO sync_relay_live_restore_cancellations(relay_database_namespace,operation_id,workspace_id,requested_at_ms,outcome,
-      acknowledgment_json,journal_cursor,accounted_bytes) VALUES (?,'restore',?,35,'cancelled','{}',NULL,1)`).run(key.namespace, scope.workspaceId);
-  }],
-  ["a declined restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
+  ["a declined restore", (f: Kept) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
     terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL,declined_at_ms=35`)],
-  ["a restore of another activation", (f: Awaited<ReturnType<typeof restored>>) =>
-    f.restore.update(`basis_json=json_set(basis_json,'$.ownerOrigin','{"adoptionId":"earlier-activation"}')`)],
-  ["a restore without the owner's activation", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("intent_json=json_set(intent_json,'$.deliveryKind','bootstrap')")],
-  ["a retirement the restore did not open", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("invalidated_at_ms=20")],
-  ["a later restore generation", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9")],
-  ["a replaced workspace identity", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'")],
-  ["another workspace owner", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='owner-2'")],
-  ["a document moved from its restored path", (f: Awaited<ReturnType<typeof restored>>) => f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,
+  ["a restore that kept nothing", (f: Kept) => f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')")],
+  ["a restore that kept an earlier run", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.runToken',9)")],
+  ["a restore that kept another share", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.shareId','another-share')")],
+  ["a later restore generation", (f: Kept) => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9")],
+  ["a replaced workspace identity", (f: Kept) => f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'")],
+  ["another workspace owner", (f: Kept) => f.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='owner-2'")],
+  ["a note moved from its restored path", (f: Kept) => f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,
     relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES (?,?,2,'moved','main','docs/b.md',?,'text',1,2)`)
     .run(scope.workspaceId, binding.objectId, "b".repeat(64))],
-] as const)("does not keep a document live for its owner after %s", async (_case, change) => {
-  const f = await restored();
+] as const)("does not keep a note live for its owner after %s", async (_case, change) => {
+  const f = await kept();
   change(f);
   expect(f.covered()).toBe(false);
+  expect(f.enabled(f.asOwner, true)).toBe(false);
   expect(f.enabled(f.asOwner)).toBe(false);
   expect(f.release()).toMatchObject({enabled: false, retired: true});
 });
 
 // Proves: no other document inherits the continuation: not another object
 // at the restored path, and not a sibling the same share covered.
-it("keeps only the restored document live, not a replacement or sibling", async () => {
-  const f = await restored();
+it("keeps only the restored note live, not a replacement or sibling", async () => {
+  const f = await kept();
   for (const other of [{objectId: "replacement", path: binding.currentPath}, {objectId: "sibling", path: "docs/b.md"}]) {
     expect(f.storage.serviceHostEnrollmentCovered({...f.enrolled(), ...other})).toBe(false);
   }
 });
 
-// The host retiring the owner's next activation at the boundary it released.
-const retireSuccessor = (f: Awaited<ReturnType<typeof restored>>) =>
-  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(SUCCESSOR);
-
-// Proves: Pause only fences a restored document, before or after the owner's
-// next activation exists, and Resume brings live editing back for the owner
-// alone. The paused activation retires as any other, the grant stays revoked,
-// and admission waits for the owner's next activation to complete.
-it.each([["before", false], ["after", true]] as const)("brings live editing back when the owner resumes a paused restored document %s their next activation exists",
-  async (_when, successor) => {
-    const f = await restored();
-    if (successor) retainSuccessorActivation(f.raw, true);
-    expect(f.owner()).toBe(successor ? "current" : "refused");
-    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40})).toMatchObject({ownerStop: "pause"});
-    expect(f.enabled(f.asOwner)).toBe(false);
-    expect(f.owner()).toBe("refused");
-    expect(f.covered()).toBe(true);
-    expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
-    if (successor) {
-      expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 40});
-      retireSuccessor(f);
-    }
-    expect(f.enabled(f.asOwner)).toBe(false);
-    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50})).toMatchObject({enabled: true, retired: false, ownerStop: null});
-    expect(f.covered()).toBe(true);
-    expect(f.enabled(f.asOwner)).toBe(true);
-    expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
-    expect(f.owner()).toBe("refused");
-    expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+// Proves: the restore's revocation keeps only the exact activation it names.
+// The run of every other note it leaves without Edit access ends, here a
+// sibling under the same folder share, and naming another activation keeps
+// nothing: that note's retirement opens as on any revocation.
+it.each([["its own activation", true], ["another activation", false]] as const)("keeps a note through the restore's revocation only when it names %s",
+  async (_case, own) => {
+    const f = await activated();
+    f.seed(scope.workspaceId, "sibling", "docs/b.md", "sibling-share");
+    f.enroll({path: "docs/b.md"});
+    const run = (path: string) => f.storage.readServiceHostEnrollment(scope.workspaceId, path)!.runToken;
+    expect(revokeKeeping(f, own ? `ordinary-activation-${"a".repeat(64)}` : "another-activation")).toEqual({ok: true, keeps: own ? 1 : 0});
+    expect(f.retirement()).toEqual(own ? null : recorded(30));
+    expect(run(binding.currentPath)).toBe(own ? 10 : 30);
+    expect(run("docs/b.md")).toBe(30);
   });
 
-// Proves: Stop ends live editing that the owner's restore kept, before or
-// after the owner's next activation exists. Neither Resume nor enrolling the
-// document again brings it back. Sharing it for editing again does.
-it.each([["before", false], ["after", true]] as const)("ends live editing for good when the owner stops a restored document %s their next activation exists",
-  async (_when, successor) => {
-    const f = await restored();
-    if (successor) retainSuccessorActivation(f.raw, true);
-    const prepared = successor ? {prepared: {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}}} : {};
-    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 40, ...prepared}))
-      .toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
-    expect(f.enabled(f.asOwner)).toBe(false);
+// Proves the hard rule: when a retirement is already open, the restore's
+// revocation neither clears, skips nor replaces it, keeps nothing, and ends
+// the run, so no record of a kept session can follow.
+it("leaves an open retirement in place when the owner's restore revokes the last Edit grant", async () => {
+  const f = await activated();
+  expect(f.setEnabled(false)).toMatchObject({ownerStop: "pause"});
+  expect(f.retirement()).toEqual(recorded(20));
+  expect(revokeKeeping(f, `ordinary-activation-${"a".repeat(64)}`)).toEqual({ok: true, keeps: 0});
+  expect(f.retirement()).toEqual(recorded(20)); expect(f.retirements()).toBe(1);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({runToken: 30});
+});
+
+// Proves: Pause only fences a restored note, and Resume brings the owner's
+// live editing back once the paused activation retired.
+it("brings live editing back when the owner resumes a paused restored note", async () => {
+  const f = await kept();
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40})).toMatchObject({ownerStop: "pause"});
+  expect(f.retirement()).toMatchObject({activationId: f.restore.activationId, requestedAtMs: 40});
+  expect(f.enabled(f.asOwner)).toBe(false);
+  expect(f.covered()).toBe(true);
+  expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
+  f.retireKept();
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50}))
+    .toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 10});
+  expect(f.covered()).toBe(true);
+  expect(f.enabled(f.asOwner)).toBe(true);
+  expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
+  expect(f.afterRestart()).toEqual({covered: true, owner: true});
+});
+
+// Proves: Stop ends live editing the restore kept, for good. Neither Resume
+// nor enrolling the note again brings it back.
+it.each([10, 5] as const)("ends live editing for good when the owner stops a restored note (%s)",
+  async nowMs => {
+    const f = await kept();
+    const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs, prepared}))
+      .toMatchObject({enabled: false, retired: true, ownerStop: "retire", runToken: 11});
+    expect(f.covered()).toBe(false);
     expect(f.release()).toMatchObject({retired: true});
-    if (successor) {
-      expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 40});
-      retireSuccessor(f);
-    }
-    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    f.retireKept();
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null});
     expect(f.covered()).toBe(false);
     expect(f.enabled(f.asOwner)).toBe(false);
     expect(f.release()).toMatchObject({enabled: false, retired: true});
-    expect(f.enroll({nowMs: 60})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.enroll({nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 11});
     expect(f.covered()).toBe(false);
     expect(f.enabled(f.asOwner)).toBe(false);
-    f.share("again", "again-edit");
-    expect(f.covered()).toBe(true);
-    expect(f.enabled(f.asOwner)).toBe(true);
+    expect(f.afterRestart()).toEqual({covered: false, owner: false});
   });
 
-// Proves: overlapping Edit grants decide as before. A new Edit share keeps
-// the document live by itself; ending it is an ordinary revocation that
-// retires the owner's next activation and ends the continuation. The owner's
-// next restore that ends a last Edit grant keeps the document live again.
-it("ends the continuation on a later revocation, and continues after a repeated restore", async () => {
-  const f = await restored();
-  retainSuccessorActivation(f.raw, true);
-  f.share("again", "again-edit");
-  expect(f.covered()).toBe(true);
-  expect(f.storage.revokeShareGrant({shareId: "again", grantId: "again-edit", revokedAtMs: 50}).ok).toBe(true);
-  expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 50, restoreFenceGeneration: 8});
+// Proves: every ordinary end of Edit access after the restore ends the
+// owner's continuation for good: lowering a new Edit link to View, revoking a
+// new Edit grant, and that person's account deletion before the host releases
+// the note. The kept activation retires as on any such revocation.
+it.each([
+  ["the owner lowers a new Edit link to View", 50, (f: Kept) => {
+    f.share("again", "again-view", "view");
+    expect(f.storage.createLinkGrant({grant: {grantId: "again-link", shareId: "again", principalKind: "link", principalUserId: null, principalEmail: null,
+      access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null},
+      credential: {credentialId: "again-credential", grantId: "again-link", secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
+    expect(f.covered()).toBe(true);
+    expect(f.storage.retuneShareGrant({shareId: "again", grantId: "again-link", access: "view", changedAtMs: 50, expectedDependentGrantIds: [], guard() {}}).ok).toBe(true);
+  }],
+  ...([10, 5, 50] as const).map(nowMs => [`the owner revokes a new Edit grant (${nowMs})`, nowMs, (f: Kept) => {
+    f.share("again", "again-edit");
+    expect(f.storage.revokeShareGrant({shareId: "again", grantId: "again-edit", revokedAtMs: nowMs}).ok).toBe(true);
+  }] as const),
+  ["the owner revokes a new Edit grant and that person's account is deleted", 50, (f: Kept) => {
+    initializeAccountDeletion(f.storage as StorageContext, "fence-key");
+    f.share("again", "again-edit");
+    expect(f.storage.revokeShareGrant({shareId: "again", grantId: "again-edit", revokedAtMs: 50}).ok).toBe(true);
+    fenceAccount(f.storage as StorageContext, "fence-key", "reader-2", "reader-2@dohc.test");
+  }],
+] as const)("ends the owner's continuation when %s", async (_case, endedAtMs, end) => {
+  const f = await kept();
+  end(f);
+  expect(f.enrolled().runToken).toBe(Math.max(endedAtMs, 11));
+  expect(f.retirement()).toMatchObject({activationId: f.restore.activationId, restoreFenceGeneration: 8});
   expect(f.covered()).toBe(false);
-  // Had that revocation been the owner's second restore, it resumes at generation 9 and the successor retires.
-  f.raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
-      lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,
-      invalidated_at_ms,fenced_at_ms,accounted_bytes)
-    SELECT 'second',relay_database_namespace,operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,json_set(intent_json,'$.operationId','second'),
-      json_set(basis_json,'$.ownerOrigin',?),terminal_json,applied_json,native_receipt_json,'resumed',8,9,cutover_cursor,revoked_generation,50,50,accounted_bytes
-    FROM sync_relay_live_restore_operations WHERE operation_id='restore'`).run(JSON.stringify({adoptionId: SUCCESSOR}));
-  expect(f.covered()).toBe(false);
-  f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9");
-  f.raw.prepare(`UPDATE sync_relay_service_activations SET retire_restore_generation=9,retired_at_ms=60,retired_boundary_json='{}',state_bytes=NULL
-    WHERE activation_id=?`).run(SUCCESSOR);
-  expect(f.covered()).toBe(true);
-  expect(f.enabled(f.asOwner)).toBe(true);
+  expect(f.release()).toMatchObject({enabled: false, retired: true});
+  f.retireKept();
+  expect(f.enabled(f.asOwner)).toBe(false);
+  expect(f.afterRestart()).toEqual({covered: false, owner: false});
 });
 
 it("candidate scanning advances past a full page of noncanonical shares", async () => {
