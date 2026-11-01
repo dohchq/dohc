@@ -15,8 +15,9 @@
 # runs from Oct 1 to Oct 11 the step's execution phase had a median of 14.8
 # minutes, set by three large-history tests at 496s to 660s. Those three now
 # take 37s to 58s run together. In full collab and runtime suite runs the
-# slowest test is `admitted_baselines_commit_atomically_and_replay_after_reopen`:
-# 37s alone and 85s to 122s beside the rest of its suite. On Oct 13 a gate run
+# slowest test was `admitted_baselines_commit_atomically_and_replay_after_reopen`:
+# 37s alone and 85s to 122s beside the rest of its suite, before it moved to one
+# store (#3025). On Oct 13 a gate run
 # on a loaded host timed out two capacity tests at 3 minutes that took 48s to
 # 63s in another gate run that day. 6 minutes is 3x the worst ordinary run.
 #

@@ -337,41 +337,40 @@ fn a_file_on_another_device_is_drained_at_once() {
     assert!(ws.store.take_flush_trace().is_empty());
 }
 
-/// A version switch replaces every file it changes. 1,000 replaced files
-/// take 2,000 barriers, a temp and a folder each, and one drain pays for all
-/// of them.
+/// A version switch replaces every file it changes. Each replaced file takes
+/// a barrier on its temp and then on its folder while its job is still
+/// pending, and one drain pays for all of them. Three files in two folders
+/// show the order; more files repeat the same two flushes each.
 #[test]
-fn a_thousand_file_switch_takes_two_thousand_barriers_and_one_drain() {
+fn a_version_switch_flushes_each_file_then_its_folder_and_drains_once() {
     let mut ws = Workspace::new("switch-count");
-    for n in 0..1000 {
-        let rel = format!("d{}/f{n}.md", n / 100);
-        std::fs::create_dir_all(ws.path(&format!("d{}", n / 100))).expect("folder");
+    let files = ["d0/f0.md", "d0/f1.md", "d1/f2.md"];
+    for (n, rel) in files.into_iter().enumerate() {
+        std::fs::create_dir_all(ws.path(&rel[..2])).expect("folder");
         let before = format!("before {n}");
-        std::fs::write(ws.path(&rel), &before).expect("preimage");
+        std::fs::write(ws.path(rel), &before).expect("preimage");
         ws.store
             .put_binary_blob(before.as_bytes())
             .expect("preimage blob");
         let preimage = Preimage::Present(hex_sha256(before.as_bytes()));
         let id = format!("version-switch-mat_{n:04}");
-        ws.enqueue(&id, &rel, format!("after {n}").as_bytes(), preimage, false);
+        ws.enqueue(&id, rel, format!("after {n}").as_bytes(), preimage, false);
     }
     let ended = ws.watch_ended_jobs();
     let results = run_pending_jobs(&ws.store, &ws.path(""), &options()).expect("switch");
-    assert_eq!(results.len(), 1000);
-    // Job n flushes its temp and folder while the n jobs before it have ended
-    // and it has not.
-    let ended = ended.lock().unwrap().clone();
-    let expected: Vec<i64> = (0..2000).map(|flush| flush / 2).collect();
-    assert_eq!(ended, expected);
+    assert_eq!(results.len(), files.len());
     assert!(
         results
             .iter()
             .all(|result| result.outcome == JobOutcome::Completed)
     );
-    ws.store.drain_flushes().expect("drain");
-    let trace = ws.store.take_flush_trace();
-    let count = |kind| trace.iter().filter(|event| event.kind == kind).count();
-    assert_eq!(count(ORDERED), 2000);
-    assert_eq!(count(FlushKind::Drain), usize::from(BARRIERS));
-    assert_eq!(trace.len(), 2000 + count(FlushKind::Drain));
+    // Job n flushes its temp and folder while the n jobs before it have ended
+    // and it has not.
+    assert_eq!(*ended.lock().unwrap(), vec![0, 0, 1, 1, 2, 2]);
+    let names = ["d0/f0.md", "d0/f1.md", "d1/f2.md", "d0", "d1"];
+    assert_eq!(
+        ws.flushes(&names),
+        ordered(&["d0/f0.md", "d0", "d0/f1.md", "d0", "d1/f2.md", "d1"])
+    );
+    ws.assert_drains_once();
 }
