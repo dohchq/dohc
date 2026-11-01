@@ -238,8 +238,9 @@ export function OpenExternallyControl(props: {
 // The file Open externally opens, and where a failed open is reported.
 export type OpenExternallyTarget = { workspaceId: string; path: string; onError?: ReportButtonError };
 
-// Opens a read-only note in the system's app for the file.
-export function OpenExternallyLink(props: OpenExternallyTarget) {
+// Opens a read-only note in the system's app for the file. A surface that can
+// show beside a lossy note's notice gives the link its own test ID.
+export function OpenExternallyLink(props: OpenExternallyTarget & { testId?: string }) {
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -252,7 +253,7 @@ export function OpenExternallyLink(props: OpenExternallyTarget) {
       {(describedBy) => (
         <button
           type="button"
-          data-testid="lossy-note-open-externally"
+          data-testid={props.testId ?? "lossy-note-open-externally"}
           aria-describedby={describedBy}
           onClick={openExternally}
           className="whitespace-nowrap text-muted hover:text-ink"

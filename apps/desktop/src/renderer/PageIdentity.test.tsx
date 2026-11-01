@@ -86,6 +86,34 @@ describe("PageIdentity", () => {
       expect(flag.contains(open)).toBe(true);
     });
 
+    it.each([false, true])("shows a locked block's title read-only, with no flag (shared: %s)", async (shared) => {
+      const user = userEvent.setup();
+      // Written on one line, the block cannot change one property without
+      // rewriting the others.
+      const body = "---\n{title: Plan, owner: Sam}\n---\n\n# Body\n";
+      const doc = markdownToYDoc(body);
+      const onChange = vi.fn();
+      try {
+        render(
+          shared
+            ? <PageIdentity ydoc={doc} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />
+            : <PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />,
+        );
+        const title = screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement;
+        expect(title.value).toBe("Plan");
+        expect(title.readOnly).toBe(true);
+        expect(screen.queryByTestId("page-icon-add")).toBeNull();
+        expect(screen.queryByRole("status")).toBeNull();
+
+        await user.type(title, "!");
+
+        expect(title.value).toBe("Plan");
+        expect(onChange).not.toHaveBeenCalled();
+        expect(screen.queryByRole("status")).toBeNull();
+        expect(screen.queryByText("Title and icon are read-only")).toBeNull();
+      } finally { doc.destroy(); }
+    });
+
     it("removes the title key when the field is cleared", async () => {
       const user = userEvent.setup();
       render(
