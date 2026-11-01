@@ -555,6 +555,15 @@ export function stopRestoreFinishedAtMovedPath(storage: StorageContext, operatio
   if (operation.phase !== "resumed") refuse();
   return !objectHoldsFrozenPath(storage, operation);
 }
+/**
+ * Inside the transaction that resumes the restore. A restore that kept the
+ * owner's live session but finishes after its file left the frozen path can't
+ * keep it: the note is away from where live editing began. It ends the run and
+ * opens the retirement, which settles the frozen path.
+ */
+export function endKeptRunAwayFromFrozenPath(storage: StorageContext, operation: StopRestoreOperation, at: number): void {
+  if (!objectHoldsFrozenPath(storage, operation)) endKeptRun(storage, operation, at);
+}
 /** Whether the restore's object still holds its frozen path. Admission refuses otherwise. */
 export function stopRestoreHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
   return !departedFrozenPath(storage, operation);

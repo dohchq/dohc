@@ -3027,8 +3027,8 @@ it("declines a restore whose file is renamed before its fence", () => {
 // Proves: once relay admission takes a restore, a rename no longer ends it.
 // Its host finishes it across a restart at the frozen path, generation and
 // binding. The renamed file and the object now at the old path keep their
-// moments, the live document keeps the path it registered at, and its open
-// retirement still settles the frozen path. The restore's settlement moment
+// moments, the live document keeps the path it registered at, and the
+// retirement its resume opens settles the frozen path. The restore's settlement moment
 // lands as retirement output at the frozen path and projects nowhere. The
 // retirement then completes at the restore's own key, with the owner
 // delivery's boundary at the restore's accepted row. A successor needs fresh
@@ -3072,6 +3072,28 @@ it("finishes an admitted restore at its frozen path after its file is renamed", 
     db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId);
     expect(reopened.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor})).toEqual({kind: "refused", reason: "stale-document"});
   } finally {if (!closed) f.close(); reopened?.close();}
+});
+
+// Proves: a restore that kept the owner's live session and resumes after its
+// file is renamed ends that session as it resumes. The run ends, and the
+// retirement opens at the restored generation and the restore's own row, so
+// the frozen path settles. A restore that resumes in place keeps the session.
+it.each(["renamed", "in place"] as const)("ends the owner's kept live session when a restore resumes after its file is renamed: %s", async when => {
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
+  try {
+    const retirement = () => readServiceActivationRetirement(f.context, f.document);
+    const runToken = () => f.storage.readServiceHostEnrollmentByObjectId(f.document.workspaceId, f.document.objectId)!.runToken, kept = runToken();
+    if (when === "renamed") departFrozenPath(f);
+    expect(retirement()).toBeNull();
+    expect(f.complete().phase).toBe("resumed");
+    if (when === "renamed") {
+      expect(retirement()).toMatchObject({...carriedRetirement(f).key, path: "docs/a.md", requestedAtMs: f.resume.recordedAtMs});
+      expect(runToken()).not.toBe(kept);
+    } else {
+      expect(retirement()).toBeNull();
+      expect(runToken()).toBe(kept);
+    }
+  } finally {f.close();}
 });
 
 // A real identity rotation raises the log floor to the log's tip, past the restore's baseline.
