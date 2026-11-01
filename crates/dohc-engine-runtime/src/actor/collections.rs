@@ -2580,7 +2580,7 @@ mod collection_relation_cleanup_tests {
     const FLIGHTS: &str = "tasks/flights.md";
     const SOURCE: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Packing list\n\n<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
     const TARGET: &str = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n\n# Book flights\n";
-    const REWRITTEN: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n# Packing list\n\n&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\nSunscreen and a spare charger.\n\n&lt;/details&gt;\n\nSee [the airline's bag rules](https://example.com/bags).\n\n&#91;bags&#93;&#58; https&#58;//example&#46;com/bags";
+    const REWRITTEN: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n# Packing list\n\n&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\nSunscreen and a spare charger.\n\n&lt;/details&gt;\n\nSee [the airline's bag rules](https://example.com/bags).\n\n&#91;bags&#93;&#58; https&#58;//example&#46;com/bags\n";
 
     fn write_text(
         store: &mut EngineStore,
@@ -3441,7 +3441,7 @@ mod collection_relation_cleanup_tests {
         let mut store = EngineStore::open(&db, 1).unwrap();
         ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
             .unwrap();
-        let markdown = format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource");
+        let markdown = format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource\n");
         write_text(
             &mut store,
             "schema",

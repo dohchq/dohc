@@ -181,7 +181,7 @@ it.skipIf(engine.missing)("closes remaining engines and removes storage after se
 it.skipIf(engine.missing)("settles safe imported Markdown after body and field edits expire its witness", async () => {
   const root = await tempRoot("automation-witness-checker");
   const server = await computer({root, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: {kind: "claim"}});
-  const original = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.\n`;
+  const original = `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.`;
   await server.request("versionedText.write", {versionId: "main", path: "Tasks/collection.yaml",
     text: "fields: {Status: {type: text}}\n", origin: "api", publish: true}, server.workspace);
   await server.request("versionedText.write", {versionId: "main", path: "Tasks/one.md", text: original,

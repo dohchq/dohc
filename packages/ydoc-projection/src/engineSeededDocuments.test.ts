@@ -29,7 +29,7 @@ describe('engine-seeded documents', () => {
     try {
       Y.applyUpdate(doc, Uint8Array.from(update))
       expect(doc.getMap('meta').get('schemaVersion')).toBe(1)
-      expect(admitted(update).projectedMarkdown).toBe(markdown && `${markdown}\n`)
+      expect(admitted(update).projectedMarkdown).toBe(markdown)
     } finally { doc.destroy() }
   })
 

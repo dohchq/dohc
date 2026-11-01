@@ -9064,7 +9064,7 @@ mod projection_tests {
             .unwrap();
         assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, code);
         for depth in [QUOTE_FOLD_MAX_DEPTH - 1, QUOTE_FOLD_MAX_DEPTH] {
-            let quote = format!("{}deep", "> ".repeat(depth));
+            let quote = format!("{}deep\n", "> ".repeat(depth));
             doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &quote)
                 .unwrap();
             assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, quote);
@@ -10860,7 +10860,7 @@ mod projection_tests {
             remote
                 .apply(&source.encode_full_state())
                 .expect("valid update");
-            assert_eq!(remote.project_richdoc().unwrap(), expected);
+            assert_eq!(remote.project_richdoc().unwrap(), format!("{expected}\n"));
         }
         // `opens_block` errs toward yes, as the importer's `opensBlock` does.
         for (link, opens) in [
@@ -12347,7 +12347,8 @@ fn main() {}
             doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
                 .unwrap();
             let markdown = row["markdown"].as_str().unwrap();
-            let selected = format!("{} edited\n", markdown.trim_end_matches('\n'));
+            let ending = if markdown.ends_with("\r\n") { "\r\n" } else { "\n" };
+            let selected = format!("{} edited{ending}", markdown.trim_end_matches(['\r', '\n']));
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &selected)
                 .unwrap();
             assert_eq!(
