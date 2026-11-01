@@ -13,7 +13,7 @@ import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {fixture as ticketFixture, binding, scope, keptByOwnerRestore, retainServiceActivation} from "./liveTickets.test-helper";
-import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
+import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
@@ -55,6 +55,9 @@ const storeName = (workspaceId: string, replicationEpoch = "epoch", streamIdenti
 async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean; unavailable?: AbortSignal; pending?: string[];
   seed?(data: string, relay: Awaited<ReturnType<typeof ticketFixture>>): Promise<void>} = {}) {
   const f = await ticketFixture(); cleanup.push(f.close);
+  // The relay attaches its history as it opens its storage, before anything reads it (`openRelayDeployment`).
+  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
+  attachLiveJournalHistory(f.storage as StorageContext, history);
   if (options.unavailable) vi.spyOn(f.storage, "unavailable", "get").mockReturnValue(options.unavailable);
   // The ticket fixture provisions a device; this supervisor test starts a clean service deployment.
   f.raw.exec("DELETE FROM sync_relay_session_host_control");
@@ -68,7 +71,6 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     f.storage.releaseServiceHostEnrollment({workspaceId: enrolled.workspaceId, objectId: enrolled.objectId, nowMs: 10});
   }
   await options.seed?.(data, f);
-  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   const frameChanges = createNamedFrameChanges(8);
   // A stand-in for the service host: it records each membership update, keeps
   // each wanted workspace attached, and, like a hosted replica, keeps a

@@ -3215,6 +3215,7 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   // A restart after the restore resumed continues the same session.
   host = await hostingAgain(o, host);
   await ownerEditsAgain(o, host, fence);
+  expect(delivered(o)).not.toContain("edit-after");
   expect(journalText(o)).toBe(restoredText("after"));
   await editOnce(o, host, "again");
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
@@ -3276,7 +3277,9 @@ it("charges the owner's restore for the record it stores, and no more", async ()
     storage.options.workspaceQuotaBytes = usage(o);
     const refused = (() => { try { o.beginRestore(); } catch (error) { return error; } })();
     expect(refused).toBeInstanceOf(SyncRelayQuotaExceededError);
-    return Number(/: (d+) bytes would exceed/.exec((refused as Error).message)![1]) - usage(o);
+    const measured = /: (\d+) bytes would exceed/.exec((refused as Error).message);
+    expect(measured).not.toBeNull();
+    return Number(measured![1]) - usage(o);
   };
   anotherEditGrant(o);
   const plain = charge();
