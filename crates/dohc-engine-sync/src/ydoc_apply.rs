@@ -4100,36 +4100,138 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     match resulting {
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
-            ensure_adopted_owner_binding_unchanged(tx, &complete.key, Some(path))?;
-            require_unfenced_lineage(tx, &complete.key)?;
-            let Some((marker, doc)) = complete.state.as_ref() else {
-                return Ok(());
-            };
-            if lineage_has_content(marker) {
-                let projection =
-                    project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
-                if projection.content != text {
-                    // An adopted owner cannot accept an ordinary rewrite.
-                    // Retain this moment instead of waiting for that rewrite.
-                    ensure_adopted_owner_binding_unchanged(tx, &complete.key, None)?;
-                    if marker.content_kind == ContentKind::Scene {
-                        // The origin of an external scene edit retires its
-                        // lineage instead of emitting a Markdown rewrite (a
-                        // scene has no fold), so the rewrite this pending
-                        // state would wait for is never coming. Converge the
-                        // same way the origin did: the replicated file moment
-                        // is canonical, the lineage retires, and the next
-                        // open seeds a fresh scene from the artifact.
-                        return retire_complete_ydoc_lineage_in_tx(tx, complete);
-                    }
-                    return Err(SyncError::RetryableState {
-                        reason: "ydoc-resulting-head-pending",
-                    });
-                }
-            }
-            settle_ydoc_marker_to_text(tx, &complete.key, path, text, now_ms)
+            let decision = imported_text_head_in_tx(tx, complete, path, text, None)?;
+            apply_imported_text_head_in_tx(tx, complete, &decision, path, text, now_ms)
         }
     }
+}
+
+/// What an imported text head does to the object's closed Y.Doc lineage.
+pub(crate) enum ImportedTextHead {
+    /// The lineage holds no content the text would replace. Settle its
+    /// marker to the text, if there is a marker.
+    Settle,
+    /// No one else can hold the lineage's content. Retire it; the next open
+    /// seeds a fresh lineage from the file.
+    Retire,
+    /// The lineage holds other content. Only a conflict keeps both.
+    Conflict(Box<LineageSide>),
+}
+
+/// A lineage's projection and the authors History does not name yet.
+pub(crate) struct LineageSide {
+    content: String,
+    authors: Option<String>,
+    frontmatter: Option<serde_json::Value>,
+}
+
+/// Decide what an imported text head does to a closed lineage, before the
+/// moment writes anything. `pre_edit_sha256` names the head the moment
+/// replaces. Without it, the lineage is never treated as a disposable seed.
+pub(crate) fn imported_text_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    path: &str,
+    text: &str,
+    pre_edit_sha256: Option<&str>,
+) -> Result<ImportedTextHead, SyncError> {
+    let key = &complete.key;
+    ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
+    require_unfenced_lineage(tx, key)?;
+    let Some((marker, doc)) = complete.state.as_ref() else {
+        return Ok(ImportedTextHead::Settle);
+    };
+    if !lineage_has_content(marker) {
+        return Ok(ImportedTextHead::Settle);
+    }
+    let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+    if projection.content == text {
+        return Ok(ImportedTextHead::Settle);
+    }
+    // An adopted owner cannot accept an ordinary rewrite.
+    // Retain this moment instead of deciding for that owner.
+    ensure_adopted_owner_binding_unchanged(tx, key, None)?;
+    if marker.content_kind == ContentKind::Scene {
+        // The origin of an external scene edit retires its lineage instead
+        // of emitting a Markdown rewrite (a scene has no fold). Converge the
+        // same way the origin did: the replicated file moment is canonical,
+        // the lineage retires, and the next open seeds a fresh scene from
+        // the artifact.
+        return Ok(ImportedTextHead::Retire);
+    }
+    if let Some(pre_edit) = pre_edit_sha256
+        && disposable_seed_in_tx(tx, key, marker, pre_edit)?
+    {
+        return Ok(ImportedTextHead::Retire);
+    }
+    // The conflict records this projection as the head. A lossy note whose
+    // witness no longer matches cannot be written, so it keeps waiting.
+    use dohc_engine_collab::markdown_write_safety;
+    if pre_edit_sha256 != Some(hex_sha256(projection.content.as_bytes()).as_str())
+        && markdown_write_safety::holds(
+            &projection.markdown_write_safety,
+            projection.witness_source_sha256.as_deref(),
+            pre_edit_sha256,
+        )
+        && !markdown_write_safety::check_witness(doc, key, path, None)
+            .map_err(map_collab_hard_error)?
+    {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-resulting-head-pending",
+        });
+    }
+    let authors = dohc_engine_collab::author_coverage::reserved_in(tx, key)
+        .map_err(map_collab_hard_error)?
+        .moment_json();
+    Ok(ImportedTextHead::Conflict(Box::new(LineageSide {
+        content: projection.content,
+        authors,
+        frontmatter: (marker.content_kind == ContentKind::Richdoc)
+            .then(|| doc.frontmatter_json()),
+    })))
+}
+
+/// Settle or retire the lineage as `decision` says. A conflict never settles
+/// here: its moment keeps waiting.
+pub(crate) fn apply_imported_text_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    decision: &ImportedTextHead,
+    path: &str,
+    text: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    match decision {
+        ImportedTextHead::Settle if complete.state.is_none() => Ok(()),
+        ImportedTextHead::Settle => {
+            settle_ydoc_marker_to_text(tx, &complete.key, path, text, now_ms)
+        }
+        ImportedTextHead::Retire => retire_complete_ydoc_lineage_in_tx(tx, complete),
+        ImportedTextHead::Conflict(_) => Err(SyncError::RetryableState {
+            reason: "ydoc-resulting-head-pending",
+        }),
+    }
+}
+
+/// Whether the lineage is still this device's untouched seed of the
+/// pre-edit file, with no copy anywhere else: unclaimed, never journaled,
+/// unbound, and under no open conflict. The pristine witness alone also
+/// accepts an exact replicated claim, so the claim is checked separately.
+fn disposable_seed_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    marker: &dohc_engine_collab::Marker,
+    pre_edit_sha256: &str,
+) -> Result<bool, SyncError> {
+    if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Unclaimed {
+        return Ok(false);
+    }
+    let seed = dohc_engine_collab::pristine_seed_lineage_source(tx, key)
+        .map_err(map_collab_hard_error)?;
+    if seed.as_deref() != Some(pre_edit_sha256) {
+        return Ok(false);
+    }
+    Ok(empty_seed_never_replicated_in_tx(tx, key)? && open_sync_conflict_id(tx, key)?.is_none())
 }
 
 /// Fold a conflict resolution's chosen text into the object's canonical
@@ -4461,6 +4563,26 @@ fn settle_ydoc_marker_to_text(
     Ok(())
 }
 
+/// The conflict side that names a text head exactly, as resolution checks it.
+fn text_snapshot_side(
+    snapshot: &dohc_engine_domain::TextSnapshot,
+) -> crate::moment_apply::ConflictSide {
+    crate::moment_apply::ConflictSide {
+        exists: true,
+        path: snapshot.path.clone(),
+        object_id: Some(snapshot.object_id.clone()),
+        kind: Some(crate::moment_apply::ContentKind::Text),
+        digest: Some(snapshot.blob_sha256.clone()),
+        updated_at_ms: Some(snapshot.updated_at_ms),
+        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
+        metadata: Some(crate::moment_apply::Metadata {
+            origin: snapshot.metadata_origin.clone(),
+            summary: snapshot.metadata_summary.clone(),
+            correlation_id: snapshot.metadata_correlation_id.clone(),
+        }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn open_base_conflict_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -4486,20 +4608,7 @@ fn open_base_conflict_in_tx(
         )),
     );
     let base_side = crate::moment_apply::ConflictSide::absent(path);
-    let current_side = crate::moment_apply::ConflictSide {
-        exists: true,
-        path: snapshot.path.clone(),
-        object_id: Some(snapshot.object_id.clone()),
-        kind: Some(crate::moment_apply::ContentKind::Text),
-        digest: Some(snapshot.blob_sha256.clone()),
-        updated_at_ms: Some(snapshot.updated_at_ms),
-        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
-        metadata: Some(crate::moment_apply::Metadata {
-            origin: snapshot.metadata_origin.clone(),
-            summary: snapshot.metadata_summary.clone(),
-            correlation_id: snapshot.metadata_correlation_id.clone(),
-        }),
-    };
+    let current_side = text_snapshot_side(snapshot);
     let incoming_side = crate::moment_apply::ConflictSide {
         exists: true,
         path: path.to_owned(),
@@ -5752,6 +5861,149 @@ fn conflict_replaced_lineage_in_tx(
     .map(Some)
 }
 
+/// Record a lineage projection the head does not hold as the head's own
+/// History moment, with the authors its interval reserved, as lineage
+/// replacement does. A conflict then shows it as the current side. The
+/// lineage keeps its updates and outbox, and its marker settles to the
+/// recorded head. Returns whether it wrote a moment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_lineage_side_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    side: &LineageSide,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<bool, SyncError> {
+    let current = validate_retryable_ydoc_identity(tx, key, path)?;
+    let projected_sha = hex_sha256(side.content.as_bytes());
+    if current
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.blob_sha256 == projected_sha)
+    {
+        return Ok(false);
+    }
+    // This moment names the reserved authors, so an unresolved settle
+    // attempt must not credit them again.
+    dohc_engine_collab::author_coverage::supersede_in(tx, key, now_ms)
+        .map_err(map_collab_hard_error)?;
+    let preimage = current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
+    let result = write_projected_text_in_tx(
+        tx,
+        &WriteText {
+            workspace_id: key.workspace_id.clone(),
+            version_id: key.version_id.clone(),
+            object_id: key.object_id.clone(),
+            path: path.to_owned(),
+            text: side.content.clone(),
+            moment_id: format!(
+                "{}-local",
+                ydoc_apply_moment_id(key, path, origin_id, origin_seq)
+            ),
+            metadata_origin: "ydoc".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: side.authors.clone(),
+            now_ms,
+            request_id: None,
+        },
+    )
+    .map_err(map_domain_hard_error)?;
+    enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
+    upsert_file_search_index(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        path,
+        Some(&side.content),
+        search_policy,
+    )?;
+    if let Some(frontmatter) = side.frontmatter.as_ref() {
+        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            frontmatter,
+        )
+        .map_err(map_domain_hard_error)?;
+    }
+    dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+        .map_err(map_collab_hard_error)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET settle_seq=?4, last_settled_sha=?5, updated_at_ms=?6, path=?7 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            result.moment.moment_order,
+            projected_sha,
+            now_ms,
+            path,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(true)
+}
+
+/// The per-envelope decision id for a conflict whose current side is the
+/// object's Y.Doc and whose incoming side is the file this envelope wrote.
+fn ydoc_current_side_decision_id(envelope: &ReplicationEnvelope) -> String {
+    let coordinate = format!(
+        "{}\0{}\0{}",
+        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
+    );
+    format!(
+        "sync-ydoc-conflict-side:{}",
+        dohc_engine_storage::hex_sha256(coordinate.as_bytes())
+    )
+}
+
+/// Record that the conflict `envelope` opened shows the Y.Doc as its current
+/// side, so projection coalescing moves that side and keeps the file.
+pub(crate) fn record_ydoc_current_side_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflict_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO engine_requests \
+         (request_id,payload_hash,result_seq,committed_at,kind) \
+         VALUES (?1,?2,?3,?4,'sync-ydoc-conflict-side')",
+        params![
+            ydoc_current_side_decision_id(envelope),
+            conflict_id,
+            envelope.origin_seq,
+            envelope.recorded_at_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn ydoc_holds_current_side_in_tx(
+    conn: &rusqlite::Connection,
+    conflict_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engine_requests \
+         WHERE kind='sync-ydoc-conflict-side' AND payload_hash=?1)",
+        [conflict_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 /// Store projected content for the conflict UI to hydrate from `blobs`.
 fn put_projection_text_blob(
     tx: &rusqlite::Transaction<'_>,
@@ -6351,49 +6603,61 @@ pub fn project_and_write_in_tx(
     ).optional().map_err(SyncError::corrupt)?.flatten();
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
-    // the conflict preserves. Coalesce the incoming side to the freshest
-    // remote projection instead (moment-lane parity) and leave the head and
-    // the settle marker alone until a resolution closes the conflict.
+    // the conflict preserves. Coalesce the Y.Doc's side to the freshest
+    // projection instead (moment-lane parity). When that side is the
+    // incoming one, leave the head and the settle marker alone until a
+    // resolution closes the conflict. When it is the current side, the
+    // incoming side holds a file another device wrote: write the head and
+    // move the current side with it, so the file stays under review and
+    // resolution still finds the head that side names.
+    let mut ydoc_current_side = None;
     if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
-        let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
-        put_projection_text_blob(tx, &projection.content, &projected_sha)?;
-        let matches_reviewed_side: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM conflicts \
-                 WHERE workspace_id=?1 AND conflict_id=?2 AND (\
-                   (current_exists=1 AND current_content_kind='text' \
-                    AND current_blob_sha256=?3) OR \
-                   (incoming_exists=1 AND incoming_content_kind='text' \
-                    AND incoming_blob_sha256=?3)))",
-                params![key.workspace_id, conflict_id, projected_sha],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        // A resolution rewrite names bytes the open conflict already shows.
-        // Keep both side anchors stable for the ordered resolve that follows.
-        if !matches_reviewed_side {
-            crate::moment_apply::coalesce_conflict_sides(
-                tx,
-                &key.workspace_id,
-                &conflict_id,
-                &crate::moment_apply::ConflictSide {
-                    exists: true,
-                    path: path.to_owned(),
-                    object_id: Some(key.object_id.clone()),
-                    kind: Some(crate::moment_apply::ContentKind::Text),
-                    digest: Some(projected_sha),
-                    updated_at_ms: Some(now_ms),
-                    latest_moment_id: Some(ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
-                    metadata: Some(crate::moment_apply::Metadata {
-                        origin: "sync".to_owned(),
-                        summary: None,
-                        correlation_id: None,
-                    }),
-                },
-                now_ms,
-            )?;
+        if ydoc_holds_current_side_in_tx(tx, &conflict_id)? {
+            ydoc_current_side = Some(conflict_id);
+        } else {
+            let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+            put_projection_text_blob(tx, &projection.content, &projected_sha)?;
+            let matches_reviewed_side: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM conflicts \
+                     WHERE workspace_id=?1 AND conflict_id=?2 AND (\
+                       (current_exists=1 AND current_content_kind='text' \
+                        AND current_blob_sha256=?3) OR \
+                       (incoming_exists=1 AND incoming_content_kind='text' \
+                        AND incoming_blob_sha256=?3)))",
+                    params![key.workspace_id, conflict_id, projected_sha],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            // A resolution rewrite names bytes the open conflict already shows.
+            // Keep both side anchors stable for the ordered resolve that follows.
+            if !matches_reviewed_side {
+                crate::moment_apply::coalesce_conflict_side(
+                    tx,
+                    &key.workspace_id,
+                    &conflict_id,
+                    crate::moment_apply::ConflictRole::Incoming,
+                    &crate::moment_apply::ConflictSide {
+                        exists: true,
+                        path: path.to_owned(),
+                        object_id: Some(key.object_id.clone()),
+                        kind: Some(crate::moment_apply::ContentKind::Text),
+                        digest: Some(projected_sha),
+                        updated_at_ms: Some(now_ms),
+                        latest_moment_id: Some(ydoc_apply_moment_id(
+                            key, path, origin_id, origin_seq,
+                        )),
+                        metadata: Some(crate::moment_apply::Metadata {
+                            origin: "sync".to_owned(),
+                            summary: None,
+                            correlation_id: None,
+                        }),
+                    },
+                    now_ms,
+                )?;
+            }
+            return Ok(false);
         }
-        return Ok(false);
     }
     // A deterministic per-envelope id keeps a retained drain's retry on its
     // original History row, even after another write advances the head.
@@ -6583,6 +6847,16 @@ pub fn project_and_write_in_tx(
         ],
     )
     .map_err(SyncError::persist)?;
+    if let Some(conflict_id) = ydoc_current_side.as_deref() {
+        crate::moment_apply::coalesce_conflict_side(
+            tx,
+            &key.workspace_id,
+            conflict_id,
+            crate::moment_apply::ConflictRole::Current,
+            &text_snapshot_side(&result.snapshot),
+            now_ms,
+        )?;
+    }
     Ok(!result.deduped)
 }
 
