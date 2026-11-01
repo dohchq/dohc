@@ -53,11 +53,12 @@ export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
 
 /**
  * The file head a remote update was read with: a resync's head, or a settle's
- * head when `committed` says this session's own save wrote it. An update
- * without one is a delta the engine sent with no head.
+ * head when `committed` says this session's own save wrote it. A head with no
+ * `sha256` installs state whose head is unknown until a resync pairs one with
+ * it. An update without a head is a delta the engine sent with none.
  */
 export interface YdocDeliveredHead {
-  sha256: string | null;
+  sha256?: string | null;
   committed?: true;
 }
 
@@ -1385,19 +1386,17 @@ export class YdocAdapterSession {
   }
 
   // Installs durable state and the head read with it as one delivery. State
-  // without a pairable head installs with the head unknown.
+  // without a pairable head installs with the head unknown, which the
+  // delivery says even when the state changes nothing.
   private installState(update: Uint8Array, headSha256: string | null | undefined): void {
     Y.applyUpdate(this.acknowledgedDoc, update);
     this.installs += 1;
     this.headSha256 = headSha256;
-    if (headSha256 === undefined) {
-      Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
-      return;
+    let head: YdocDeliveredHead = {};
+    if (headSha256 !== undefined) {
+      head = this.confirmsSettle(headSha256) ? { sha256: headSha256, committed: true } : { sha256: headSha256 };
+      this.settled = null;
     }
-    const head: YdocDeliveredHead = this.confirmsSettle(headSha256)
-      ? { sha256: headSha256, committed: true }
-      : { sha256: headSha256 };
-    this.settled = null;
     this.pairedHead = head;
     try {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);

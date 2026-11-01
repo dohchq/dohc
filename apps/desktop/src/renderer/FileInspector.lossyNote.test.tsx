@@ -65,7 +65,7 @@ function lossySession(doc = witness(markdownToYDoc(LOSSY), LOSSY)) {
   return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(LOSSY) };
 }
 
-type EngineHead = { sha256: string | null; committed?: true };
+type EngineHead = { sha256?: string | null; committed?: true };
 type RemoteUpdateListener = (event: { sessionId: string; update: Uint8Array; head?: EngineHead; lineageGeneration: number }) => void;
 const remoteUpdateListeners = new Set<RemoteUpdateListener>();
 const lineageReplacementListeners = new Set<(event: EngineYDocLineageReplacementEvent) => void>();
@@ -557,6 +557,17 @@ describe("Edit anyway", () => {
     // once the note asks again.
     await screen.findByTestId("lossy-note-edit-anyway");
     expect(screen.getByTestId("lossy-note-notice")).toBeTruthy();
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+  });
+
+  it("checks a restore of the accepted source that lands while the converting save is pending, and asks again once its head arrives", async () => {
+    const { bridge } = await editAnyway(LOSSY);
+    // The restore installs while the save runs, so its head is unknown.
+    deliver(bridge, EMPTY_UPDATE, {});
+    expect(screen.queryByTestId("markdown-editor")?.getAttribute("contenteditable")).not.toBe("true");
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha(LOSSY) });
+
+    await screen.findByTestId("lossy-note-edit-anyway");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
   });
 

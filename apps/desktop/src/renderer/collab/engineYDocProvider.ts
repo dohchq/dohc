@@ -29,10 +29,11 @@ const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
 /**
  * The file head an update's state was read with. `committed` marks the head
- * of this session's own save.
+ * of this session's own save. A head with no `sha256` installs state whose
+ * head is unknown.
  */
 export interface EngineYDocHead {
-  sha256: string | null;
+  sha256?: string | null;
   committed?: true;
 }
 
@@ -632,10 +633,13 @@ export async function bindEngineYDoc(
   const install = (target: Y.Doc, current: typeof head, delivery: EngineYDocDelivery): typeof head => {
     const before = sourceWitness(target);
     Y.applyUpdate(target, delivery.update, ENGINE_SOURCED_ORIGIN);
-    if (delivery.head?.committed) lastSave = { sha256: delivery.head.sha256, pairedInstalls };
-    else if (delivery.head && delivery.head.sha256 !== lastSave?.sha256) pairedInstalls += 1;
-    if (delivery.head) return delivery.head.sha256;
-    return sameWitness(before, sourceWitness(target)) ? current : undefined;
+    if (delivery.head === undefined) return sameWitness(before, sourceWitness(target)) ? current : undefined;
+    const { sha256, committed } = delivery.head;
+    // State whose head is unknown waits for the read that pairs one with it.
+    if (sha256 === undefined) return undefined;
+    if (committed) lastSave = { sha256, pairedInstalls };
+    else if (sha256 !== lastSave?.sha256) pairedInstalls += 1;
+    return sha256;
   };
 
   // Apply forwarded remote deltas under the engine origin so they render live

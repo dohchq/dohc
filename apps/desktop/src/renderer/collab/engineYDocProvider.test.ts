@@ -1216,6 +1216,20 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("forgets the head for state main installs with its head unknown, even when it changes nothing", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    mock.pushRemote(new Uint8Array([0, 0]), 1, {});
+    expect(binding.headSha256).toBeUndefined();
+    expect(changes).toHaveBeenCalledTimes(2);
+    // The read that pairs a head with it counts the install.
+    expect(binding.pairedInstalls).toBe(1);
+    await binding.destroy();
+  });
+
   it("installs a replacement with its head, then the head of state buffered behind it", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);

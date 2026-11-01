@@ -791,14 +791,15 @@ it("sends its settle's head as a committed receipt, and confirms it with a fresh
   // State reaches the session while the settle is in flight.
   engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1, payload: {sessionId: session.sessionId, resyncRequired: true}});
   await drain();
-  // That state changed nothing, so it delivers nothing and no head.
-  expect(deliveries).toHaveLength(1);
+  // That state changed nothing, but its head is unknown while the settle
+  // runs, and the delivery says so.
+  expect(deliveries.slice(1)).toEqual([{text: "seed one two", bytes: 2, head: {}, sessionHead: undefined}]);
   const resyncs = engine.requests.filter(request => request.method === YDOC_METHOD.resync).length;
   release.resolve();
   const second = await settled;
   await drain();
   expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(resyncs + 1);
-  expect(deliveries.slice(1)).toEqual([{text: "seed one two", bytes: 2, head: {sha256: second.sha256, committed: true}, sessionHead: second.sha256}]);
+  expect(deliveries.slice(2)).toEqual([{text: "seed one two", bytes: 2, head: {sha256: second.sha256, committed: true}, sessionHead: second.sha256}]);
   await session.close(); adapter.dispose();
 });
 
@@ -819,13 +820,42 @@ it("does not confirm a settle whose paired read shows another source", async () 
   peer.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
   engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
   await drain();
-  expect(deliveries.every(delivery => delivery.head === undefined)).toBe(true);
+  expect(deliveries.every(delivery => delivery.head?.sha256 === undefined)).toBe(true);
   release.resolve();
   const result = await settled;
   await drain();
   expect(deliveries.at(-1)?.head).toEqual({sha256: result.sha256});
   expect(deliveries.some(delivery => delivery.head?.committed)).toBe(false);
   peer.destroy(); await session.close(); adapter.dispose();
+});
+
+it("tells the provider the head is unknown for a restore that lands while a save is in flight", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const {transport, control} = settlingTransport(engine);
+  const deliveries: Array<{text: string; head?: YdocDeliveredHead}> = [];
+  const provider = await openEngineYdocProviderSession({
+    transport, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    onRemoteUpdate: (_update, head) => deliveries.push({text: provider.doc.getText("plainText").toString(), ...(head ? {head} : {})}),
+    scheduleSettle: () => () => undefined,
+  });
+  await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(4, " one")), {armSettle: false});
+  const release = Promise.withResolvers<void>();
+  control.hold = release.promise;
+  const settled = provider.settleNow();
+  await drain();
+  // A restore changes the file while the save is in flight. Main reads the
+  // state again, but no head pairs with it until the save ends.
+  const peer = new Y.Doc(); Y.applyUpdate(peer, Y.encodeStateAsUpdate(provider.doc));
+  const vector = Y.encodeStateVector(peer);
+  peer.getText("plainText").insert(0, "restored ");
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(deliveries).toEqual([{text: "restored seed one", head: {}}]);
+  release.resolve();
+  const result = await settled;
+  await drain();
+  expect(deliveries.at(-1)).toEqual({text: "restored seed one", head: {sha256: result!.sha256, committed: true}});
+  peer.destroy(); await provider.close({settle: true});
 });
 
 it("pairs a head only with the last pass of a resync that a new source overtook", async () => {
