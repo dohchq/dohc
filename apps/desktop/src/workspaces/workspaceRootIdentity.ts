@@ -89,7 +89,8 @@ function identityMatches<Entry>(
  * The deepest folder on `path`, itself included, that is one of `roots`:
  * spelled the same, or else the same folder on disk. `path` is absolute with
  * links resolved. Two roots that are one folder, neither spelled as the path,
- * match nothing. Root identities are read once, and only when spelling misses.
+ * match nothing. Unless the path itself is spelled as a root, a call stats
+ * each root once and each folder on the path until one matches.
  */
 export function deepestRootSync<Entry>(
   path: string,
