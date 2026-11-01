@@ -502,6 +502,11 @@ export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead |
   return kind === undefined ? null : { kind, words: message };
 }
 
+/** A refusal main returned as data, as the error a report reads it from. */
+export function collectionsRefusalError({ kind, words }: Exclude<CollectionsRefusalRead, { kind: "elsewhere" }>): Error {
+  return Object.assign(new Error(words), { name: "CollectionsRefusalError", code: `${COLLECTIONS_REFUSAL_CODE}${kind}` });
+}
+
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {
   return readError(error).words === PRIVACY_DENIED_WORDS;

@@ -51,6 +51,11 @@ export function useCollectionFolders(
     setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
     setArchiveView({ workspaceId, enabled });
   }, [workspaceId]);
+  // The list says in place why this computer cannot list the Collections.
+  const refuse = useCallback((refusal: CollectionsRefusalRead) => {
+    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
+    setRefusalState({ workspaceId, refusal });
+  }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
     const request = ++datasetRequest.current;
     let result;
@@ -70,27 +75,27 @@ export function useCollectionFolders(
         }
         throw new Error(unavailable.failure);
       }
-      if (request !== datasetRequest.current) return;
-      setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
-      setRefusalState({ workspaceId, refusal });
+      if (request === datasetRequest.current) refuse(refusal);
       return;
     }
     if (request !== datasetRequest.current) return;
+    if (result.kind === "collections-refused") return refuse(result.refusal);
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, result.datasets) });
     setRefusalState(null);
-  }, [workspaceId, includeArchived]);
+  }, [workspaceId, includeArchived, refuse]);
   const loadMoreDatasets = useCallback(async () => {
     if (!nextDataset) return;
     const request = ++datasetRequest.current;
     const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, after: nextDataset, ...(includeArchived ? { includeArchived: true } : {}) });
     if (request !== datasetRequest.current) return;
+    if (result.kind === "collections-refused") return refuse(result.refusal);
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState(current => {
       const datasets = [...(current?.workspaceId === workspaceId ? current.datasets : []), ...result.datasets];
       return { workspaceId, datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, datasets) };
     });
-  }, [workspaceId, nextDataset, includeArchived]);
+  }, [workspaceId, nextDataset, includeArchived, refuse]);
   const refreshCollections = useCallback(async () => {
     const request = ++collectionsRequest.current;
     try {

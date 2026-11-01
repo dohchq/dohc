@@ -1,6 +1,7 @@
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
 import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere, type DatasetPlace } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -214,7 +215,20 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       // Creating, approving and recovering stay with the computer that keeps the Collections.
       const server = readsData && dependencies.serverCollectionsFor ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal) : null;
       current();
-      const data = server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
+      const openData = async () => server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
+      if (input.action === "list") {
+        try {
+          const data = await openData(); current();
+          const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
+          return { kind: "list" as const, ...await addressPage(result), ...(server ? { elsewhere: server.elsewhere } : {}) };
+        } catch (error) {
+          current();
+          if (!(error instanceof CollectionsRefusalError) || error.refusal.kind !== "unclaimed") throw error;
+          // The Explorer lists after every change. A refusal thrown here would reach Electron's log each time.
+          return { kind: "collections-refused" as const, refusal: { kind: "unclaimed" as const, words: error.message } };
+        }
+      }
+      const data = await openData();
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
       const migrationAuthority = {
@@ -350,10 +364,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         if (!("setGrant" in data) || !data.setGrant) throw new Error("Collection access is unavailable on this computer.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
-      }
-      if (input.action === "list") {
-        const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
-        return { kind: "list" as const, ...await addressPage(result), ...(server ? { elsewhere: server.elsewhere } : {}) };
       }
       if (input.action === "describe") {
         const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };

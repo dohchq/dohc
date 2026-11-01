@@ -214,6 +214,8 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
+  // A list no computer keeps the Collections for yet. `words` say how to keep them on this one.
+  z.object({ kind: z.literal("collections-refused"), refusal: z.object({ kind: z.literal("unclaimed"), words: z.string().min(1).max(1024) }).strict() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions"), place: DatasetPlace.optional() }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),

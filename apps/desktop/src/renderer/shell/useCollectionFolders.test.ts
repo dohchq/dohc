@@ -60,6 +60,21 @@ it("keeps a refusal to list the Collections here as the list's state, and report
   expect(result.current.collectionsRefusal).toBeNull();
 });
 
+it("keeps a list main refused because no computer keeps the Collections as the list's state, on refresh and load more (#3016)", async () => {
+  const { result, dataset } = setup();
+  const refusal = { kind: "unclaimed", words: "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc." } as const;
+  dataset.mockResolvedValueOnce({ kind: "collections-refused", refusal });
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.collectionsRefusal).toEqual(refusal);
+  expect(result.current.datasets).toEqual([]);
+  await act(async () => result.current.refreshDatasets());
+  expect(result.current.collectionsRefusal).toBeNull();
+  dataset.mockResolvedValueOnce({ kind: "collections-refused", refusal });
+  await act(async () => result.current.loadMoreDatasets());
+  expect(result.current.collectionsRefusal).toEqual(refusal);
+  expect(result.current.datasets).toEqual([]);
+});
+
 it("keeps where the other Collections are with the server's list, only for its own workspace", async () => {
   const { result, dataset, rerender } = setup();
   const elsewhere = { server: "https://relay.example", computer: { label: "Laptop", sameName: false } };

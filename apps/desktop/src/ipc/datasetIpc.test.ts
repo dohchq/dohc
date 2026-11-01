@@ -538,7 +538,12 @@ it.each([
     { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" },
     { workspaceId: "workspace", action: "approve", preparationId: datasetId, revisionSha256: f.revision.revisionSha256 },
   ]) {
-    for (const caller of ["window", "cli"]) await expect(f.handler(caller, request), request.action).rejects.toThrow(words);
+    for (const caller of ["window", "cli"]) {
+      const answer = f.handler(caller, request);
+      // A list returns the unclaimed refusal (#3016).
+      if (request.action === "list" && words === unclaimed) await expect(answer).resolves.toEqual({ kind: "collections-refused", refusal: { kind: "unclaimed", words } });
+      else await expect(answer, request.action).rejects.toThrow(words);
+    }
   }
   expect(await readdir(join(root, ".dohc"))).toEqual(left);
   if (folder) expect(await readdir(join(root, ...folder)), "not opened").toEqual(["state.sqlite"]);
