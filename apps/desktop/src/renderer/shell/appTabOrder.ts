@@ -32,10 +32,11 @@ export function routeAppTab(event: KeyboardEvent) {
   if (!screen.includes(active)) return;
   const step = (order: HTMLElement[]) => order[(order.indexOf(active) + (event.shiftKey ? order.length - 1 : 1)) % order.length];
   const next = step(screen);
-  if (next.matches(FRAME) && event.shiftKey) {
-    // Shift+Tab goes into a page's frame at its end: focus moves to the page's end stop, and the browser goes on
-    // from there into the frame's last control.
-    entering = next.closest(PAGE)?.querySelector<HTMLElement>("[data-app-stop]") ?? null;
+  const page = next.closest(PAGE);
+  if (next.matches(FRAME) && event.shiftKey && !page?.contains(active)) {
+    // Shift+Tab from outside the page goes into its frame at the end: focus moves to the page's end stop, and the
+    // browser goes on from there into the frame's last control. Inside the page the browser already reaches it.
+    entering = page?.querySelector<HTMLElement>("[data-app-stop]") ?? null;
     entering?.focus();
     entering = null;
     return;

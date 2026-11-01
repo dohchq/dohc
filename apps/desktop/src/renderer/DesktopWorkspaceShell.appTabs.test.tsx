@@ -20,7 +20,7 @@ vi.mock("./FileInspector", () => ({
   FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
 }));
 // The app's real view hook, so each open and close reaches the bridge as it does from the app's tab. The button
-// stands in for the page's toolbar. A static site under sites/ shows its preview in an iframe instead.
+// stands in for the page's toolbar. A static site under sites/ shows its preview in an iframe instead, with Logs after it.
 vi.mock("./SitePreviewPage", async () => {
   const { AppViewBody, useAppView } = await import("./AppView");
   return {
@@ -33,7 +33,12 @@ vi.mock("./SitePreviewPage", async () => {
       return (
         <div data-testid="site-preview-page" data-root={props.siteRoot}>
           <button type="button">Reload app</button>
-          {isStatic ? <iframe data-testid="site-preview-frame" title="Notes site" /> : <AppViewBody view={view} onReview={() => undefined} />}
+          {isStatic ? (
+            <>
+              <iframe data-testid="site-preview-frame" title="Notes site" />
+              <details><summary>Logs</summary></details>
+            </>
+          ) : <AppViewBody view={view} onReview={() => undefined} />}
         </div>
       );
     },
@@ -237,7 +242,7 @@ describe("an app's page when its tab moves", () => {
 // jsdom has no guest page, so the walk stands in for one: Tab onto a webview or a preview iframe enters its guest,
 // the guest's keys never reach dohc, and leaving the guest goes on from the frame element in document order.
 const FRAME = "webview, iframe";
-const TABBABLE = `a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), ${FRAME}`;
+const TABBABLE = `a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), details > summary:first-of-type, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), ${FRAME}`;
 const tabbables = () => [...document.querySelectorAll<HTMLElement>(TABBABLE)]
   .filter((element) => !element.closest("[data-app-group-id].hidden, [hidden], [inert]"));
 function keyboard() {
@@ -316,7 +321,8 @@ describe("Tab order with an app beside another group", () => {
     ], []);
     await waitFor(() => expect(document.querySelector('[data-root="sites/notes"] [data-testid="site-preview-frame"]')).not.toBeNull());
     const { regions } = walk("left");
-    expect(regions).toEqual(["group left", "app left", "guest left", "separator", "group right", "outside"]);
+    // The preview's Logs control follows its frame.
+    expect(regions).toEqual(["group left", "app left", "guest left", "app left", "separator", "group right", "outside"]);
   });
 
   it("adds no stop to the order with one group", async () => {
