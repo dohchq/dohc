@@ -1041,18 +1041,18 @@ describe("owner app publication", () => {
     const linksLine = "The server didn't return this app's links.";
 
     it.each([
-      ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false })],
+      ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false }), () => api.cloudStatus],
       // main answers listUnavailable for the relay's not_found 404.
-      ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request))],
+      ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request)), () => api.publishOwnerApp],
       ["the sync status says the server is disconnected", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "cloud-disconnected" });
-      }],
+      }, () => api.getSyncStatus],
       ["the sync status says the server is unreachable", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
-      }],
-    ])("hides Share links when %s", async (_, arrange) => {
+      }, () => api.getSyncStatus],
+    ])("hides Share links when %s", async (_, arrange, decider) => {
       const reportError = vi.fn();
       api.publishOwnerApp.mockImplementation(local([localRow]));
       arrange();
@@ -1061,8 +1061,9 @@ describe("owner app publication", () => {
       expect(await stateText()).toBe("Approved on this device");
       await waitFor(() => expect(api.cloudStatus).toHaveBeenCalled());
       await waitFor(() => expect(actions("list").length).toBeGreaterThan(0));
-      await act(async () => undefined);
-      await act(async () => undefined);
+      // Absence shows no line to wait for, so wait until the answer that decides Share links has arrived.
+      await waitFor(() => expect(decider()).toHaveBeenCalled());
+      await act(async () => { await Promise.allSettled(decider().mock.results.map(result => result.value)); });
       expect(screen.queryByRole("heading", { name: "Share links" })).toBeNull();
       expect(screen.queryByText(linksLine)).toBeNull();
       expect(screen.queryByRole("alert")).toBeNull();

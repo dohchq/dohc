@@ -1270,8 +1270,7 @@ export function DesktopWorkspaceShell(props: {
     [cloudConnected, cloudServerUrl, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, onSharePath, openCloud, openSettings, sharing],
   );
   // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
-  const appServer = cloudStatus?.workspaceServerUrl ?? null;
-  const appAccess = useMemo(() => ({ context: accessContext, server: appServer }), [accessContext, appServer]);
+  const appAccess = useMemo(() => ({ context: accessContext, server: cloudServerUrl }), [accessContext, cloudServerUrl]);
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
