@@ -453,6 +453,28 @@ it("shows a restored note only to its owner, ready once the owner's next activat
   expect((await documents())[0].status).toBe("paused");
 });
 
+// Proves: the owner's next activation completing after the owner's Pause or
+// Stop does not bring live editing back. Discovery never reports the restored
+// note ready, and the relay admits nothing, until the owner resumes a Pause.
+it.each(["pause", "stop"] as const)("keeps a restored note off when the owner's next activation completes after the owner's %s", async action => {
+  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  f.host.ready.mockReturnValue(true);
+  retainServiceActivation(f.raw, namespace, true);
+  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  const successor = retainSuccessorActivation(f.raw, false);
+  const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40, ...(action === "stop" ? {retire: true, prepared} : {})});
+  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(successor);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents as Array<{status: string}>;
+  const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId,
+    lineageClaimId: binding.lineageClaimId}, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
+  expect((await documents()).map(row => row.status)).not.toContain("ready");
+  expect(owner()).toBe("refused");
+  expect(f.release(binding.objectId)).toMatchObject({enabled: false, retired: action === "stop"});
+  expect((await documents()).map(row => row.status)).not.toContain("ready");
+  expect(owner()).toBe("refused");
+});
+
 it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {
   const f = await heldDocumentFixture(undefined, effectIndex); cleanup.push(f.close);
   expect((await (await f.handle(f.request())).json()).documents[0]).toMatchObject({reason: "conflict-parent-withheld"});

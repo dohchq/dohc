@@ -669,6 +669,12 @@ it("keeps a document live for its owner after their restore ended its last Edit 
 // retires the enrollment as it would for any document no Edit grant covers.
 it.each([
   ["an unfinished restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("phase='settled'")],
+  ["a cancelled restore", (f: Awaited<ReturnType<typeof restored>>) => {
+    f.restore.update(`phase='authority-invalidated',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,terminal_json=NULL,applied_json=NULL,
+      native_receipt_json=NULL`);
+    f.raw.prepare(`INSERT INTO sync_relay_live_restore_cancellations(relay_database_namespace,operation_id,workspace_id,requested_at_ms,outcome,
+      acknowledgment_json,journal_cursor,accounted_bytes) VALUES (?,'restore',?,35,'cancelled','{}',NULL,1)`).run(key.namespace, scope.workspaceId);
+  }],
   ["a declined restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
     terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL,declined_at_ms=35`)],
   ["a restore of another activation", (f: Awaited<ReturnType<typeof restored>>) =>

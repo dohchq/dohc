@@ -3071,6 +3071,8 @@ it("completes a moved document's retirement after a restart that follows its adm
 // The enrolled document's owner, as the relay checks whether it stays live for them.
 const ownerCovers = (o: Enrolled) => o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: "object", ownerUserId: "owner",
   shareId: "share", path: o.sibling.path});
+const restoreOwner = {userId: "owner", shareId: "share"};
+const activations = (o: Enrolled) => o.raw.prepare("SELECT activation_id FROM sync_relay_service_activations ORDER BY rowid").all().map(row => row.activation_id);
 const ownerBinding = (o: Enrolled) => o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}}).kind;
 
 // Proves: an admitted restore that ended the document's last Edit grant, at
@@ -3095,18 +3097,30 @@ it("keeps a document live for its owner after its admitted restore ended the las
   const host = await restartedHost(o);
   await passed();
   const {publish} = restoreEngine(o, host), complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
-  await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  const resumed = await host.completeRestore(stopLookup, proposalDigest);
+  expect(resumed).toMatchObject({kind: "resumed", proposalDigest});
+  // A retry after a lost reply gets the same answer.
+  expect(await host.completeRestore(stopLookup, proposalDigest)).toEqual(resumed);
   const key = retirementKey(o);
   expect(key.acceptedThrough).toBeGreaterThan(before.acceptedThrough);
-  // The restore resumed, but its activation has not retired yet.
-  expect(ownerCovers(o)).toBe(false);
+  // The restore resumed, and the retirement it opened still fences the document until the activation retires.
+  expect(o.f.storage.serviceActivationRetirement(o.document)).not.toBeNull();
+  expect(o.f.storage.serviceHostDocumentEnabled(o.document, restoreOwner)).toBe(false);
+  expect(ownerBinding(o)).toBe("refused");
   await publish();
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(retiredRow(o).retired).toBe(true);
   expect(complete).toHaveBeenLastCalledWith(expect.objectContaining({key}));
   expect(ownerCovers(o)).toBe(true);
+  expect(o.f.storage.serviceHostDocumentEnabled(o.document, restoreOwner)).toBe(true);
   expect(o.f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+  // Nothing is admitted until the owner's next activation completes.
   expect(ownerBinding(o)).toBe("refused");
+  // A retry that arrives after the retirement changes nothing, whatever it answers.
+  await host.completeRestore(stopLookup, proposalDigest).catch(() => undefined);
+  expect(o.f.storage.readStopRestore(stopLookup)?.phase).toBe("resumed");
+  expect(activations(o)).toEqual([ACTIVATION]);
+  expect(ownerCovers(o)).toBe(true);
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
