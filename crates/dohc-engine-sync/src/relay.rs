@@ -1830,6 +1830,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if crashes(faults, FaultPoint::SyncAfterPushBeforeCursorPersist) {
                         return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                     }
+                    // The relay answers refusals only for the rows a push
+                    // carries. Its maximum can pass this batch after an answer
+                    // that never arrived, so resend the rows after it.
+                    let answered = batch
+                        .last()
+                        .map(|op| op.origin_seq)
+                        .ok_or(RelayError::InvalidResponse)?;
                     if !response.redundant_recoveries.is_empty()
                         && let TxnOutcome::Crashed { .. } =
                             crate::ydoc_recovery::record_redundant_publication(
@@ -1846,7 +1853,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         store,
                         workspace_id,
                         &origin_id,
-                        response.current_max_origin_seq,
+                        answered,
                         &response.settlement_refusals,
                         &response.hosted_refusals,
                         batch,
@@ -1908,7 +1915,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     pushed = pushed
                         .checked_add(response.inserted)
                         .ok_or(RelayError::InvalidResponse)?;
-                    cursor = response.current_max_origin_seq;
+                    cursor = answered;
                     progress.acknowledged += batch.len();
                     batch_start += batch.len();
                 }
