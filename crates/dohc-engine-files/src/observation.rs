@@ -1536,6 +1536,10 @@ mod tests {
         for i in 0..10_000 {
             f.write(&format!("dir-{}/file-{i}.md", i / 100), "abc");
         }
+        // Every file is inside History's margin, so this walk reads them all.
+        let written = std::time::Instant::now();
+        f.scan(&f.cursor());
+        let recent_walk = written.elapsed();
         let baseline = Scanner::new(ScanBounds::default()).unwrap();
         let crate::ScanOutcome::Completed(listing) = baseline
             .scan(f.root.path(), &CancellationToken::new())
@@ -1553,6 +1557,11 @@ mod tests {
                 },
             )
         }));
+        // Measure walks that compare size and times alone. The first walk past
+        // the margin reads each file once more.
+        std::thread::sleep(
+            std::time::Duration::from_millis(2100).saturating_sub(written.elapsed()),
+        );
         f.scan(&f.cursor());
         let mut times = Vec::new();
         let mut baseline_times = Vec::new();
@@ -1591,7 +1600,8 @@ mod tests {
                 .unwrap();
         }
         eprintln!(
-            "OBSERVATION_COST files=10000 baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",
+            "OBSERVATION_COST files=10000 recent_walk_ms={:.3} baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",
+            recent_walk.as_secs_f64() * 1000.0,
             baseline_times[10].as_secs_f64() * 1000.0,
             times[10].as_secs_f64() * 1000.0,
             start.elapsed().as_secs_f64() * 10.0,
