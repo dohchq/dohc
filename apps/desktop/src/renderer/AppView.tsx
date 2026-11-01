@@ -32,12 +32,23 @@ export const APP_CRASHED = "This app stopped working.";
 export const APP_LIMIT = "Close another app before opening this one.";
 export const APP_SESSION_ENDED = "This app lost its connection to dohc.";
 export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Download it from your browser.";
+export const APP_NEEDS_LINK = "This app uses no Collection, so it can't run on this device. Publish it on a share link to open it in a browser.";
 const BROWSER_OPEN_FAILED = "dohc could not open this app in your browser.";
 // A load the app replaced before it finished, such as a second click.
 const LOAD_ABORTED = -3;
 
 function readTheme(): ColorScheme {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+// Review app's source check. If it can't answer, the tab still offers review, where the dialog reports the problem.
+async function canRunHere(workspaceId: string, appRoot: string): Promise<boolean> {
+  try {
+    const checked = await bridge().publishOwnerApp({ action: "checkLocal", workspaceId, appRoot });
+    return !(checked.kind === "localChecked" && checked.appRoot === appRoot && !checked.declaresCollection);
+  } catch {
+    return true;
+  }
 }
 
 function subscribeTheme(onChange: () => void): () => void {
@@ -49,7 +60,8 @@ function subscribeTheme(onChange: () => void): () => void {
 type ViewState =
   | { status: "checking" }
   // `ended`: this view had opened the app, so its approval ended since.
-  | { status: "unapproved"; ended: boolean }
+  // `runsHere`: false for an app that uses no Collection, which this device can't approve.
+  | { status: "unapproved"; ended: boolean; runsHere: boolean }
   // `launch` keys the webview, so each launch gets a new guest.
   | { status: "open"; url: string; partition: string; launch: number }
   | { status: "failed" };
@@ -126,7 +138,9 @@ export function useAppView(options: {
       if (!current()) return;
       if (result.kind === "unapproved" && result.viewId === viewId) {
         notices?.clear(failureId);
-        setState({ status: "unapproved", ended: opened.current });
+        const runsHere = await canRunHere(workspaceId, appRoot);
+        if (!current()) return;
+        setState({ status: "unapproved", ended: opened.current, runsHere });
         return;
       }
       if (result.kind !== "opened" || result.viewId !== viewId || !localLaunchUrl(result.url)) throw new Error(APP_OPEN_FAILED);
@@ -221,7 +235,7 @@ export function useAppView(options: {
         notices?.clear(sessionId);
         notices?.clear(downloadId);
         setLoading(false);
-        setState({ status: "unapproved", ended: true });
+        setState({ status: "unapproved", ended: true, runsHere: true });
       } else if (event.kind === "session-ended") {
         // Never tear down a page the person is using. A hidden one opens again when it shows.
         if (!latest.current.visible) {
@@ -339,9 +353,11 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
       <div data-testid="app-view-unapproved" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
         <AppWindow size={24} aria-hidden className="text-subtle" />
         <p className="m-0 max-w-sm text-sm text-muted">
-          {state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
+          {!state.runsHere ? APP_NEEDS_LINK
+            : state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
         </p>
-        <PrimaryButton onClick={props.onReview}>Review and open app</PrimaryButton>
+        {/* For an app that can't run here, Review app opens on publishing it on a link. */}
+        <PrimaryButton onClick={props.onReview}>{state.runsHere ? "Review and open app" : "Publish on a link"}</PrimaryButton>
       </div>
     );
   }
