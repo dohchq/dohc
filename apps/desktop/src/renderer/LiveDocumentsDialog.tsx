@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
@@ -550,7 +550,7 @@ export function LiveDocumentsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (busy !== null || focusStopRetry.current === null) return;
     const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-object-id]") ?? [])]
       .find(element => element.dataset.liveDocumentObjectId === focusStopRetry.current && element.dataset.liveDocumentSaveOnly === undefined);
