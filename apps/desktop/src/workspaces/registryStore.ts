@@ -15,6 +15,7 @@ import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import { canonicalWorkspaceRoot, type CreatedWorkspace } from "./createWorkspaceFolder";
 import { folderIdentitySync, sameFolder, type FolderIdentity } from "./workspaceRootIdentity";
+import { RegistryReadError } from "./registryReadFailure";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
@@ -427,8 +428,9 @@ export function createRegistryStore(
       // or I/O error must not be treated as "no workspaces" — that would let
       // the next write() clobber a registry we simply failed to read.
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw new Error(
+        throw new RegistryReadError(
           `Cannot read workspace registry (${registryFile}); refusing to overwrite it.`,
+          registryFile,
         );
       }
       cache = { version: 1, workspaces: [] };
@@ -440,22 +442,30 @@ export function createRegistryStore(
     } catch {
       // A present-but-corrupt file is not "no workspaces" — refuse rather
       // than let the next write() collapse real data to empty.
-      throw new Error(
+      throw new RegistryReadError(
         `Workspace registry is corrupt (${registryFile}); refusing to overwrite it.`,
+        registryFile,
       );
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(`Workspace registry has an unexpected shape (${registryFile}).`);
+      throw new RegistryReadError(
+        `Workspace registry has an unexpected shape (${registryFile}).`,
+        registryFile,
+      );
     }
     const obj = parsed as Record<string, unknown>;
     if (obj.version !== 1) {
       // A future-version registry must be preserved, never silently wiped.
-      throw new Error(
+      throw new RegistryReadError(
         `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`,
+        registryFile,
       );
     }
     if (!Array.isArray(obj.workspaces)) {
-      throw new Error(`Workspace registry "workspaces" is not an array (${registryFile}).`);
+      throw new RegistryReadError(
+        `Workspace registry "workspaces" is not an array (${registryFile}).`,
+        registryFile,
+      );
     }
     cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map((entry) => withRoster(withRealRoot(entry))) };
     return cache;
