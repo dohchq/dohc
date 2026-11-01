@@ -213,9 +213,11 @@ async function reserveRelayPort(): Promise<number> {
 async function requireOwnerRestoreList(baseUrl: string): Promise<void> {
   const workspaceId = randomUUID();
   const headers = { authorization: "Bearer test:relay-startup-check", "content-type": "application/json" };
-  const claim = await fetch(`${baseUrl}/sync/workspaces`, { method: "POST", headers, body: JSON.stringify({ workspaceId }) });
+  // A hang guard: a relay that takes the requests and never answers fails startup, which stops it.
+  const signal = AbortSignal.timeout(60_000);
+  const claim = await fetch(`${baseUrl}/sync/workspaces`, { method: "POST", headers, body: JSON.stringify({ workspaceId }), signal });
   if (!claim.ok) throw new Error(`Claiming a workspace answered ${claim.status}: ${await claim.text()}`);
-  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, { headers });
+  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, { headers, signal });
   if (restores.status !== 200) throw new Error(`Unfinished restores answered ${restores.status}: ${await restores.text()}`);
 }
 
