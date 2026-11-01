@@ -941,6 +941,9 @@ mod prepared_base_repair_tests;
 #[derive(Debug, Default)]
 struct BaseRepairAnswers {
     decisions: Vec<(String, BaseRepairDecision)>,
+    /// Waiting local bases the fetch's empty push proved unsent, by the
+    /// signature of their kept `Unchanged` decision.
+    unadmitted: BTreeMap<String, crate::ydoc_apply::UnadmittedBase>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -953,6 +956,8 @@ enum BaseRepairDecision {
         origin_id: String,
         origin_seq: i64,
         relay_seq: Option<i64>,
+        /// Every coordinate of the base, so an absent base marks the one its marker stores.
+        candidates: Vec<(String, i64)>,
         recorded_at_ms: i64,
     },
     Deferred {
@@ -1016,17 +1021,17 @@ impl BaseRepairDecision {
         match store.write_with(faults, |tx| {
             match self {
                 Self::Unchanged => {}
-                Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
+                Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, candidates, recorded_at_ms } => {
                     let key = dohc_engine_collab::DocKey::new(workspace_id, version_id, object_id)
                         .map_err(base_repair_collab_error)?;
+                    let Some(relay_seq) = relay_seq else {
+                        return crate::ydoc_apply::confirm_base_absent_in_tx(tx, &key, lineage_claim_id,
+                            candidates, *recorded_at_ms);
+                    };
                     dohc_engine_collab::record_base_coordinate_in_tx(tx, dohc_engine_collab::BaseCoordinateRecord {
                         key: &key, lineage_claim_id, origin_id, origin_seq: *origin_seq,
-                        relay_seq: *relay_seq, now_ms: *recorded_at_ms,
+                        relay_seq: Some(*relay_seq), now_ms: *recorded_at_ms,
                     }).map_err(base_repair_collab_error)?;
-                    if relay_seq.is_none() {
-                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(tx, &key, lineage_claim_id,
-                            origin_id, *origin_seq, *recorded_at_ms).map_err(base_repair_collab_error)?;
-                    }
                     tx.execute("DELETE FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                         params![workspace_id, version_id, object_id]).map_err(SyncError::persist)?;
                 }
@@ -1234,23 +1239,28 @@ struct PendingBaseRelayRepair {
 type BaseRelayRepairKey = (String, String, String);
 type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>, bool);
 
-/// Whether `page` carries an exact base for `key` from a lineage other than `lineage_claim_id`.
-fn page_has_other_base(
-    page: &[ReplicationEnvelope],
-    key: &dohc_engine_collab::DocKey,
-    lineage_claim_id: &str,
-) -> bool {
-    page.iter().any(|op| {
-        op.op_kind == "ydoc.update"
-            && op.payload["objectId"] == key.object_id.as_str()
-            && op.payload["lineageClaimId"].as_str().is_some_and(|claim| {
-                claim != lineage_claim_id
-                    && crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
-                        &op.payload,
-                        key,
-                        claim,
-                    )
-            })
+/// The `(origin, seq)` coordinates of one document's base candidates.
+fn candidate_coordinates(candidates: &[BaseRelayRepairCandidate]) -> Vec<(String, i64)> {
+    candidates
+        .iter()
+        .map(|(repair, ..)| (repair.origin_id.clone(), repair.origin_seq))
+        .collect()
+}
+
+/// The empty push ran after every fetch and found this base unsent, so the
+/// relay can order it only after any base the pull holds. Only such a base's
+/// claim records the absence.
+fn proved_unadmitted(
+    candidates: &[BaseRelayRepairCandidate],
+    own_relay_bound: i64,
+) -> Option<crate::ydoc_apply::UnadmittedBase> {
+    let waiting = candidates.iter().any(|(_, _, unresolved)| *unresolved);
+    let proved_unsent = candidates.iter().all(|(repair, relay_seq, unresolved)| {
+        relay_seq.is_none() && (!unresolved || repair.origin_seq > own_relay_bound)
+    });
+    (waiting && proved_unsent).then(|| crate::ydoc_apply::UnadmittedBase {
+        lineage_claim_id: candidates[0].0.lineage_claim_id.clone(),
+        candidates: candidate_coordinates(candidates),
     })
 }
 
@@ -1364,7 +1374,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
-    ) -> Result<(), RelayError> {
+    ) -> Result<crate::ydoc_apply::UnadmittedBases, RelayError> {
         self.repair_base_orders(
             store,
             workspace_id,
@@ -1375,6 +1385,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         )
     }
 
+    /// The fetch phase keeps its answers in the phase and returns no bases.
     #[allow(clippy::too_many_arguments)]
     fn repair_base_orders(
         &self,
@@ -1384,7 +1395,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
         mut phase: BaseRepairPhase<'_>,
-    ) -> Result<(), RelayError> {
+    ) -> Result<crate::ydoc_apply::UnadmittedBases, RelayError> {
         let passive = store.is_passive();
         let local_pushed_seq =
             read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
@@ -1528,7 +1539,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })
             .map_err(local)?;
         if repairs.is_empty() && deferred.is_empty() {
-            return Ok(());
+            return Ok(Default::default());
         }
         let needs_confirmation = repairs.iter().any(|repair| {
             repair.origin_id == identity.origin_id && repair.origin_seq > local_pushed_seq
@@ -1592,10 +1603,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let decisions = answers.by_signature();
             let touched = pull_objects(page);
             let mut missing = false;
+            let mut unadmitted = crate::ydoc_apply::UnadmittedBases::new();
             for group in groups.values() {
                 let signature = base_repair_signature(local_pushed_seq, group.iter());
                 if let Some(decision) = decisions.get(signature.as_str()) {
                     decision.apply(store, workspace_id, faults)?;
+                    // The proof holds only while the base is as the fetch saw it.
+                    if let Some(base) = answers.unadmitted.get(&signature) {
+                        unadmitted.insert(group[0].key.clone(), base.clone());
+                    }
                 } else if touched.contains(&group[0].key.object_id) {
                     missing = true;
                 }
@@ -1611,7 +1627,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             return if missing {
                 Err(RelayError::RepairPending)
             } else {
-                Ok(())
+                Ok(unadmitted)
             };
         }
         let touched = pull_objects(page);
@@ -1648,6 +1664,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             chunks.push(chunk);
         }
 
+        let mut unadmitted = crate::ydoc_apply::UnadmittedBases::new();
         for BaseRelayRepairChunk {
             mut repairs,
             mut deferred,
@@ -1809,12 +1826,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             && local_pushed_seq < repair.origin_seq
                             && !passive =>
                     {
-                        // The probe ran after the page arrived and found this
-                        // coordinate unsent, so the relay can only append it
-                        // after a base the page carries for its document.
-                        let after_page_base = repair.origin_seq > own_relay_bound
-                            && page_has_other_base(page, &repair.key, &repair.lineage_claim_id);
-                        (None, !after_page_base)
+                        (None, true)
                     }
                     LogCoordinateResponse::Absent => (None, false),
                 };
@@ -1829,6 +1841,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
 
             if !matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                for candidates in grouped.values() {
+                    if let Some(base) = proved_unadmitted(candidates, own_relay_bound) {
+                        unadmitted.insert(candidates[0].0.key.clone(), base);
+                    }
+                }
                 grouped.retain(|_, candidates| {
                     candidates
                         .iter()
@@ -1856,10 +1873,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if relay_seq.is_none()
                         && candidates.iter().any(|(_, _, unresolved)| *unresolved)
                     {
-                        if touched.contains(&chosen.key.object_id)
-                            && !answers.keep(signature, BaseRepairDecision::Unchanged)
-                        {
-                            return Ok(());
+                        if touched.contains(&chosen.key.object_id) {
+                            if !answers.keep(signature.clone(), BaseRepairDecision::Unchanged) {
+                                return Ok(Default::default());
+                            }
+                            if let Some(base) = proved_unadmitted(candidates, own_relay_bound) {
+                                answers.unadmitted.insert(signature, base);
+                            }
                         }
                         continue;
                     }
@@ -1872,15 +1892,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             origin_id: chosen.origin_id.clone(),
                             origin_seq: chosen.origin_seq,
                             relay_seq,
+                            candidates: candidate_coordinates(candidates),
                             recorded_at_ms: chosen.recorded_at_ms,
                         },
                     ) {
-                        return Ok(());
+                        return Ok(Default::default());
                     }
                 }
                 for (signature, decision) in prepared_deferred {
                     if !answers.keep(signature, decision) {
-                        return Ok(());
+                        return Ok(Default::default());
                     }
                 }
                 continue;
@@ -1894,9 +1915,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 relay_seq.map(|relay_seq| (repair, relay_seq))
                             })
                             .min_by_key(|(_, relay_seq)| *relay_seq);
-                        let (chosen, relay_seq) = match resolved {
-                            Some((repair, relay_seq)) => (repair, Some(relay_seq)),
-                            None => (&candidates[0].0, None),
+                        let Some((chosen, relay_seq)) = resolved else {
+                            let first = &candidates[0].0;
+                            crate::ydoc_apply::confirm_base_absent_in_tx(
+                                tx,
+                                &first.key,
+                                &first.lineage_claim_id,
+                                &candidate_coordinates(&candidates),
+                                first.recorded_at_ms,
+                            )?;
+                            continue;
                         };
                         dohc_engine_collab::record_base_coordinate_in_tx(
                             tx,
@@ -1905,22 +1933,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 lineage_claim_id: &chosen.lineage_claim_id,
                                 origin_id: &chosen.origin_id,
                                 origin_seq: chosen.origin_seq,
-                                relay_seq,
+                                relay_seq: Some(relay_seq),
                                 now_ms: chosen.recorded_at_ms,
                             },
                         )
                         .map_err(base_repair_collab_error)?;
-                        if relay_seq.is_none() {
-                            dohc_engine_collab::mark_base_coordinate_absent_in_tx(
-                                tx,
-                                &chosen.key,
-                                &chosen.lineage_claim_id,
-                                &chosen.origin_id,
-                                chosen.origin_seq,
-                                chosen.recorded_at_ms,
-                            )
-                            .map_err(base_repair_collab_error)?;
-                        }
                         tx.execute(
                             "DELETE FROM ydoc_base_relay_candidates
                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1952,7 +1969,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
             }
         }
-        Ok(())
+        Ok(unadmitted)
     }
 
     pub fn push_workspace(
@@ -2735,7 +2752,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &ops,
                         BaseRepairPhase::Apply(&prepared.repairs),
                     ) {
-                        Ok(()) | Err(RelayError::RepairPending) => {}
+                        Ok(_) | Err(RelayError::RepairPending) => {}
                         Err(error) => return Err(error),
                     }
                 }
@@ -2966,7 +2983,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         );
         let prepared_state = (|| {
             preflight_collisions(store, workspace_id, &identity.origin_id, &held_ops)?;
-            self.repair_base_orders(
+            let unadmitted = self.repair_base_orders(
                 store,
                 workspace_id,
                 &identity,
@@ -2974,14 +2991,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 &held_ops,
                 BaseRepairPhase::Apply(&prepared.repairs),
             )?;
-            store
+            let complete = store
                 .read_with(|conn| {
                     crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
                 })
-                .map_err(local)
+                .map_err(local)?;
+            Ok::<_, RelayError>((unadmitted, complete))
         })();
-        let bootstrap_complete = match prepared_state {
-            Ok(complete) => complete,
+        let (unadmitted, bootstrap_complete) = match prepared_state {
+            Ok(state) => state,
             Err(error) => {
                 held_ops.truncate(fetched);
                 return Err(error);
@@ -2992,7 +3010,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         drop(held_ops);
         let pull_token = prepared.pull_token().to_owned();
         let ordered = merge_by_origin(ops);
-        let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
+        let progress = Self::begin_apply(
+            ordered.len(),
+            durable_origins,
+            Holding::ByOrigin,
+            unadmitted,
+        );
         Ok((
             Box::new(OrdinaryFetch {
                 reference_page: prepared.reference_page.clone(),
@@ -3318,7 +3341,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .cloned(),
         );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        self.repair_pending_ydoc_base_orders(
+        let unadmitted = self.repair_pending_ydoc_base_orders(
             store,
             workspace_id,
             &identity,
@@ -3328,8 +3351,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let progress =
-            Self::begin_apply(ops.len(), durable, Holding::ByDocument { behind, unready });
+        let progress = Self::begin_apply(
+            ops.len(),
+            durable,
+            Holding::ByDocument { behind, unready },
+            unadmitted,
+        );
         Ok(Some((
             Box::new(HostedFetch {
                 replica,
@@ -3622,7 +3649,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     /// Where a pass's apply starts: open documents' artifacts still to
     /// recover, and its `ops` ordered ops all still to apply.
-    fn begin_apply(ops: usize, durable: BTreeSet<String>, holding: Holding) -> ApplyProgress {
+    fn begin_apply(
+        ops: usize,
+        durable: BTreeSet<String>,
+        holding: Holding,
+        unadmitted_bases: crate::ydoc_apply::UnadmittedBases,
+    ) -> ApplyProgress {
         ApplyProgress {
             pass: AppliedPass::default(),
             recovering: true,
@@ -3639,6 +3671,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             rounds_done: false,
             settlements: Default::default(),
             archived_protected: Vec::new(),
+            unadmitted_bases,
         }
     }
 
@@ -4025,6 +4058,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                     true,
                     relay_namespace,
+                    &p.unadmitted_bases,
                 ),
             }
         };
@@ -6239,6 +6273,9 @@ struct ApplyProgress {
     /// inactive drains before its ops found released tails protect. Those
     /// drains pass over them; the end of the pass decides them again.
     archived_protected: Vec<[String; 3]>,
+    /// The documents whose waiting local base the relay can admit only
+    /// after every base this pass holds, as its empty push showed.
+    unadmitted_bases: crate::ydoc_apply::UnadmittedBases,
 }
 
 /// What applying a pass came to.

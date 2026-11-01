@@ -114,11 +114,22 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
+    apply_replication_envelope_in_batch(
+        store,
+        cache,
+        envelope,
+        faults,
+        leases,
+        false,
+        None,
+        &Default::default(),
+    )
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one.
+/// pull's trusted configuration names one. `unadmitted` holds the pull's
+/// documents whose base the relay can admit only after `envelope`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_replication_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -127,6 +138,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
     relay_namespace: Option<&str>,
+    unadmitted: &crate::ydoc_apply::UnadmittedBases,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     if envelope
         .origin_id
@@ -194,6 +206,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 leases,
                 batch_inactive,
                 relay_namespace,
+                unadmitted,
             ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
