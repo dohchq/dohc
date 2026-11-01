@@ -5,13 +5,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { buildEngineReader } from "../../../packages/ydoc-projection/scripts/build-engine-reader.mjs";
-import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
+import { NODE_VERSION, PINNED_NODE, SELF_HOST_NODE } from "./pinned-node.mjs";
 
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const run = promisify(execFile);
 const identity = (platform, arch) => ({ version: NODE_VERSION, platform, arch, unicode: "17.0", icu: "78.3" });
-const supported = (platform, arch) => Object.hasOwn(PINNED_NODE, `${platform}-${arch}`);
+// A self-host build passes the image's own Node as hostNode.
+const pin = (platform, arch, selfHost) => (selfHost ? SELF_HOST_NODE : PINNED_NODE)[`${platform}-${arch}`];
 
 async function regular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`Reader asset is not a regular file: ${path}`);
@@ -20,7 +21,7 @@ async function regular(path) {
 
 /** Packaging verifies the official runtime before any macOS signing changes its bytes. */
 export async function requireEngineReader(resources = join(desktop, "resources"), platform = process.platform, arch = process.arch, hostNode) {
-  if (!supported(platform, arch)) return;
+  if (!pin(platform, arch, hostNode)) return;
   const selection = JSON.parse(await regular(join(resources, "engine-reader/selection.json")));
   return verifyGeneration(resources, platform, arch, selection.generation, hostNode);
 }
@@ -33,7 +34,7 @@ async function verifyGeneration(resources, platform, arch, generation, hostNode)
   const runtime = hostNode ?? (platform === "win32" ? join(resources, "app-compiler/node.exe") : join(root, "node"));
   if (manifest.version !== 1 || buildSha256 !== generation || hash(JSON.stringify(built)) !== buildSha256 ||
       JSON.stringify(manifest.runtime) !== JSON.stringify({ ...identity(platform, arch), sha256: manifest.runtime.sha256 }) ||
-      manifest.runtime.sha256 !== PINNED_NODE[`${platform}-${arch}`].sha256) throw new Error("Reader identity mismatch.");
+      manifest.runtime.sha256 !== pin(platform, arch, hostNode).sha256) throw new Error("Reader identity mismatch.");
   if (hash(await regular(runtime)) !== manifest.runtime.sha256 ||
       hash(await regular(join(root, "reader.cjs"))) !== manifest.bundleSha256) throw new Error("Reader asset hash mismatch.");
   return { node: resolve(runtime), bundle: resolve(root, "reader.cjs"), manifest: resolve(root, "manifest.json") };
@@ -91,7 +92,7 @@ async function archivedNode(staging, fetchNode, resources, platform, arch) {
 export async function stageEngineReader(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
   const resources = resolve(options.resources ?? join(desktop, "resources"));
-  if (!supported(platform, arch)) return { supported: false };
+  if (!pin(platform, arch, options.selfHost)) return { supported: false };
   const base = join(resources, "engine-reader");
   await mkdir(base, { recursive: true, mode: 0o755 });
   await chmod(base, 0o755);

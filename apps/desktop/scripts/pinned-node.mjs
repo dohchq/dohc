@@ -12,8 +12,11 @@ export const PINNED_NODE = {
     url: `${release}/node-v${NODE_VERSION}-linux-x64.tar.gz`, archiveSha256: "2faf6a387e9b62b888e21c54f01249fb27537ffecf1842f29f4c919d0a59a0ff",
     member: `node-v${NODE_VERSION}-linux-x64/bin/node`, file: "node", sha256: "b2959781cc5a74c357ffa02367efa8a0330cbb1c9cb347732fdfaaaca381cbcd",
   },
-  "linux-arm64": {
-    url: `${release}/node-v${NODE_VERSION}-linux-arm64.tar.gz`, archiveSha256: "589f5b6dd4fcfee4dfda73013903c966abaa8abd93dbc9d436544e472b4f0e74",
-    member: `node-v${NODE_VERSION}-linux-arm64/bin/node`, file: "node", sha256: "3a988781edde7f1c76751f771cf402e0866fb4a81fbcd0852a2ce2f5bd2ccd37",
-  },
+};
+// The self-host image runs the reader on its own Node, which must be the
+// official build. That also covers linux-arm64, which has no desktop reader.
+export const SELF_HOST_NODE = {
+  ...PINNED_NODE,
+  // bin/node in node-v24.16.0-linux-arm64.tar.gz
+  "linux-arm64": { sha256: "3a988781edde7f1c76751f771cf402e0866fb4a81fbcd0852a2ce2f5bd2ccd37" },
 };

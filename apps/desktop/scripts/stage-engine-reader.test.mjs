@@ -28,11 +28,16 @@ test("reader generations and staging files stay out of git", () => {
 test("unsupported reader targets leave desktop and self-host preparation available", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-unsupported-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["linux", "arm64"], ["win32", "arm64"], ["freebsd", "x64"]]) {
+  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["win32", "arm64"], ["freebsd", "x64"]]) {
     assert.deepEqual(await stageEngineReader({ resources: root, platform, arch, selfHost: true }), { supported: false });
     assert.equal(await requireEngineReader(root, platform, arch), undefined);
     assert.deepEqual(await readdir(root), []);
   }
+  // Only the self-host image has a linux-arm64 reader.
+  assert.deepEqual(await stageEngineReader({ resources: root, platform: "linux", arch: "arm64" }), { supported: false });
+  assert.equal(await requireEngineReader(root, "linux", "arm64"), undefined);
+  assert.deepEqual(await readdir(root), []);
+  await assert.rejects(requireEngineReader(root, "linux", "arm64", process.execPath), { code: "ENOENT" });
   assert.equal(installedReaderConfig("/absent", "darwin"), undefined);
   assert.equal(installedReaderConfig("/absent", "win32"), undefined);
 });
@@ -177,6 +182,7 @@ test("macOS signing uses the reader hook without enabling Electron Node mode", a
 });
 
 test("the reader has no Intel Mac runtime pin", async () => {
-  const { PINNED_NODE } = await import("./pinned-node.mjs");
+  const { PINNED_NODE, SELF_HOST_NODE } = await import("./pinned-node.mjs");
   assert.equal(PINNED_NODE["darwin-x64"], undefined);
+  assert.equal(SELF_HOST_NODE["darwin-x64"], undefined);
 });

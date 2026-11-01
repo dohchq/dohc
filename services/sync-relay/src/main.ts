@@ -5,8 +5,8 @@ import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import {
   fatal,
   installShutdown,
@@ -104,17 +104,26 @@ if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env
   fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
 }
 // A live host without the Markdown reader starts, but its Edit shares never go live.
-if ((selfHostedLive || process.env.DOHC_RELAY_SERVICE_HOST_CONFIG) && !readerConfigured(process.env.DOHC_ENGINE_READER_CONFIG)) {
-  fatal("FATAL: Edit shares need the Markdown reader, and DOHC_ENGINE_READER_CONFIG does not name one. The self-host image sets it from /opt/dohc-reader/engine-reader/startup.json. If that file is missing, the image was built without the reader.");
+if (selfHostedLive || process.env.DOHC_RELAY_SERVICE_HOST_CONFIG) {
+  const problem = readerConfigProblem(process.env.DOHC_ENGINE_READER_CONFIG);
+  if (problem) fatal(`FATAL: Edit shares need the Markdown reader, but ${problem}. Its value is the startup.json that stage-engine-reader.mjs --self-host writes. The self-host image reads /opt/dohc-reader/engine-reader/startup.json, which is missing if the image was built without the reader.`);
 }
 
-function readerConfigured(value: string | undefined): boolean {
-  try {
-    const config: unknown = JSON.parse(value ?? "");
-    return typeof config === "object" && config !== null &&
-      ["node", "bundle", "manifest"].every(key => { const path: unknown = Reflect.get(config, key); return typeof path === "string" && existsSync(path); });
-  } catch {
-    return false;
+// The engine only warns about a config it rejects. Match its checks: exactly these keys, each an absolute path.
+function readerConfigProblem(value: string | undefined): string | undefined {
+  if (value === undefined) return "DOHC_ENGINE_READER_CONFIG is not set";
+  const keys = ["bundle", "manifest", "node"];
+  let config: unknown;
+  try { config = JSON.parse(value); } catch { config = undefined; }
+  if (typeof config !== "object" || config === null || Object.keys(config).sort().join() !== keys.join()) {
+    return "DOHC_ENGINE_READER_CONFIG is not a JSON object with only node, bundle and manifest";
+  }
+  for (const key of keys) {
+    const path: unknown = Reflect.get(config, key);
+    if (typeof path !== "string" || !isAbsolute(path)) return `DOHC_ENGINE_READER_CONFIG's ${key} is not an absolute path`;
+    let file = false;
+    try { file = statSync(path).isFile(); } catch { /* reported below */ }
+    if (!file) return `DOHC_ENGINE_READER_CONFIG's ${key} names no file: ${path}`;
   }
 }
 

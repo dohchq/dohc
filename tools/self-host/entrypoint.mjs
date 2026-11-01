@@ -50,7 +50,7 @@ async function checkAccounts() {
 async function main(action) {
   if (process.env.DOHC_ENGINE_READER_CONFIG === undefined) {
     try { process.env.DOHC_ENGINE_READER_CONFIG = readFileSync("/opt/dohc-reader/engine-reader/startup.json", "utf8"); }
-    catch { /* Without it the relay refuses to start and names the missing reader. */ }
+    catch { /* Without it the relay refuses to start and says why. */ }
   }
   if (process.env.POSTGRES_PASSWORD !== undefined) process.env.POSTGRES_URL = postgresUrl(process.env);
   if (action === 'check-accounts') return checkAccounts();
