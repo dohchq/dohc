@@ -4101,9 +4101,11 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
             match imported_text_head_in_tx(tx, complete, path, text, None, None)? {
-                ImportedTextHead::Conflict(_) => Err(SyncError::RetryableState {
-                    reason: "ydoc-resulting-head-pending",
-                }),
+                ImportedTextHead::Conflict(_) | ImportedTextHead::Recover(_) => {
+                    Err(SyncError::RetryableState {
+                        reason: "ydoc-resulting-head-pending",
+                    })
+                }
                 decision => {
                     apply_imported_text_head_in_tx(tx, complete, &decision, path, text, now_ms)
                 }
@@ -4124,6 +4126,10 @@ pub(crate) enum ImportedTextHead {
     /// text. It names the projection to record as the head, or None when the
     /// head already shows the lineage's side.
     Conflict(Option<String>),
+    /// A lossy note's projection fails the witness check, so the head keeps
+    /// its exact source. A conflict keeps that source beside the text, and a
+    /// recovery copy keeps the projection.
+    Recover(String),
 }
 
 /// Decide what an imported text head does to a closed lineage, before the
@@ -4172,7 +4178,8 @@ pub(crate) fn imported_text_head_in_tx(
     }
     // A lossy note's projection replaces its exact source only when the
     // witness check finds it keeps the meaning. Otherwise the head keeps
-    // that source and the conflict shows it.
+    // that source, the conflict shows it, and a projection History lacks
+    // leaves as a recovery copy.
     use dohc_engine_collab::markdown_write_safety;
     if markdown_write_safety::holds(
         &projection.markdown_write_safety,
@@ -4181,7 +4188,10 @@ pub(crate) fn imported_text_head_in_tx(
     ) && !markdown_write_safety::check_witness(doc, key, path, resolver)
         .map_err(map_collab_hard_error)?
     {
-        return Ok(ImportedTextHead::Conflict(None));
+        if projection_held_in_tx(tx, key, &projection.content)? {
+            return Ok(ImportedTextHead::Conflict(None));
+        }
+        return Ok(ImportedTextHead::Recover(projection.content));
     }
     Ok(ImportedTextHead::Conflict(Some(projection.content)))
 }
@@ -4200,7 +4210,9 @@ pub(crate) fn apply_imported_text_head_in_tx(
             settle_ydoc_marker_to_text(tx, &complete.key, path, text, now_ms)
         }
         ImportedTextHead::Retire => retire_complete_ydoc_lineage_in_tx(tx, complete),
-        ImportedTextHead::Settle | ImportedTextHead::Conflict(_) => Ok(()),
+        ImportedTextHead::Settle | ImportedTextHead::Conflict(_) | ImportedTextHead::Recover(_) => {
+            Ok(())
+        }
     }
 }
 
@@ -5954,6 +5966,35 @@ pub(crate) fn record_lineage_side_in_tx(
         ],
     )
     .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// Keep a lineage projection the head cannot show as a recovery copy beside
+/// `path`, naming the authors its interval reserved. The lineage keeps its
+/// updates, and the head keeps its exact source.
+pub(crate) fn recover_lineage_side_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    path: &str,
+    content: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let key = &complete.key;
+    let authors = dohc_engine_collab::author_coverage::reserved_in(tx, key)
+        .map_err(map_collab_hard_error)?
+        .moment_json();
+    crate::ydoc_recovery::recover_unsettled_local_in_tx(
+        tx,
+        key,
+        complete
+            .state
+            .as_ref()
+            .and_then(|(marker, _)| marker.lineage_claim_id.as_deref()),
+        path,
+        content,
+        authors.as_deref(),
+        now_ms,
+    )?;
     Ok(())
 }
 

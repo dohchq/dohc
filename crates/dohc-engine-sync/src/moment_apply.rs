@@ -97,7 +97,8 @@ impl<'a> MomentApplyMode<'a> {
 }
 
 /// A file edit waits for the person to resolve the object's open conflict.
-/// Placeholder: the design lead writes the words people see.
+/// A pull retains it, so the rest of sync moves on, and retries it on each
+/// pass. People and agents see this code in sync status.
 pub(crate) const RESOLVE_EXISTING_CONFLICT: &str = "resolve-existing-conflict";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1069,13 +1070,15 @@ fn apply_moment_append(
     } else {
         None
     };
-    // The lineage holds content the file would replace. Record that content
-    // as the head, and the file meets it in a conflict below. A file the
-    // head already holds leaves the lineage's later edits alone.
+    // One conflict per object, so resolution meets the head it shows. A file
+    // from another branch than an open conflict on an object with a lineage
+    // waits for the person to resolve it, whatever the lineage decides. A
+    // file that continues the conflict's incoming side goes on.
     let mut ydoc_holds_current = false;
     if !content_fast_forward
-        && let (Some(snapshot), Some((complete, ImportedTextHead::Conflict(side)))) =
+        && let (Some(snapshot), Some((complete, decision))) =
             (local.as_ref(), ydoc_decision.as_ref())
+        && complete.state.is_some()
     {
         let same_branch: Option<bool> = tx
             .query_row(
@@ -1091,32 +1094,45 @@ fn apply_moment_append(
                 |row| row.get(0),
             )
             .map_err(SyncError::corrupt)?;
-        match same_branch {
-            // The file continues the open conflict's incoming side.
-            Some(true) => {}
-            // One conflict per object, so resolution meets the head it shows.
-            Some(false) => {
-                return Err(SyncError::RetryableState {
-                    reason: RESOLVE_EXISTING_CONFLICT,
-                });
-            }
-            None => {
-                if let Some(content) = side {
-                    crate::ydoc_apply::record_lineage_side_in_tx(
-                        tx,
-                        complete,
-                        &snapshot.path,
-                        content,
-                        &envelope.origin_id,
-                        envelope.origin_seq,
-                        envelope.recorded_at_ms,
-                        search_policy,
-                    )?;
+        if same_branch == Some(false) {
+            return Err(SyncError::RetryableState {
+                reason: RESOLVE_EXISTING_CONFLICT,
+            });
+        }
+        // The lineage holds content the file would replace. Record that
+        // content as the head, or keep a projection the head cannot show as a
+        // recovery copy, and the file meets the head in a conflict below. A
+        // file the head already holds leaves the lineage's later edits alone.
+        if !matches!(decision, ImportedTextHead::Settle | ImportedTextHead::Retire) {
+            if same_branch.is_none() {
+                match decision {
+                    ImportedTextHead::Conflict(Some(content)) => {
+                        crate::ydoc_apply::record_lineage_side_in_tx(
+                            tx,
+                            complete,
+                            &snapshot.path,
+                            content,
+                            &envelope.origin_id,
+                            envelope.origin_seq,
+                            envelope.recorded_at_ms,
+                            search_policy,
+                        )?;
+                    }
+                    ImportedTextHead::Recover(content) => {
+                        crate::ydoc_apply::recover_lineage_side_in_tx(
+                            tx,
+                            complete,
+                            &snapshot.path,
+                            content,
+                            envelope.recorded_at_ms,
+                        )?;
+                    }
+                    _ => {}
                 }
                 ydoc_holds_current = true;
             }
+            head_fast_forward = false;
         }
-        head_fast_forward = false;
     }
 
     if content_fast_forward && payload.operation == "delete" {
