@@ -3675,10 +3675,10 @@ const chatDispatchService = createChatDispatchService({
       ? agentDispatchStoreHandleFor(workspace).requeueFailedTrigger(input)
       : false;
   },
-  listAppQuitRecoveries: (workspace, threadId) => {
+  listFailedRunRecoveries: (workspace, threadId) => {
     const current = workspaceForDispatch(workspace.workspaceId);
     return current && current.attachmentId === workspace.attachmentId
-      ? agentDispatchStoreHandleFor(workspace).listAppQuitRecoveries(
+      ? agentDispatchStoreHandleFor(workspace).listFailedRunRecoveries(
           workspace.workspaceId,
           threadId,
         )
