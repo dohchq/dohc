@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -1083,25 +1083,15 @@ describe("sync relay startup guards", () => {
     expect(code).toBe(1); expect(stderr).toContain("DOHC_SELF_HOST_LIVE must be 0 or 1.");
     await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
   });
-  type ReaderFiles = {node: string; bundle: string; manifest: string};
-  const notObject = "DOHC_ENGINE_READER_CONFIG is not a JSON object with only node, bundle and manifest";
-  it.each<{name: string; host?: Record<string, string>; reader: (files: ReaderFiles) => string | undefined; reason: string}>([
-    {name: "unset", reader: () => undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
-    {name: "unset for a service host", host: {DOHC_RELAY_SERVICE_HOST_CONFIG: "/missing/host.json"}, reader: () => undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
-    {name: "not JSON", reader: () => "{", reason: notObject},
-    {name: "empty", reader: () => "{}", reason: notObject},
-    {name: "an extra field", reader: files => JSON.stringify({...files, extra: files.node}), reason: notObject},
-    // The relay's working directory has this file, but the engine rejects relative paths.
-    {name: "a relative path", reader: files => JSON.stringify({...files, node: "package.json"}), reason: "DOHC_ENGINE_READER_CONFIG's node is not an absolute path"},
-    ...(["node", "bundle", "manifest"] as const).map(key => ({name: `a missing ${key}`,
-      reader: (files: ReaderFiles) => JSON.stringify({...files, [key]: `${files[key]}.missing`}), reason: `DOHC_ENGINE_READER_CONFIG's ${key} names no file`})),
-    {name: "a directory", reader: files => JSON.stringify({...files, bundle: join(files.bundle, "..")}), reason: "DOHC_ENGINE_READER_CONFIG's bundle names no file"},
-  ])("refuses a live host without the Markdown reader before opening storage: $name", async ({host = {DOHC_SELF_HOST_LIVE: "1"}, reader, reason}) => {
-    const root = await tempRoot("live-host-no-reader"), dbPath = join(root, "relay.sqlite");
-    const files = {node: join(root, "node"), bundle: join(root, "reader.cjs"), manifest: join(root, "manifest.json")};
-    await Promise.all(Object.values(files).map(path => writeFile(path, "")));
+  // readerConfig.test.ts covers each reason. These prove a live host stops on it.
+  it.each([
+    {host: {DOHC_SELF_HOST_LIVE: "1"}, reader: undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
+    {host: {DOHC_RELAY_SERVICE_HOST_CONFIG: "/missing/host.json"}, reader: undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
+    {host: {DOHC_SELF_HOST_LIVE: "1"}, reader: "{}", reason: "DOHC_ENGINE_READER_CONFIG is not a JSON object"},
+  ])("refuses a live host without the Markdown reader before opening storage: %j", async ({host, reader, reason}) => {
+    const dbPath = join(await tempRoot("live-host-no-reader"), "relay.sqlite");
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
-      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, ...host, DOHC_ENGINE_READER_CONFIG: reader(files)});
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, ...host, DOHC_ENGINE_READER_CONFIG: reader});
     expect(code).toBe(1); expect(stderr).toContain(`Edit shares need the Markdown reader, but ${reason}`);
     await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
   });
