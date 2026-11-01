@@ -928,12 +928,31 @@ fn receipts(db: &Path, request_id: &str) -> i64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_settlement_after_the_checkpoint_base_replays_the_remaining_typing() {
-    let (scratch, db, supervisor, actor, state, doc, _) = setup().await;
+    let (scratch, db, supervisor, actor, state, _, _) = setup().await;
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update).unwrap();
     let before = hex_sha256(&disk(scratch.path(), FILE));
     let warm = doc.plaintext_insert(0, "warm\n");
-    record(&actor, &state, FILE, ContentKind::Plaintext, warm, "warm", 4).await;
+    record(
+        &actor,
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        warm,
+        "warm",
+        4,
+    )
+    .await;
     let mut input = checkpoint_at(&state, FILE, &doc, before);
-    settle(&actor, scratch.path(), &state, FILE, ContentKind::Plaintext, 5).await;
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        5,
+    )
+    .await;
     assert_eq!(disk(scratch.path(), FILE), b"warm\nbase\n");
     input
         .updates
@@ -999,16 +1018,30 @@ async fn an_uncaptured_outside_edit_imports_without_replay() {
 async fn matching_disk_bytes_on_another_lineage_still_import() {
     // The checkpoint's base predates "warm", so the settled file matches the
     // projection but not the checkpoint's lineage.
-    let (scratch, db, supervisor, actor, state, doc, _) = setup().await;
-    let mut input = checkpoint_at(
+    let (scratch, db, supervisor, actor, state, _, _) = setup().await;
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update).unwrap();
+    let mut input = checkpoint_at(&state, FILE, &doc, hex_sha256(&disk(scratch.path(), FILE)));
+    let warm = doc.plaintext_insert(0, "warm\n");
+    record(
+        &actor,
         &state,
         FILE,
-        &doc,
-        hex_sha256(&disk(scratch.path(), FILE)),
-    );
-    let warm = doc.plaintext_insert(0, "warm\n");
-    record(&actor, &state, FILE, ContentKind::Plaintext, warm, "warm", 4).await;
-    settle(&actor, scratch.path(), &state, FILE, ContentKind::Plaintext, 5).await;
+        ContentKind::Plaintext,
+        warm,
+        "warm",
+        4,
+    )
+    .await;
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        5,
+    )
+    .await;
     input
         .updates
         .push(typed("outage-typing", doc.plaintext_insert(0, "outage\n")));
@@ -1091,13 +1124,25 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
     }
     let full = doc.encode_full_state();
     record(&actor, &state, NOTE, ContentKind::Richdoc, full, "seed", 3).await;
-    settle(&actor, scratch.path(), &state, NOTE, ContentKind::Richdoc, 4).await;
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        NOTE,
+        ContentKind::Richdoc,
+        4,
+    )
+    .await;
     let at_base = disk(scratch.path(), NOTE);
     let update = match warm {
         Warm::Append => doc.richdoc_append_paragraph("Warm."),
         Warm::Preserving => {
             let source = String::from_utf8(at_base.clone()).unwrap();
-            let ending = if source.contains("\r\n") { "\r\n" } else { "\n" };
+            let ending = if source.contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
             let body = source.strip_suffix(ending).unwrap_or(&source);
             doc.rewrite_content_to_markdown_preserving_source(
                 ContentKind::Richdoc,
@@ -1106,9 +1151,26 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
             .unwrap()
         }
     };
-    record(&actor, &state, NOTE, ContentKind::Richdoc, update, "warm", 5).await;
+    record(
+        &actor,
+        &state,
+        NOTE,
+        ContentKind::Richdoc,
+        update,
+        "warm",
+        5,
+    )
+    .await;
     let mut input = checkpoint_at(&state, NOTE, &doc, hex_sha256(&at_base));
-    settle(&actor, scratch.path(), &state, NOTE, ContentKind::Richdoc, 6).await;
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        NOTE,
+        ContentKind::Richdoc,
+        6,
+    )
+    .await;
     input.updates.push(typed(
         "outage-typing",
         doc.richdoc_append_paragraph("Typed after the quit."),
@@ -1214,7 +1276,7 @@ async fn rich_formats_keep_the_typing_after_dohc_settles_the_file() {
         let text = input.text.clone();
         let outcome = import(&rich.actor, rich.scratch.path(), input).await;
         let kept = assert_typing_kept(rich, &text, outcome).await;
-        eprintln!("rich format {name}: {kept}");
+        assert_eq!(kept, "replayed", "rich format {name}");
     }
 }
 
@@ -1233,7 +1295,7 @@ async fn a_checkpoint_from_another_serializer_is_refused_and_kept() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_leaves_a_pending_markdown_obligation_for_settlement() {
     let mut rich = rich("# Note\n\nAnchor.\n", Warm::Append).await;
-    let raw =rusqlite::Connection::open(&rich.db).unwrap();
+    let raw = rusqlite::Connection::open(&rich.db).unwrap();
     raw.execute(
         "INSERT INTO markdown_write_obligations(workspace_id,version_id,object_id,\
          lineage_claim_id,operation_id,kind,path,retry_inputs_json,completed,\
@@ -1242,24 +1304,12 @@ async fn replay_leaves_a_pending_markdown_obligation_for_settlement() {
         rusqlite::params![WS, rich.state.key.object_id, NOTE],
     )
     .unwrap();
-    drop(raw);
-    let db = rich.db.clone();
     let input = rich.input.take().unwrap();
     let text = input.text.clone();
     let outcome = import(&rich.actor, rich.scratch.path(), input).await;
-    assert_eq!(assert_typing_kept(rich, &text, outcome).await, "replayed");
-    let pending: i64 = inspect(&db, |store| {
-        store
-            .read_with(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM markdown_write_obligations \
-                     WHERE operation_id='pending-session' AND completed=0",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(StorageError::corrupt_public)
-            })
-            .unwrap()
-    });
+    let sql = "SELECT COUNT(*) FROM markdown_write_obligations \
+               WHERE operation_id='pending-session' AND completed=0";
+    let pending: i64 = raw.query_row(sql, [], |r| r.get(0)).unwrap();
     assert_eq!(pending, 1);
+    assert_eq!(assert_typing_kept(rich, &text, outcome).await, "replayed");
 }
