@@ -257,7 +257,8 @@ export interface EngineYDocBinding {
   readonly headSha256?: string | null;
   readonly lastSave: EngineYDocSaveReceipt | null;
   // Counts the file's states main installed other than this session's own
-  // saves: each state with a head that was not a save's, and each replacement.
+  // saves: each state with a head other than the newest save's, and each
+  // replacement. A read of the head that save wrote is that save.
   readonly pairedInstalls: number;
   // A delivery changed the head of the current doc, or installed a state
   // with its head. A replacement doc brings its head with
@@ -626,12 +627,13 @@ export async function bindEngineYDoc(
   const headListeners = new Set<() => void>();
   // Applies an engine update and returns the head its state now pairs with:
   // the one it came with, else the current one unless it changed the source.
-  // It records a save's receipt, and counts a state with a head of its own.
+  // It records a save's receipt, and counts a state with a head other than
+  // the newest save's.
   const install = (target: Y.Doc, current: typeof head, delivery: EngineYDocDelivery): typeof head => {
     const before = sourceWitness(target);
     Y.applyUpdate(target, delivery.update, ENGINE_SOURCED_ORIGIN);
     if (delivery.head?.committed) lastSave = { sha256: delivery.head.sha256, pairedInstalls };
-    else if (delivery.head) pairedInstalls += 1;
+    else if (delivery.head && delivery.head.sha256 !== lastSave?.sha256) pairedInstalls += 1;
     if (delivery.head) return delivery.head.sha256;
     return sameWitness(before, sourceWitness(target)) ? current : undefined;
   };

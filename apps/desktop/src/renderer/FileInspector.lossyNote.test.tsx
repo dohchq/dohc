@@ -501,11 +501,12 @@ describe("Edit anyway", () => {
     expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
   });
 
-  it("keeps the editor when the converting save's receipt and a read of the head it wrote land before one render", async () => {
+  it("keeps the editor when the converting save's receipt, a read of the head it wrote and the next save's receipt land before one render", async () => {
     const { bridge, user, title, editor } = await editAnyway();
     deliverAll(bridge, [
       { update: EMPTY_UPDATE, head: { sha256: CONVERTED, committed: true } },
       { update: EMPTY_UPDATE, head: { sha256: CONVERTED } },
+      { update: EMPTY_UPDATE, head: { sha256: sha("second save"), committed: true } },
     ]);
     expectEditing(editor, title);
     await user.keyboard(" two");

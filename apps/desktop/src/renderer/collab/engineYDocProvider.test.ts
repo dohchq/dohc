@@ -1275,6 +1275,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(changes).toHaveBeenCalledTimes(2);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
     mock.pushRemote(new Uint8Array([0, 0]));
+    // A read of the head the save wrote is that save.
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64) });
     expect(binding.pairedInstalls).toBe(2);
     expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
 
