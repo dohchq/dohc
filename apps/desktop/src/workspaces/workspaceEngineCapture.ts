@@ -2636,9 +2636,10 @@ export function createWorkspaceEngineCapture(
       EngineYdocProviderSession,
       { updates: { update: Uint8Array; head?: YdocDeliveredHead }[]; installed: boolean }
     >();
-    // The head a generation's state was opened or last installed with.
-    const installedHead = (session: EngineYdocProviderSession): YdocDeliveredHead | undefined =>
-      session.headSha256 === undefined ? undefined : { sha256: session.headSha256 };
+    // The head a generation's state was opened or last installed with, or `{}`
+    // when that head is unknown, so the renderer forgets the head it held.
+    const installedHead = (session: EngineYdocProviderSession): YdocDeliveredHead =>
+      session.headSha256 === undefined ? {} : { sha256: session.headSha256 };
 
     const append = <T>(operation: () => Promise<T>): Promise<T> => {
       const pending = operationChain.then(operation);
@@ -2974,12 +2975,9 @@ export function createWorkspaceEngineCapture(
         );
         // The generation's head, read with its state, goes even when the
         // state adds nothing.
-        const head = installedHead(replacement);
-        if (remoteDelta.byteLength > 2 || head) {
-          Y.applyUpdate(doc, remoteDelta);
-          Y.applyUpdate(recordedDoc, remoteDelta);
-          input.onRemoteUpdate(remoteDelta, head);
-        }
+        Y.applyUpdate(doc, remoteDelta);
+        Y.applyUpdate(recordedDoc, remoteDelta);
+        input.onRemoteUpdate(remoteDelta, installedHead(replacement));
         if (!claimCoversRecordedHistory(replacement.doc, recordedStateVector)) {
           // The daemon only admits a neutral seed into an absent lineage.
           // Refuse an incomplete existing lineage rather than crediting old
