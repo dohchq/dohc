@@ -1531,7 +1531,7 @@ export interface AgentDispatchStore {
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
   // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {

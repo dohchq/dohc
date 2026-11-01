@@ -1197,10 +1197,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         ),
       ),
     );
-    // The engine claims the oldest request in a thread that is not paused,
-    // and the claim records the listed request's agent's command. A request
-    // written since the list was read can win the claim. Its own agent still
-    // runs, but the run records the listed agent's command.
+    // Scope each claim to the agent whose command it records.
     const next = pending.find(({ threadId }) => pauseStates.get(threadId)?.paused !== true);
     const nextAgent = (next && runnable.get(next.agentId)) ?? [...runnable.values()][0]!;
     if (dispatch.resolveUncertainClaim) {
@@ -1210,6 +1207,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         uncertainClaim = await dispatch.resolveUncertainClaim(
           workspace.workspaceId,
           {
+            agentId: nextAgent.id,
             command: launchCommand(nextAgent.launch),
             logPath: logPathTemplate(),
           },
@@ -1293,6 +1291,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       let claim: AgentDispatchClaim | null;
       try {
         claim = await dispatch.claimNextPending(workspace.workspaceId, {
+          agentId: candidate.agentId,
           command: launchCommand(runnable.get(candidate.agentId)!.launch),
           logPath: logPathTemplate(),
         });
@@ -1306,7 +1305,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runReservations.delete(workspace.workspaceId);
         if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
-        return;
+        continue;
       }
       await startClaim(workspace, claim, runnable.get(claim.run.agentId), releaseWorkspace, assertMayStart);
       return;

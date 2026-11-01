@@ -329,6 +329,7 @@ type ChatDispatchEnqueueParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatDispatchClaimParams = ChatsJsonObject & {
+  agentId: string;
   runId: string;
   command?: string;
   logPath?: string;

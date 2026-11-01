@@ -1138,6 +1138,82 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
   });
 
+  it("records the running agent's command when an older request arrives after listing", async () => {
+    const fixture = await createFixture({
+      deferClaim: true,
+      agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+    });
+    const listed = await createAgentThread(fixture, { body: "Review the plan." });
+    fixture.service.start();
+    const scanning = fixture.service.scanWorkspace(WORKSPACE_ID);
+    await fixture.claimStarted;
+    try {
+      fixture.setNextChatTimestamp(CHAT_START_MS - 1);
+      const other = await fixture.chat.sendMessage({
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        threadId: listed.threadId,
+        author: { kind: "human", displayName: "Sam" },
+        namedAgentIds: ["codex"],
+        body: "Review it too.",
+      });
+      expect((await fixture.dispatch.listPending(WORKSPACE_ID))[0]).toMatchObject({
+        triggerMessageId: other.id, agentId: "codex",
+      });
+    } finally {
+      fixture.releaseClaim?.();
+    }
+    await scanning;
+
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.spawnCalls[0]!.command).toMatch(/(?:^|[\\/])claude(?:\.exe)?$/iu);
+    const [claim] = await fixture.dispatch.openRuns(WORKSPACE_ID);
+    expect(claim?.run).toMatchObject({
+      agentId: "default", triggerMessageId: listed.messageId, command: fixture.runner.command,
+    });
+    expect(fixture.attributions.at(-1)?.run).toMatchObject({ agentId: "default" });
+    expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([
+      expect.objectContaining({ agentId: "codex" }),
+    ]);
+  });
+
+  it("continues to the next listed agent when the first agent's request is gone", async () => {
+    const fixture = await createFixture({
+      deferClaim: true,
+      temporaryRunActivity: true,
+      agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+    });
+    const listed = await createAgentThread(fixture, { body: "Review the plan." });
+    await fixture.chat.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: listed.threadId,
+      author: { kind: "human", displayName: "Sam" },
+      namedAgentIds: ["codex"],
+      body: "Review it too.",
+    });
+    fixture.service.start();
+    const scanning = fixture.service.scanWorkspace(WORKSPACE_ID);
+    await fixture.claimStarted;
+    try {
+      await fixture.dispatch.failPendingForThread({
+        workspaceId: WORKSPACE_ID, threadId: listed.threadId, agentId: "default", reason: "cancelled",
+      });
+    } finally {
+      fixture.releaseClaim?.();
+    }
+    await scanning;
+
+    expect(fixture.dispatchRequests.filter(({ method }) => method === CHATS_METHOD.dispatchClaimNextPending))
+      .toMatchObject([{ params: { agentId: "default" } }, { params: { agentId: "codex" } }]);
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]?.run).toMatchObject({
+      agentId: "codex", command: "node codex.mjs",
+    });
+    expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
+    expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
+  });
+
   it("reports each pause and resume once, wherever it came from", async () => {
     const fixture = await createFixture();
     const onPausedChanged = vi.fn<(paused: boolean) => void>();
@@ -2016,6 +2092,7 @@ describe("chatDispatchService", () => {
         agentId: "default",
       });
       const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+        agentId: "default",
         command: "seed-runner",
       });
       if (!claim) throw new Error("Expected a seeded budget claim.");
@@ -2082,7 +2159,7 @@ describe("chatDispatchService", () => {
         });
         threadId = started.thread.id;
         await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: started.message.id, threadId, agentId: "default" });
-        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "seed-runner" });
+        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "seed-runner" });
         if (!claim) throw new Error("Expected a seeded claim.");
         await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
       }
@@ -2138,7 +2215,7 @@ describe("chatDispatchService", () => {
       for (let index = 0; index < CHAT_DISPATCH_BUDGET_MAX; index += 1) {
         const message = await reply(index);
         await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: message.id, threadId: wake.thread.id, agentId: "default" });
-        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "seed-runner" });
+        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "seed-runner" });
         if (!claim) throw new Error("Expected a seeded claim.");
         await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
       }
@@ -2188,7 +2265,7 @@ describe("chatDispatchService", () => {
     });
     for (let index = 0; index < CHAT_DISPATCH_BUDGET_MAX; index += 1) {
       await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: `seed_${index}`, threadId: thread.id, agentId: "default" });
-      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "seed-runner" });
+      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "seed-runner" });
       if (!claim) throw new Error("Expected a seeded budget claim.");
       await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
     }
@@ -2224,7 +2301,7 @@ describe("chatDispatchService", () => {
         threadId: pending.threadId,
         agentId: "default",
       });
-      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (!claim) throw new Error("Expected a seeded budget claim.");
       await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
     }
@@ -2266,7 +2343,7 @@ describe("chatDispatchService", () => {
         threadId: pending.threadId,
         agentId: "default",
       });
-      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (!claim) throw new Error("Expected a seeded budget claim.");
       await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
     }
@@ -2714,6 +2791,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -2744,6 +2822,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const ended = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -2773,6 +2852,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const ended = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -2865,6 +2945,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -2966,6 +3047,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!interrupted || !fixture.restartDaemon) {
@@ -3005,6 +3087,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -3047,6 +3130,7 @@ describe("chatDispatchService", () => {
       agentId: "default",
     });
     const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
       logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
     });
@@ -3073,7 +3157,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
         agentId: "default",
       });
-      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
       if (!claim) throw new Error("Expected a run.");
       if (ending === "quit") {
         await fixture.dispatch.failRun({ runId: claim.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
@@ -3131,7 +3215,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID, triggerMessageId: "later_request", threadId: run.threadId,
         agentId: "default",
       });
-      const later = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      const later = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
       if (!later) throw new Error("Expected a later run.");
       await fixture.dispatch.completeRun({ runId: later.run.runId, exitCode: 0 });
 
@@ -3150,7 +3234,7 @@ describe("chatDispatchService", () => {
       await fixture.dispatch.recordTrigger({
         workspaceId: WORKSPACE_ID, triggerMessageId: run.messageId, threadId: run.threadId, agentId: "codex",
       });
-      const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "node codex.mjs" });
+      const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "codex", command: "node codex.mjs" });
       if (codex?.run.agentId !== "codex") throw new Error("Expected Codex's run.");
       await fixture.dispatch.completeRun({ runId: codex.run.runId, exitCode: 0 });
 
@@ -3172,7 +3256,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID, triggerMessageId: run.messageId, threadId: run.threadId, agentId: "codex",
       });
       const quitCodex = async () => {
-        const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "node codex.mjs" });
+        const codex = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "codex", command: "node codex.mjs" });
         if (codex?.run.agentId !== "codex") throw new Error("Expected Codex's run.");
         await fixture.dispatch.failRun({ runId: codex.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
         return codex.run.runId;
@@ -3204,7 +3288,7 @@ describe("chatDispatchService", () => {
       const run = await stoppedRun(fixture, "restarted");
       await activate(fixture);
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
-      const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
       if (!second) throw new Error("Expected the second attempt.");
       await fixture.dispatch.failRun({ runId: second.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
 
@@ -4134,7 +4218,7 @@ describe("chatDispatchService", () => {
         await fixture.dispatch.recordTrigger({
           workspaceId: WORKSPACE_ID, triggerMessageId: `budget_seed_${index}`, threadId: paused.threadId, agentId: "default",
         });
-        const seeded = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+        const seeded = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default" });
         if (!seeded) throw new Error("Expected a seeded budget claim.");
         await fixture.dispatch.completeRun({ runId: seeded.run.runId, exitCode: 0 });
       }
@@ -4220,7 +4304,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
         agentId: "default",
       });
-      const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (!first) throw new Error("Expected a first attempt.");
       await fixture.dispatch.failRun({ runId: first.run.runId, reason: "app restart during run" });
       await expect(fixture.requeueRaw({
@@ -4594,7 +4678,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID, triggerMessageId: first.messageId, threadId: first.threadId,
         agentId: "default",
       });
-      const earlier = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
+      const earlier = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (!earlier) throw new Error("Expected a first attempt.");
       await fixture.dispatch.failRun({ runId: earlier.run.runId, reason: "app restart during run" });
       await fixture.requeueRaw({ workspaceId: WORKSPACE_ID, triggerMessageId: first.messageId, runId: earlier.run.runId });

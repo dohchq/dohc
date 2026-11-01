@@ -820,7 +820,7 @@ fn a_message_that_names_two_agents_shows_each_agents_own_request() {
         },
     );
     let claim = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-1", "agent", None, 12, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "agent", None, 12, &NO_FAULTS)
         .expect("claim")
         .expect("a request to claim");
     let other = if claim.run.agent_id == "default" {

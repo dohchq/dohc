@@ -1021,7 +1021,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     };
 
     let research = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-1", "", None, 35, &NO_FAULTS)
+        .claim_next_pending(WS, "research", "run-1", "", None, 35, &NO_FAULTS)
         .expect("claim")
         .expect("research's run");
     assert_eq!(research.run.agent_id, "research");
@@ -1054,7 +1054,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     );
 
     let default = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "", None, 60, &NO_FAULTS)
         .expect("claim")
         .expect("the default agent's run");
     assert_eq!(default.run.agent_id, "default");
@@ -1115,7 +1115,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
     );
     let mut chats = LinkedChatStore::new(&mut store);
     let first = chats
-        .claim_next_pending(WS, "run-1", "", None, 40, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "", None, 40, &NO_FAULTS)
         .expect("claim")
         .expect("first agent");
     assert_eq!(
@@ -1127,7 +1127,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
     );
     assert!(
         chats
-            .claim_next_pending(WS, "run-2", "", None, 41, &NO_FAULTS)
+            .claim_next_pending(WS, "research", "run-2", "", None, 41, &NO_FAULTS)
             .expect("claim while running")
             .is_none(),
         "one run at a time per workspace."
@@ -1136,7 +1136,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
         .expect("complete");
     let second = chats
-        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .claim_next_pending(WS, "research", "run-2", "", None, 60, &NO_FAULTS)
         .expect("claim")
         .expect("second agent");
     assert_eq!(
@@ -1152,7 +1152,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .expect("complete");
     assert!(
         chats
-            .claim_next_pending(WS, "run-3", "", None, 80, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-3", "", None, 80, &NO_FAULTS)
             .expect("claim")
             .is_none()
     );
