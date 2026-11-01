@@ -973,6 +973,8 @@ export function MarkdownView(props: {
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
     <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
+  // Read-only properties and a refused title offer this file to open externally.
+  const noteFile = { workspaceId: props.workspaceId, path: props.path, onError: props.onButtonError };
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
     // discarded — the store outlives this view and the refusal screen renders
@@ -2225,11 +2227,12 @@ export function MarkdownView(props: {
               ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
+              file={noteFile}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
             </Suspense>
           </div>
           <EditorErrorBoundary
@@ -2402,11 +2405,12 @@ export function MarkdownView(props: {
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
+              file={noteFile}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
             </Suspense>
           </div>
           <EditorErrorBoundary
@@ -2474,6 +2478,7 @@ export function MarkdownView(props: {
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
               opening={opening}
+              file={noteFile}
             />
             {recordButtons}
             {/* Opening, the panel draws its pills where they will be, so the
@@ -2486,6 +2491,7 @@ export function MarkdownView(props: {
                 opening={opening}
                 readOnly={readOnly}
                 recordId={recordId}
+                file={noteFile}
                 onShowSource={toggleSourceView}
               />
             </Suspense>

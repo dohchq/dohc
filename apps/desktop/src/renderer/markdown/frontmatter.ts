@@ -10,8 +10,12 @@ import {
 // local edit keeps the text a person wrote the way a settle does.
 export { orderFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 
-/** Why a document's properties cannot be edited one at a time. */
-export { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "@dohc/ydoc-projection/frontmatter";
+/**
+ * Why a document's properties are read-only, said to the person. Agents and
+ * automations get FRONTMATTER_EDIT_REFUSED_MESSAGE from the projection.
+ */
+export const PROPERTIES_READ_ONLY_REASON =
+  "dohc can't change one property in this file without rewriting the others. Open it in another app to edit them.";
 
 export type FrontmatterEntry = {
   key: string;
