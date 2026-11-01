@@ -1596,6 +1596,25 @@ describe("loopback idempotency", () => {
   });
 });
 
+describe("loopback channel previews", () => {
+  it("keeps the opening message's stored key, origin and agent, and leaves out those it lacks", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const key = '{"kind":"agent","ownerKey":{"kind":"installation","installationId":"device"},"claimedName":"Codex"}';
+    await adapter.startChannelThread({ authorActorKey: key, origin: "cli", workspaceId: "workspace", channelId: "channel",
+      threadId: "run", author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex", body: "Done" });
+    await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      threadId: "plain", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const threads = await adapter.listChannelThreads({ workspaceId: "workspace", channelId: "channel" });
+    expect(threads.find((summary) => summary.thread.id === "run")?.openingMessage)
+      .toMatchObject({ authorActorKey: key, origin: "cli", authorAgentId: "codex" });
+    const plain = threads.find((summary) => summary.thread.id === "plain")?.openingMessage;
+    expect(plain).toBeDefined();
+    expect(plain).not.toHaveProperty("authorActorKey");
+    expect(plain).not.toHaveProperty("origin");
+  });
+});
+
 describe("link authors", () => {
   it("cannot be written through either local write method", async () => {
     const { adapter, loopback } = loopbackAdapter();

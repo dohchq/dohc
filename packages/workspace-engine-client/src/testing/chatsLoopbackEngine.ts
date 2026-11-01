@@ -1933,6 +1933,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
           ...(opening
             ? {
                 openingMessage: {
+                  ...(opening.authorActorKey !== undefined ? { authorActorKey: opening.authorActorKey } : {}),
+                  ...(opening.origin ? { origin: opening.origin } : {}),
                   id: opening.id,
                   author: opening.author,
                   ...(opening.authorOwnerDisplayName ? { authorOwnerDisplayName: opening.authorOwnerDisplayName } : {}),
