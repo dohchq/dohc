@@ -2,15 +2,15 @@
  "seed": 1022,
  "contentKind": "richdoc",
  "updates": [
-  "AQHWj5GLDwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjIA",
-  "AQHWj5GLDwEoAQtmcm9udG1hdHRlcgVjb3VudAF9mgEA",
-  "AQPWj5GLDwIHAQRib2R5AwlwYXJhZ3JhcGgHANaPkYsPAgYEANaPkYsPAwoJdGFibmHDr3ZlAA==",
-  "AQXWj5GLDw2H1o+Riw8CAwlwYXJhZ3JhcGgHANaPkYsPDQYGANaPkYsPDgZpdGFsaWMEdHJ1ZYTWj5GLDw8QbGluZQpjb250WsO8cmljaIbWj5GLDx4GaXRhbGljBG51bGwA",
-  "AQPWj5GLDyCH1o+Riw8NAwlwYXJhZ3JhcGgHANaPkYsPIAYEANaPkYsPIRAJdGFi8J2UmPCdlKvwnZSmAA==",
-  "AQPWj5GLDyxG1o+Riw8EBGJvbGQEdHJ1ZcTWj5GLDyzWj5GLDwQBWMbWj5GLDy3Wj5GLDwQEYm9sZARudWxsAA=="
+  "AQHgzKxgACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAyMgA=",
+  "AQHgzKxgASgBC2Zyb250bWF0dGVyBWNvdW50AX2aAQA=",
+  "AQPgzKxgAgcBBGJvZHkDCXBhcmFncmFwaAcA4MysYAIGBADgzKxgAwoJdGFibmHDr3ZlAA==",
+  "AQXgzKxgDYfgzKxgAgMJcGFyYWdyYXBoBwDgzKxgDQYGAODMrGAOBml0YWxpYwR0cnVlhODMrGAPEGxpbmUKY29udFrDvHJpY2iG4MysYB4GaXRhbGljBG51bGwA",
+  "AQPgzKxgIIfgzKxgDQMJcGFyYWdyYXBoBwDgzKxgIAYEAODMrGAhEAl0YWLwnZSY8J2Uq/CdlKYA",
+  "AQPgzKxgLEbgzKxgBARib2xkBHRydWXE4MysYCzgzKxgBAFYxuDMrGAt4MysYAQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ARDWj5GLDwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjIoAQtmcm9udG1hdHRlcgVjb3VudAF9mgEHAQRib2R5AwlwYXJhZ3JhcGgHANaPkYsPAgYEANaPkYsPAwoJdGFibmHDr3Zlh9aPkYsPAgMJcGFyYWdyYXBoBwDWj5GLDw0GBgDWj5GLDw4GaXRhbGljBHRydWWE1o+Riw8PEGxpbmUKY29udFrDvHJpY2iG1o+Riw8eBml0YWxpYwRudWxsh9aPkYsPDQMJcGFyYWdyYXBoBwDWj5GLDyAGBADWj5GLDyEQCXRhYvCdlJjwnZSr8J2UpkbWj5GLDwQEYm9sZAR0cnVlxNaPkYsPLNaPkYsPBAFYxtaPkYsPLdaPkYsPBARib2xkBG51bGwA",
- "stateVectorB64": "AdaPkYsPLw==",
+ "mergedUpdateB64": "ARDgzKxgACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAyMigBC2Zyb250bWF0dGVyBWNvdW50AX2aAQcBBGJvZHkDCXBhcmFncmFwaAcA4MysYAIGBADgzKxgAwoJdGFibmHDr3Zlh+DMrGACAwlwYXJhZ3JhcGgHAODMrGANBgYA4MysYA4GaXRhbGljBHRydWWE4MysYA8QbGluZQpjb250WsO8cmljaIbgzKxgHgZpdGFsaWMEbnVsbIfgzKxgDQMJcGFyYWdyYXBoBwDgzKxgIAYEAODMrGAhEAl0YWLwnZSY8J2Uq/CdlKZG4MysYAQEYm9sZAR0cnVlxODMrGAs4MysYAQBWMbgzKxgLeDMrGAEBGJvbGQEbnVsbAA=",
+ "stateVectorB64": "AeDMrGAv",
  "expected": {
   "frontmatter": {
    "alpha": "value-1022",
@@ -50,6 +50,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1022\ncount: 90\n---\n\n**X**\ttabnaïve\n\n*line\ncontZürich*\n\n&#9;tab𝔘𝔫𝔦"
+  "markdown": "---\nalpha: value-1022\ncount: 90\n---\n\n**X**\ttabnaïve\n\n*line\ncontZürich*\n\n&#9;tab𝔘𝔫𝔦\n"
  }
 }

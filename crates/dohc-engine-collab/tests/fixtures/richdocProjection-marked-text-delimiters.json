@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-marked-text-delimiters",
  "updates": [
-  "ARXkvMa5DwAHAQRib2R5AwlwYXJhZ3JhcGgHAOS8xrkPAAYGAOS8xrkPAQRib2xkAnt9hOS8xrkPAhFib2xkICoqIGRlbGltaXRlcobkvMa5DxMEYm9sZARudWxshOS8xrkPFAMgLyCG5LzGuQ8XBml0YWxpYwJ7fYTkvMa5DxgSaXRhbGljICogZGVsaW1pdGVyhuS8xrkPKgZpdGFsaWMEbnVsbITkvMa5DysDIC8ghuS8xrkPLgZzdHJpa2UCe32E5LzGuQ8vE3N0cmlrZSB+fiBkZWxpbWl0ZXKG5LzGuQ9CBnN0cmlrZQRudWxshOS8xrkPQwMgLyCG5LzGuQ9GCXVuZGVybGluZQJ7fYTkvMa5D0cWdW5kZXJsaW5lICsrIGRlbGltaXRlcobkvMa5D10JdW5kZXJsaW5lBG51bGyE5LzGuQ9eAyAvIIbkvMa5D2EJaGlnaGxpZ2h0Ant9hOS8xrkPYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhuS8xrkPeAloaWdobGlnaHQEbnVsbAA=",
-  "AQHkvMa5D3ooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWFya2VkLXRleHQtZGVsaW1pdGVycwA="
+  "ARXaypfbDQAHAQRib2R5AwlwYXJhZ3JhcGgHANrKl9sNAAYGANrKl9sNAQRib2xkAnt9hNrKl9sNAhFib2xkICoqIGRlbGltaXRlcobaypfbDRMEYm9sZARudWxshNrKl9sNFAMgLyCG2sqX2w0XBml0YWxpYwJ7fYTaypfbDRgSaXRhbGljICogZGVsaW1pdGVyhtrKl9sNKgZpdGFsaWMEbnVsbITaypfbDSsDIC8ghtrKl9sNLgZzdHJpa2UCe32E2sqX2w0vE3N0cmlrZSB+fiBkZWxpbWl0ZXKG2sqX2w1CBnN0cmlrZQRudWxshNrKl9sNQwMgLyCG2sqX2w1GCXVuZGVybGluZQJ7fYTaypfbDUcWdW5kZXJsaW5lICsrIGRlbGltaXRlcobaypfbDV0JdW5kZXJsaW5lBG51bGyE2sqX2w1eAyAvIIbaypfbDWEJaGlnaGxpZ2h0Ant9hNrKl9sNYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhtrKl9sNeAloaWdobGlnaHQEbnVsbAA=",
+  "AQHaypfbDXooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWFya2VkLXRleHQtZGVsaW1pdGVycwA="
  ],
- "mergedUpdateB64": "ARbkvMa5DwAHAQRib2R5AwlwYXJhZ3JhcGgHAOS8xrkPAAYGAOS8xrkPAQRib2xkAnt9hOS8xrkPAhFib2xkICoqIGRlbGltaXRlcobkvMa5DxMEYm9sZARudWxshOS8xrkPFAMgLyCG5LzGuQ8XBml0YWxpYwJ7fYTkvMa5DxgSaXRhbGljICogZGVsaW1pdGVyhuS8xrkPKgZpdGFsaWMEbnVsbITkvMa5DysDIC8ghuS8xrkPLgZzdHJpa2UCe32E5LzGuQ8vE3N0cmlrZSB+fiBkZWxpbWl0ZXKG5LzGuQ9CBnN0cmlrZQRudWxshOS8xrkPQwMgLyCG5LzGuQ9GCXVuZGVybGluZQJ7fYTkvMa5D0cWdW5kZXJsaW5lICsrIGRlbGltaXRlcobkvMa5D10JdW5kZXJsaW5lBG51bGyE5LzGuQ9eAyAvIIbkvMa5D2EJaGlnaGxpZ2h0Ant9hOS8xrkPYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhuS8xrkPeAloaWdobGlnaHQEbnVsbCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXJrZWQtdGV4dC1kZWxpbWl0ZXJzAA==",
- "stateVectorB64": "AeS8xrkPew==",
+ "mergedUpdateB64": "ARbaypfbDQAHAQRib2R5AwlwYXJhZ3JhcGgHANrKl9sNAAYGANrKl9sNAQRib2xkAnt9hNrKl9sNAhFib2xkICoqIGRlbGltaXRlcobaypfbDRMEYm9sZARudWxshNrKl9sNFAMgLyCG2sqX2w0XBml0YWxpYwJ7fYTaypfbDRgSaXRhbGljICogZGVsaW1pdGVyhtrKl9sNKgZpdGFsaWMEbnVsbITaypfbDSsDIC8ghtrKl9sNLgZzdHJpa2UCe32E2sqX2w0vE3N0cmlrZSB+fiBkZWxpbWl0ZXKG2sqX2w1CBnN0cmlrZQRudWxshNrKl9sNQwMgLyCG2sqX2w1GCXVuZGVybGluZQJ7fYTaypfbDUcWdW5kZXJsaW5lICsrIGRlbGltaXRlcobaypfbDV0JdW5kZXJsaW5lBG51bGyE2sqX2w1eAyAvIIbaypfbDWEJaGlnaGxpZ2h0Ant9hNrKl9sNYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhtrKl9sNeAloaWdobGlnaHQEbnVsbCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXJrZWQtdGV4dC1kZWxpbWl0ZXJzAA==",
+ "stateVectorB64": "AdrKl9sNew==",
  "coverage": {
   "nodes": [
    "doc",
@@ -23,6 +23,6 @@
   ]
  },
  "expected": {
-  "markdown": "**bold ** delimiter** / *italic * delimiter* / ~~strike ~~ delimiter~~ / ++underline ++ delimiter++ / ==highlight \\=\\= delimiter=="
+  "markdown": "**bold ** delimiter** / *italic * delimiter* / ~~strike ~~ delimiter~~ / ++underline ++ delimiter++ / ==highlight \\=\\= delimiter==\n"
  }
 }

@@ -1,0 +1,20 @@
+{
+ "seed": -141,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-frontmatter-only-retained",
+ "updates": [
+  "AQTxtLr1AwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhFWRvaGNGcm9udG1hdHRlclNvdXJjZQF3Iy0tLQojIGtlcHQgY29tbWVudAp0aXRsZTogUGxhbgotLS0KKAEEbWV0YR9kb2hjRnJvbnRtYXR0ZXJTb3VyY2VJdGVtOnRpdGxlAXcMMTA1MTYzMDE5MzowAA==",
+  "AQHxtLr1AwQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcZZnJvbnRtYXR0ZXItb25seS1yZXRhaW5lZAA="
+ ],
+ "mergedUpdateB64": "AQXxtLr1AwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhFWRvaGNGcm9udG1hdHRlclNvdXJjZQF3Iy0tLQojIGtlcHQgY29tbWVudAp0aXRsZTogUGxhbgotLS0KKAEEbWV0YR9kb2hjRnJvbnRtYXR0ZXJTb3VyY2VJdGVtOnRpdGxlAXcMMTA1MTYzMDE5MzowKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3GWZyb250bWF0dGVyLW9ubHktcmV0YWluZWQA",
+ "stateVectorB64": "AfG0uvUDBQ==",
+ "coverage": {
+  "nodes": [
+   "doc"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "---\n# kept comment\ntitle: Plan\n---\n"
+ }
+}

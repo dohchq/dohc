@@ -1,0 +1,30 @@
+{
+ "seed": -138,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-list-table",
+ "updates": [
+  "ASrE1/b+DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDE1/b+DgEDCGxpc3RJdGVtBwDE1/b+DgIDCXBhcmFncmFwaAcAxNf2/g4DBgQAxNf2/g4EBGl0ZW2HxNf2/g4DAwV0YWJsZQcAxNf2/g4JAwh0YWJsZVJvdwcAxNf2/g4KAwt0YWJsZUhlYWRlcgcAxNf2/g4LAwlwYXJhZ3JhcGgHAMTX9v4ODAYEAMTX9v4ODQFhKADE1/b+DgsHY29sc3BhbgF9ASgAxNf2/g4LB3Jvd3NwYW4BfQGHxNf2/g4KAwh0YWJsZVJvdwcAxNf2/g4RAwl0YWJsZUNlbGwHAMTX9v4OEgMJcGFyYWdyYXBoBwDE1/b+DhMGBADE1/b+DhQBMSgAxNf2/g4SB2NvbHNwYW4BfQEoAMTX9v4OEgdyb3dzcGFuAX0Bh8TX9v4OAQMIdGFza0xpc3QHAMTX9v4OGAMIdGFza0l0ZW0HAMTX9v4OGQMJcGFyYWdyYXBoBwDE1/b+DhoGBADE1/b+DhsEdGFza4fE1/b+DhoDBXRhYmxlBwDE1/b+DiADCHRhYmxlUm93BwDE1/b+DiEDC3RhYmxlSGVhZGVyBwDE1/b+DiIDCXBhcmFncmFwaAcAxNf2/g4jBgQAxNf2/g4kAWIoAMTX9v4OIgdjb2xzcGFuAX0BKADE1/b+DiIHcm93c3BhbgF9AYfE1/b+DiEDCHRhYmxlUm93BwDE1/b+DigDCXRhYmxlQ2VsbAcAxNf2/g4pAwlwYXJhZ3JhcGgHAMTX9v4OKgYEAMTX9v4OKwEyKADE1/b+DikHY29sc3BhbgF9ASgAxNf2/g4pB3Jvd3NwYW4BfQEoAMTX9v4OGQdjaGVja2VkAXkA",
+  "AQHE1/b+DjAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKbGlzdC10YWJsZQA="
+ ],
+ "mergedUpdateB64": "ASvE1/b+DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDE1/b+DgEDCGxpc3RJdGVtBwDE1/b+DgIDCXBhcmFncmFwaAcAxNf2/g4DBgQAxNf2/g4EBGl0ZW2HxNf2/g4DAwV0YWJsZQcAxNf2/g4JAwh0YWJsZVJvdwcAxNf2/g4KAwt0YWJsZUhlYWRlcgcAxNf2/g4LAwlwYXJhZ3JhcGgHAMTX9v4ODAYEAMTX9v4ODQFhKADE1/b+DgsHY29sc3BhbgF9ASgAxNf2/g4LB3Jvd3NwYW4BfQGHxNf2/g4KAwh0YWJsZVJvdwcAxNf2/g4RAwl0YWJsZUNlbGwHAMTX9v4OEgMJcGFyYWdyYXBoBwDE1/b+DhMGBADE1/b+DhQBMSgAxNf2/g4SB2NvbHNwYW4BfQEoAMTX9v4OEgdyb3dzcGFuAX0Bh8TX9v4OAQMIdGFza0xpc3QHAMTX9v4OGAMIdGFza0l0ZW0HAMTX9v4OGQMJcGFyYWdyYXBoBwDE1/b+DhoGBADE1/b+DhsEdGFza4fE1/b+DhoDBXRhYmxlBwDE1/b+DiADCHRhYmxlUm93BwDE1/b+DiEDC3RhYmxlSGVhZGVyBwDE1/b+DiIDCXBhcmFncmFwaAcAxNf2/g4jBgQAxNf2/g4kAWIoAMTX9v4OIgdjb2xzcGFuAX0BKADE1/b+DiIHcm93c3BhbgF9AYfE1/b+DiEDCHRhYmxlUm93BwDE1/b+DigDCXRhYmxlQ2VsbAcAxNf2/g4pAwlwYXJhZ3JhcGgHAMTX9v4OKgYEAMTX9v4OKwEyKADE1/b+DikHY29sc3BhbgF9ASgAxNf2/g4pB3Jvd3NwYW4BfQEoAMTX9v4OGQdjaGVja2VkAXkoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKbGlzdC10YWJsZQA=",
+ "stateVectorB64": "AcTX9v4OMQ==",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "doc",
+   "listItem",
+   "paragraph",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "- item\n\n  | a   |\n  | --- |\n  | 1   |\n\n- [ ] task\n\n  | b   |\n  | --- |\n  | 2   |\n"
+ }
+}

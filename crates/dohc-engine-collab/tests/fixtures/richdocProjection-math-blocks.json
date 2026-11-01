@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-math-blocks",
  "updates": [
-  "AQfija3WBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAOKNrdYEAQN0ZXgBdwhFID0gbWNeMofija3WBAEDCW1hdGhCbG9jaygA4o2t1gQDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh+KNrdYEAwMJbWF0aEJsb2NrKADija3WBAUDdGV4AXcAAA==",
-  "AQHija3WBAcoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLbWF0aC1ibG9ja3MA"
+  "AQe9+vX3AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAL369fcBAQN0ZXgBdwhFID0gbWNeMoe9+vX3AQEDCW1hdGhCbG9jaygAvfr19wEDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh7369fcBAwMJbWF0aEJsb2NrKAC9+vX3AQUDdGV4AXcAAA==",
+  "AQG9+vX3AQcoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLbWF0aC1ibG9ja3MA"
  ],
- "mergedUpdateB64": "AQjija3WBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAOKNrdYEAQN0ZXgBdwhFID0gbWNeMofija3WBAEDCW1hdGhCbG9jaygA4o2t1gQDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh+KNrdYEAwMJbWF0aEJsb2NrKADija3WBAUDdGV4AXcAKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3C21hdGgtYmxvY2tzAA==",
- "stateVectorB64": "AeKNrdYECA==",
+ "mergedUpdateB64": "AQi9+vX3AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAL369fcBAQN0ZXgBdwhFID0gbWNeMoe9+vX3AQEDCW1hdGhCbG9jaygAvfr19wEDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh7369fcBAwMJbWF0aEJsb2NrKAC9+vX3AQUDdGV4AXcAKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3C21hdGgtYmxvY2tzAA==",
+ "stateVectorB64": "Ab369fcBCA==",
  "coverage": {
   "nodes": [
    "doc",
@@ -16,6 +16,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "$$E = mc^2$$\n\n$$\n\\sum_{i=0}^n i = \\frac{n(n+1)}{2}\nE = mc^2\n$$\n\n$$$$"
+  "markdown": "$$E = mc^2$$\n\n$$\n\\sum_{i=0}^n i = \\frac{n(n+1)}{2}\nE = mc^2\n$$\n\n$$$$\n"
  }
 }

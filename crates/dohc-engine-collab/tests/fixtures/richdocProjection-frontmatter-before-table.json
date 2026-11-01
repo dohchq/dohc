@@ -1,0 +1,26 @@
+{
+ "seed": -137,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-frontmatter-before-table",
+ "updates": [
+  "ARH8+N76CQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwV0YWJsZQcA/Pje+gkCAwh0YWJsZVJvdwcA/Pje+gkDAwt0YWJsZUhlYWRlcgcA/Pje+gkEAwlwYXJhZ3JhcGgHAPz43voJBQYEAPz43voJBgFhKAD8+N76CQQHY29sc3BhbgF9ASgA/Pje+gkEB3Jvd3NwYW4BfQGH/Pje+gkDAwh0YWJsZVJvdwcA/Pje+gkKAwl0YWJsZUNlbGwHAPz43voJCwMJcGFyYWdyYXBoBwD8+N76CQwGBAD8+N76CQ0BMSgA/Pje+gkLB2NvbHNwYW4BfQEoAPz43voJCwdyb3dzcGFuAX0BAA==",
+  "AQH8+N76CREoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYZnJvbnRtYXR0ZXItYmVmb3JlLXRhYmxlAA=="
+ ],
+ "mergedUpdateB64": "ARL8+N76CQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwV0YWJsZQcA/Pje+gkCAwh0YWJsZVJvdwcA/Pje+gkDAwt0YWJsZUhlYWRlcgcA/Pje+gkEAwlwYXJhZ3JhcGgHAPz43voJBQYEAPz43voJBgFhKAD8+N76CQQHY29sc3BhbgF9ASgA/Pje+gkEB3Jvd3NwYW4BfQGH/Pje+gkDAwh0YWJsZVJvdwcA/Pje+gkKAwl0YWJsZUNlbGwHAPz43voJCwMJcGFyYWdyYXBoBwD8+N76CQwGBAD8+N76CQ0BMSgA/Pje+gkLB2NvbHNwYW4BfQEoAPz43voJCwdyb3dzcGFuAX0BKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3GGZyb250bWF0dGVyLWJlZm9yZS10YWJsZQA=",
+ "stateVectorB64": "Afz43voJEg==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "---\ntitle: Plan\n---\n\n| a   |\n| --- |\n| 1   |\n"
+ }
+}

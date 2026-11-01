@@ -1,0 +1,12 @@
+{
+ "seed": 903,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGOsobsBAAEAQlwbGFpblRleHQRb25lIGZpbmFsIGVuZGluZwoA"
+ ],
+ "mergedUpdateB64": "AQGOsobsBAAEAQlwbGFpblRleHQRb25lIGZpbmFsIGVuZGluZwoA",
+ "stateVectorB64": "AY6yhuwEEQ==",
+ "expected": {
+  "text": "one final ending\n"
+ }
+}

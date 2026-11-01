@@ -2,17 +2,17 @@
  "seed": 1020,
  "contentKind": "richdoc",
  "updates": [
-  "AQHLg82gDwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjAA",
-  "AQHLg82gDwEoAQtmcm9udG1hdHRlcgVjb3VudAF9DAA=",
-  "AQXLg82gDwIHAQRib2R5AwlwYXJhZ3JhcGgHAMuDzaAPAgYGAMuDzaAPAwRib2xkBHRydWWEy4PNoA8ECWHMgWhlbGxvIIbLg82gDwwEYm9sZARudWxsAA==",
-  "AQPLg82gDw6Hy4PNoA8CAwlwYXJhZ3JhcGgHAMuDzaAPDgYEAMuDzaAPDwxoZWxsbyBuYcOvdmUA",
-  "AQPLg82gDxuHy4PNoA8OAwlwYXJhZ3JhcGgHAMuDzaAPGwYEAMuDzaAPHBBsaW5lCmNvbnRaw7xyaWNoAA==",
-  "AQPLg82gDyyHy4PNoA8bAwlwYXJhZ3JhcGgHAMuDzaAPLAYEAMuDzaAPLQ0JdGFi5pel5pys6KqeAA==",
-  "AQfLg82gDzWHy4PNoA8sAwlwYXJhZ3JhcGgHAMuDzaAPNQYGAMuDzaAPNgRib2xkBHRydWWGy4PNoA83Bml0YWxpYwR0cnVlhMuDzaAPOAxaw7xyaWNoY2Fmw6mGy4PNoA9CBGJvbGQEbnVsbIbLg82gD0MGaXRhbGljBG51bGwA",
-  "AQHLg82gD0XEy4PNoA8Ey4PNoA8FAVgA"
+  "AQHSuqzDBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjAA",
+  "AQHSuqzDBgEoAQtmcm9udG1hdHRlcgVjb3VudAF9DAA=",
+  "AQXSuqzDBgIHAQRib2R5AwlwYXJhZ3JhcGgHANK6rMMGAgYGANK6rMMGAwRib2xkBHRydWWE0rqswwYECWHMgWhlbGxvIIbSuqzDBgwEYm9sZARudWxsAA==",
+  "AQPSuqzDBg6H0rqswwYCAwlwYXJhZ3JhcGgHANK6rMMGDgYEANK6rMMGDwxoZWxsbyBuYcOvdmUA",
+  "AQPSuqzDBhuH0rqswwYOAwlwYXJhZ3JhcGgHANK6rMMGGwYEANK6rMMGHBBsaW5lCmNvbnRaw7xyaWNoAA==",
+  "AQPSuqzDBiyH0rqswwYbAwlwYXJhZ3JhcGgHANK6rMMGLAYEANK6rMMGLQ0JdGFi5pel5pys6KqeAA==",
+  "AQfSuqzDBjWH0rqswwYsAwlwYXJhZ3JhcGgHANK6rMMGNQYGANK6rMMGNgRib2xkBHRydWWG0rqswwY3Bml0YWxpYwR0cnVlhNK6rMMGOAxaw7xyaWNoY2Fmw6mG0rqswwZCBGJvbGQEbnVsbIbSuqzDBkMGaXRhbGljBG51bGwA",
+  "AQHSuqzDBkXE0rqswwYE0rqswwYFAVgA"
  ],
- "mergedUpdateB64": "ARjLg82gDwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjAoAQtmcm9udG1hdHRlcgVjb3VudAF9DAcBBGJvZHkDCXBhcmFncmFwaAcAy4PNoA8CBgYAy4PNoA8DBGJvbGQEdHJ1ZYTLg82gDwQJYcyBaGVsbG8ghsuDzaAPDARib2xkBG51bGyHy4PNoA8CAwlwYXJhZ3JhcGgHAMuDzaAPDgYEAMuDzaAPDwxoZWxsbyBuYcOvdmWHy4PNoA8OAwlwYXJhZ3JhcGgHAMuDzaAPGwYEAMuDzaAPHBBsaW5lCmNvbnRaw7xyaWNoh8uDzaAPGwMJcGFyYWdyYXBoBwDLg82gDywGBADLg82gDy0NCXRhYuaXpeacrOiqnofLg82gDywDCXBhcmFncmFwaAcAy4PNoA81BgYAy4PNoA82BGJvbGQEdHJ1ZYbLg82gDzcGaXRhbGljBHRydWWEy4PNoA84DFrDvHJpY2hjYWbDqYbLg82gD0IEYm9sZARudWxshsuDzaAPQwZpdGFsaWMEbnVsbMTLg82gDwTLg82gDwUBWAA=",
- "stateVectorB64": "AcuDzaAPRg==",
+ "mergedUpdateB64": "ARjSuqzDBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjAoAQtmcm9udG1hdHRlcgVjb3VudAF9DAcBBGJvZHkDCXBhcmFncmFwaAcA0rqswwYCBgYA0rqswwYDBGJvbGQEdHJ1ZYTSuqzDBgQJYcyBaGVsbG8ghtK6rMMGDARib2xkBG51bGyH0rqswwYCAwlwYXJhZ3JhcGgHANK6rMMGDgYEANK6rMMGDwxoZWxsbyBuYcOvdmWH0rqswwYOAwlwYXJhZ3JhcGgHANK6rMMGGwYEANK6rMMGHBBsaW5lCmNvbnRaw7xyaWNoh9K6rMMGGwMJcGFyYWdyYXBoBwDSuqzDBiwGBADSuqzDBi0NCXRhYuaXpeacrOiqnofSuqzDBiwDCXBhcmFncmFwaAcA0rqswwY1BgYA0rqswwY2BGJvbGQEdHJ1ZYbSuqzDBjcGaXRhbGljBHRydWWE0rqswwY4DFrDvHJpY2hjYWbDqYbSuqzDBkIEYm9sZARudWxshtK6rMMGQwZpdGFsaWMEbnVsbMTSuqzDBgTSuqzDBgUBWAA=",
+ "stateVectorB64": "AdK6rMMGRg==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1020",
@@ -65,6 +65,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1020\ncount: 12\n---\n\n**Xáhello** \n\nhello naïve\n\nline\ncontZürich\n\n&#9;tab日本語\n\n***Zürichcafé***"
+  "markdown": "---\nalpha: value-1020\ncount: 12\n---\n\n**Xáhello** \n\nhello naïve\n\nline\ncontZürich\n\n&#9;tab日本語\n\n***Zürichcafé***\n"
  }
 }

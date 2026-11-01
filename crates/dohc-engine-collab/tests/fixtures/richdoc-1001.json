@@ -2,15 +2,15 @@
  "seed": 1001,
  "contentKind": "richdoc",
  "updates": [
-  "AQHOvas1ACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAwMQA=",
-  "AQHOvas1ASgBC2Zyb250bWF0dGVyBWNvdW50AX0OAA==",
-  "AQPOvas1AgcBBGJvZHkDCXBhcmFncmFwaAcAzr2rNQIGBADOvas1Aw53b3JsZOaXpeacrOiqngA=",
-  "AQXOvas1DIfOvas1AgMJcGFyYWdyYXBoBwDOvas1DAYGAM69qzUNBml0YWxpYwR0cnVlhM69qzUOCgl0YWJuYcOvdmWGzr2rNRcGaXRhbGljBG51bGwA",
-  "AQPOvas1GYfOvas1DAMJcGFyYWdyYXBoBwDOvas1GQYEAM69qzUaCndvcmxkd29ybGQA",
-  "AQPOvas1JUbOvas1BARib2xkBHRydWXEzr2rNSXOvas1BAFYxs69qzUmzr2rNQQEYm9sZARudWxsAA=="
+  "AQGU+pCJBQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDEA",
+  "AQGU+pCJBQEoAQtmcm9udG1hdHRlcgVjb3VudAF9DgA=",
+  "AQOU+pCJBQIHAQRib2R5AwlwYXJhZ3JhcGgHAJT6kIkFAgYEAJT6kIkFAw53b3JsZOaXpeacrOiqngA=",
+  "AQWU+pCJBQyHlPqQiQUCAwlwYXJhZ3JhcGgHAJT6kIkFDAYGAJT6kIkFDQZpdGFsaWMEdHJ1ZYSU+pCJBQ4KCXRhYm5hw692ZYaU+pCJBRcGaXRhbGljBG51bGwA",
+  "AQOU+pCJBRmHlPqQiQUMAwlwYXJhZ3JhcGgHAJT6kIkFGQYEAJT6kIkFGgp3b3JsZHdvcmxkAA==",
+  "AQOU+pCJBSVGlPqQiQUEBGJvbGQEdHJ1ZcSU+pCJBSWU+pCJBQQBWMaU+pCJBSaU+pCJBQQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ARDOvas1ACgBC2Zyb250bWF0dGVyBWFscGhhAXcKdmFsdWUtMTAwMSgBC2Zyb250bWF0dGVyBWNvdW50AX0OBwEEYm9keQMJcGFyYWdyYXBoBwDOvas1AgYEAM69qzUDDndvcmxk5pel5pys6Kqeh869qzUCAwlwYXJhZ3JhcGgHAM69qzUMBgYAzr2rNQ0GaXRhbGljBHRydWWEzr2rNQ4KCXRhYm5hw692ZYbOvas1FwZpdGFsaWMEbnVsbIfOvas1DAMJcGFyYWdyYXBoBwDOvas1GQYEAM69qzUaCndvcmxkd29ybGRGzr2rNQQEYm9sZAR0cnVlxM69qzUlzr2rNQQBWMbOvas1Js69qzUEBGJvbGQEbnVsbAA=",
- "stateVectorB64": "Ac69qzUo",
+ "mergedUpdateB64": "ARCU+pCJBQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDEoAQtmcm9udG1hdHRlcgVjb3VudAF9DgcBBGJvZHkDCXBhcmFncmFwaAcAlPqQiQUCBgQAlPqQiQUDDndvcmxk5pel5pys6Kqeh5T6kIkFAgMJcGFyYWdyYXBoBwCU+pCJBQwGBgCU+pCJBQ0GaXRhbGljBHRydWWElPqQiQUOCgl0YWJuYcOvdmWGlPqQiQUXBml0YWxpYwRudWxsh5T6kIkFDAMJcGFyYWdyYXBoBwCU+pCJBRkGBACU+pCJBRoKd29ybGR3b3JsZEaU+pCJBQQEYm9sZAR0cnVlxJT6kIkFJZT6kIkFBAFYxpT6kIkFJpT6kIkFBARib2xkBG51bGwA",
+ "stateVectorB64": "AZT6kIkFKA==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1001",
@@ -50,6 +50,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1001\ncount: 14\n---\n\n**X**world日本語\n\n&#9;*tabnaïve*\n\nworldworld"
+  "markdown": "---\nalpha: value-1001\ncount: 14\n---\n\n**X**world日本語\n\n&#9;*tabnaïve*\n\nworldworld\n"
  }
 }

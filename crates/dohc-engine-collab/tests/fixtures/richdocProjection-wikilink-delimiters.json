@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-wikilink-delimiters",
  "updates": [
-  "AQS9lcPYCAAHAQRib2R5AwlwYXJhZ3JhcGgHAL2Vw9gIAAMId2lraWxpbmsoAL2Vw9gIAQZ0YXJnZXQBdxFmb2xkZXJ8bmFtZV1ddGFpbCgAvZXD2AgBBWxhYmVsAXcSbGFiZWx8d2l0aF1dY2xvc2VyAA==",
-  "AQG9lcPYCAQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTd2lraWxpbmstZGVsaW1pdGVycwA="
+  "AQSLhv+dBAAHAQRib2R5AwlwYXJhZ3JhcGgHAIuG/50EAAMId2lraWxpbmsoAIuG/50EAQZ0YXJnZXQBdxFmb2xkZXJ8bmFtZV1ddGFpbCgAi4b/nQQBBWxhYmVsAXcSbGFiZWx8d2l0aF1dY2xvc2VyAA==",
+  "AQGLhv+dBAQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTd2lraWxpbmstZGVsaW1pdGVycwA="
  ],
- "mergedUpdateB64": "AQW9lcPYCAAHAQRib2R5AwlwYXJhZ3JhcGgHAL2Vw9gIAAMId2lraWxpbmsoAL2Vw9gIAQZ0YXJnZXQBdxFmb2xkZXJ8bmFtZV1ddGFpbCgAvZXD2AgBBWxhYmVsAXcSbGFiZWx8d2l0aF1dY2xvc2VyKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3E3dpa2lsaW5rLWRlbGltaXRlcnMA",
- "stateVectorB64": "Ab2Vw9gIBQ==",
+ "mergedUpdateB64": "AQWLhv+dBAAHAQRib2R5AwlwYXJhZ3JhcGgHAIuG/50EAAMId2lraWxpbmsoAIuG/50EAQZ0YXJnZXQBdxFmb2xkZXJ8bmFtZV1ddGFpbCgAi4b/nQQBBWxhYmVsAXcSbGFiZWx8d2l0aF1dY2xvc2VyKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3E3dpa2lsaW5rLWRlbGltaXRlcnMA",
+ "stateVectorB64": "AYuG/50EBQ==",
  "coverage": {
   "nodes": [
    "doc",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "[[folder\\|name\\]\\]tail|label\\|with\\]\\]closer]]"
+  "markdown": "[[folder\\|name\\]\\]tail|label\\|with\\]\\]closer]]\n"
  }
 }

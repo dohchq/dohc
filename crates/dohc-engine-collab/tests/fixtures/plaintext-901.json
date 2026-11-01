@@ -1,0 +1,12 @@
+{
+ "seed": 901,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGYw8CABgAEAQlwbGFpblRleHQqLS0tCnRpdGxlOiBsb29rcyBsaWtlIGZyb250bWF0dGVyCi0tLQpib2R5AA=="
+ ],
+ "mergedUpdateB64": "AQGYw8CABgAEAQlwbGFpblRleHQqLS0tCnRpdGxlOiBsb29rcyBsaWtlIGZyb250bWF0dGVyCi0tLQpib2R5AA==",
+ "stateVectorB64": "AZjDwIAGKg==",
+ "expected": {
+  "text": "---\ntitle: looks like frontmatter\n---\nbody"
+ }
+}

@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-code-blocks",
  "updates": [
-  "AQqrnJBSACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCWNvZGVCbG9jawcAq5yQUgEGBACrnJBSAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoAKuckFIBCGxhbmd1YWdlAXcCdHOHq5yQUgEDCWNvZGVCbG9jawcAq5yQUhwGBACrnJBSHRBubyBsYW5ndWFnZSBoZXJlh6uckFIcAwljb2RlQmxvY2soAKuckFIuCGxhbmd1YWdlAXcEcnVzdAA=",
-  "AQGrnJBSMCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwtjb2RlLWJsb2NrcwA="
+  "AQqE3Y3KCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAITdjcoLAQYEAITdjcoLAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoAITdjcoLAQhsYW5ndWFnZQF3AnRzh4TdjcoLAQMJY29kZUJsb2NrBwCE3Y3KCxwGBACE3Y3KCx0Qbm8gbGFuZ3VhZ2UgaGVyZYeE3Y3KCxwDCWNvZGVCbG9jaygAhN2NygsuCGxhbmd1YWdlAXcEcnVzdAA=",
+  "AQGE3Y3KCzAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLY29kZS1ibG9ja3MA"
  ],
- "mergedUpdateB64": "AQurnJBSACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCWNvZGVCbG9jawcAq5yQUgEGBACrnJBSAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoAKuckFIBCGxhbmd1YWdlAXcCdHOHq5yQUgEDCWNvZGVCbG9jawcAq5yQUhwGBACrnJBSHRBubyBsYW5ndWFnZSBoZXJlh6uckFIcAwljb2RlQmxvY2soAKuckFIuCGxhbmd1YWdlAXcEcnVzdCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwtjb2RlLWJsb2NrcwA=",
- "stateVectorB64": "AauckFIx",
+ "mergedUpdateB64": "AQuE3Y3KCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAITdjcoLAQYEAITdjcoLAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoAITdjcoLAQhsYW5ndWFnZQF3AnRzh4TdjcoLAQMJY29kZUJsb2NrBwCE3Y3KCxwGBACE3Y3KCx0Qbm8gbGFuZ3VhZ2UgaGVyZYeE3Y3KCxwDCWNvZGVCbG9jaygAhN2NygsuCGxhbmd1YWdlAXcEcnVzdCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwtjb2RlLWJsb2NrcwA=",
+ "stateVectorB64": "AYTdjcoLMQ==",
  "coverage": {
   "nodes": [
    "codeBlock",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "```ts\nconst x = 1 < 2 && 3 > 2\n```\n\n```\nno language here\n```\n\n```rust\n\n```"
+  "markdown": "```ts\nconst x = 1 < 2 && 3 > 2\n```\n\n```\nno language here\n```\n\n```rust\n\n```\n"
  }
 }

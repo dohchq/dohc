@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-empty-code-block-containers",
  "updates": [
-  "AROZoIuUBQAHAQRib2R5AwpidWxsZXRMaXN0BwCZoIuUBQADCGxpc3RJdGVtBwCZoIuUBQEDCXBhcmFncmFwaAcAmaCLlAUCBgQAmaCLlAUDBWludHJvh5mgi5QFAgMJY29kZUJsb2NrKACZoIuUBQkIbGFuZ3VhZ2UBdwJqc4eZoIuUBQEDCGxpc3RJdGVtBwCZoIuUBQsDCXBhcmFncmFwaAcAmaCLlAUMBgQAmaCLlAUNBWludHJvh5mgi5QFDAMJY29kZUJsb2NrKACZoIuUBRMIbGFuZ3VhZ2UBdwlsYW5nYHRpY2uHmaCLlAUAAwpibG9ja3F1b3RlBwCZoIuUBRUDCWNvZGVCbG9jaygAmaCLlAUWCGxhbmd1YWdlAXcJbGFuZ2B0aWNrh5mgi5QFFQMJcGFyYWdyYXBoBwCZoIuUBRgGBACZoIuUBRkKQWZ0ZXIgY29kZQA=",
-  "AQGZoIuUBSQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbZW1wdHktY29kZS1ibG9jay1jb250YWluZXJzAA=="
+  "AROJqqSUDgAHAQRib2R5AwpidWxsZXRMaXN0BwCJqqSUDgADCGxpc3RJdGVtBwCJqqSUDgEDCXBhcmFncmFwaAcAiaqklA4CBgQAiaqklA4DBWludHJvh4mqpJQOAgMJY29kZUJsb2NrKACJqqSUDgkIbGFuZ3VhZ2UBdwJqc4eJqqSUDgEDCGxpc3RJdGVtBwCJqqSUDgsDCXBhcmFncmFwaAcAiaqklA4MBgQAiaqklA4NBWludHJvh4mqpJQODAMJY29kZUJsb2NrKACJqqSUDhMIbGFuZ3VhZ2UBdwlsYW5nYHRpY2uHiaqklA4AAwpibG9ja3F1b3RlBwCJqqSUDhUDCWNvZGVCbG9jaygAiaqklA4WCGxhbmd1YWdlAXcJbGFuZ2B0aWNrh4mqpJQOFQMJcGFyYWdyYXBoBwCJqqSUDhgGBACJqqSUDhkKQWZ0ZXIgY29kZQA=",
+  "AQGJqqSUDiQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcbZW1wdHktY29kZS1ibG9jay1jb250YWluZXJzAA=="
  ],
- "mergedUpdateB64": "ARSZoIuUBQAHAQRib2R5AwpidWxsZXRMaXN0BwCZoIuUBQADCGxpc3RJdGVtBwCZoIuUBQEDCXBhcmFncmFwaAcAmaCLlAUCBgQAmaCLlAUDBWludHJvh5mgi5QFAgMJY29kZUJsb2NrKACZoIuUBQkIbGFuZ3VhZ2UBdwJqc4eZoIuUBQEDCGxpc3RJdGVtBwCZoIuUBQsDCXBhcmFncmFwaAcAmaCLlAUMBgQAmaCLlAUNBWludHJvh5mgi5QFDAMJY29kZUJsb2NrKACZoIuUBRMIbGFuZ3VhZ2UBdwlsYW5nYHRpY2uHmaCLlAUAAwpibG9ja3F1b3RlBwCZoIuUBRUDCWNvZGVCbG9jaygAmaCLlAUWCGxhbmd1YWdlAXcJbGFuZ2B0aWNrh5mgi5QFFQMJcGFyYWdyYXBoBwCZoIuUBRgGBACZoIuUBRkKQWZ0ZXIgY29kZSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxtlbXB0eS1jb2RlLWJsb2NrLWNvbnRhaW5lcnMA",
- "stateVectorB64": "AZmgi5QFJQ==",
+ "mergedUpdateB64": "ARSJqqSUDgAHAQRib2R5AwpidWxsZXRMaXN0BwCJqqSUDgADCGxpc3RJdGVtBwCJqqSUDgEDCXBhcmFncmFwaAcAiaqklA4CBgQAiaqklA4DBWludHJvh4mqpJQOAgMJY29kZUJsb2NrKACJqqSUDgkIbGFuZ3VhZ2UBdwJqc4eJqqSUDgEDCGxpc3RJdGVtBwCJqqSUDgsDCXBhcmFncmFwaAcAiaqklA4MBgQAiaqklA4NBWludHJvh4mqpJQODAMJY29kZUJsb2NrKACJqqSUDhMIbGFuZ3VhZ2UBdwlsYW5nYHRpY2uHiaqklA4AAwpibG9ja3F1b3RlBwCJqqSUDhUDCWNvZGVCbG9jaygAiaqklA4WCGxhbmd1YWdlAXcJbGFuZ2B0aWNrh4mqpJQOFQMJcGFyYWdyYXBoBwCJqqSUDhgGBACJqqSUDhkKQWZ0ZXIgY29kZSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxtlbXB0eS1jb2RlLWJsb2NrLWNvbnRhaW5lcnMA",
+ "stateVectorB64": "AYmqpJQOJQ==",
  "coverage": {
   "nodes": [
    "blockquote",
@@ -21,6 +21,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "- intro\n  ```js\n  \n  ```\n- intro\n  ~~~lang`tick\n  \n  ~~~\n\n> ~~~lang`tick\n>\n> ~~~\n\nAfter code"
+  "markdown": "- intro\n  ```js\n  \n  ```\n- intro\n  ~~~lang`tick\n  \n  ~~~\n\n> ~~~lang`tick\n>\n> ~~~\n\nAfter code\n"
  }
 }

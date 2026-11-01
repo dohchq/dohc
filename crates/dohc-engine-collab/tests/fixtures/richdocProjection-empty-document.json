@@ -1,0 +1,20 @@
+{
+ "seed": -130,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-empty-document",
+ "updates": [
+  "AAA=",
+  "AQHmlOi/BAAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcOZW1wdHktZG9jdW1lbnQA"
+ ],
+ "mergedUpdateB64": "AQHmlOi/BAAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcOZW1wdHktZG9jdW1lbnQA",
+ "stateVectorB64": "AeaU6L8EAQ==",
+ "coverage": {
+  "nodes": [
+   "doc"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": ""
+ }
+}

@@ -1,0 +1,22 @@
+{
+ "seed": -132,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-final-ending-missing",
+ "updates": [
+  "AQTo7bSJDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAOjttIkPAQYEAOjttIkPAgVCb2R5LgA=",
+  "AQHo7bSJDwgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUZmluYWwtZW5kaW5nLW1pc3NpbmcA"
+ ],
+ "mergedUpdateB64": "AQXo7bSJDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAOjttIkPAQYEAOjttIkPAgVCb2R5LigBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxRmaW5hbC1lbmRpbmctbWlzc2luZwA=",
+ "stateVectorB64": "AejttIkPCQ==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "Body.\n"
+ }
+}

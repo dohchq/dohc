@@ -1,0 +1,12 @@
+{
+ "seed": 906,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGf7ZMWAAQBCXBsYWluVGV4dBV0cmFpbGluZyBzcGFjZXMgICAKICAA"
+ ],
+ "mergedUpdateB64": "AQGf7ZMWAAQBCXBsYWluVGV4dBV0cmFpbGluZyBzcGFjZXMgICAKICAA",
+ "stateVectorB64": "AZ/tkxYV",
+ "expected": {
+  "text": "trailing spaces   \n  "
+ }
+}

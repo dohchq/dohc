@@ -1,0 +1,27 @@
+{
+ "seed": -139,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-quote-table",
+ "updates": [
+  "ARSL+POXCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCL+POXCQEDCXBhcmFncmFwaAcAi/jzlwkCBgQAi/jzlwkDBXF1b3Rlh4v485cJAgMFdGFibGUHAIv485cJCQMIdGFibGVSb3cHAIv485cJCgMLdGFibGVIZWFkZXIHAIv485cJCwMJcGFyYWdyYXBoBwCL+POXCQwGBACL+POXCQ0BYSgAi/jzlwkLB2NvbHNwYW4BfQEoAIv485cJCwdyb3dzcGFuAX0Bh4v485cJCgMIdGFibGVSb3cHAIv485cJEQMJdGFibGVDZWxsBwCL+POXCRIDCXBhcmFncmFwaAcAi/jzlwkTBgQAi/jzlwkUATEoAIv485cJEgdjb2xzcGFuAX0BKACL+POXCRIHcm93c3BhbgF9AQA=",
+  "AQGL+POXCRgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLcXVvdGUtdGFibGUA"
+ ],
+ "mergedUpdateB64": "ARWL+POXCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCL+POXCQEDCXBhcmFncmFwaAcAi/jzlwkCBgQAi/jzlwkDBXF1b3Rlh4v485cJAgMFdGFibGUHAIv485cJCQMIdGFibGVSb3cHAIv485cJCgMLdGFibGVIZWFkZXIHAIv485cJCwMJcGFyYWdyYXBoBwCL+POXCQwGBACL+POXCQ0BYSgAi/jzlwkLB2NvbHNwYW4BfQEoAIv485cJCwdyb3dzcGFuAX0Bh4v485cJCgMIdGFibGVSb3cHAIv485cJEQMJdGFibGVDZWxsBwCL+POXCRIDCXBhcmFncmFwaAcAi/jzlwkTBgQAi/jzlwkUATEoAIv485cJEgdjb2xzcGFuAX0BKACL+POXCRIHcm93c3BhbgF9ASgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwtxdW90ZS10YWJsZQA=",
+ "stateVectorB64": "AYv485cJGQ==",
+ "coverage": {
+  "nodes": [
+   "blockquote",
+   "doc",
+   "paragraph",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "> quote\n>\n> | a   |\n> | --- |\n> | 1   |\n"
+ }
+}

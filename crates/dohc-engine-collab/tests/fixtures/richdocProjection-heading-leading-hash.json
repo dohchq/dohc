@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-heading-leading-hash",
  "updates": [
-  "AQTnyJrPCwAHAQRib2R5AwdoZWFkaW5nBwDnyJrPCwAGBADnyJrPCwESIyBzdGFydHMgd2l0aCBoYXNoKADnyJrPCwAFbGV2ZWwBfQIA",
-  "AQHnyJrPCxUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA"
+  "AQTvn9edAQAHAQRib2R5AwdoZWFkaW5nBwDvn9edAQAGBADvn9edAQESIyBzdGFydHMgd2l0aCBoYXNoKADvn9edAQAFbGV2ZWwBfQIA",
+  "AQHvn9edARUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA"
  ],
- "mergedUpdateB64": "AQXnyJrPCwAHAQRib2R5AwdoZWFkaW5nBwDnyJrPCwAGBADnyJrPCwESIyBzdGFydHMgd2l0aCBoYXNoKADnyJrPCwAFbGV2ZWwBfQIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA",
- "stateVectorB64": "AefIms8LFg==",
+ "mergedUpdateB64": "AQXvn9edAQAHAQRib2R5AwdoZWFkaW5nBwDvn9edAQAGBADvn9edAQESIyBzdGFydHMgd2l0aCBoYXNoKADvn9edAQAFbGV2ZWwBfQIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA",
+ "stateVectorB64": "Ae+f150BFg==",
  "coverage": {
   "nodes": [
    "doc",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "## # starts with hash"
+  "markdown": "## # starts with hash\n"
  }
 }

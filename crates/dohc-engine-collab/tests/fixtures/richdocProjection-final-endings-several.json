@@ -1,0 +1,22 @@
+{
+ "seed": -131,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-final-endings-several",
+ "updates": [
+  "AQa4zu7nCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALjO7ucLAQYEALjO7ucLAgVCb2R5Loe4zu7nCwEDCXBhcmFncmFwaIe4zu7nCwgDCXBhcmFncmFwaAA=",
+  "AQG4zu7nCwooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcVZmluYWwtZW5kaW5ncy1zZXZlcmFsAA=="
+ ],
+ "mergedUpdateB64": "AQe4zu7nCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALjO7ucLAQYEALjO7ucLAgVCb2R5Loe4zu7nCwEDCXBhcmFncmFwaIe4zu7nCwgDCXBhcmFncmFwaCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxVmaW5hbC1lbmRpbmdzLXNldmVyYWwA",
+ "stateVectorB64": "AbjO7ucLCw==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "Body.\n\n\n\n&nbsp;\n"
+ }
+}

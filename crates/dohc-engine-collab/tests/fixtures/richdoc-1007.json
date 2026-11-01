@@ -2,14 +2,14 @@
  "seed": 1007,
  "contentKind": "richdoc",
  "updates": [
-  "AQH8sY/iDQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcA",
-  "AQH8sY/iDQEoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEA",
-  "AQf8sY/iDQIHAQRib2R5AwlwYXJhZ3JhcGgHAPyxj+INAgYGAPyxj+INAwRib2xkBHRydWWG/LGP4g0EBml0YWxpYwR0cnVlhPyxj+INBQ93b3JsZNmF2LHYrdio2KeG/LGP4g0PBGJvbGQEbnVsbIb8sY/iDRAGaXRhbGljBG51bGwA",
-  "AQX8sY/iDRKH/LGP4g0CAwlwYXJhZ3JhcGgHAPyxj+INEgYGAPyxj+INEwRib2xkBHRydWWE/LGP4g0UCmhlbGxvIAl0YWKG/LGP4g0eBGJvbGQEbnVsbAA=",
-  "AQH8sY/iDSDE/LGP4g0E/LGP4g0FAVgA"
+  "AQGFut7pBwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcA",
+  "AQGFut7pBwEoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEA",
+  "AQeFut7pBwIHAQRib2R5AwlwYXJhZ3JhcGgHAIW63ukHAgYGAIW63ukHAwRib2xkBHRydWWGhbre6QcEBml0YWxpYwR0cnVlhIW63ukHBQ93b3JsZNmF2LHYrdio2KeGhbre6QcPBGJvbGQEbnVsbIaFut7pBxAGaXRhbGljBG51bGwA",
+  "AQWFut7pBxKHhbre6QcCAwlwYXJhZ3JhcGgHAIW63ukHEgYGAIW63ukHEwRib2xkBHRydWWEhbre6QcUCmhlbGxvIAl0YWKGhbre6QceBGJvbGQEbnVsbAA=",
+  "AQGFut7pByDEhbre6QcEhbre6QcFAVgA"
  ],
- "mergedUpdateB64": "AQ/8sY/iDQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEHAQRib2R5AwlwYXJhZ3JhcGgHAPyxj+INAgYGAPyxj+INAwRib2xkBHRydWWG/LGP4g0EBml0YWxpYwR0cnVlhPyxj+INBQ93b3JsZNmF2LHYrdio2KeG/LGP4g0PBGJvbGQEbnVsbIb8sY/iDRAGaXRhbGljBG51bGyH/LGP4g0CAwlwYXJhZ3JhcGgHAPyxj+INEgYGAPyxj+INEwRib2xkBHRydWWE/LGP4g0UCmhlbGxvIAl0YWKG/LGP4g0eBGJvbGQEbnVsbMT8sY/iDQT8sY/iDQUBWAA=",
- "stateVectorB64": "Afyxj+INIQ==",
+ "mergedUpdateB64": "AQ+Fut7pBwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEHAQRib2R5AwlwYXJhZ3JhcGgHAIW63ukHAgYGAIW63ukHAwRib2xkBHRydWWGhbre6QcEBml0YWxpYwR0cnVlhIW63ukHBQ93b3JsZNmF2LHYrdio2KeGhbre6QcPBGJvbGQEbnVsbIaFut7pBxAGaXRhbGljBG51bGyHhbre6QcCAwlwYXJhZ3JhcGgHAIW63ukHEgYGAIW63ukHEwRib2xkBHRydWWEhbre6QcUCmhlbGxvIAl0YWKGhbre6QceBGJvbGQEbnVsbMSFut7pBwSFut7pBwUBWAA=",
+ "stateVectorB64": "AYW63ukHIQ==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1007",
@@ -40,6 +40,6 @@
     ]
    }
   ],
-  "markdown": "---\nalpha: value-1007\ncount: 87\n---\n\n**X*worldمرحبا***\n\n**hello \ttab**"
+  "markdown": "---\nalpha: value-1007\ncount: 87\n---\n\n**X*worldمرحبا***\n\n**hello \ttab**\n"
  }
 }

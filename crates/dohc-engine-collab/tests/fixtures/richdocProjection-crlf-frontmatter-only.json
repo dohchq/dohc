@@ -1,0 +1,20 @@
+{
+ "seed": -144,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-crlf-frontmatter-only",
+ "updates": [
+  "AQOguumUAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeAA=",
+  "AQGguumUAQMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcVY3JsZi1mcm9udG1hdHRlci1vbmx5AA=="
+ ],
+ "mergedUpdateB64": "AQSguumUAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BFBsYW4oAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxVjcmxmLWZyb250bWF0dGVyLW9ubHkA",
+ "stateVectorB64": "AaC66ZQBBA==",
+ "coverage": {
+  "nodes": [
+   "doc"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "---\r\ntitle: Plan\r\n---\r\n"
+ }
+}

@@ -1,0 +1,23 @@
+{
+ "seed": -142,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-crlf-body",
+ "updates": [
+  "AQnz9anbAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeAcBBGJvZHkDB2hlYWRpbmcHAPP1qdsDAgYEAPP1qdsDAwVUaXRsZSgA8/Wp2wMCBWxldmVsAX0Bh/P1qdsDAgMJcGFyYWdyYXBoBwDz9anbAwoGBADz9anbAwsEQm9keQA=",
+  "AQHz9anbAxAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcJY3JsZi1ib2R5AA=="
+ ],
+ "mergedUpdateB64": "AQrz9anbAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeAcBBGJvZHkDB2hlYWRpbmcHAPP1qdsDAgYEAPP1qdsDAwVUaXRsZSgA8/Wp2wMCBWxldmVsAX0Bh/P1qdsDAgMJcGFyYWdyYXBoBwDz9anbAwoGBADz9anbAwsEQm9keSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwljcmxmLWJvZHkA",
+ "stateVectorB64": "AfP1qdsDEQ==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "heading",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "# Title\r\n\r\nBody\r\n"
+ }
+}

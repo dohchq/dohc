@@ -1,0 +1,12 @@
+{
+ "seed": 905,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGEiap9AAQBCXBsYWluVGV4dB5jcmxmIGxpbmVzDQphbmQgYSBmaW5hbCBjcmxmDQoA"
+ ],
+ "mergedUpdateB64": "AQGEiap9AAQBCXBsYWluVGV4dB5jcmxmIGxpbmVzDQphbmQgYSBmaW5hbCBjcmxmDQoA",
+ "stateVectorB64": "AYSJqn0e",
+ "expected": {
+  "text": "crlf lines\r\nand a final crlf\r\n"
+ }
+}

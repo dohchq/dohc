@@ -3,11 +3,11 @@
  "contentKind": "richdoc",
  "kind": "richdocProjection-code-fence-collision",
  "updates": [
-  "AQSkyKK6AgAHAQRib2R5Awljb2RlQmxvY2sHAKTIoroCAAYEAKTIoroCARBiZWZvcmUKYGBgCmFmdGVyKACkyKK6AgAIbGFuZ3VhZ2UBdwJqcwA=",
-  "AQGkyKK6AhMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUY29kZS1mZW5jZS1jb2xsaXNpb24A"
+  "AQSExqGDDwAHAQRib2R5Awljb2RlQmxvY2sHAITGoYMPAAYEAITGoYMPARBiZWZvcmUKYGBgCmFmdGVyKACExqGDDwAIbGFuZ3VhZ2UBdwJqcwA=",
+  "AQGExqGDDxMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUY29kZS1mZW5jZS1jb2xsaXNpb24A"
  ],
- "mergedUpdateB64": "AQWkyKK6AgAHAQRib2R5Awljb2RlQmxvY2sHAKTIoroCAAYEAKTIoroCARBiZWZvcmUKYGBgCmFmdGVyKACkyKK6AgAIbGFuZ3VhZ2UBdwJqcygBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxRjb2RlLWZlbmNlLWNvbGxpc2lvbgA=",
- "stateVectorB64": "AaTIoroCFA==",
+ "mergedUpdateB64": "AQWExqGDDwAHAQRib2R5Awljb2RlQmxvY2sHAITGoYMPAAYEAITGoYMPARBiZWZvcmUKYGBgCmFmdGVyKACExqGDDwAIbGFuZ3VhZ2UBdwJqcygBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxRjb2RlLWZlbmNlLWNvbGxpc2lvbgA=",
+ "stateVectorB64": "AYTGoYMPFA==",
  "coverage": {
   "nodes": [
    "codeBlock",
@@ -17,6 +17,6 @@
   "marks": []
  },
  "expected": {
-  "markdown": "````js\nbefore\n```\nafter\n````"
+  "markdown": "````js\nbefore\n```\nafter\n````\n"
  }
 }
