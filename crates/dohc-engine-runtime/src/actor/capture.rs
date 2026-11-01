@@ -886,9 +886,9 @@ mod capture_file_hold_tests {
     }
 
     #[test]
-    fn a_retire_waits_while_a_version_switch_has_not_placed_the_head() {
-        // dohc#2360. A switch whose placement failed leaves the head's write
-        // pending, so its missing file is not a deletion yet.
+    fn a_retire_waits_while_a_pending_write_has_not_placed_the_head() {
+        // dohc#2360. A switch or settle whose placement failed leaves the
+        // head's write pending, so its missing file is not a deletion yet.
         use dohc_engine_storage::{MaterializationJobSpec, MaterializationOperation, Preimage};
         let scratch = ScratchDir::new().unwrap();
         let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
@@ -962,7 +962,7 @@ mod capture_file_hold_tests {
             retire_once(&mut store),
             Err(RuntimeError::Sync(
                 dohc_engine_sync::SyncError::RetryableState {
-                    reason: "version-switch-placement-pending"
+                    reason: "head-placement-pending"
                 }
             ))
         ));
@@ -973,6 +973,39 @@ mod capture_file_hold_tests {
                     "UPDATE materialization_jobs SET status='complete',completed_at_ms=7 \
                      WHERE job_id=?1",
                     params![job_id],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        // A document settle whose write failed leaves the same pending write.
+        let settle = MaterializationJobSpec {
+            job_id: "ydoc-mat_settle".into(),
+            ..spec
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &settle,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            retire_once(&mut store),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "head-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(moments(&store), count);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='complete',completed_at_ms=7 \
+                     WHERE job_id=?1",
+                    params![settle.job_id],
                 )
                 .map_err(StorageError::persist_public)
             })
@@ -2922,10 +2955,11 @@ pub(super) fn ensure_no_pending_undo_placement(
     Ok(())
 }
 
-/// A version switch whose placement failed leaves the active head's write
-/// pending, so its file is missing until replay lands it. Retiring that head
-/// would discard the version's file instead of waiting for it.
-fn ensure_no_pending_switch_placement(
+/// A write that failed to place the active head stays pending, so its file is
+/// missing until replay lands it. This covers a version switch and a document
+/// settle alike. Retiring that head would discard the file instead of waiting
+/// for it.
+fn ensure_no_pending_head_placement(
     conn: &Connection,
     workspace: &str,
     path: &str,
@@ -2940,7 +2974,7 @@ fn ensure_no_pending_switch_placement(
          JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id
              AND s.object_id=a.object_id
          WHERE j.workspace_id IN (?1,'') AND j.target_path=?2 AND j.status='pending'
-             AND j.operation='write' AND j.job_id GLOB 'version-switch-mat_*'
+             AND j.operation='write'
              AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256)",
         )
         .map_err(StorageError::corrupt_public)?
@@ -2949,7 +2983,7 @@ fn ensure_no_pending_switch_placement(
     if pending {
         return Err(RuntimeError::Sync(
             dohc_engine_sync::SyncError::RetryableState {
-                reason: "version-switch-placement-pending",
+                reason: "head-placement-pending",
             },
         ));
     }
@@ -3162,7 +3196,7 @@ fn capture_retire_on_store(
         let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
         let placement_admission = if hold.is_none() {
             ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path).and_then(|()| {
-                ensure_no_pending_switch_placement(tx, &input.workspace_id, &input.path)
+                ensure_no_pending_head_placement(tx, &input.workspace_id, &input.path)
             })
         } else {
             Ok(())

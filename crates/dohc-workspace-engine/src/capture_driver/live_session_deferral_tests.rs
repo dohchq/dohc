@@ -1213,7 +1213,9 @@ fn switch_write_status(db: &Path, path: &str) -> String {
     rusqlite::Connection::open(db)
         .expect("open database observer")
         .query_row(
-            "SELECT status FROM materialization_jobs              WHERE workspace_id = ?1 AND target_path = ?2 AND operation = 'write'              AND job_id GLOB 'version-switch-mat_*'",
+            "SELECT status FROM materialization_jobs \
+             WHERE workspace_id = ?1 AND target_path = ?2 AND operation = 'write' \
+             AND job_id GLOB 'version-switch-mat_*'",
             [WORKSPACE_ID, path],
             |row| row.get(0),
         )
