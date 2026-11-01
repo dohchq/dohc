@@ -19,6 +19,7 @@ import {
   cliTransportResponseSchema,
   parseCliResult,
   type CliRequest,
+  type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliTransportResponse,
   type CliVerb,
@@ -4284,6 +4285,81 @@ describe("CLI socket server", () => {
     expect(thread.messages[0]?.agentRequests).toEqual([{ agentId: "default", state: "waiting" }]);
     await expect(invokeAny("show", { cwd: workspaceRoot, actor: "human", target: cliThreadId(chat.thread.id), peek: true, limit: 1 }))
       .rejects.toThrow("--before and --limit page a group's stream");
+  });
+
+  it("shows each stream item's own poll in CLI text, JSON, and MCP without decision reads", async () => {
+    if (!store) throw new Error("Store is not available");
+    const group = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Travel", kind: "channel", type: "both" });
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const options = ["Train", "Bus"];
+    const post = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "posts",
+      author, body: "How do we travel?", needsDecision: true, options,
+    });
+    const plain = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "posts",
+      author, body: "Travel notes",
+    });
+    await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: plain.thread.id,
+      parentMessageId: plain.message.id, author, body: "Where do we stay?",
+      needsDecision: true, options: ["Hotel", "Tent"],
+    });
+    const chat = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "chat",
+      author, body: "How do we return?", needsDecision: true, options,
+    });
+    const request = (input: CliRequestWithoutToken) => invokeAny(input.verb, input.args);
+
+    for (const state of ["open", "resolved"] as const) {
+      if (state === "resolved") {
+        for (const poll of [post, chat]) {
+          await invoke("reply", {
+            cwd: workspaceRoot, actor: "human", thread: poll.thread.id, to: poll.message.id,
+            resolve: poll.message.id, choose: "Train", attachments: [], needsDecision: false, body: "Take the train.",
+          });
+        }
+      }
+      const decisions = vi.spyOn(store, "listThreadDecisions");
+      const streams = vi.spyOn(store, "listGroupStream");
+      try {
+        const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: group.slug, peek: true });
+        if (!("stream" in shown)) throw new Error("expected a stream");
+        const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: group.slug });
+        if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+        for (const poll of [post, chat]) {
+          expect(shown.stream.items.find((item) => item.message.id === cliMessageId(poll.message.id))?.message).toMatchObject({
+            decisionState: state, decisionOptions: options,
+            ...(state === "resolved" ? { decisionChosenOption: "Train" } : {}),
+          });
+          expect(read.stream.items.find((item) => item.message.id === poll.message.id)?.message).toMatchObject({
+            needsDecision: true, decisionState: state, options,
+            ...(state === "resolved" ? { chosenOption: "Train", resolvedByMessageId: expect.any(String) } : {}),
+          });
+        }
+        const plainCli = shown.stream.items.find((item) => item.message.id === cliMessageId(plain.message.id));
+        expect(plainCli?.message.decisionState).toBeUndefined();
+        expect(plainCli?.message.decisionOptions).toBeUndefined();
+        expect(plainCli?.post?.openDecisionCount).toBe(1);
+        expect(read.stream.items.find((item) => item.message.id === plain.message.id)?.message).toMatchObject({ needsDecision: false });
+
+        const text = await executeCli({ argv: ["chat", "show", group.slug, "--peek"], cwd: workspaceRoot, env: {}, request });
+        expect(text.exitCode, text.stderr).toBe(0);
+        for (const question of [post.message.body, chat.message.body]) {
+          expect(text.stdout).toContain(`needs-decision(${state})`);
+          expect(text.stdout).toContain(`${question}\n${state === "resolved" ? "- [x] Train" : "- [ ] Train"}\n- [ ] Bus`);
+        }
+        expect(text.stdout).not.toContain("- [ ] Hotel");
+        const json = await executeCli({ argv: ["chat", "show", group.slug, "--peek", "--json"], cwd: workspaceRoot, env: {}, request });
+        expect(json.exitCode, json.stderr).toBe(0);
+        expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 3, ...shown });
+        expect(streams).toHaveBeenCalledTimes(4);
+        expect(decisions).not.toHaveBeenCalled();
+      } finally {
+        streams.mockRestore();
+        decisions.mockRestore();
+      }
+    }
   });
 
   it("answers a thread reply in that thread, unless the agent names another message", async () => {

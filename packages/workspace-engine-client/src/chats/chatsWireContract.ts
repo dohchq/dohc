@@ -850,6 +850,7 @@ const ChatStreamPageSchema = mutableStruct({
       mutableStruct({
         position: ChatStreamPositionSchema,
         message: ChatMessageSchema,
+        decision: Schema.optionalKey(ChatDecisionSchema),
         reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
         post: Schema.optionalKey(ChatStreamPostSchema),
       }),

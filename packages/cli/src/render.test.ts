@@ -268,7 +268,10 @@ describe("markdown renderers", () => {
           {
             position: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
             threadId: "th_1",
-            message: { id: "msg_1", author: sam, body: "Plan the trip", createdAtMs: 1_000, attachments: [] },
+            message: {
+              id: "msg_1", author: sam, body: "Plan the trip", createdAtMs: 1_000, attachments: [],
+              decisionState: "resolved", decisionOptions: ["Train", "Bus"], decisionChosenOption: "Train",
+            },
             post: {
               replyCount: 2,
               repliers: [{ author: scout, lastReplyAtMs: 3_000 }],
@@ -282,6 +285,7 @@ describe("markdown renderers", () => {
             threadId: "th_chat",
             message: {
               id: "msg_4", author: sam, body: "Who is driving?", createdAtMs: 4_000, attachments: [],
+              decisionState: "open", decisionOptions: ["Sam", "Ada"],
               agentRequests: [{ agentId: "default", state: "failed", failureReason: "no-reply" }],
             },
           },
@@ -294,14 +298,18 @@ describe("markdown renderers", () => {
       "# #engineering",
       "older: --before 1000:posts:th_1",
       "",
-      "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
+      "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · needs-decision(resolved) · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
       "Plan the trip",
+      "- [x] Train",
+      "- [ ] Bus",
       "> **Scout** · 1970-01-01T00:00:03.000Z · msg_3: Booked the train.",
       "",
       "--- read up to here ---",
       "",
-      "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply)",
+      "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply) · needs-decision(open)",
       "Who is driving?",
+      "- [ ] Sam",
+      "- [ ] Ada",
       "",
     ].join("\n"));
   });

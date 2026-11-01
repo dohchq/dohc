@@ -12,6 +12,41 @@ import {
 } from "./chatsWireContract";
 
 describe("chats result decoder rejection", () => {
+  it("decodes each stream item's optional poll decision", () => {
+    const item = {
+      position: { createdAtMs: 1, lane: "posts", id: "post" },
+      message: {
+        id: "root", workspaceId: "workspace", threadId: "post",
+        author: { kind: "human", displayName: "Sam" },
+        body: "Train or bus?", createdAtMs: 1, attachments: [],
+      },
+      reactions: [],
+      post: { replyCount: 0, repliers: [], openDecisionCount: 0 },
+    };
+    const open = {
+      threadId: "post", messageId: "root", state: "open", atMs: 1,
+      options: ["Train", "Bus"],
+    };
+    const resolved = {
+      ...open, state: "resolved", atMs: 2, chosenOption: "Train", resolvedByMessageId: "answer",
+    };
+    for (const decision of [open, resolved]) {
+      const decoded = decodeChatsResult(CHATS_METHOD.streamList, {
+        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
+      });
+      expect(decoded.items[0]?.decision).toEqual(decision);
+    }
+    const plain = decodeChatsResult(CHATS_METHOD.streamList, {
+      items: [item], nextBefore: null, readPosition: null,
+    });
+    expect(plain.items[0]?.decision).toBeUndefined();
+    for (const decision of [null, { ...open, state: "invalid" }, { ...open, options: [1] }]) {
+      expect(() => decodeChatsResult(CHATS_METHOD.streamList, {
+        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
+      })).toThrow(ProtocolShapeError);
+    }
+  });
+
   it("preserves prototype-named message ids in a null-prototype run map", () => {
     const run: JsonValue = {
       workspaceId: "chat-loopback",
