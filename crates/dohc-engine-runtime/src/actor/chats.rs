@@ -951,6 +951,7 @@ impl ActorHandle {
     pub async fn chat_dispatch_claim_next_pending(
         &self,
         workspace_id: String,
+        agent_id: String,
         run_id: String,
         command: String,
         log_path: Option<String>,
@@ -964,6 +965,7 @@ impl ActorHandle {
                 chats
                     .claim_next_pending(
                         &workspace_id,
+                        &agent_id,
                         &run_id,
                         &command,
                         log_path.as_deref(),

@@ -143,7 +143,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     method: CHATS_METHOD.dispatchEnqueue,
     params: { triggerMessageId: "m", threadId: "t", agentId: "default" },
   },
-  { method: CHATS_METHOD.dispatchClaimNextPending, params: { runId: "r" } },
+  { method: CHATS_METHOD.dispatchClaimNextPending, params: { agentId: "default", runId: "r" } },
   { method: CHATS_METHOD.dispatchListPending, params: {} },
   { method: CHATS_METHOD.dispatchOpenRuns, params: {} },
   { method: CHATS_METHOD.dispatchListRunMessages, params: { runId: "r" } },
@@ -888,6 +888,7 @@ describe("ChatsLiveAdapter", () => {
     // preserve that indirection.
     await expect(
       adapter.claimNextPending("workspace", {
+        agentId: "default",
         command: "codex",
         logPath: "run-logs/{runId}.log",
       }),
@@ -896,6 +897,7 @@ describe("ChatsLiveAdapter", () => {
       method: CHATS_METHOD.dispatchClaimNextPending,
       params: {
         runId: "run-claim",
+        agentId: "default",
         command: "codex",
         logPath: "run-logs/{runId}.log",
       },
@@ -1006,6 +1008,39 @@ describe("ChatsLiveAdapter", () => {
     }
   });
 
+  it("claims only the listed agent when another agent has an older request", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      messageId: "other-first", author, body: "First", namedAgentIds: ["other"],
+    });
+    await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      messageId: "listed", author, body: "Second", namedAgentIds: ["default"],
+    });
+    expect((await adapter.listPending("workspace"))[0]?.agentId).toBe("other");
+
+    const claim = await adapter.claimNextPending("workspace", {
+      agentId: "default", command: "listed-command",
+    });
+    expect(claim?.dispatch).toMatchObject({ triggerMessageId: "listed", agentId: "default" });
+    expect(claim?.run).toMatchObject({ agentId: "default", command: "listed-command" });
+    if (!claim) throw new Error("Expected the listed agent's run.");
+    await adapter.completeRun({ runId: claim.run.runId, exitCode: 0 });
+
+    await expect(adapter.claimNextPending("workspace", { agentId: "default" })).resolves.toBeNull();
+    expect(await adapter.listPending("workspace")).toEqual([
+      expect.objectContaining({ triggerMessageId: "other-first", agentId: "other", attemptCount: 0 }),
+    ]);
+  });
+
   it("folds pending requests only from the same place: the stream, or one message's thread", async () => {
     const loopback = new ChatsLoopbackEngine();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
@@ -1030,7 +1065,7 @@ describe("ChatsLiveAdapter", () => {
     }
     const claimed: string[] = [];
     for (let run = 0; run < 3; run += 1) {
-      const claim = await adapter.claimNextPending("workspace");
+      const claim = await adapter.claimNextPending("workspace", { agentId: "codex" });
       claimed.push(claim!.dispatch.triggerMessageId);
       await adapter.completeRun({ runId: claim!.run.runId, exitCode: 0 });
     }
