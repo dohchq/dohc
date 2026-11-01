@@ -3525,6 +3525,57 @@ fn clear_base_relay_candidates_in_tx(
     Ok(())
 }
 
+/// A document's active base whose coordinates the relay log held none of
+/// after the pull fetched its pages, so the relay can admit it only after
+/// every base the pull holds.
+pub(crate) struct UnadmittedBase {
+    pub(crate) lineage_claim_id: String,
+    pub(crate) candidates: Vec<(String, i64)>,
+}
+
+pub(crate) type UnadmittedBases = std::collections::HashMap<DocKey, UnadmittedBase>;
+
+/// Record that the relay log holds none of `candidates`, the coordinates of
+/// the active lineage's base, and drop the document's candidates. The marker
+/// keeps its stored coordinate when that is one of them.
+pub(crate) fn confirm_base_absent_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    candidates: &[(String, i64)],
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let stored = dohc_engine_collab::read_marker_in(tx, key)
+        .map_err(map_collab_hard_error)?
+        .and_then(|marker| marker.base_origin_id.zip(marker.base_origin_seq));
+    let (origin_id, origin_seq) = candidates
+        .iter()
+        .find(|candidate| stored.as_ref() == Some(*candidate))
+        .unwrap_or(&candidates[0]);
+    dohc_engine_collab::record_base_coordinate_in_tx(
+        tx,
+        dohc_engine_collab::BaseCoordinateRecord {
+            key,
+            lineage_claim_id,
+            origin_id,
+            origin_seq: *origin_seq,
+            relay_seq: None,
+            now_ms,
+        },
+    )
+    .map_err(map_collab_hard_error)?;
+    dohc_engine_collab::mark_base_coordinate_absent_in_tx(
+        tx,
+        key,
+        lineage_claim_id,
+        origin_id,
+        *origin_seq,
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)?;
+    clear_base_relay_candidates_in_tx(tx, key)
+}
+
 pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -6593,11 +6644,22 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
+    apply_ydoc_envelope_in_batch(
+        store,
+        cache,
+        envelope,
+        faults,
+        leases,
+        false,
+        None,
+        &UnadmittedBases::new(),
+    )
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
-/// pull's trusted configuration names one.
+/// pull's trusted configuration names one. `unadmitted` holds the pull's
+/// documents whose base the relay can admit only after `envelope`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_ydoc_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -6606,6 +6668,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
     relay_namespace: Option<&str>,
+    unadmitted: &UnadmittedBases,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
     let tails = &cache.released_tails(store);
@@ -7040,6 +7103,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         };
         let base_payload = &payload;
         let reader_resolver = cache.reader_resolver.clone();
+        let unadmitted = unadmitted.get(&key);
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             if let Some(lineage) = dohc_engine_collab::read_marker_in(tx, &claim_key)
                 .map_err(map_collab_hard_error)?
@@ -7154,6 +7218,25 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
                     && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
             });
+            // The relay admits the waiting local base only after this one.
+            // Its absence is recorded only here, so it lasts only when the
+            // claim below installs this base in the same transaction.
+            if let Some(unadmitted) = unadmitted
+                && marker_before.as_ref().is_some_and(|marker| {
+                    marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                        && marker.lineage_claim_id.as_ref() == Some(&unadmitted.lineage_claim_id)
+                        && marker.base_relay_seq.is_none()
+                        && !marker.base_relay_confirmed_absent
+                })
+            {
+                confirm_base_absent_in_tx(
+                    tx,
+                    &claim_key,
+                    &unadmitted.lineage_claim_id,
+                    &unadmitted.candidates,
+                    op.recorded_at_ms,
+                )?;
+            }
             if let Some(result) = preserve_incomplete_base_in_tx(
                 tx,
                 &claim_key,

@@ -6723,6 +6723,7 @@ mod tests {
             &crate::NoLiveLeases,
             true,
             None,
+            &Default::default(),
         )
         .unwrap();
         store
@@ -6798,6 +6799,7 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
+                &Default::default(),
             )
             .unwrap();
         }
@@ -6869,6 +6871,7 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
+                &Default::default(),
             )
             .unwrap();
         }
@@ -6934,6 +6937,7 @@ mod tests {
                     &crate::NoLiveLeases,
                     true,
                     None,
+                    &Default::default(),
                 )
                 .unwrap();
                 let active_update = active.doc.plaintext_insert(0, "active ");
@@ -6950,6 +6954,7 @@ mod tests {
                     &crate::NoLiveLeases,
                     true,
                     None,
+                    &Default::default(),
                 )
                 .unwrap();
                 assert_eq!(
@@ -7030,6 +7035,7 @@ mod tests {
                 &crate::NoLiveLeases,
                 true,
                 None,
+                &Default::default(),
             )
             .unwrap();
         }

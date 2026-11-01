@@ -7598,6 +7598,7 @@ fn queue_real_update(store: &mut EngineStore, object_id: &str, path: &str) {
         &AlwaysLive,
         true,
         Some("relay"),
+        &Default::default(),
     )
     .unwrap();
 }
@@ -7718,6 +7719,7 @@ fn the_end_of_pass_drain_reports_what_it_admits_to_the_pass_once() {
             &AlwaysLive,
             true,
             Some("relay"),
+            &Default::default(),
         )
         .unwrap();
     }
