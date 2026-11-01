@@ -1514,21 +1514,22 @@ mod tests {
                 (object, input, handle)
             })
             .collect();
-        let bootstrap = |store: &mut EngineStore,
-                         cache: &mut WriterDocCache,
-                         (_, input, handle): &(String, LiveApplicationBootstrap, ApplicationHandle),
-                         vector: &Vector| {
-            bootstrap_committed(
-                store,
-                cache,
-                handle,
-                input.clone(),
-                vector.bytes.clone(),
-                &NoFaults,
-                |_, _, _, _| Ok::<_, Error>(()),
-            )
-            .unwrap()
-        };
+        let bootstrap =
+            |store: &mut EngineStore,
+             cache: &mut WriterDocCache,
+             (_, input, handle): &(String, LiveApplicationBootstrap, ApplicationHandle),
+             vector: &Vector| {
+                bootstrap_committed(
+                    store,
+                    cache,
+                    handle,
+                    input.clone(),
+                    vector.bytes.clone(),
+                    &NoFaults,
+                    |_, _, _, _| Ok::<_, Error>(()),
+                )
+                .unwrap()
+            };
         for (document, vector) in documents.iter().zip(&vectors) {
             assert_eq!(
                 bootstrap(&mut store, &mut cache, document, vector),
@@ -1540,7 +1541,12 @@ mod tests {
                 "{}",
                 vector.name
             );
-            assert_eq!(counts_of(&store, &document.0), (1, 1, 1, 1), "{}", vector.name);
+            assert_eq!(
+                counts_of(&store, &document.0),
+                (1, 1, 1, 1),
+                "{}",
+                vector.name
+            );
         }
         drop(store);
         let mut store = EngineStore::open(&path, 101).unwrap();
@@ -1555,10 +1561,18 @@ mod tests {
                 "{}",
                 vector.name
             );
-            assert_eq!(counts_of(&store, &document.0), (1, 1, 1, 1), "{}", vector.name);
+            assert_eq!(
+                counts_of(&store, &document.0),
+                (1, 1, 1, 1),
+                "{}",
+                vector.name
+            );
             let loaded = store
                 .read_with(|conn| {
-                    durable::load_doc_in(conn, &DocKey::new("workspace", "main", &document.0).unwrap())
+                    durable::load_doc_in(
+                        conn,
+                        &DocKey::new("workspace", "main", &document.0).unwrap(),
+                    )
                 })
                 .unwrap();
             assert_eq!(
