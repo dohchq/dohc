@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -33,15 +33,18 @@ if (process.argv[2] === "fixture") {
       if (specifier === "node:fs/promises" && context.parentURL?.endsWith("/debug.mjs")) {
         return { url: pathToFileURL(join(root, "fs-adapter.mjs")).href, shortCircuit: true };
       }
+      if (specifier === "./debug-home.mjs" && context.parentURL?.endsWith("/debug.mjs")) {
+        return { url: pathToFileURL(join(root, "home-adapter.mjs")).href, shortCircuit: true };
+      }
       return next(specifier, context);
     },
   });
+  // A signal that ends the launcher leaves this child behind. It exits without writing, as the test may be removing its folder.
   const child = spawn(process.execPath, ["-e", `
-    const { writeFileSync } = require('node:fs');
-    process.on('disconnect', () => { writeFileSync(process.argv[1], 'supervisor disconnected'); process.exit(0); });
+    process.on('disconnect', () => process.exit(0));
     process.on('message', () => process.exit(0));
     process.send('ready');
-  `, join(root, "child-disconnected")], { detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  `], { detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   await new Promise((resolve) => child.once("message", resolve));
   process.send({ phase: "launched", pid: child.pid });
   const childClosed = new Promise((resolve) => child.once("close", resolve));
@@ -114,24 +117,26 @@ if (process.argv[2] === "fixture") {
     writeFileSync(join(root, "build.mjs"), `export async function prepare() {}\nexport function assertPrepared() { return { desktop: { commit: 'earlier-build-head' } }; }`);
     writeFileSync(join(root, "process.mjs"), `import assert from 'node:assert/strict'; export const repoRoot = import.meta.dirname; export function git(args) { assert.deepEqual(args, ['rev-parse', 'HEAD']); return 'current-checkout-head'; }`);
     writeFileSync(join(root, "fs-adapter.mjs"), `export { readFile } from 'node:fs/promises'; import { mkdir as make, writeFile as write } from 'node:fs/promises'; export async function mkdir(path, ...args) { if (String(path).endsWith('workspace')) await globalThis.debugFixtureHold('startup'); return make(path, ...args); } export async function writeFile(path, ...args) { if (String(path).endsWith('desktop.jsonl')) await globalThis.debugFixtureHold('evidence'); return write(path, ...args); }`);
+    // Report the session's link, so the test checks that link and not every link other tests make in the temp folder.
+    writeFileSync(join(root, "home-adapter.mjs"), `import { makeDebugHome as make } from './debug-home.mjs'; export { removeDebugHome } from './debug-home.mjs'; export function makeDebugHome(...args) { const session = make(...args); process.send({ phase: 'home', link: session.link }); return session; }`);
     for (const [name, source] of [["playwright", "module.exports = { _electron: globalThis.debugFixtureElectron };"], ["electron", "module.exports = 'fixture-electron';"]]) {
       const directory = join(root, "node_modules", name);
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, "index.js"), source);
     }
-    const links = () => new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("dohc-debug-home-")));
-    const linksBefore = links();
     const child = spawn(process.execPath, [import.meta.filename, "fixture", root, signal, phase, probe], {
       windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     let output = "";
     let protectedCleanup;
     let launcherPid;
+    let link;
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
     const interrupt = () => process.platform === "win32" ? child.send("signal") : child.kill(signal);
     child.on("message", (message) => {
       if (message.phase === "launched") launcherPid = message.pid;
+      if (message.phase === "home") link = message.link;
       if (message.phase === "ready" && probe === "none") interrupt();
       if (message.phase === phase) {
         protectedCleanup = message.listeners > 0;
@@ -146,12 +151,13 @@ if (process.argv[2] === "fixture") {
     const deadline = setTimeout(() => child.kill("SIGKILL"), 20_000);
     try {
       const result = await closed;
-      t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")), supervisorDisconnected: existsSync(join(root, "child-disconnected")) }));
+      t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")) }));
       if (phase === "startup" || phase === "playwright") {
         // A signal that ends the launcher before its cleanup runs leaves no link to the session's home.
         assert.equal(result.code, signal === "SIGTERM" ? 143 : 130, output);
         assert.equal(protectedCleanup, true, "the launcher listens for the signal during startup");
-        assert.deepEqual([...links()].filter((name) => !linksBefore.has(name)), [], "no link to the session's home remains");
+        assert.ok(link, "the launcher made a link to the session's home");
+        assert.equal(existsSync(link), false, "the session's link is gone");
         return;
       }
       assert.equal(result.exitSignal, null, output);
