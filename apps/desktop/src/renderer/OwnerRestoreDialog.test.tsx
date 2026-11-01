@@ -419,6 +419,8 @@ it.each([false, true])("reviews a saved proposal before confirming after reopen 
     fireEvent.click(screen.getByRole("button", {name: "Retry"}));
   }
   await screen.findByRole("button", {name: "Restore file"});
+  // The main action goes last, so Shift+Tab into the dialog reaches it first.
+  expect(screen.getAllByRole("button").slice(-3).map(button => button.textContent)).toEqual(["Close", "Decline restore", "Restore file"]);
   expect(screen.getByRole("textbox", {name: "File after restore"})).toHaveProperty("value", "Earlier text");
   expect(f.call.mock.calls.some(([input]) => input.action === "confirm" || input.action === "prepare")).toBe(false);
   expect(f.props.onBeforeRestore).not.toHaveBeenCalled();
