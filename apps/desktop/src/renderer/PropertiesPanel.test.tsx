@@ -1528,6 +1528,31 @@ describe("PropertiesPanel", () => {
     }
   });
 
+  it("holds a name another device added before the rows read it", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody\n");
+    // Rename after the panel reads the new source, before its effect refreshes
+    // the rows, so the rows don't show the other device's property yet.
+    function RenamesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "state" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<><PropertiesPanel ydoc={doc} /></>);
+
+      act(() => {
+        setFrontmatterValue(doc, "state", "remote");
+        rerender(<><PropertiesPanel ydoc={doc} /><RenamesOnCommit /></>);
+      });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "draft", state: "remote" });
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "state");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+    } finally { doc.destroy(); }
+  });
+
   it("holds a live document's name that a property with a cleared name still saves under", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\na: one\nb: two\n---\n\nBody\n");

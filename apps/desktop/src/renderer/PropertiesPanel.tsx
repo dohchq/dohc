@@ -402,13 +402,28 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (heldName && heldRow === -1) setHeldName(null);
   });
 
+  // Whether the note as it is now has this name, whatever its case, on a
+  // property other than the one this row was read as.
+  function noteHas(key: string, entry: Row): boolean {
+    const name = key.trim().toLowerCase();
+    if (!name || isReserved(name)) return false;
+    const keys = ydoc ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys()) : sourceEntries.map((read) => read.key);
+    return keys.some((read) => read !== entry.sourceKey && read.trim().toLowerCase() === name);
+  }
+
   function setKey(index: number, key: string) {
     const entry = entries[index];
-    if (entry && nameTaken(index, key, entries)) {
+    if (!entry) return;
+    // The rows may not have read a property another device just added. If
+    // the note has the name, the rows read the note now, so the name is held.
+    const rows = nameTaken(index, key, entries) || !noteHas(key, entry)
+      ? entries
+      : withRead(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), entries);
+    const at = rows.findIndex((row) => row.id === entry.id);
+    if (at !== -1 && nameTaken(at, key, rows)) {
       setHeldName({ row: entry.id, text: key });
       // The row keeps the name it was read with until the new name is free.
-      const read = entry.sourceKey ?? "";
-      if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
+      setEntries(rows.map((row, i) => (i === at ? { ...row, key: row.sourceKey ?? "" } : row)));
       return;
     }
     if (index === heldRow) setHeldName(null);
