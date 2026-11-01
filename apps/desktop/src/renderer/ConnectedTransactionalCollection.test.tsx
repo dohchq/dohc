@@ -23,9 +23,9 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   listAutomationPeople: vi.fn(async () => ({ status: "listed", people: [] })),
   readScheduleHost: vi.fn(async () => ({ kind: "this-computer" })), onScheduleHostChanged: vi.fn(() => () => undefined),
   onCloudSessionChanged: vi.fn(() => () => undefined),
-  writeCollectionAutomations: vi.fn() }));
+  writeCollectionAutomations: vi.fn(), listRelayShares: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
@@ -36,6 +36,7 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
   {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
   {props.onCustomize && <button onClick={props.onCustomize}>Customize…</button>}
+  {props.onManageAccess && <button onClick={props.onManageAccess}>Manage access</button>}
 </> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
@@ -577,5 +578,39 @@ describe("a Collection this computer cannot use", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
     expect((await screen.findByTestId("collection-refusal")).textContent).toContain("another copy replaced");
     expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  });
+});
+
+describe("a read that waited for this Collection's move", () => {
+  it("files one row naming the Collection, and takes it back when a save that moves the Collection reads it again", async () => {
+    const waited = Error("CollectionMoveUnfinishedError [waited]: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
+    const shareable: DatasetDescription = { ...dataset, operations: [{ ...dataset.operations[0]!, access: "helper" }] };
+    let describes = 0;
+    backend.dataset.mockImplementation(async (input: { action: string }) => {
+      if (input.action === "describe") { describes += 1; if (describes === 2) throw waited; return { kind: "description", dataset: shareable }; }
+      if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null,
+        place: { kind: "here", server: { host: "sync.example.test", runs: "off", automations: 0, scheduledAutomations: 0 } } };
+      return { kind: "grant-updated" };
+    });
+    // Another request that waited for the move: the save leaves it to its own Try again.
+    backend.findDatasetCollection.mockRejectedValueOnce(waited);
+    backend.listRelayShares.mockResolvedValue({ granted: [{ workspaceId: "workspace-a", grantId: "grant", recipientUserId: "person", recipientEmail: "friend@example.test", revokedAtMs: null }] });
+    const onError = vi.fn(), onSettled = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onSettled={onSettled} onNotice={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    const named = "CollectionMoveUnfinishedError [waited]: \"Fundraiser\" didn't finish moving to sync.example.test. Its records are kept on this computer.";
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(String), named, expect.any(Function)));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh records" }));
+    const row = "collection-open:data/dataset.json";
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Could not open this Collection.", named, expect.any(Function), row));
+    onSettled.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Manage access" }));
+    await screen.findByRole("option", { name: /friend@example.test/ });
+    fireEvent.change(screen.getByLabelText("Collection access person"), { target: { value: "grant" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Create/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move and save access" }));
+    await waitFor(() => expect(describes).toBe(3));
+    await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
+    expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(2);
   });
 });

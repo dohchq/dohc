@@ -429,7 +429,7 @@ describe("local dataset owner adapter", () => {
       expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
       expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
-      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
+      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},marker:datasetId=>restarted.transferStatus(datasetId),async remote(origin){expect(origin).toBe("https://relay");return remote;}});
       expect((await routed.invoke(call(approved,id(5)))).result).toMatchObject([{name:"First"}]);
       expect(await routed.file({...upload,workspaceId:"w",action:"file",fileId:file.file.fileId})).toEqual({file:file.file,bytesBase64});
       expect(await routed.invoke(mutation)).toMatchObject({replayed:true});

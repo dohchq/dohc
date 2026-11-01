@@ -10,6 +10,7 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
+import { CollectionMoveUnfinishedError, ipcWireError } from "../../ipc/errorWords";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
 
@@ -623,6 +624,33 @@ describe("useShellError", () => {
     act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site" }));
     act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("files a failure that only waited for another request's Collection move as a row without a toast, so that request's failure keeps the toast", () => {
+    const now = vi.spyOn(Date, "now");
+    // As the renderer receives it from main.
+    const stopped = (waited: boolean) => new Error(`Error invoking remote method 'dohc:dataset': ${String(ipcWireError(
+      new CollectionMoveUnfinishedError("sync.example.test", { cause: Error("Sharing failed (502)."), waited })))}`);
+    const unfinished = "This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.";
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      now.mockReturnValue(1_000);
+      act(() => result.current.reportShellError("Could not read Collections.", stopped(true)));
+      now.mockReturnValue(2_000);
+      act(() => result.current.reportShellError("Could not load Collection access.", stopped(false), vi.fn()));
+      now.mockReturnValue(3_000);
+      act(() => result.current.reportShellError("dohc could not read this Collection's automations.", stopped(true), vi.fn()));
+      expect(result.current.shellErrors.map(({ message, seen }) => ({ message, seen }))).toEqual([
+        { message: `Could not read Collections. ${unfinished}`, seen: true },
+        { message: `Could not load Collection access. ${unfinished}`, seen: false },
+        { message: `dohc could not read this Collection's automations. ${unfinished}`, seen: true },
+      ]);
+      // A read that resumed the move itself, as after a restart, reports it with a toast.
+      act(() => result.current.reportShellError("Could not open this Collection.", stopped(false)));
+      expect(result.current.shellErrors.at(-1)).toMatchObject({ message: `Could not open this Collection. ${unfinished}`, seen: false });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   // The toast is the newest unseen row, by time, then by place in the list.

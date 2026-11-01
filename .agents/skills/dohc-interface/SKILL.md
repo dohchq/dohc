@@ -148,6 +148,7 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 
 - Use these places. Do not add a new one for a new message.
 - Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
+- A dialog shows the failure of an action it started in place, above the button that retries it, and files no toast or row while it is open. If the dialog closed before the answer, the failure takes a toast and a row.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
@@ -165,7 +166,7 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
-- Report errors through the shell's `reportError` callback instead of rendering them yourself.
+- Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
 - For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
