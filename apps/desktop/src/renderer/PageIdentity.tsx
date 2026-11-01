@@ -235,6 +235,8 @@ export function PageIdentity(props: PageIdentityProps) {
     };
     map.observe(update);
     meta.observe(updateSource);
+    // A change made after the render, before these listened, reads too.
+    update();
     return () => {
       map.unobserve(update);
       meta.unobserve(updateSource);

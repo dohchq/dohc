@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Profiler, useState } from "react";
+import { Profiler, useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { FRONTMATTER_SOURCE_META_KEY } from "@dohc/ydoc-projection/frontmatter";
 import { Lexer } from "marked";
 import { PageIdentity } from "./PageIdentity";
 import { NoticeCenter } from "./workbench/NoticeCenter";
@@ -112,6 +113,22 @@ describe("PageIdentity", () => {
         expect(screen.queryByRole("status")).toBeNull();
         expect(screen.queryByText("Title and icon are read-only")).toBeNull();
       } finally { doc.destroy(); }
+    });
+
+    it("shows the title read-only when the block locks before the page listens", () => {
+      const doc = markdownToYDoc("---\ntitle: Plan\n---\n\n# Body\n");
+      const locked = markdownToYDoc("---\n{title: Plan, owner: Sam}\n---\n\n# Body\n");
+      // Another device's change lands after the title renders, before its effect listens.
+      function LocksOnCommit() {
+        useLayoutEffect(() => {
+          doc.getMap("meta").set(FRONTMATTER_SOURCE_META_KEY, locked.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY));
+        }, []);
+        return null;
+      }
+      try {
+        render(<><PageIdentity ydoc={doc} filenameStem="plan" /><LocksOnCommit /></>);
+        expect((screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement).readOnly).toBe(true);
+      } finally { doc.destroy(); locked.destroy(); }
     });
 
     it("removes the title key when the field is cleared", async () => {
