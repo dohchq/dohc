@@ -120,6 +120,8 @@ export function createNamedDesktopLiveCapture(options: {
       const provider: EngineYDocSessionProvider = {
         doc: session.doc, initialUpdate: Y.encodeStateAsUpdate(session.doc), contentKind: "richdoc", path: input.path,
         objectId: first.selection.objectId, versionId: "main", artifactAssets: [],
+        // This device holds no file head, so the note check judges the witnessed source.
+        headSha256: null,
         get lineageClaimId() { return session.state().binding?.lineageClaimId; },
         liveWritable: () => {
           try { options.assertCurrent(); return !closed && !credentials.signal.aborted && session.state().status === "live"; }
