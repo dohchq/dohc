@@ -1,5 +1,6 @@
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::ReleasedTails;
+use dohc_engine_collab::reader_resolver::ReaderResolver;
 use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_markdown_path};
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
@@ -13,6 +14,7 @@ use std::cmp::Ordering;
 use crate::file_search::{
     delete_file_search_index, search_policy_for_store, upsert_file_search_index,
 };
+use crate::ydoc_apply::ImportedTextHead;
 use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 #[cfg(test)]
@@ -77,15 +79,26 @@ pub(crate) struct ConflictEffectOwner {
 /// holds for a released lineage, so it carries none.
 #[derive(Clone, Copy)]
 enum MomentApplyMode<'a> {
-    Ordinary(&'a ReleasedTails),
+    Ordinary(&'a ReleasedTails, Option<&'a ReaderResolver>),
     ConflictParent,
 }
 
-impl MomentApplyMode<'_> {
+impl<'a> MomentApplyMode<'a> {
     fn ordinary(self) -> bool {
-        matches!(self, Self::Ordinary(_))
+        matches!(self, Self::Ordinary(..))
+    }
+
+    fn resolver(self) -> Option<&'a ReaderResolver> {
+        match self {
+            Self::Ordinary(_, resolver) => resolver,
+            Self::ConflictParent => None,
+        }
     }
 }
+
+/// A file edit waits for the person to resolve the object's open conflict.
+/// Placeholder: the design lead writes the words people see.
+pub(crate) const RESOLVE_EXISTING_CONFLICT: &str = "resolve-existing-conflict";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,7 +399,7 @@ pub fn apply_moment_envelope_detailed(
     tails: &ReleasedTails,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     let tails = tails.bound_to(store);
-    apply_moment_envelope_in_batch(store, envelope, faults, leases, None, &tails)
+    apply_moment_envelope_in_batch(store, envelope, faults, leases, None, &tails, None)
 }
 
 /// `relay_namespace` names the feed a pull read `envelope` from, when the
@@ -399,6 +412,7 @@ pub(crate) fn apply_moment_envelope_in_batch(
     leases: &dyn LeaseProbe,
     relay_namespace: Option<&str>,
     tails: &ReleasedTails,
+    resolver: Option<&ReaderResolver>,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
@@ -486,7 +500,7 @@ pub(crate) fn apply_moment_envelope_in_batch(
             envelope,
             &payload,
             search_policy.as_ref(),
-            MomentApplyMode::Ordinary(tails),
+            MomentApplyMode::Ordinary(tails, resolver),
             content_held,
             content_held
                 .then(|| leases.bound_claim(&key))
@@ -875,7 +889,7 @@ fn apply_moment_append(
     // text write rebinds it when it moves the document. This is the moment's
     // one decision, made before it writes anything.
     let protected = match mode {
-        MomentApplyMode::Ordinary(tails) => {
+        MomentApplyMode::Ordinary(tails, _) => {
             let key = DocKey::new(
                 &envelope.workspace_id,
                 &payload.version_id,
@@ -1017,21 +1031,22 @@ fn apply_moment_append(
         }
     }
 
-    // A file write that is not a Y.Doc settlement may come from a device
-    // that never held this object's lineage, so no rewrite follows it.
-    // Decide before the moment writes anything whether the lineage settles
-    // to it, retires as an untouched seed, or meets it in a conflict.
+    // A text write or move that is not a Y.Doc settlement comes with no
+    // rewrite of this object's lineage. Decide before the moment writes
+    // anything whether the lineage settles, retires, or meets it in a conflict.
     let ydoc_decision = if mode.ordinary()
         && protected.is_none()
         && owner_settlement.is_none()
-        && (head_fast_forward || content_fast_forward)
-        && payload.operation == "write"
+        && conflicting_occupant.is_none()
         && after_kind == ContentKind::Text
-        && payload.path == payload.payload_after_path
+        && match payload.operation.as_str() {
+            "write" => payload.path == payload.payload_after_path,
+            "rename" => true,
+            _ => false,
+        }
         && !is_ydoc_settlement_moment_id(&payload.moment_id)
         && let (Some(snapshot), Some(text)) = (local.as_ref(), after_text.as_deref())
         && snapshot.kind == ContentKind::Text
-        && snapshot.path == payload.payload_after_path
     {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -1048,44 +1063,60 @@ fn apply_moment_append(
             &payload.payload_after_path,
             text,
             Some(&snapshot.digest),
+            mode.resolver(),
         )?;
-        Some((key, complete, decision))
+        Some((complete, decision))
     } else {
         None
     };
     // The lineage holds content the file would replace. Record that content
-    // as the head, then let the file meet it in a conflict below. A file the
+    // as the head, and the file meets it in a conflict below. A file the
     // head already holds leaves the lineage's later edits alone.
     let mut ydoc_holds_current = false;
-    if head_fast_forward
-        && let Some((key, _, crate::ydoc_apply::ImportedTextHead::Conflict(side))) =
-            ydoc_decision.as_ref()
+    if !content_fast_forward
+        && let (Some(snapshot), Some((complete, ImportedTextHead::Conflict(side)))) =
+            (local.as_ref(), ydoc_decision.as_ref())
     {
-        if crate::ydoc_apply::open_sync_conflict_for_object(
-            tx,
-            &envelope.workspace_id,
-            &payload.version_id,
-            &payload.object_id,
-        )?
-        .is_some()
-        {
-            // One conflict per object: this file waits for its resolution.
-            return Err(SyncError::RetryableState {
-                reason: "ydoc-resulting-head-pending",
-            });
+        let same_branch: Option<bool> = tx
+            .query_row(
+                "SELECT MAX(incoming_latest_moment_id IS ?4) FROM conflicts \
+                 WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+                   AND target_version_id=?2 AND incoming_object_id=?3",
+                params![
+                    envelope.workspace_id,
+                    payload.version_id,
+                    payload.object_id,
+                    payload.before_latest_moment_id,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        match same_branch {
+            // The file continues the open conflict's incoming side.
+            Some(true) => {}
+            // One conflict per object, so resolution meets the head it shows.
+            Some(false) => {
+                return Err(SyncError::RetryableState {
+                    reason: RESOLVE_EXISTING_CONFLICT,
+                });
+            }
+            None => {
+                if let Some(content) = side {
+                    crate::ydoc_apply::record_lineage_side_in_tx(
+                        tx,
+                        complete,
+                        &snapshot.path,
+                        content,
+                        &envelope.origin_id,
+                        envelope.origin_seq,
+                        envelope.recorded_at_ms,
+                        search_policy,
+                    )?;
+                }
+                ydoc_holds_current = true;
+            }
         }
-        crate::ydoc_apply::record_lineage_side_in_tx(
-            tx,
-            key,
-            &payload.payload_after_path,
-            side,
-            &envelope.origin_id,
-            envelope.origin_seq,
-            envelope.recorded_at_ms,
-            search_policy,
-        )?;
         head_fast_forward = false;
-        ydoc_holds_current = true;
     }
 
     if content_fast_forward && payload.operation == "delete" {
@@ -1259,31 +1290,25 @@ fn apply_moment_append(
             .map_err(SyncError::persist)?;
         }
 
-        let resulting = match after_kind {
-            ContentKind::Text => crate::ResultingHead::Text {
-                path: &payload.payload_after_path,
-                text: after_text.as_deref().ok_or(SyncError::BlobInvalid)?,
-            },
-            ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
-        };
         let mut record_facts = None;
         if mode.ordinary() {
-            if let Some((_, complete, decision)) = ydoc_decision.as_ref() {
-                // Only a file the head already held reaches here with a
-                // conflict decision. The lineage keeps its later edits.
-                if !matches!(decision, crate::ydoc_apply::ImportedTextHead::Conflict(_))
-                    && let crate::ResultingHead::Text { path, text } = resulting
-                {
-                    crate::ydoc_apply::apply_imported_text_head_in_tx(
-                        tx,
-                        complete,
-                        decision,
-                        path,
-                        text,
-                        envelope.recorded_at_ms,
-                    )?;
-                }
+            if let Some((complete, decision)) = ydoc_decision.as_ref() {
+                crate::ydoc_apply::apply_imported_text_head_in_tx(
+                    tx,
+                    complete,
+                    decision,
+                    &payload.payload_after_path,
+                    after_text.as_deref().ok_or(SyncError::BlobInvalid)?,
+                    envelope.recorded_at_ms,
+                )?;
             } else {
+                let resulting = match after_kind {
+                    ContentKind::Text => crate::ResultingHead::Text {
+                        path: &payload.payload_after_path,
+                        text: after_text.as_deref().ok_or(SyncError::BlobInvalid)?,
+                    },
+                    ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
+                };
                 match crate::reconcile_imported_resulting_head_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -1543,7 +1568,12 @@ fn apply_moment_append(
         },
     )?;
     if ydoc_holds_current && opened > 0 {
-        crate::ydoc_apply::record_ydoc_current_side_in_tx(tx, envelope, &conflict_id)?;
+        crate::ydoc_apply::record_ydoc_current_side_in_tx(
+            tx,
+            &conflict_id,
+            envelope.origin_seq,
+            envelope.recorded_at_ms,
+        )?;
     }
 
     if let (Some(_), Some(occupant)) = (local.as_ref(), conflicting_occupant.as_ref()) {

@@ -6,24 +6,25 @@ use dohc_engine_collab::{
     ContentKind, DocKey, LeaseRegistry, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
 };
 use dohc_engine_domain::{
-    ChangeActorKind, ChangeAttribution, ResolveConflictKind, ResolveTextConflict, WriteText,
+    ChangeActorKind, ChangeAttribution, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
+    WriteText,
 };
 
 const SCHEMA_PATH: &str = "missions/collection.yaml";
 const SCHEMA: &str = "fields: {}\n";
 const RECORD: &str = "apollo";
 const RECORD_PATH: &str = "missions/apollo.md";
+const MOVED_PATH: &str = "missions/apollo-11.md";
 const PLANNED: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Planned\n---\n# Apollo\n";
 const FLOWN: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Flown\n---\n# Apollo\n";
-const NOTES: &str = "Crew notes.\n";
-const MERGED: &str =
-    "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Flown\n---\n# Apollo\nCrew notes.\n";
+const NOTES: &str = "Crew notes.";
+const LOG: &str = "Splashdown logged.";
 const GEMINI_PATH: &str = "missions/gemini.md";
 const GEMINI: &str = "# Gemini\n";
-
-fn draft() -> String {
-    format!("{PLANNED}{NOTES}")
-}
+// A note whose rich document cannot reproduce its source, and the canonical
+// Markdown that document projects.
+const LOSSY: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n- \n\n  - b\n - c";
+const LOSSY_CANONICAL: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n- \n\n- b\n- c";
 
 fn sha(text: &str) -> String {
     dohc_engine_storage::hex_sha256(text.as_bytes())
@@ -33,56 +34,57 @@ fn key() -> DocKey {
     DocKey::new("ws", "main", RECORD).expect("record key")
 }
 
-/// Device A saves files and never opens the record, so it holds no lineage.
-fn device_a() -> (ScratchDir, EngineStore) {
+/// A rich document holding `markdown`, as the desktop adopts a record.
+fn richdoc(markdown: &str) -> Ydoc {
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+        .expect("rich document");
+    doc
+}
+
+fn projected(doc: &Ydoc) -> String {
+    doc.project(ContentKind::Richdoc)
+        .expect("project the record")
+        .content
+}
+
+/// `markdown` as a rich document writes it, so a resolution can fold it.
+fn md(markdown: &str) -> String {
+    projected(&richdoc(markdown))
+}
+
+/// A device that saves files and never opens the record, so it holds no
+/// lineage.
+fn device(origin: &str) -> (ScratchDir, EngineStore) {
     let (scratch, _path, mut a) = open_store();
     VersionedTextStore::new(&mut a)
         .ensure_main_version("ws", "main", 1, &NoFaults)
         .expect("main version");
-    adopt_join_identity(
-        &mut a, "ws", "device-a", "epoch-1", "stream-1", 1, &NoFaults,
-    )
-    .expect("device A identity");
+    adopt_join_identity(&mut a, "ws", origin, "epoch-1", "stream-1", 1, &NoFaults)
+        .expect("device identity");
     a.write_with(&NoFaults, |tx| {
         tx.execute(
-            "INSERT INTO sync_relay_push_state VALUES ('ws','device-a',-1)",
-            [],
+            "INSERT INTO sync_relay_push_state VALUES ('ws',?1,-1)",
+            [origin],
         )
         .map_err(SyncError::persist)?;
         Ok::<_, SyncError>(())
     })
-    .expect("device A push state");
+    .expect("device push state");
     (scratch, a)
 }
 
-/// Save `text` on A and return the envelope A journals for it.
-fn a_saves(
+/// Run `change` on A and return the envelope A journals for `moment`.
+fn a_journals(
     a: &mut EngineStore,
-    object: &str,
-    path: &str,
-    text: &str,
     moment: &str,
-    now_ms: i64,
+    change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SyncError>,
 ) -> ReplicationEnvelope {
-    let input = WriteText {
-        workspace_id: "ws".into(),
-        version_id: "main".into(),
-        object_id: object.into(),
-        moment_id: moment.into(),
-        path: path.into(),
-        text: text.into(),
-        metadata_origin: "api".into(),
-        metadata_summary: None,
-        metadata_correlation_id: None,
-        author_json: None,
-        now_ms,
-        request_id: None,
-    };
     a.write_with(&NoFaults, |tx| {
-        dohc_engine_domain::write_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
+        change(tx)?;
         journal_moment_append_in_tx(tx, "ws", moment)
     })
-    .expect("A saves the file");
+    .expect("A changes the file");
     a.read_with(|conn| {
         conn.query_row(
             "SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log \
@@ -108,11 +110,40 @@ fn a_saves(
     .expect("A journals the moment")
 }
 
-/// A creates the Collection and Apollo as it was planned.
-fn a_creates_apollo(a: &mut EngineStore) -> Vec<ReplicationEnvelope> {
+/// Save `text` on A and return the envelope A journals for it.
+fn a_saves(
+    a: &mut EngineStore,
+    object: &str,
+    path: &str,
+    text: &str,
+    moment: &str,
+    now_ms: i64,
+) -> ReplicationEnvelope {
+    let input = WriteText {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        object_id: object.into(),
+        moment_id: moment.into(),
+        path: path.into(),
+        text: text.into(),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: None,
+    };
+    a_journals(a, moment, |tx| {
+        dohc_engine_domain::write_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
+        Ok(())
+    })
+}
+
+/// A creates the Collection and Apollo holding `apollo`.
+fn a_creates_apollo(a: &mut EngineStore, apollo: &str) -> Vec<ReplicationEnvelope> {
     vec![
         a_saves(a, "missions-schema", SCHEMA_PATH, SCHEMA, "schema-saved", 10),
-        a_saves(a, RECORD, RECORD_PATH, PLANNED, "apollo-planned", 20),
+        a_saves(a, RECORD, RECORD_PATH, apollo, "apollo-planned", 20),
     ]
 }
 
@@ -149,42 +180,43 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
 }
 
 /// Device B pulls the Collection and Apollo as A created them.
-fn device_b(created: &[ReplicationEnvelope]) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+fn device_b(
+    created: &[ReplicationEnvelope],
+    apollo: &str,
+) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut b) = open_store();
     seed_identity(&mut b);
     VersionedTextStore::new(&mut b)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
-    pull(&mut b, 0, created, &[SCHEMA, PLANNED]);
+    pull(&mut b, 0, created, &[SCHEMA, apollo]);
     b.write_with(&NoFaults, |tx| {
         dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
     })
     .expect("bind the record");
-    assert_eq!(indexed_status(&b), Some(json!("Planned")));
     (scratch, path, b)
 }
 
-/// B opens Apollo: the seed of its file, then `typing` by a named typist,
-/// never settled.
-fn b_opens(b: &mut EngineStore, typing: Option<&str>) {
+/// B opens Apollo: `doc` seeds it from `file`, then each of `typing` is a
+/// paragraph a named typist adds, never settled.
+fn b_opens(b: &mut EngineStore, doc: &Ydoc, file: &str, typing: &[&str]) {
     let key = key();
     let mut cache = WriterDocCache::new();
-    let doc = Ydoc::wire();
     let marker = MarkerCreation {
         path: Some(RECORD_PATH),
-        content_kind: ContentKind::Plaintext,
+        content_kind: ContentKind::Richdoc,
         regime: Regime::LocalOnly,
     };
-    let planned_sha = sha(PLANNED);
+    let file_sha = sha(file);
     dohc_engine_collab::record_local_update(
         b,
         &mut cache,
         &key,
-        &doc.plaintext_insert(0, PLANNED),
+        &doc.encode_full_state(),
         LocalAppend {
             marker: Some(marker),
             is_seed: true,
-            seed_source_sha256: Some(&planned_sha),
+            seed_source_sha256: Some(&file_sha),
             ..Default::default()
         },
         &NoFaults,
@@ -192,31 +224,81 @@ fn b_opens(b: &mut EngineStore, typing: Option<&str>) {
         |_tx, _outcome, _sha| Ok(()),
     )
     .expect("seed the record from its file");
-    let Some(typing) = typing else {
-        return;
-    };
+    b_types(b, &mut cache, doc, typing, 2_001);
+}
+
+fn b_types(
+    b: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    doc: &Ydoc,
+    typing: &[&str],
+    at: i64,
+) {
     let attribution = ChangeAttribution {
         actor_kind: ChangeActorKind::Human,
         on_behalf_of: None,
         depth: 0,
         run: None,
     };
-    dohc_engine_collab::record_local_update(
-        b,
-        &mut cache,
-        &key,
-        &doc.plaintext_insert(PLANNED.encode_utf16().count() as u32, typing),
-        LocalAppend {
-            marker: Some(marker),
-            actor_origin_id: Some("typist"),
-            attribution: Some(&attribution),
-            ..Default::default()
-        },
-        &NoFaults,
-        2_001,
-        |_tx, _outcome, _sha| Ok(()),
-    )
-    .expect("type into the record");
+    for (index, paragraph) in typing.iter().enumerate() {
+        dohc_engine_collab::record_local_update(
+            b,
+            cache,
+            &key(),
+            &doc.richdoc_append_paragraph(paragraph),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some(RECORD_PATH),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                actor_origin_id: Some("typist"),
+                attribution: Some(&attribution),
+                ..Default::default()
+            },
+            &NoFaults,
+            at + index as i64,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .expect("type into the record");
+    }
+}
+
+/// B settles `text` as its record session does.
+fn b_settles(b: &mut EngineStore, text: &str) {
+    b.write_with(&NoFaults, |tx| {
+        let result = dohc_engine_domain::write_projected_text_in_tx(
+            tx,
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: RECORD.into(),
+                path: RECORD_PATH.into(),
+                text: text.into(),
+                moment_id: "apollo-b1".into(),
+                metadata_origin: "ydoc".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_050,
+                request_id: None,
+            },
+        )
+        .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+        tx.execute(
+            "UPDATE ydoc_docs SET settle_seq=?1,last_settled_sha=?2 WHERE object_id=?3",
+            params![
+                result.moment.moment_order,
+                result.snapshot.blob_sha256,
+                RECORD
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        dohc_engine_collab::author_coverage::advance_in(tx, &key(), false)
+            .map_err(SyncError::corrupt)?;
+        Ok::<_, SyncError>(())
+    })
+    .expect("B settles its edit");
 }
 
 /// Another device's Y.Doc base for Apollo, which claims B's lineage.
@@ -228,7 +310,7 @@ fn device_c_base(b: &mut EngineStore, doc: &Ydoc) -> String {
         "ydoc.update",
         json!({
             "versionId":"main", "objectId":RECORD, "path":RECORD_PATH,
-            "contentKind":"plaintext", "updateBlobSha256":sha, "lineageClaimId":sha,
+            "contentKind":"richdoc", "updateBlobSha256":sha, "lineageClaimId":sha,
             "isBaseState":true,
         }),
     );
@@ -329,6 +411,26 @@ fn count(b: &EngineStore, sql: &str) -> i64 {
         .expect(sql)
 }
 
+/// How many History moments hold `text`.
+fn history_holds(b: &EngineStore, text: &str) -> i64 {
+    b.read_with(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND object_id=?1 \
+               AND after_blob_sha256=?2",
+            params![RECORD, sha(text)],
+            |row| row.get(0),
+        )
+    })
+    .expect("History moments")
+}
+
+fn side_records(b: &EngineStore) -> i64 {
+    count(
+        b,
+        "SELECT COUNT(*) FROM engine_requests WHERE kind='sync-ydoc-conflict-side'",
+    )
+}
+
 fn lineage_rows(b: &EngineStore) -> i64 {
     count(
         b,
@@ -339,11 +441,12 @@ fn lineage_rows(b: &EngineStore) -> i64 {
 }
 
 fn lineage_text(b: &EngineStore) -> String {
-    dohc_engine_collab::load_persisted(b, &key())
-        .expect("load the lineage")
-        .expect("the lineage remains")
-        .doc
-        .plaintext_string()
+    projected(
+        &dohc_engine_collab::load_persisted(b, &key())
+            .expect("load the lineage")
+            .expect("the lineage remains")
+            .doc,
+    )
 }
 
 fn resolve(b: &mut EngineStore, resolution: ResolveConflictKind) {
@@ -398,19 +501,21 @@ fn resolve(b: &mut EngineStore, resolution: ResolveConflictKind) {
 
 #[test]
 fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
-    let (_a_scratch, mut a) = device_a();
-    let created = a_creates_apollo(&mut a);
-    let (_b_scratch, _b_path, mut b) = device_b(&created);
-    b_opens(&mut b, None);
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    assert_eq!(indexed_status(&b), Some(json!("Planned")));
+    b_opens(&mut b, &richdoc(&planned), &planned, &[]);
 
-    let flown = a_saves(&mut a, RECORD, RECORD_PATH, FLOWN, "apollo-flown", 30);
-    pull(&mut b, 2, std::slice::from_ref(&flown), &[FLOWN]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
 
     assert_eq!(
         read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-        flown.origin_seq
+        flown_op.origin_seq
     );
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(FLOWN));
+    assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
     assert_eq!(indexed_status(&b), Some(json!("Flown")));
     assert_eq!(
         count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
@@ -421,17 +526,16 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
     assert!(open_conflicts(&b).is_empty());
 
     // The next open seeds a fresh lineage from the file A wrote.
-    let flown_sha = sha(FLOWN);
-    let doc = Ydoc::wire();
+    let flown_sha = sha(&flown);
     dohc_engine_collab::record_local_update(
         &mut b,
         &mut WriterDocCache::new(),
         &key(),
-        &doc.plaintext_insert(0, FLOWN),
+        &richdoc(&flown).encode_full_state(),
         LocalAppend {
             marker: Some(MarkerCreation {
                 path: Some(RECORD_PATH),
-                content_kind: ContentKind::Plaintext,
+                content_kind: ContentKind::Richdoc,
                 regime: Regime::LocalOnly,
             }),
             require_empty_lineage: true,
@@ -447,13 +551,13 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
 
     // A reverts the file to bytes the old seed once projected. Only the
     // current seed's source decides; it retires again.
-    let reverted = a_saves(&mut a, RECORD, RECORD_PATH, PLANNED, "apollo-reverted", 40);
-    pull(&mut b, 3, std::slice::from_ref(&reverted), &[PLANNED]);
+    let reverted = a_saves(&mut a, RECORD, RECORD_PATH, &planned, "apollo-reverted", 40);
+    pull(&mut b, 3, std::slice::from_ref(&reverted), &[&planned]);
     assert_eq!(
         read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
         reverted.origin_seq
     );
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(PLANNED));
+    assert_eq!(head_text(&b, RECORD), Some(planned));
     assert_eq!(indexed_status(&b), Some(json!("Planned")));
     assert_eq!(lineage_rows(&b), 0);
     assert!(open_conflicts(&b).is_empty());
@@ -461,15 +565,17 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
 
 #[test]
 fn record_file_edit_meets_unsettled_record_edits_in_a_conflict_holding_both() {
-    let (_a_scratch, mut a) = device_a();
-    let created = a_creates_apollo(&mut a);
-    let (_b_scratch, _b_path, mut b) = device_b(&created);
-    b_opens(&mut b, Some(NOTES));
-    let draft = draft();
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let draft = projected(&doc);
 
-    let flown = a_saves(&mut a, RECORD, RECORD_PATH, FLOWN, "apollo-flown", 30);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
     let gemini = a_saves(&mut a, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 31);
-    pull(&mut b, 2, &[flown, gemini.clone()], &[FLOWN, GEMINI]);
+    pull(&mut b, 2, &[flown_op, gemini.clone()], &[&flown, GEMINI]);
 
     assert_eq!(
         read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
@@ -479,10 +585,10 @@ fn record_file_edit_meets_unsettled_record_edits_in_a_conflict_holding_both() {
     assert_eq!(head_text(&b, "gemini").as_deref(), Some(GEMINI));
     assert_eq!(
         open_conflicts(&b),
-        vec![(sha(&draft), sha(FLOWN))],
+        vec![(sha(&draft), sha(&flown))],
         "the conflict holds B's edit and A's file"
     );
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(draft.as_str()));
+    assert_eq!(head_text(&b, RECORD), Some(draft.clone()));
     assert!(
         head_authors(&b).is_some_and(|authors| authors.contains("typist")),
         "History names who typed B's edit"
@@ -498,44 +604,196 @@ fn record_file_edit_meets_unsettled_record_edits_in_a_conflict_holding_both() {
         "B keeps its updates"
     );
     assert_eq!(lineage_text(&b), draft);
+    assert_eq!(side_records(&b), 1);
+}
+
+/// A lossy note's projection never replaces its exact source unchecked. The
+/// conflict holds that source beside A's file instead of waiting forever.
+#[test]
+fn record_file_edit_meets_a_lossy_note_in_a_conflict_holding_its_exact_source() {
+    let flown = md(FLOWN);
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, LOSSY);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, LOSSY);
+    let doc = richdoc(LOSSY_CANONICAL);
+    assert_ne!(projected(&doc), LOSSY, "the note is lossy");
+    doc.preserve_folded_markdown_source(LOSSY)
+        .expect("witness the exact source");
+    b_opens(&mut b, &doc, LOSSY, &[NOTES]);
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+
+    assert_eq!(open_conflicts(&b), vec![(sha(LOSSY), sha(&flown))]);
+    assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
     assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM engine_requests WHERE kind='sync-ydoc-conflict-side'"
-        ),
-        1
+        count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
+        1,
+        "History holds A's edit"
     );
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"),
+        2,
+        "B keeps its typing"
+    );
+    assert_eq!(side_records(&b), 1);
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
+        flown_op.origin_seq
+    );
+}
+
+/// A file moved on a device without the lineage meets B's unsettled edits in
+/// a conflict instead of waiting forever.
+#[test]
+fn record_file_move_meets_unsettled_record_edits_in_a_conflict() {
+    let planned = md(PLANNED);
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let draft = projected(&doc);
+
+    let rename = RenameTextFile {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        from_path: RECORD_PATH.into(),
+        to_path: MOVED_PATH.into(),
+        moment_id: "apollo-moved".into(),
+        request_id: None,
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 30,
+    };
+    let moved = a_journals(&mut a, "apollo-moved", |tx| {
+        dohc_engine_domain::rename_text_in_tx(tx, &rename, |_, _| Ok(()))
+            .map_err(SyncError::corrupt)?;
+        Ok(())
+    });
+    assert_conflicts_opened(deliver(&mut b, &moved, &NoLiveLeases).expect("apply"), 1);
+
+    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&planned))]);
+    assert_eq!(head_text(&b, RECORD), Some(draft.clone()));
+    assert_eq!(lineage_text(&b), draft);
+    assert_eq!(side_records(&b), 1);
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
+        moved.origin_seq
+    );
+}
+
+/// B settled one edit and keeps typing. A file written over the older head
+/// meets B's latest edits, and choosing A's file keeps them in History.
+#[test]
+fn record_file_edit_from_an_older_head_keeps_unsettled_edits_in_the_current_side() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let settled = projected(&doc);
+    b_settles(&mut b, &settled);
+    b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_060);
+    let latest = projected(&doc);
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+
+    assert_eq!(
+        open_conflicts(&b),
+        vec![(sha(&latest), sha(&flown))],
+        "the current side holds B's unsettled edit"
+    );
+    assert_eq!(head_text(&b, RECORD), Some(latest.clone()));
+    assert_eq!(side_records(&b), 1, "the Y.Doc moves the current side");
+
+    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
+    assert_eq!(head_text(&b, RECORD), Some(flown));
+    assert!(open_conflicts(&b).is_empty());
+    assert!(history_holds(&b, &latest) >= 1, "History keeps B's edit");
+}
+
+/// One conflict per object. A file that continues the conflict's incoming
+/// side updates it. A file from another branch waits for the resolution.
+#[test]
+fn record_file_edit_on_another_branch_waits_for_the_open_conflict() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let landed = format!("{flown}\nLanded.\n");
+    let splashed = format!("{flown}\nSplashed down.\n");
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_d_scratch, mut d) = device("device-d");
+    hydrate(&mut d, &[SCHEMA, &planned]);
+    for op in &created {
+        assert!(matches!(
+            deliver(&mut d, op, &NoLiveLeases)
+                .expect("D pulls A's record")
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+    }
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let draft = projected(&doc);
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown, &landed, &splashed]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+
+    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
+    assert_conflicts_opened(
+        deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's next edit"),
+        0,
+    );
+    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&landed))]);
+
+    let splashed_op = a_saves(&mut d, RECORD, RECORD_PATH, &splashed, "apollo-splashed", 50);
+    assert!(
+        matches!(
+            deliver(&mut b, &splashed_op, &NoLiveLeases),
+            Err(SyncError::RetryableState {
+                reason: crate::moment_apply::RESOLVE_EXISTING_CONFLICT
+            })
+        ),
+        "D's edit waits for the open conflict"
+    );
+    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&landed))]);
+    assert_eq!(head_text(&b, RECORD), Some(draft));
 }
 
 #[test]
 fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
     for claimed in [false, true] {
-        let (_a_scratch, mut a) = device_a();
-        let created = a_creates_apollo(&mut a);
-        let (_b_scratch, b_path, mut b) = device_b(&created);
-        let replica = Ydoc::wire();
+        let (_a_scratch, mut a) = device("device-a");
+        let created = a_creates_apollo(&mut a, &planned);
+        let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+        let replica = richdoc(&planned);
         let claim = if claimed {
-            replica.plaintext_insert(0, PLANNED);
             Some(device_c_base(&mut b, &replica))
         } else {
-            b_opens(&mut b, Some(NOTES));
+            b_opens(&mut b, &replica, &planned, &[NOTES]);
             None
         };
-        let current = if claimed { PLANNED.to_owned() } else { draft() };
+        let current = projected(&replica);
 
-        let flown = a_saves(&mut a, RECORD, RECORD_PATH, FLOWN, "apollo-flown", 30);
-        hydrate(&mut b, &[FLOWN]);
-        assert_conflicts_opened(deliver(&mut b, &flown, &NoLiveLeases).expect("apply"), 1);
-        assert_eq!(open_conflicts(&b), vec![(sha(&current), sha(FLOWN))]);
+        let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+        hydrate(&mut b, &[&flown]);
+        assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+        assert_eq!(open_conflicts(&b), vec![(sha(&current), sha(&flown))]);
         let state = |b: &EngineStore| {
             (
                 open_conflicts(b),
                 count(b, "SELECT COUNT(*) FROM moments"),
                 count(b, "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"),
-                count(
-                    b,
-                    "SELECT COUNT(*) FROM engine_requests WHERE kind='sync-ydoc-conflict-side'",
-                ),
+                side_records(b),
                 head_text(b, RECORD),
             )
         };
@@ -544,7 +802,7 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
 
         drop(b);
         let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
-        let redelivered = deliver(&mut b, &flown, &NoLiveLeases).expect("redeliver");
+        let redelivered = deliver(&mut b, &flown_op, &NoLiveLeases).expect("redeliver");
         assert!(
             matches!(redelivered.primary, ApplyDisposition::Skipped),
             "{redelivered:?}"
@@ -552,7 +810,7 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
         assert_eq!(state(&b), decided, "claimed={claimed}");
         assert_eq!(
             read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-            flown.origin_seq
+            flown_op.origin_seq
         );
 
         let Some(claim) = claim else {
@@ -568,7 +826,7 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
         );
         // The replica keeps editing. Its projection moves the Y.Doc's side
         // of the conflict and never replaces A's file.
-        let delta = replica.plaintext_insert(PLANNED.encode_utf16().count() as u32, NOTES);
+        let delta = replica.richdoc_append_paragraph(NOTES);
         let delta_sha = b.put_binary_blob(&delta).expect("delta blob");
         let mut update = envelope(
             "device-c",
@@ -576,7 +834,7 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
             "ydoc.update",
             json!({
                 "versionId":"main", "objectId":RECORD, "path":RECORD_PATH,
-                "contentKind":"plaintext", "updateBlobSha256":delta_sha,
+                "contentKind":"richdoc", "updateBlobSha256":delta_sha,
                 "lineageClaimId":claim, "isBaseState":false,
             }),
         );
@@ -593,93 +851,118 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
             .primary,
             ApplyDisposition::Applied(_)
         ));
-        let draft = draft();
-        assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(FLOWN))]);
-        assert_eq!(head_text(&b, RECORD).as_deref(), Some(draft.as_str()));
+        let edited = projected(&replica);
+        assert_eq!(open_conflicts(&b), vec![(sha(&edited), sha(&flown))]);
+        assert_eq!(head_text(&b, RECORD), Some(edited));
     }
 }
 
+/// Each resolution keeps its choice after a restart, on a lineage only B
+/// holds and on one another device claimed. A later file meets the choice.
 #[test]
 fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
-    let draft = draft();
-    for (resolution, chosen) in [
-        (ResolveConflictKind::KeepCurrent, draft.as_str()),
-        (ResolveConflictKind::ApplyIncoming, FLOWN),
-        (
-            ResolveConflictKind::ApplyMerged {
-                text: MERGED.to_owned(),
-            },
-            MERGED,
-        ),
-    ] {
-        let (_a_scratch, mut a) = device_a();
-        let created = a_creates_apollo(&mut a);
-        let (_b_scratch, b_path, mut b) = device_b(&created);
-        b_opens(&mut b, Some(NOTES));
-        let flown = a_saves(&mut a, RECORD, RECORD_PATH, FLOWN, "apollo-flown", 30);
-        hydrate(&mut b, &[FLOWN, MERGED]);
-        assert_conflicts_opened(deliver(&mut b, &flown, &NoLiveLeases).expect("apply"), 1);
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let merged = {
+        let doc = richdoc(&flown);
+        doc.richdoc_append_paragraph(NOTES);
+        projected(&doc)
+    };
+    for claimed in [false, true] {
+        for choice in ["current", "incoming", "merged"] {
+            let (_a_scratch, mut a) = device("device-a");
+            let created = a_creates_apollo(&mut a, &planned);
+            let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+            let doc = richdoc(&planned);
+            if claimed {
+                device_c_base(&mut b, &doc);
+            } else {
+                b_opens(&mut b, &doc, &planned, &[NOTES]);
+            }
+            let current = projected(&doc);
+            let (resolution, chosen) = match choice {
+                "current" => (ResolveConflictKind::KeepCurrent, current.clone()),
+                "incoming" => (ResolveConflictKind::ApplyIncoming, flown.clone()),
+                _ => (
+                    ResolveConflictKind::ApplyMerged {
+                        text: merged.clone(),
+                    },
+                    merged.clone(),
+                ),
+            };
+            let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+            hydrate(&mut b, &[&flown, &merged]);
+            assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+            assert_eq!(open_conflicts(&b), vec![(sha(&current), sha(&flown))]);
 
-        resolve(&mut b, resolution);
-        assert_eq!(head_text(&b, RECORD).as_deref(), Some(chosen));
-        assert!(open_conflicts(&b).is_empty());
+            resolve(&mut b, resolution);
+            assert_eq!(head_text(&b, RECORD), Some(chosen.clone()));
+            assert!(open_conflicts(&b).is_empty());
 
-        drop(b);
-        let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
-        let redelivered = deliver(&mut b, &flown, &NoLiveLeases).expect("redeliver");
-        assert!(
-            matches!(redelivered.primary, ApplyDisposition::Skipped),
-            "{redelivered:?}"
-        );
-        assert_eq!(head_text(&b, RECORD).as_deref(), Some(chosen));
-        assert_eq!(lineage_text(&b), chosen, "the next open shows the choice");
-        assert!(open_conflicts(&b).is_empty());
+            drop(b);
+            let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+            let redelivered = deliver(&mut b, &flown_op, &NoLiveLeases).expect("redeliver");
+            assert!(
+                matches!(redelivered.primary, ApplyDisposition::Skipped),
+                "{redelivered:?}"
+            );
+            assert_eq!(head_text(&b, RECORD), Some(chosen.clone()));
+            assert_eq!(lineage_text(&b), chosen, "the next open shows the choice");
+            assert!(open_conflicts(&b).is_empty());
 
-        // A reverts its file to the bytes B's seed projected. B's lineage
-        // now holds the choice, so the revert meets the choice, never the
-        // side the resolution discarded.
-        let reverted = a_saves(&mut a, RECORD, RECORD_PATH, PLANNED, "apollo-reverted", 40);
-        hydrate(&mut b, &[PLANNED]);
-        assert_conflicts_opened(
-            deliver(&mut b, &reverted, &NoLiveLeases).expect("apply the revert"),
-            1,
-        );
-        assert_eq!(open_conflicts(&b), vec![(sha(chosen), sha(PLANNED))]);
-        assert_eq!(head_text(&b, RECORD).as_deref(), Some(chosen));
+            // A reverts its file to the planned bytes. B's lineage holds the
+            // choice, so the revert meets the choice, never the side the
+            // resolution discarded.
+            let reverted = a_saves(&mut a, RECORD, RECORD_PATH, &planned, "apollo-reverted", 40);
+            hydrate(&mut b, &[&planned]);
+            let applied = deliver(&mut b, &reverted, &NoLiveLeases).expect("apply the revert");
+            if chosen == planned {
+                assert_conflicts_opened(applied, 0);
+                assert_eq!(head_text(&b, RECORD), Some(planned.clone()));
+            } else {
+                assert_conflicts_opened(applied, 1);
+                assert_eq!(
+                    open_conflicts(&b),
+                    vec![(sha(&chosen), sha(&planned))],
+                    "claimed={claimed} choice={choice}"
+                );
+                assert_eq!(head_text(&b, RECORD), Some(chosen));
+            }
+        }
     }
 }
 
 #[test]
 fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
-    let (_a_scratch, mut a) = device_a();
-    let created = a_creates_apollo(&mut a);
-    let (_b_scratch, _b_path, mut b) = device_b(&created);
-    b_opens(&mut b, None);
-    let flown = a_saves(&mut a, RECORD, RECORD_PATH, FLOWN, "apollo-flown", 30);
-    hydrate(&mut b, &[FLOWN]);
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
 
     let leases = LeaseRegistry::new();
     let held = leases.acquire(&key()).expect("open the record");
     assert!(matches!(
-        deliver(&mut b, &flown, &leases),
+        deliver(&mut b, &flown_op, &leases),
         Err(SyncError::RetryableState {
             reason: "ydoc-session-live"
         })
     ));
-    assert!(read_replication_acked_seq(&b, "ws", "device-a").expect("ack") < flown.origin_seq);
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(PLANNED));
+    assert!(read_replication_acked_seq(&b, "ws", "device-a").expect("ack") < flown_op.origin_seq);
+    assert_eq!(head_text(&b, RECORD), Some(planned));
 
     drop(held);
-    let applied = deliver(&mut b, &flown, &leases).expect("apply after close");
+    let applied = deliver(&mut b, &flown_op, &leases).expect("apply after close");
     assert!(
         matches!(applied.primary, ApplyDisposition::Applied(_)),
         "{applied:?}"
     );
     assert_eq!(
         read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-        flown.origin_seq
+        flown_op.origin_seq
     );
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(FLOWN));
+    assert_eq!(head_text(&b, RECORD), Some(flown));
     assert_eq!(indexed_status(&b), Some(json!("Flown")));
     assert_eq!(lineage_rows(&b), 0);
     assert!(open_conflicts(&b).is_empty());

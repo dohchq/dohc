@@ -5240,6 +5240,7 @@ impl Holding {
                 crate::hosted::CONFLICT_PARENT_WITHHELD
                     | crate::hosted::PATH_HELD_IN_SCOPE
                     | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                    | crate::moment_apply::RESOLVE_EXISTING_CONFLICT
                     | "ydoc-resulting-head-pending"
             )
             && let Some(object_id) = crate::hosted::hosted_document(op)
