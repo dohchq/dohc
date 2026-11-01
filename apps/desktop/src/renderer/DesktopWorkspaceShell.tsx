@@ -6906,6 +6906,12 @@ export function DesktopWorkspaceShell(props: {
           files={files}
           recent={wb.recentFiles}
           pinned={wb.pinned}
+          // Empty-state facts: the committed-listing flags keep "No files
+          // to open" from speaking before (or despite) a listing, and the
+          // create hint only names New file when it is available.
+          listingReady={fileListingCommit !== null}
+          listingFailed={fileListingCommit === null && listingsSettled > 0}
+          canCreateFile={isCommandAvailable("new-file", commandContext)}
           onOpenPath={openFile}
           onClose={() => setQuickOpenOpen(false)}
         />
