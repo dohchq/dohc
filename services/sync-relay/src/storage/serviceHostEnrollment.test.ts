@@ -1,5 +1,5 @@
 import {afterEach, expect, it} from "vitest";
-import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "../liveTickets.test-helper";
+import {fixture as ticketFixture, binding, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
@@ -457,7 +457,7 @@ it("pages retired documents by path without mixing workspaces or active rows", a
 
 it("retires an enrollment only once no active Edit grant on the owner's shares covers it", async () => {
   const f = await fixture(), enrolled = f.enroll();
-  const covered = () => f.storage.serviceHostEnrollmentHasEditGrant(enrolled);
+  const covered = () => f.storage.serviceHostEnrollmentCovered(enrolled);
   const retire = () => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId: enrolled.objectId, nowMs: 40});
   const share = (shareId: string, paths: string[], granter = "owner-1") => {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,0)")
@@ -629,6 +629,126 @@ it("retires the activation when deleting a collaborator's account ends the last 
   f.share("replacement", "replacement-edit", "edit", "reader-3");
   expect(f.retirement()).toEqual(deleted); expect(f.retirements()).toBe(1);
   expect(f.owner()).toBe("refused");
+});
+
+const SUCCESSOR = `ordinary-activation-${"b".repeat(64)}`;
+// The fixture document after the owner's finished restore that ended its last Edit grant.
+async function restored() {
+  const f = await activated(), restore = restoredWithoutEditGrant(f.storage, f.raw, key.namespace);
+  const enrolled = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
+  const enabled = (owner?: {userId: string; shareId: string}) => serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner);
+  const asOwner = {userId: "owner-1", shareId: scope.shareId};
+  return {...f, restore, enrolled, enabled, asOwner, covered: () => f.storage.serviceHostEnrollmentCovered(enrolled())};
+}
+
+// Proves: the owner's restore that ended the document's last Edit grant keeps
+// the document live for that owner once the restore resumed and its
+// activation retired. Only the enrollment's own owner and share continue; the
+// revoked recipient does not, and the grant stays revoked. Admission stays
+// closed until the owner's next activation completes.
+it("keeps a document live for its owner after their restore ended its last Edit grant", async () => {
+  const f = await restored();
+  expect(f.covered()).toBe(true);
+  expect(f.enabled(f.asOwner)).toBe(true);
+  expect(f.enabled()).toBe(false);
+  expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
+  expect(f.enabled({userId: "owner-1", shareId: "another-share"})).toBe(false);
+  expect(f.release()).toBeNull();
+  expect(f.enrolled()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.owner()).toBe("refused");
+  retainSuccessorActivation(f.raw, false);
+  expect(f.owner()).toBe("refused");
+  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(SUCCESSOR);
+  expect(f.owner()).toBe("current");
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "named", userId: scope.userId, grantId: scope.grantId}}).kind).toBe("refused");
+  expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+});
+
+// Proves: nothing but that exact finished restore keeps the document live.
+// Each case leaves the owner without live editing, and the host's release
+// retires the enrollment as it would for any document no Edit grant covers.
+it.each([
+  ["an unfinished restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("phase='settled'")],
+  ["a declined restore", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
+    terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL,declined_at_ms=35`)],
+  ["a restore of another activation", (f: Awaited<ReturnType<typeof restored>>) =>
+    f.restore.update(`basis_json=json_set(basis_json,'$.ownerOrigin','{"adoptionId":"earlier-activation"}')`)],
+  ["a restore without the owner's activation", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("intent_json=json_set(intent_json,'$.deliveryKind','bootstrap')")],
+  ["a retirement the restore did not open", (f: Awaited<ReturnType<typeof restored>>) => f.restore.update("invalidated_at_ms=20")],
+  ["a later restore generation", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9")],
+  ["a replaced workspace identity", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'")],
+  ["another workspace owner", (f: Awaited<ReturnType<typeof restored>>) => f.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='owner-2'")],
+  ["a document moved from its restored path", (f: Awaited<ReturnType<typeof restored>>) => f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,
+    relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES (?,?,2,'moved','main','docs/b.md',?,'text',1,2)`)
+    .run(scope.workspaceId, binding.objectId, "b".repeat(64))],
+] as const)("does not keep a document live for its owner after %s", async (_case, change) => {
+  const f = await restored();
+  change(f);
+  expect(f.covered()).toBe(false);
+  expect(f.enabled(f.asOwner)).toBe(false);
+  expect(f.release()).toMatchObject({enabled: false, retired: true});
+});
+
+// Proves: no other document inherits the continuation: not another object
+// at the restored path, and not a sibling the same share covered.
+it("keeps only the restored document live, not a replacement or sibling", async () => {
+  const f = await restored();
+  for (const other of [{objectId: "replacement", path: binding.currentPath}, {objectId: "sibling", path: "docs/b.md"}]) {
+    expect(f.storage.serviceHostEnrollmentCovered({...f.enrolled(), ...other})).toBe(false);
+  }
+});
+
+// Proves: the owner's Pause or Stop wins over the continuation. Before the
+// owner's next activation exists, either fences the document while it stands,
+// and Resume returns it. Once that activation exists, Pause or Stop opens its
+// retirement, which no restore opened, so live editing ends until the owner
+// shares the document again.
+it.each(["pause", "stop"] as const)("lets the owner's %s end live editing that their restore kept", async action => {
+  const f = await restored();
+  if (action === "pause") {
+    f.setEnabled(false);
+    expect(f.enabled(f.asOwner)).toBe(false);
+    expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
+  } else expect(f.stop()).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(f.enabled(f.asOwner)).toBe(false);
+  expect(f.setEnabled(true)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.enabled(f.asOwner)).toBe(true);
+  retainSuccessorActivation(f.raw, true);
+  if (action === "pause") f.setEnabled(false);
+  else f.stop({prepared: {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}}});
+  expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 20});
+  f.setEnabled(true);
+  expect(f.enabled(f.asOwner)).toBe(false);
+  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=50,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(SUCCESSOR);
+  expect(f.covered()).toBe(false);
+  expect(f.enabled(f.asOwner)).toBe(false);
+});
+
+// Proves: overlapping Edit grants decide as before. A new Edit share keeps
+// the document live by itself; ending it is an ordinary revocation that
+// retires the owner's next activation and ends the continuation. The owner's
+// next restore that ends a last Edit grant keeps the document live again.
+it("ends the continuation on a later revocation, and continues after a repeated restore", async () => {
+  const f = await restored();
+  retainSuccessorActivation(f.raw, true);
+  f.share("again", "again-edit");
+  expect(f.covered()).toBe(true);
+  expect(f.storage.revokeShareGrant({shareId: "again", grantId: "again-edit", revokedAtMs: 50}).ok).toBe(true);
+  expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 50, restoreFenceGeneration: 8});
+  expect(f.covered()).toBe(false);
+  // Had that revocation been the owner's second restore, it resumes at generation 9 and the successor retires.
+  f.raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
+      lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,
+      invalidated_at_ms,fenced_at_ms,accounted_bytes)
+    SELECT 'second',relay_database_namespace,operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,json_set(intent_json,'$.operationId','second'),
+      json_set(basis_json,'$.ownerOrigin',?),terminal_json,applied_json,native_receipt_json,'resumed',8,9,cutover_cursor,revoked_generation,50,50,accounted_bytes
+    FROM sync_relay_live_restore_operations WHERE operation_id='restore'`).run(JSON.stringify({adoptionId: SUCCESSOR}));
+  expect(f.covered()).toBe(false);
+  f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9");
+  f.raw.prepare(`UPDATE sync_relay_service_activations SET retire_restore_generation=9,retired_at_ms=60,retired_boundary_json='{}',state_bytes=NULL
+    WHERE activation_id=?`).run(SUCCESSOR);
+  expect(f.covered()).toBe(true);
+  expect(f.enabled(f.asOwner)).toBe(true);
 });
 
 it("candidate scanning advances past a full page of noncanonical shares", async () => {

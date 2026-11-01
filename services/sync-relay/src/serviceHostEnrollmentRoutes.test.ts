@@ -430,6 +430,29 @@ it("reports a restored note ready to its owner after the restore ended its last 
     document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace, shareId: scope.shareId}}]);
 });
 
+// Proves: only the owner discovers the restored note, and it reads as ready
+// only once the owner's next activation completed. The revoked recipient and
+// another account find nothing, and the owner's Pause still pauses it.
+it("shows a restored note only to its owner, ready once the owner's next activation completed", async () => {
+  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  f.host.ready.mockReturnValue(true);
+  retainServiceActivation(f.raw, namespace, true);
+  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
+  const successor = retainSuccessorActivation(f.raw, false);
+  expect((await documents())[0].status).toBe("preparing");
+  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(successor);
+  expect((await documents())[0].status).toBe("ready");
+  for (const userId of [scope.userId, "other"]) {
+    f.setActor({workspaceId: scope.workspaceId, userId});
+    expect((await f.handle(f.request())).status).toBe(404);
+  }
+  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false})).toMatchObject({ownerStop: "pause"});
+  expect((await documents())[0].status).toBe("paused");
+});
+
 it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {
   const f = await heldDocumentFixture(undefined, effectIndex); cleanup.push(f.close);
   expect((await (await f.handle(f.request())).json()).documents[0]).toMatchObject({reason: "conflict-parent-withheld"});

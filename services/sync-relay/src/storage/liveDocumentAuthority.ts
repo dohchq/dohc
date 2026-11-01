@@ -655,7 +655,7 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
     stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
-    if (!serviceHostDocumentEnabled(storage, document)) return {kind: "refused", reason: "host-unavailable"};
+    if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined)) return {kind: "refused", reason: "host-unavailable"};
     let share: SyncRelayShareRow;
     let selector: ShareSelector;
     let authority: ServerDerivedLiveUpdateAuthority;

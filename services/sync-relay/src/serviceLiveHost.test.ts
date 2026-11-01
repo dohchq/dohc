@@ -3068,6 +3068,71 @@ it("completes a moved document's retirement after a restart that follows its adm
   expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
 });
 
+// The enrolled document's owner, as the relay checks whether it stays live for them.
+const ownerCovers = (o: Enrolled) => o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: "object", ownerUserId: "owner",
+  shareId: "share", path: o.sibling.path});
+const ownerBinding = (o: Enrolled) => o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}}).kind;
+
+// Proves: an admitted restore that ended the document's last Edit grant, at
+// its path, still retires the activation at the key its admission left. Once
+// the restore resumed and that retirement finished, the document stays live for
+// its owner alone: the Edit grant stays revoked, the relay admits nothing until
+// a successor completed, and hosting the document again captures that
+// successor from the retired activation.
+it("keeps a document live for its owner after its admitted restore ended the last Edit grant and its activation retired", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  o.beginRestore();
+  await o.depart();
+  await passed();
+  expect(ownerCovers(o)).toBe(false);
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const {proposalDigest, before} = await admitMovedRestore(o);
+  await o.host.close(); log.mockClear();
+  Object.assign(o.f.config, {restore: RESTORE}); await o.f.save();
+  const host = await restartedHost(o);
+  await passed();
+  const {publish} = restoreEngine(o, host), complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
+  await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  const key = retirementKey(o);
+  expect(key.acceptedThrough).toBeGreaterThan(before.acceptedThrough);
+  // The restore resumed, but its activation has not retired yet.
+  expect(ownerCovers(o)).toBe(false);
+  await publish();
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(complete).toHaveBeenLastCalledWith(expect.objectContaining({key}));
+  expect(ownerCovers(o)).toBe(true);
+  expect(o.f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+  expect(ownerBinding(o)).toBe("refused");
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures), {timeout: 10_000});
+});
+
+// Proves: a restore the owner declined keeps nothing live once it ended the
+// document's last Edit grant. Its retirement finishes as before, and the
+// relay refuses the owner's live editing.
+it("keeps nothing live for the owner after a declined restore ended the last Edit grant", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.beginRestore();
+  await o.depart();
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(o.host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(ownerCovers(o)).toBe(false);
+  expect(ownerBinding(o)).toBe("refused");
+});
+
 // Each way an owner ends a document's live editing: deleting its share, Pause, or Stop.
 const endLiveEditing = {
   unshare: (o: Enrolled) => expect(o.f.storage.revokeShare("share", 30)).toBe(true),
