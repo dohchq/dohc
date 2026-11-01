@@ -296,6 +296,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const [entries, setEntries] = useState<Row[]>(() =>
     editableEntries(sourceEntries).map(newRow),
   );
+  // The file as this panel last wrote it, until the parent passes another
+  // body. The rows hold what they wrote, so the next save starts from it.
+  const [written, setWritten] = useState<{ from: string; to: string } | null>(null);
+  if (written && written.from !== body) setWritten(null);
 
   useEffect(() => {
     if (!ydoc) return;
@@ -343,13 +347,21 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const readOnly = props.readOnly ?? false;
   const refused = locked || opening || readOnly;
 
+  function fileEntries(): FrontmatterEntry[] {
+    return written ? frontmatterEntries(written.to) : sourceEntries;
+  }
+
   function commit(next: Row[]) {
     if (refused) return;
     const { saves, values, remove, renamed } = rowChanges(entries, next);
     try {
       if (values.size > 0 || remove.length > 0) {
         if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
-        else props.onChange?.(applyFrontmatter(body, changedProperties(sourceEntries, values, remove), renamed));
+        else {
+          const to = applyFrontmatter(written?.to ?? body, changedProperties(fileEntries(), values, remove), renamed);
+          props.onChange?.(to);
+          setWritten({ from: body, to });
+        }
       }
     } catch {
       // The rows stay as they were before this edit.
