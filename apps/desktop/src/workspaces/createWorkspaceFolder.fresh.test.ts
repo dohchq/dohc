@@ -63,7 +63,7 @@ describe("New workspace's claim that it made a folder from nothing", () => {
     expect((await create(root)).fresh).not.toBeNull();
   });
 
-  it.each(["._package.json", ".dohc/._settings.json"])("names no folder that also holds %s", async (name) => {
+  it.each(["._package.json", "._", "._._.dohc", ".dohc/._settings.json", ".dohc/._engine"])("names no folder that also holds %s", async (name) => {
     const root = join(await createTestScratch("dohc-fresh-"), "Trip");
     meanwhile = async (rootPath) => {
       await mkdir(join(rootPath, ".dohc"));
