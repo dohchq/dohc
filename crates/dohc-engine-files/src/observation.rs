@@ -1028,12 +1028,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ctime_detects_same_size_same_mtime_write() {
+        use std::os::unix::fs::MetadataExt;
         let f = Fixture::new();
         f.write("note.md", "a");
         f.scan(&f.cursor());
         let path = f.root.path().join("note.md");
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let cursor = f.cursor();
+        // A coarse filesystem clock can give the next write note.md's ctime,
+        // which the feed can't tell apart (#2904). Write an ignored probe
+        // until its ctime differs, so the clock has passed note.md's tick.
+        let ctime = |path: &std::path::Path| {
+            let metadata = std::fs::metadata(path).unwrap();
+            (metadata.ctime(), metadata.ctime_nsec())
+        };
+        let probe = f.root.path().join(".dohc/ctime-probe");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::fs::write(&probe, "").unwrap();
+            if ctime(&probe) != ctime(&path) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the filesystem's ctime clock didn't pass note.md's within 5 s"
+            );
+        }
         f.write("note.md", "b");
         std::fs::File::options()
             .write(true)
