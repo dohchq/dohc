@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
@@ -55,6 +56,8 @@ export async function spawnSyncRelay(input: {
       "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")]);
     mkdirSync(join(deployment, "live-host"));
   }
+  // share-web reaches the relay's live routes at its loopback address, and they accept only listed hosts.
+  const listenPort = input.port ?? (input.editLinks ? await reserveRelayPort() : 0);
   const child: ChildProcess = spawn(
     process.execPath,
     [
@@ -76,7 +79,7 @@ export async function spawnSyncRelay(input: {
         DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
         NODE_ENV: "test",
         SYNC_RELAY_TEST_AUTH: "1",
-        SYNC_RELAY_PORT: String(input.port ?? 0),
+        SYNC_RELAY_PORT: String(listenPort),
         SYNC_RELAY_DB_PATH: deployment ? undefined : input.dbPath,
         ...(input.appPublications ? { DOHC_RELAY_APP_PUBLICATIONS: "1" } : {}),
         ...(input.linkBoundary
@@ -95,7 +98,7 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
               DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
               DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin,
-              DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin).host,
+              DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(input.editLinks.publicOrigin).host, `127.0.0.1:${listenPort}`].join(","),
               // The self-host image gives the live host a Markdown reader. Without one it holds every lossy rewrite.
               DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
               ...input.editLinks.trustEnv,
@@ -182,6 +185,18 @@ export async function spawnSyncRelay(input: {
     diagnostics: () => ({ stdout, stderr }),
     stop,
   };
+}
+
+async function reserveRelayPort(): Promise<number> {
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
+  });
+  const address = listener.address();
+  await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+  if (!address || typeof address === "string") throw new Error("No relay port reserved.");
+  return address.port;
 }
 
 async function initializeRelayDeployment(args: string[]): Promise<void> {
