@@ -43,6 +43,9 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   const acknowledgedGenerations: number[] = [];
   let openedSessionId: string | null = null;
   let openCount = 0;
+  // The lineage main stamps on each remote update: the open's, then the
+  // newest replacement's.
+  let currentLineageGeneration = 1;
   const doc = new Y.Doc();
   if (kind === "scene") {
     declareSceneRoots(doc);
@@ -98,7 +101,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
         available: true,
         initialUpdate: Y.encodeStateAsUpdate(doc),
         artifactAssets,
-        lineageGeneration: 1,
+        lineageGeneration: currentLineageGeneration,
       };
     },
     async applyEngineYDocUpdate(payload: {
@@ -165,18 +168,14 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   };
 
   // Mutates the SOURCE doc and delivers the resulting incremental update as
-  // a forwarded remote delta — a co-editor's edit, arriving on the same
-  // channel a local one settles through. Not gated by `writesRefused`: a
-  // remote update still applies to a deleted-while-editing doc (only LOCAL
-  // writes are refused), so a deletion's captured text must be frozen
-  // against exactly this.
-  function emitRemoteEdit(suffix: string, lineageGeneration?: number): void {
+  // a forwarded remote delta: a co-editor's edit, stamped with the lineage
+  // main currently serves, as main stamps every remote update.
+  function emitRemoteEdit(suffix: string): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const before = Y.encodeStateVector(doc);
     doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
     const update = Y.encodeStateAsUpdate(doc, before);
-    // Main stamps a remote update with its lineage; without one the editor drops it.
-    const event = { sessionId: openedSessionId, update, ...(lineageGeneration === undefined ? {} : { lineageGeneration }) };
+    const event = { sessionId: openedSessionId, update, lineageGeneration: currentLineageGeneration };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });
@@ -197,6 +196,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     lineageGeneration = 2,
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
+    currentLineageGeneration = lineageGeneration;
     const replacement = new Y.Doc();
     if (kind === "scene") {
       declareSceneRoots(replacement);

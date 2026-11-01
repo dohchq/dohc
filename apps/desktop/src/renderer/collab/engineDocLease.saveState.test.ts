@@ -343,7 +343,7 @@ it("makes a change outside dohc unsaved when typing lands after it", async () =>
 it("makes a change outside dohc unsaved when an agent's edit lands after it", async () => {
   await retainBound();
   harness.emitChangedOutside(false, 0);
-  harness.emitRemoteEdit(" agent", 1);
+  harness.emitRemoteEdit(" agent");
   expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
   expect(retained.lease.unsavedEditsPending()).toBe(true);
 });
@@ -969,16 +969,9 @@ it("sets the text aside when another file takes the document's path", async () =
 });
 
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
-  // The boundary capture snapshots the doc synchronously at the
-  // deletion event and defers only the markdown PROJECTION (the part that
-  // needs the lazy Tiptap module). Nothing before this pin distinguished
-  // that from deferring the snapshot too — both pass every earlier test,
-  // because unmount alone does not corrupt a Y.Doc's encodable state.
-  //
-  // A remote update is the real discriminator: it is not gated by
-  // `writesRefused` (only LOCAL writes are refused after deletion), so it
-  // can still land on the same doc while the projection is in flight. A
-  // synchronous snapshot is immune to it; a deferred one would pick it up.
+  // The capture snapshots the doc at the deletion event and defers only the
+  // markdown projection. A remote edit landing while that projection is in
+  // flight must not reach the text set aside: the path it edits is gone.
   await retainBound();
 
   act(() => {

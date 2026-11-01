@@ -189,6 +189,9 @@ function makeTransport(
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
+  // Main reported the path gone. A remote edit after that would change the
+  // text set aside at the deletion, so it is dropped.
+  documentGone: () => boolean,
   kind: LiveDocumentKind,
   allowLossySourceSha256?: string,
 ): EngineYDocTransport {
@@ -266,7 +269,7 @@ function makeTransport(
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
-        if (event.sessionId !== sessionId) return;
+        if (event.sessionId !== sessionId || documentGone()) return;
         listener(event.update, event.lineageGeneration, event.head);
       });
     },
@@ -443,6 +446,7 @@ function createEngineDocSession(
     sessionId,
     localSeq,
     writesRefused,
+    () => deletionPending,
     documentKind,
     input.allowLossySourceSha256,
   );
