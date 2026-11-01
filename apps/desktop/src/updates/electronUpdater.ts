@@ -84,8 +84,9 @@ type AutoUpdaterLike = {
   isUpdaterActive?(): boolean;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
   // Starts the installer without quitting. Returns false, and starts nothing,
-  // once an install already started.
-  install(isSilent?: boolean, isForceRunAfter?: boolean): boolean;
+  // once an install already started. The Windows and Linux updaters have it;
+  // the macOS one does not.
+  install?(isSilent?: boolean, isForceRunAfter?: boolean): boolean;
   on(eventName: "checking-for-update", listener: () => void): void;
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
   on(eventName: "update-not-available", listener: () => void): void;
@@ -342,7 +343,7 @@ export async function startAutoUpdates(options: {
   options.onQuit((exitCode) => {
     if (platform !== "win32" || !restartStaged || exitCode !== 0) return;
     if (!(options.restartApproved?.() ?? true)) return;
-    autoUpdater.install(false, true);
+    autoUpdater.install?.(false, true);
   });
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
