@@ -210,7 +210,8 @@ async function checkNoAccounts(options, settings, config, host) {
   const state = result.status === 0 ? result.stdout.trim() : undefined, database = `${settings.POSTGRES_DB} on ${settings.DOHC_POSTGRES_HOST}`;
   if (state === "present") {
     throw new Error(`Database ${database} already holds dohc accounts, so this is not the deployment's first start. ` +
-      'A first start needs a database that has never held dohc. If the volume is lost, follow "Recover from total loss" in docs/how-to/drive.md.');
+      'If an earlier first start on this volume created the deployment, run start without --first-start. ' +
+      'Otherwise a first start needs a database that has never held dohc. If the volume is lost, follow "Recover from total loss" in docs/how-to/drive.md.');
   }
   if (state !== "missing") throw new Error(`Could not check database ${database} for dohc accounts. Check the database settings and the CA file, then try again.`);
 }
@@ -225,6 +226,8 @@ export async function runDrive(options, host = systemHost) {
   let redact = text => text;
   try {
     if (host.platform !== "linux") throw new Error("Run Drive commands on the Drive server, which runs Linux.");
+    // Without root, blkid cannot probe devices and reports no match, which would skip the duplicate volume check.
+    if (host.uid !== 0) throw new Error("Run Drive commands as root, with sudo.");
     const release = checkRelease(options, host);
     const envStats = host.lstat(options.envFile);
     if (!envStats?.isFile() || envStats.uid !== host.uid || !hasMode(envStats, 0o600)) {

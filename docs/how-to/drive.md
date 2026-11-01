@@ -70,7 +70,7 @@ Published apps use the app domain `dohc.app`.
 The rehearsal is the server's first step. It needs no provider accounts.
 It runs before the volume, the accounts, and the configuration exist, so nothing it leaves behind can reach them.
 
-1. **Operator:** Run the rehearsal as root:
+1. **Operator:** Run the rehearsal as root, in a session that survives a dropped connection, such as `tmux`:
 
    ```sh
    sudo node /srv/dohc-drive/tools/drive/rehearse.mjs --bundle /srv/dohc-release --image dohc-self-host:<release-revision> \
@@ -80,7 +80,7 @@ It runs before the volume, the accounts, and the configuration exist, so nothing
    The rehearsal refuses a server with a global IPv6 address. It also refuses when Docker already has containers or volumes.
 2. **Operator:** Read the result. The rehearsal passed when it prints `[ok]` for each check and exits with status 0.
    If a check fails, stop and report the failure before you go on.
-3. **Operator:** If the rehearsal reports that cleanup left something, rebuild the server before you go on.
+3. **Operator:** Rebuild the server before you go on if the rehearsal reports that cleanup left something, does not exit with status 0, or stops before it prints `Evidence:`.
    Destroy the Droplet, then start again from [Prepare the server](#prepare-the-server).
    A leftover mount, loop device, container, or volume must never meet the deployment.
 4. **Operator:** Copy the evidence file that the rehearsal names after `Evidence:` off the server. Then delete its folder:
@@ -300,6 +300,9 @@ If it does not, stop and report before changing the certificate setup.
    A first start under existing accounts would create a deployment that none of them can use.
    The release then refuses a first start when any deployment folder holds data.
    Every later start uses `start` without `--first-start`. `drive.mjs` never adds it.
+   If the first start fails after it created the deployment, run `start` without `--first-start`.
+   If it fails after the release set up the accounts database but before it created the deployment, both starts refuse.
+   Keep the volume and the database as they are, and report the failure. Rebuild only under an approved plan.
 
 ### Check that only Cloudflare reaches the origin
 
@@ -330,9 +333,22 @@ Never record a key, password, token, cookie, or email address.
 1. **Operator:** [Check that only Cloudflare reaches the origin](#check-that-only-cloudflare-reaches-the-origin).
    Record the exit status of each command.
 
+### Account email
+
+1. **Approval:** Send the first delivery test only after approval.
+2. **Operator:** Connect a desktop to Drive, as in [Connect the desktop app](self-host.md#connect-the-desktop-app), with an approved address for its account.
+   Its verification email is the delivery test. Open its link, approve the device, and turn on **Sync this workspace**.
+
+The check passes when the account's email arrives, and the mail provider's delivery record shows that the receiving server accepted it over TLS.
+If the record does not show the transport, open the received message's headers.
+The `Received` header added by the receiving server must show TLS, such as `with ESMTPS`.
+
+Record only the time the email arrived, the delivery status, and the TLS indicator: the provider's TLS field, or the `with ESMTPS` text from the `Received` header.
+Record nothing else from the message or the delivery record. The message holds the account's verification link.
+
 ### App launch
 
-1. **Operator:** From a desktop connected to Drive, publish a small app and share it with a link.
+1. **Operator:** From the desktop you connected in [Account email](#account-email), publish a small app and share it with a link.
 2. **Operator:** Open the share link in a browser. The app opens on a host under `dohc.app`.
 3. **Operator:** In the browser's developer tools, copy the launch host and the value of its `__Host-dohc-app` cookie.
 4. **Operator:** Within 10 minutes, request the launch page again with that cookie:
@@ -358,17 +374,6 @@ The check passes when the app loads in the browser and the command shows status 
 The response must not show `cf-cache-status: HIT`.
 
 Record the command's output. Its `sed` step hides the cookie.
-
-### Account email
-
-1. **Approval:** Send the first delivery test only after approval.
-2. **Operator:** Create a test account with an approved address.
-
-The check passes when the account's email arrives, and the mail provider's delivery record shows that the receiving server accepted it over TLS.
-If the record does not show the transport, open the received message's headers.
-The `Received` header added by the receiving server must show TLS, such as `with ESMTPS`.
-
-Record the time the email arrived and the provider's delivery record, without the address.
 
 ### Live edit
 
@@ -397,7 +402,7 @@ Do this on a Linux host other than the Droplet, with the same release bundle and
      --env-file "$HOME/drive-check/drive.env"
    ```
 
-5. **Operator:** Delete the folder. It holds the configuration and unencrypted workspace data:
+5. **Operator:** Delete the folder whether the check passed or failed. It holds the configuration and unencrypted workspace data:
 
    ```sh
    rm -r "$HOME/drive-check"
