@@ -102,6 +102,17 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
   }
   return {
     discard,
+    /**
+     * Discards each import that stopped before installation.
+     * Call it only when nothing else can import into this store, because it also removes a running import's staging.
+     */
+    async discardInterrupted(context: Context, authorize: () => void) {
+      for (;;) {
+        const row = tx(() => { authorize(); return db.prepare("SELECT import_id,workspace_id,dataset_id FROM dohc_dataset_imports WHERE phase NOT IN ('installed','claimed') LIMIT 1").get(); });
+        if (!row) return;
+        await discard(context, { workspaceId: String(row.workspace_id), datasetId: String(row.dataset_id), transferId: String(row.import_id), authorize });
+      }
+    },
     claim(context: Context, input: DatasetScope & { transferId: string; manifestSha256: string; sourceCursor: DatasetCursor; oldHostStopped?: true; authorize(): void }): RecoveryImportReceipt {
       const row = tx(() => find(input, input.transferId, input.authorize));
       if (!row || (row.phase !== "installed" && row.phase !== "claimed") || row.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(row.source_json)), input.sourceCursor)) throw new Error("Recovery transfer is not installed with this identity.");

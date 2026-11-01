@@ -152,7 +152,10 @@ it("retries a fenced recovery import after the target store reopens mid-install 
       commitAttachments() {},
       async discardAttachments() {},
     });
+    await restarted.discardInterrupted({}, f.authorize);
     expect(discards).toBe(0);
+    expect(db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n).toBe(0);
+    expect(db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(0);
     expect(restarted.status({ ...f.scope, transferId: input.transferId, authorize: f.authorize })).toBeNull();
     expect(f.journal.head(f.scope, f.authorize)).toMatchObject({ active: false, cursor: f.head() });
 
