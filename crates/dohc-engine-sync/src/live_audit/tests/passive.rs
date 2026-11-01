@@ -1046,6 +1046,69 @@ fn fence_and_cancel(
     *cancelled
 }
 
+/// Repeat the latest cancellation `count` times in one transaction, each row
+/// as [`fence_and_cancel`] records it, then register the last generation.
+/// Each real cancellation takes two durable commits.
+fn repeat_cancellation(source: &mut Fixture, count: i64) {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationHostCoordinate, NativeRestoreCancellationReceipt,
+    };
+    let from = source.binding.restore_fence_generation;
+    let (template, previous): (String, Option<String>) = source
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT cancelled_json,previous_operation_id FROM live_restore_fences WHERE new_generation=?1",
+                [from],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    // A fence names the restore that settled the generation it stops.
+    assert_eq!(previous, Some(format!("restore-{}", from - 1)));
+    let template: NativeRestoreCancellationReceipt = serde_json::from_str(&template).unwrap();
+    source
+        .store
+        .write_with(&NoFaults, |tx| {
+            for generation in from + 1..=from + count {
+                let mut cancelled = template.clone();
+                cancelled.fence.operation.operation_id = format!("restore-{generation}");
+                cancelled.fence.operation.old_binding.restore_fence_generation = generation - 1;
+                cancelled.fence.operation.new_fence = generation;
+                cancelled.binding.restore_fence_generation = generation;
+                tx.execute(
+                    "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,previous_operation_id,cancelled_json)
+                     VALUES('ws','main','object','relay',?1,?2,?3,?4,?5)",
+                    params![
+                        cancelled.fence.operation.operation_id,
+                        serde_json::to_string(&cancelled.fence.operation).unwrap(),
+                        serde_json::to_string(&cancelled.fence).unwrap(),
+                        format!("restore-{}", generation - 1),
+                        serde_json::to_string(&cancelled).unwrap(),
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    source.binding.restore_fence_generation = from + count;
+    source.handle = source
+        ._owner
+        .register(
+            &mut source.store,
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            source.binding.clone(),
+        )
+        .unwrap();
+}
+
 /// Sol's round trip: the source settles, fences a restore, cancels it,
 /// accepts its next update at the new generation and settles that too, with
 /// no successor. That update's audit record carries the cancellation that
@@ -2094,7 +2157,9 @@ fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence(
 /// A lineage cancels more restores than one chain holds, split by accepted
 /// events so each event's span stays within it. The settlement over all three
 /// events and a fresh replica's import of the audit both cross the whole
-/// history, each span from the event before it.
+/// history, each span from the event before it. In each span, the first two
+/// and the last restores fence and cancel through the protocol, and the rows
+/// between repeat the second.
 #[test]
 fn cancellations_beyond_one_chain_settle_and_import_when_events_split_them() {
     use dohc_engine_collab::live_update_application::MAX_CANCELLED_RESTORES;
@@ -2108,9 +2173,10 @@ fn cancellations_beyond_one_chain_settle_and_import_when_events_split_them() {
     let mut cursor = 1;
     for (index, span) in spans.into_iter().enumerate() {
         let terminal = Some(last.admitted.metadata.accepted.receipt.clone());
-        for _ in 0..span {
-            fence_and_cancel(&mut source, terminal.clone());
-        }
+        fence_and_cancel(&mut source, terminal.clone());
+        fence_and_cancel(&mut source, terminal.clone());
+        repeat_cancellation(&mut source, span - 3);
+        fence_and_cancel(&mut source, terminal.clone());
         cursor += span + 1;
         previous = last.evidence_digest.clone();
         last = counted_row(&mut source, cursor, index as i64 + 2, &previous, &doc);
