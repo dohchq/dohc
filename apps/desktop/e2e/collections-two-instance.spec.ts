@@ -69,7 +69,7 @@ test("a drag's field write on one device moves the card on the other device's op
 
   try {
     await mkdir(join(sourceRoot, "tasks"), { recursive: true });
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
     // Device A: a real daemon workspace seeds the collection the way an

@@ -19,7 +19,7 @@ type Relay = Awaited<ReturnType<typeof spawnSyncRelay>>;
 // A relay workspace holding shared.md, claimed and pushed by a third machine,
 // and sign-in credentials for both desktops.
 async function seedSharedWorkspace(workspaceId: string, first: Workspace, second: Workspace): Promise<Relay> {
-  const relay = await spawnSyncRelay({ dbPath: join(first.baseDir, "relay.sqlite") });
+  const relay = await spawnSyncRelay({ dbPath: join(first.baseDir, "relay", "relay.sqlite") });
   try {
     const seedRoot = join(first.baseDir, "seed");
     await mkdir(seedRoot);

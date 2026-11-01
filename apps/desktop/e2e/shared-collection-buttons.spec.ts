@@ -47,7 +47,7 @@ test("@two-client shared Buttons use host identity and show the named presser in
   let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let recipient: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
     await seedWorkspaceRegistry(ownerTemp, [{ workspaceId, rootPath: ownerTemp.rootPath }]);
     await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl,

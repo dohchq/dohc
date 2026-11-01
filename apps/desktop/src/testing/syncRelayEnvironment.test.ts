@@ -12,7 +12,7 @@ it("starts an isolated desktop E2E relay with inherited device-delivery configur
   vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
   let relay: Awaited<ReturnType<typeof spawnSyncRelay>> | undefined;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(root, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(root, "relay", "relay.sqlite") });
     expect(relay.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
     expect(existsSync(`${relay.dbPath}-wal`)).toBe(true);
     await relay.stop();

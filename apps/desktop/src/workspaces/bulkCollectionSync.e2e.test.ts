@@ -116,7 +116,7 @@ it.for(counts)("automatically syncs %i valid-id Collection files through create 
   try {
     await mkdir(join(rootPath, "tasks"), { recursive: true });
     await writeFile(join(rootPath, "tasks", "collection.yaml"), schema);
-    relay = await spawnSyncRelay({ dbPath: join(scratch, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(scratch, "relay", "relay.sqlite") });
     await lifecycle.start();
     children = directChildren();
     evidence.children = children;

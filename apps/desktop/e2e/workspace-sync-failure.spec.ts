@@ -46,7 +46,7 @@ test("a sync the server cannot take names the server, offers Try again, and clea
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "sync-failure-e2e";
-  const relayDb = join(temp.baseDir, "relay.sqlite");
+  const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
