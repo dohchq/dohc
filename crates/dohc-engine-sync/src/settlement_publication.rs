@@ -2,6 +2,8 @@ use crate::{
     RefusalReason, ReplicationEnvelope, ReplicationRefusal, SettlementAdmission,
     SettlementPublicationRefusal, SyncError,
 };
+use dohc_engine_domain::DomainError;
+use dohc_engine_storage::StorageError;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 
@@ -252,6 +254,67 @@ fn refuse_in_tx(
     Ok(refusal)
 }
 
+/// Refuse to roll back a save until the relay has answered its push. If the
+/// relay refuses the save's author names, `refuse_in_tx` sends the save again
+/// without them, and it needs the save's moment, which rollback deletes.
+pub fn rollback_waits_for_publication_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<(), DomainError> {
+    fn corrupt(error: impl std::error::Error + Send + Sync + 'static) -> DomainError {
+        DomainError::Storage(StorageError::corrupt_public(error))
+    }
+    if !crate::workspace_replicates_with_relay_in_tx(tx, workspace_id).map_err(corrupt)? {
+        return Ok(());
+    }
+    let mut unsent = tx
+        .prepare(
+            "SELECT r.payload_json FROM sync_identity i JOIN replication_log r \
+               ON r.workspace_id=i.workspace_id AND r.origin_id=i.origin_id \
+             WHERE i.workspace_id=?1 AND r.imported=0 AND r.op_kind='moment.append' \
+               AND r.origin_seq>COALESCE((SELECT pushed_seq FROM sync_relay_push_state p \
+                 WHERE p.workspace_id=i.workspace_id AND p.origin_id=i.origin_id),-1) \
+               AND json_extract(r.payload_json,'$.momentId')=?2",
+        )
+        .map_err(corrupt)?;
+    let payloads = unsent
+        .query_map(params![workspace_id, moment_id], |row| row.get::<_, String>(0))
+        .map_err(corrupt)?;
+    for payload in payloads {
+        let payload: Value = serde_json::from_str(&payload.map_err(corrupt)?).map_err(corrupt)?;
+        if relay_may_refuse_authors(&payload) {
+            return Err(DomainError::RollbackWaitsForSync);
+        }
+    }
+    Ok(())
+}
+
+/// The relay's `clientMomentAuthorsRefused` check, plus any settlement proof,
+/// which the relay refuses when it can't verify it.
+fn relay_may_refuse_authors(payload: &Value) -> bool {
+    if payload.get("settlementReference").is_some() {
+        return true;
+    }
+    match payload.get("authors") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(authors)) => {
+            authors.is_empty()
+                || authors.iter().any(|author| {
+                    let Some(entry) = author.as_object() else {
+                        return true;
+                    };
+                    match entry.get("kind").and_then(Value::as_str) {
+                        Some("agent" | "automation") => false,
+                        Some("unattributed") => entry.len() != 1,
+                        _ => true,
+                    }
+                })
+        }
+        Some(_) => true,
+    }
+}
+
 pub(crate) fn push_refusals_in_tx(
     tx: &Transaction<'_>,
     workspace: &str,
@@ -324,7 +387,9 @@ mod tests {
         apply_moment_envelope, list_replication_ops, read_pushed_seq,
     };
     use dohc_engine_collab::live_update_application::ReleasedTails;
-    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_domain::{
+        DeleteTextFile, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    };
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
     use dohc_engine_testkit::open_store;
     use serde_json::json;
@@ -910,6 +975,160 @@ mod tests {
             assert_eq!(saved[0].payload, op.payload);
             assert_eq!(crate::list_refusal_notices(&store, "ws").unwrap().len(), 1);
         }
+    }
+
+    /// Roll back as the runtime composes it: wait for publication before the
+    /// moment goes, then journal the compensating moment.
+    fn roll_back(store: &mut EngineStore, moment: &str) -> Result<bool, DomainError> {
+        VersionedTextStore::new(store).rollback_text_file_mutation_with(
+            &RollbackTextFileMutation {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                mutation_moment_id: moment.into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                author_json: None,
+            },
+            &NoFaults,
+            |tx, moment| rollback_waits_for_publication_in_tx(tx, "ws", &moment.moment_id),
+            |tx, _, _, compensating, _| {
+                crate::journal_moment_append_in_tx(tx, "ws", compensating)
+                    .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))
+            },
+        )
+    }
+
+    fn start_pushing(store: &mut EngineStore, origin: &str) {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws',?1,-1)", [origin]).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn rollback_waits_for_the_relay_to_answer_a_save_with_author_names() {
+        let (_scratch, _path, mut store) = open_store();
+        let original = proved(source(&mut store));
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",
+                params![original.payload.to_string(), original.origin_id, original.origin_seq]).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        start_pushing(&mut store, &original.origin_id);
+        let moment_appends = |store: &EngineStore| {
+            list_replication_ops(store, "ws", &original.origin_id, -1, 500)
+                .unwrap()
+                .into_iter()
+                .filter(|op| op.op_kind == "moment.append")
+                .collect::<Vec<_>>()
+        };
+        let text = |store: &mut EngineStore| {
+            VersionedTextStore::new(store)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .map(|snapshot| snapshot.text)
+        };
+
+        assert!(matches!(
+            roll_back(&mut store, "moment"),
+            Err(DomainError::RollbackWaitsForSync)
+        ));
+        assert_eq!(text(&mut store).as_deref(), Some("accepted work"));
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .get_moment("ws", "moment")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(moment_appends(&store).len(), 1, "no compensating moment");
+
+        let refusal = SettlementPublicationRefusal {
+            origin_id: original.origin_id.clone(),
+            origin_seq: original.origin_seq,
+            moment_id: "moment".into(),
+            settlement_id: "settlement".into(),
+            reason: "authorship-mismatch".into(),
+        };
+        for _ in 0..2 {
+            crate::cursor::write_pushed_seq_with_refusals(
+                &mut store,
+                "ws",
+                &original.origin_id,
+                original.origin_seq,
+                std::slice::from_ref(&refusal),
+                &[],
+                &[],
+                &NoFaults,
+                &NoLiveLeases,
+                20,
+            )
+            .unwrap();
+        }
+        let ops = moment_appends(&store);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].payload, original.payload);
+        let fallback = &ops[1];
+        assert_eq!(
+            fallback.payload["attributionUnavailable"]["settlementId"],
+            "settlement"
+        );
+        assert!(fallback.payload.get("authors").is_none());
+        assert!(fallback.payload.get("settlementReference").is_none());
+
+        assert!(!roll_back(&mut store, "moment").unwrap());
+        assert_eq!(text(&mut store), None);
+        let ops = moment_appends(&store);
+        assert_eq!(ops.len(), 3);
+        assert_eq!(
+            ops[2].payload["momentId"],
+            dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "moment"),
+            "the compensating moment follows the fallback"
+        );
+    }
+
+    #[test]
+    fn delete_rollback_does_not_wait_for_its_push() {
+        let (_scratch, _path, mut store) = open_store();
+        let original = source(&mut store);
+        start_pushing(&mut store, &original.origin_id);
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    path: "doc.md".into(),
+                    moment_id: "delete".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: Some(json!([{"kind":"agent","agentId":"mover"}]).to_string()),
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::journal_moment_append_in_tx(tx, "ws", "delete")
+            })
+            .unwrap();
+        let delete = list_replication_ops(&store, "ws", &original.origin_id, -1, 500)
+            .unwrap()
+            .into_iter()
+            .find(|op| op.payload["momentId"] == "delete")
+            .expect("the delete is journaled and not yet pushed");
+        assert_eq!(delete.payload["authors"][0]["kind"], "agent");
+        assert!(!roll_back(&mut store, "delete").unwrap());
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "accepted work"
+        );
     }
 
     #[test]

@@ -99,6 +99,11 @@ pub enum DomainError {
     #[error("checked delete moment has replication dependents")]
     CheckedDeleteReplicationDependents,
 
+    /// The relay has not answered the push of the save to roll back, so it
+    /// may still refuse the save's author names. Retry after sync.
+    #[error("rollback waits for sync to send the change")]
+    RollbackWaitsForSync,
+
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
 
@@ -258,6 +263,7 @@ impl DomainError {
             DomainError::CheckedDeleteReplicationDependents => {
                 "checked-delete-replication-dependents"
             }
+            DomainError::RollbackWaitsForSync => "rollback-waits-for-sync",
             DomainError::UndoRefused { .. } => "undo-refused",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",

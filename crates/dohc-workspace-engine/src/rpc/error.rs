@@ -618,6 +618,10 @@ fn map_domain(error: &DomainError) -> WireError {
         DomainError::CheckedDeleteReplicationDependents => {
             (ErrorCode::Conflict, "checked-delete-replication-dependents")
         }
+        DomainError::RollbackWaitsForSync => (
+            ErrorCode::Overloaded,
+            "Sync has not finished sending this change. Retry the rollback after sync completes.",
+        ),
         // The caller matches the code prefix and shows the reason.
         DomainError::InvalidInput {
             reason: reason @ dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED,
