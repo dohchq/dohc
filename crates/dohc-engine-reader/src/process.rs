@@ -12,6 +12,7 @@ use std::{
 };
 pub(super) type Event = std::result::Result<Option<Outcome>, Failure>;
 pub(super) struct Worker {
+    pub starting_at: Instant,
     child: crate::platform::Process,
     input: Option<mpsc::Sender<PreparationRequest>>,
     pub output: mpsc::Receiver<Event>,
@@ -76,6 +77,13 @@ impl Worker {
             }
             state.build_digest = Some(digest);
         }
+        #[cfg(test)]
+        {
+            let hook = shared.state.lock().unwrap().before_hash.take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         for (index, expected, cap) in [
             (0, &manifest["runtime"]["sha256"], 256 * 1024 * 1024),
             (1, &manifest["bundleSha256"], 16 * 1024 * 1024),
@@ -87,8 +95,13 @@ impl Worker {
         #[cfg(test)]
         crate::tests::after_hash(c);
         check_assets(&assets)?;
+        if Instant::now() >= deadline {
+            return Err(Failure::TimedOut);
+        }
         let assets = Arc::new(assets);
         let checked_assets = assets.clone();
+        // Asset verification has its own budget. Spawn and hello share the start budget.
+        let starting_at = Instant::now();
         let cwd = tempfile::tempdir().map_err(unavailable)?;
         let mut command = Command::new(&c.node);
         let mut read_grant = OsString::from("--allow-fs-read=");
@@ -114,6 +127,7 @@ impl Worker {
         let (input, requests) = mpsc::channel::<PreparationRequest>();
         let (events, output) = mpsc::channel();
         let mut w = Self {
+            starting_at,
             child,
             input: Some(input),
             output,

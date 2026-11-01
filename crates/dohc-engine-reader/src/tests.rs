@@ -853,6 +853,52 @@ fn startup_deadline() {
     finish(&mut reader);
 }
 #[test]
+fn slow_verification_does_not_consume_the_start_deadline() {
+    let (_dir, c) = fixture("ok");
+    let startup = Duration::from_secs(2);
+    let mut reader = Reader::with_deadlines(
+        Some(c),
+        Deadlines {
+            startup,
+            ..Deadlines::default()
+        },
+    );
+    let (entered, checking) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    reader.shared.state.lock().unwrap().before_hash = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        held.recv_timeout(Duration::from_secs(15)).unwrap();
+    }));
+    let future = reader.request(request("ok"));
+    checking.recv_timeout(Duration::from_secs(15)).unwrap();
+    // Hold verification past the entire start budget, without delaying the child.
+    assert!(matches!(
+        checking.recv_timeout(startup + Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    release.send(()).unwrap();
+    assert!(matches!(run(future), Ok(Outcome::Constructed { .. })));
+    finish(&mut reader);
+}
+#[test]
+fn verification_timeout_starts_no_child_and_remains_retryable() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::with_deadlines(
+        Some(c),
+        Deadlines {
+            verification: Duration::ZERO,
+            ..Deadlines::default()
+        },
+    );
+    for _ in 0..2 {
+        fail(run(reader.request(request("ok"))), Failure::TimedOut);
+        let state = reader.shared.state.lock().unwrap();
+        assert!(!state.closed);
+        assert_eq!(state.lifecycle.0, 0);
+    }
+    finish(&mut reader);
+}
+#[test]
 fn a_slow_start_times_out_and_leaves_the_reader_open() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::with_deadlines(

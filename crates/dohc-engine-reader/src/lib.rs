@@ -175,6 +175,8 @@ struct State {
     closed: bool,
     #[cfg(test)]
     lifecycle: (usize, usize, Option<(u32, PathBuf)>),
+    #[cfg(test)]
+    before_hash: Option<Box<dyn FnOnce() + Send>>,
 }
 #[derive(Default)]
 struct Shared {
@@ -183,6 +185,7 @@ struct Shared {
 }
 #[derive(Clone, Copy)]
 struct Deadlines {
+    verification: Duration,
     startup: Duration,
     request: Duration,
     queue: Duration,
@@ -191,6 +194,7 @@ struct Deadlines {
 impl Default for Deadlines {
     fn default() -> Self {
         Self {
+            verification: Duration::from_secs(30),
             startup: Duration::from_secs(5),
             request: Duration::from_secs(10),
             queue: Duration::from_secs(10),
@@ -367,8 +371,12 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
         let mut phase = "startup";
         let result = (|| {
             if worker.is_none() {
-                let deadline = Instant::now() + d.startup;
-                let startup = process::Worker::start(&config, shared.clone(), deadline);
+                phase = "verification";
+                let startup = process::Worker::start(
+                    &config,
+                    shared.clone(),
+                    Instant::now() + d.verification,
+                );
                 match startup {
                     Ok(started) => worker = Some(started),
                     Err(failure) => {
@@ -379,7 +387,8 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
                     }
                 }
                 phase = "hello";
-                if let Err(failure) = wait_event(worker.as_ref().unwrap(), &shared, deadline) {
+                let w = worker.as_ref().unwrap();
+                if let Err(failure) = wait_event(w, &shared, w.starting_at + d.startup) {
                     if failure == Failure::Unavailable {
                         shared.state.lock().unwrap().closed = true;
                     }
