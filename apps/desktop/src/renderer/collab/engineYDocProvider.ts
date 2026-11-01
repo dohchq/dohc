@@ -36,6 +36,15 @@ export interface EngineYDocHead {
   committed?: true;
 }
 
+/**
+ * This session's newest save: the head it wrote, and `pairedInstalls` when its
+ * receipt arrived. Later installs leave it as it is.
+ */
+export interface EngineYDocSaveReceipt {
+  sha256: string | null;
+  pairedInstalls: number;
+}
+
 export interface EngineYDocDelivery {
   update: Uint8Array;
   head?: EngineYDocHead;
@@ -246,8 +255,7 @@ export interface EngineYDocBinding {
   // task as the state. Undefined while a source main sent without its head
   // waits for one.
   readonly headSha256?: string | null;
-  // Whether this session's own save wrote that head.
-  readonly headCommitted: boolean;
+  readonly lastSave: EngineYDocSaveReceipt | null;
   // Counts the file's states main installed other than this session's own
   // saves: each state with a head that was not a save's, and each replacement.
   readonly pairedInstalls: number;
@@ -349,7 +357,7 @@ export async function bindEngineYDoc(
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
-      headCommitted: false,
+      lastSave: null,
       pairedInstalls: 0,
       onHeadChanged() {
         return () => undefined;
@@ -612,16 +620,20 @@ export async function bindEngineYDoc(
   };
   doc.on("update", onUpdate);
 
-  let head: { sha256: string | null | undefined; committed: boolean } = { sha256: opened.headSha256, committed: false };
+  let head: string | null | undefined = opened.headSha256;
   let pairedInstalls = 0;
+  let lastSave: EngineYDocSaveReceipt | null = null;
   const headListeners = new Set<() => void>();
   // Applies an engine update and returns the head its state now pairs with:
   // the one it came with, else the current one unless it changed the source.
+  // It records a save's receipt, and counts a state with a head of its own.
   const install = (target: Y.Doc, current: typeof head, delivery: EngineYDocDelivery): typeof head => {
     const before = sourceWitness(target);
     Y.applyUpdate(target, delivery.update, ENGINE_SOURCED_ORIGIN);
-    if (delivery.head) return { sha256: delivery.head.sha256, committed: delivery.head.committed === true };
-    return sameWitness(before, sourceWitness(target)) ? current : { sha256: undefined, committed: false };
+    if (delivery.head?.committed) lastSave = { sha256: delivery.head.sha256, pairedInstalls };
+    else if (delivery.head) pairedInstalls += 1;
+    if (delivery.head) return delivery.head.sha256;
+    return sameWitness(before, sourceWitness(target)) ? current : undefined;
   };
 
   // Apply forwarded remote deltas under the engine origin so they render live
@@ -630,9 +642,7 @@ export async function bindEngineYDoc(
     if (destroyed) return;
     if (updateGeneration !== lineageGeneration) return;
     const next = install(doc, head, { update, ...(updateHead ? { head: updateHead } : {}) });
-    const paired = updateHead !== undefined && updateHead.committed !== true;
-    if (paired) pairedInstalls += 1;
-    else if (next.sha256 === head.sha256 && next.committed === head.committed) return;
+    if (updateHead === undefined && next === head) return;
     head = next;
     for (const listener of headListeners) listener();
   });
@@ -698,9 +708,8 @@ export async function bindEngineYDoc(
       }
       // The replacement's head comes with it. Without one, the head stays
       // unknown until main reads the pair again.
-      let replacementHead: typeof head = input.head
-        ? { sha256: input.head.sha256, committed: input.head.committed === true }
-        : { sha256: undefined, committed: false };
+      let replacementHead: typeof head = input.head?.sha256;
+      pairedInstalls += 1;
       for (const delivery of bufferedUpdates) {
         replacementHead = install(replacement, replacementHead, delivery);
       }
@@ -708,7 +717,6 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       head = replacementHead;
-      pairedInstalls += 1;
       lineageGeneration = input.lineageGeneration;
       artifactAssets = input.artifactAssets;
       localUpdatesRefused = false;
@@ -746,10 +754,10 @@ export async function bindEngineYDoc(
     },
     available: true,
     get headSha256() {
-      return head.sha256;
+      return head;
     },
-    get headCommitted() {
-      return head.committed;
+    get lastSave() {
+      return lastSave;
     },
     get pairedInstalls() {
       return pairedInstalls;

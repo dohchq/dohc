@@ -35,7 +35,7 @@ import "./SourceCodeEditor";
 // FileInspector.tsx (removalInProgress), which is not the same as null.
 const engineDocState: UseEngineDoc = {
   available: false,
-  headCommitted: false,
+  lastSave: null,
   pairedInstalls: 0,
   opening: false,
   doc: null,

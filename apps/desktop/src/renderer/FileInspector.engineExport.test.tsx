@@ -29,7 +29,7 @@ const engineDocState: UseEngineDoc = {
   available: false,
   // No file head, so a check judges the witness alone.
   headSha256: null,
-  headCommitted: false,
+  lastSave: null,
   pairedInstalls: 0,
   opening: false,
   doc: null,

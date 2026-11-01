@@ -145,10 +145,10 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
-      // The file head `doc`'s state was installed with, and whether this
-      // session's own save wrote it. Undefined while the head is unknown.
+      // The file head `doc`'s state was installed with. Undefined while the
+      // head is unknown.
       headSha256?: string | null;
-      headCommitted: boolean;
+      lastSave: EngineYDocBinding["lastSave"];
       // Counts states main installed other than this session's own saves.
       pairedInstalls: number;
       objectId: string | null;
@@ -549,7 +549,7 @@ function createEngineDocSession(
     doc,
     objectId: bound.objectId,
     headSha256: bound.headSha256,
-    headCommitted: bound.headCommitted,
+    lastSave: bound.lastSave,
     pairedInstalls: bound.pairedInstalls,
     versionId: bound.versionId,
     artifactAssets,
@@ -1469,7 +1469,7 @@ function createEngineDocSession(
           bound.onHeadChanged(() => {
             if (disposed) return;
             publish(current => current.outcome?.kind === "bound" && current.outcome.doc === bound.doc
-              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, headCommitted: bound.headCommitted,
+              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, lastSave: bound.lastSave,
                 pairedInstalls: bound.pairedInstalls } }
               : current);
           });

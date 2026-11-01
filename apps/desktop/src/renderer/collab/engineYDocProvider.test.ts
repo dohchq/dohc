@@ -1179,9 +1179,9 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   it("changes the head in the same task as the state it came with, and forgets it for a source without one", async () => {
     const mock = mockTransport();
     const binding = await bindEngineYDoc(mock.transport);
-    const seen: Array<{ text: string; head: string | null | undefined; committed: boolean }> = [];
+    const seen: Array<{ text: string; head: string | null | undefined; saved: string | null | undefined }> = [];
     binding.onHeadChanged(() => seen.push({
-      text: bodyText(binding.doc!), head: binding.headSha256, committed: binding.headCommitted,
+      text: bodyText(binding.doc!), head: binding.headSha256, saved: binding.lastSave?.sha256,
     }));
     const remote = new Y.Doc();
     Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
@@ -1192,9 +1192,9 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     };
 
     push(() => typeIntoBody(remote, "Remote."), 1, { sha256: "a".repeat(64) });
-    expect(seen).toEqual([{ text: bodyText(remote), head: "a".repeat(64), committed: false }]);
+    expect(seen).toEqual([{ text: bodyText(remote), head: "a".repeat(64), saved: undefined }]);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
-    expect(seen.at(-1)).toEqual({ text: bodyText(remote), head: "b".repeat(64), committed: true });
+    expect(seen.at(-1)).toEqual({ text: bodyText(remote), head: "b".repeat(64), saved: "b".repeat(64) });
 
     // A delta that keeps the source keeps its head.
     push(() => typeIntoBody(remote, "More."));
@@ -1204,7 +1204,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     push(() => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)));
     expect(seen).toHaveLength(3);
     expect(binding.headSha256).toBeUndefined();
-    expect(binding.headCommitted).toBe(false);
+    // The save's receipt outlasts the head it wrote.
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 1 });
 
     // Another lineage's pair is not this doc's.
     push(() => typeIntoBody(remote, "Stale."), 2, { sha256: "d".repeat(64) });
@@ -1263,7 +1264,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("counts each state main installs with a head of its own and each replacement, but not this session's saves", async () => {
+  it("counts each state main installs with a head of its own and each replacement, but not this session's saves, and keeps the newest save's receipt", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);
     const changes = vi.fn();
@@ -1275,6 +1276,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
     mock.pushRemote(new Uint8Array([0, 0]));
     expect(binding.pairedInstalls).toBe(2);
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
 
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
@@ -1284,6 +1286,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     mock.releaseReplacement();
     await replacing;
     expect(binding.pairedInstalls).toBe(3);
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
     winner.destroy();
     await binding.destroy();
   });

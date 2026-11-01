@@ -518,18 +518,19 @@ export const FileInspector = memo(function FileInspector(
   // as its source. A session that records another source, as when another
   // pane reloads a change made outside dohc into the shared session, needs
   // its own check and consent. So does a session that installs another
-  // state of the file, as a restore does. `installs` counts those from the
-  // first render the session binds in.
+  // state of the file, as a restore does. `installs` is the session's count
+  // of those at consent, which is none when consent comes before the session
+  // opens with it.
   const [editAnyway, setEditAnyway] = useState<{
-    open: string; source: string | null; headSha256: string | null | undefined; installs: number | null;
+    open: string; source: string | null; headSha256: string | null | undefined; installs: number;
   } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
   // Edit anyway covers one save. Once that save commits, the open goes on as
   // an ordinary checked note in the same editor while the file holds what
-  // this session saved.
-  const [converted, setConverted] = useState<{ open: string; headSha256: string | null } | null>(null);
-  const convertedOpen = converted?.open === lossyOpen;
+  // this session saved last.
+  const [converted, setConverted] = useState<string | null>(null);
+  const convertedOpen = converted === lossyOpen;
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
   // stays closed until a read brings other bytes; the session that then
@@ -557,11 +558,15 @@ export const FileInspector = memo(function FileInspector(
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
   const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
     && (!engine.available || (engine.headSha256 === editAnyway.headSha256
-      && (editAnyway.installs === null || engine.pairedInstalls === editAnyway.installs)));
-  // This session's own save moved the head off the source the person
-  // accepted, which the note still records or the engine has since cleared.
-  const conversionCommitted = consented && !editingAnyway && engine.headCommitted
-    && engine.pairedInstalls === editAnyway.installs
+      && engine.pairedInstalls === editAnyway.installs));
+  // This session saved over the source the person accepted with nothing
+  // installed in between, and the doc is still that save's: nothing
+  // installed since, or a read of the head it wrote. The note still records
+  // that source, or the engine has since cleared it.
+  const saved = engine.lastSave;
+  const conversionCommitted = consented && !editingAnyway && saved !== null
+    && saved.pairedInstalls === editAnyway.installs
+    && (engine.pairedInstalls === saved.pairedInstalls || engine.headSha256 === saved.sha256)
     && (boundSource === editAnyway.source || boundSource === undefined);
   const session = useBoundNoteCheck({
     open: lossyOpen,
@@ -570,28 +575,23 @@ export const FileInspector = memo(function FileInspector(
     headSha256: engine.headSha256,
   });
   useEffect(() => {
-    if (editAnyway?.open === lossyOpen && editAnyway.installs === null && engine.available) {
-      setEditAnyway({ ...editAnyway, installs: engine.pairedInstalls });
-    } else if (conversionCommitted) {
+    if (conversionCommitted) {
       setEditAnyway(null);
       setSessionLossy(null);
-      setConverted({ open: lossyOpen, headSha256: engine.headSha256 ?? null });
+      setConverted(lossyOpen);
     } else if (consented && !editingAnyway && engine.headSha256 !== undefined) {
       // A head that is unknown waits for the state it pairs with.
       setEditAnyway(null);
       // The shared session has other bytes. Read them before asking again.
       setStaleConsentRead({ open: lossyOpen, seq: readSeq });
       refreshAfterConflict();
-    } else if (converted?.open === lossyOpen && engine.headCommitted && engine.headSha256 !== converted.headSha256) {
-      // A later save of this open moved the head.
-      setConverted({ open: lossyOpen, headSha256: engine.headSha256 ?? null });
-    } else if (converted?.open === lossyOpen && (session === "lossy"
-      || (engine.headSha256 !== undefined && !engine.headCommitted && engine.headSha256 !== converted.headSha256))) {
+    } else if (convertedOpen && (session === "lossy"
+      || (engine.headSha256 !== undefined && engine.headSha256 !== engine.lastSave?.sha256))) {
       // The file changed outside dohc. Its own check decides from here.
       setConverted(null);
     }
-  }, [consented, editAnyway, editingAnyway, conversionCommitted, converted, session, engine.available,
-    engine.pairedInstalls, engine.headSha256, engine.headCommitted, lossyOpen, readSeq, refreshAfterConflict]);
+  }, [consented, editingAnyway, conversionCommitted, convertedOpen, session,
+    engine.headSha256, engine.lastSave, lossyOpen, readSeq, refreshAfterConflict]);
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
   }, [session, lossyOpen, contentHash]);
@@ -912,7 +912,7 @@ export const FileInspector = memo(function FileInspector(
             onEditAnyway={props.receivedShare ? undefined : () => {
               const source = typeof boundSource === "string" ? boundSource : contentHash;
               setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash,
-                installs: engine.available ? engine.pairedInstalls : null });
+                installs: engine.available ? engine.pairedInstalls : 0 });
               if (engine.available && source) {
                 void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
                   allowLossySourceSha256: source }).catch((error: unknown) => {

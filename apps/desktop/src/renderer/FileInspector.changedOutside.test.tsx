@@ -72,7 +72,7 @@ function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"],
   return {
     available: true,
     headSha256,
-    headCommitted: false,
+    lastSave: null,
     pairedInstalls: 0,
     opening: false,
     doc,
