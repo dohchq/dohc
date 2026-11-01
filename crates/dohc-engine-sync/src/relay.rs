@@ -1234,6 +1234,26 @@ struct PendingBaseRelayRepair {
 type BaseRelayRepairKey = (String, String, String);
 type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>, bool);
 
+/// Whether `page` carries an exact base for `key` from a lineage other than `lineage_claim_id`.
+fn page_has_other_base(
+    page: &[ReplicationEnvelope],
+    key: &dohc_engine_collab::DocKey,
+    lineage_claim_id: &str,
+) -> bool {
+    page.iter().any(|op| {
+        op.op_kind == "ydoc.update"
+            && op.payload["objectId"] == key.object_id.as_str()
+            && op.payload["lineageClaimId"].as_str().is_some_and(|claim| {
+                claim != lineage_claim_id
+                    && crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
+                        &op.payload,
+                        key,
+                        claim,
+                    )
+            })
+    })
+}
+
 pub const MAX_BASE_REPAIR_LOOKUPS: usize = 256;
 
 #[derive(Default)]
@@ -1789,7 +1809,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             && local_pushed_seq < repair.origin_seq
                             && !passive =>
                     {
-                        (None, true)
+                        // The probe ran after the page arrived and found this
+                        // coordinate unsent, so the relay can only append it
+                        // after a base the page carries for its document.
+                        let after_page_base = repair.origin_seq > own_relay_bound
+                            && page_has_other_base(page, &repair.key, &repair.lineage_claim_id);
+                        (None, !after_page_base)
                     }
                     LogCoordinateResponse::Absent => (None, false),
                 };
