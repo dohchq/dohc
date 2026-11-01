@@ -1189,6 +1189,134 @@ async fn an_over_cap_settled_file_is_retired_once_deleted() {
     harness.close();
 }
 
+/// The status of the version switch's write job for `path`.
+fn switch_write_status(db: &Path, path: &str) -> String {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT status FROM materialization_jobs              WHERE workspace_id = ?1 AND target_path = ?2 AND operation = 'write'              AND job_id GLOB 'version-switch-mat_*'",
+            [WORKSPACE_ID, path],
+            |row| row.get(0),
+        )
+        .expect("read the switch write job")
+}
+
+// dohc#2360. A switch to a version whose only file it fails to place leaves
+// that file's write pending. A later release offers the path and the scan
+// finds no file, but the head waits for its write instead of retiring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_target_head_waiting_for_placement_survives_a_release() {
+    let harness = Harness::new();
+    harness
+        .actor
+        .ensure_main_version(
+            WORKSPACE_ID.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    harness
+        .actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "feature", NEW_FILE);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "feature".to_owned(),
+                object_id: object_id.clone(),
+                path: NEW_FILE.to_owned(),
+                text: SEED.to_owned(),
+                moment_id: "moment-feature-only".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature-only file");
+    let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+    );
+    let switched = harness
+        .actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: harness.root.clone(),
+                self_writes: Arc::new(harness.self_writes.scoped(&harness.root)),
+                now_ms: 4,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(
+            switched,
+            Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+        ),
+        "the placement fails: {switched:?}"
+    );
+    assert!(faults.fired());
+    assert_eq!(switch_write_status(&harness.db, NEW_FILE), "pending");
+    assert!(!harness.root.join(NEW_FILE).exists());
+
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    harness.capture(&files.handle()).await;
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    let key = DocKey::new(WORKSPACE_ID, "feature", &object_id).expect("document key");
+    drop(harness.leases.acquire(&key).expect("a session opens"));
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "the release offers the unplaced path"
+    );
+    harness.capture(&files.handle()).await;
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "the head waits for its write"
+    );
+    assert_eq!(switch_write_status(&harness.db, NEW_FILE), "pending");
+
+    files.close().await;
+    harness.close();
+}
+
 // An engine-internal attempt's lease wakes nothing when it ends, so a retire
 // it blocks stays an ordinary failure that capture retries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -886,6 +886,102 @@ mod capture_file_hold_tests {
     }
 
     #[test]
+    fn a_retire_waits_while_a_version_switch_has_not_placed_the_head() {
+        // dohc#2360. A switch whose placement failed leaves the head's write
+        // pending, so its missing file is not a deletion yet.
+        use dohc_engine_storage::{MaterializationJobSpec, MaterializationOperation, Preimage};
+        let scratch = ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("hold-proof", "main", 1, &NoFaults)
+            .unwrap();
+        let head = offer(&mut store, &input("placed.md", "Target.\n"))
+            .unwrap()
+            .snapshot;
+        let job_id = crate::actor::versions::switch_projection_job_id(
+            "hold-proof",
+            "main",
+            "placed.md",
+            MaterializationOperation::Write,
+            &head.blob_sha256,
+            false,
+        );
+        let spec = MaterializationJobSpec {
+            job_id: job_id.clone(),
+            workspace_id: "hold-proof".into(),
+            target_path: "placed.md".into(),
+            content_sha256: head.blob_sha256.clone(),
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            now_ms: 5,
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &spec,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
+        assert!(!scratch.path().join("placed.md").exists());
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "placed.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let moments = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0))
+                })
+                .unwrap()
+        };
+        let count = moments(&store);
+        let retire_once = |store: &mut EngineStore| {
+            capture_retire_on_store(
+                store,
+                &retire,
+                None,
+                scratch.path(),
+                &Root,
+                true,
+                &(),
+                &LeaseRegistry::new(),
+                &NoFaults,
+            )
+        };
+        assert!(matches!(
+            retire_once(&mut store),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "version-switch-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(moments(&store), count);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='complete',completed_at_ms=7 \
+                     WHERE job_id=?1",
+                    params![job_id],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        assert!(retire_once(&mut store).unwrap().retired.is_some());
+        assert!(moments(&store) > count);
+    }
+
+    #[test]
     fn history_operation_restart_parked_placement_never_reports_restored() {
         #[derive(Default)]
         struct Crash(std::sync::atomic::AtomicUsize);
@@ -2826,6 +2922,40 @@ pub(super) fn ensure_no_pending_undo_placement(
     Ok(())
 }
 
+/// A version switch whose placement failed leaves the active head's write
+/// pending, so its file is missing until replay lands it. Retiring that head
+/// would discard the version's file instead of waiting for it.
+fn ensure_no_pending_switch_placement(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    let pending: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+         JOIN versioned_workspaces w ON w.workspace_id=?1
+         JOIN path_aliases a ON a.workspace_id=w.workspace_id AND a.path=j.target_path
+             AND a.version_id=coalesce((SELECT version_id FROM active_versions
+                 WHERE workspace_id=w.workspace_id),w.main_version_id)
+         JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id
+             AND s.object_id=a.object_id
+         WHERE j.workspace_id IN (?1,'') AND j.target_path=?2 AND j.status='pending'
+             AND j.operation='write' AND j.job_id GLOB 'version-switch-mat_*'
+             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256)",
+        )
+        .map_err(StorageError::corrupt_public)?
+        .query_row(params![workspace, path], |r| r.get(0))
+        .map_err(StorageError::corrupt_public)?;
+    if pending {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "version-switch-placement-pending",
+            },
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_capture_target_not_leased(
     conn: &Connection,
     leases: &LeaseRegistry,
@@ -3031,7 +3161,9 @@ fn capture_retire_on_store(
     let outcome = store.write_with(faults, |tx| {
         let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
         let placement_admission = if hold.is_none() {
-            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path).and_then(|()| {
+                ensure_no_pending_switch_placement(tx, &input.workspace_id, &input.path)
+            })
         } else {
             Ok(())
         };
