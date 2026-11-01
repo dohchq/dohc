@@ -1,0 +1,231 @@
+// @vitest-environment jsdom
+import "./DesktopWorkspaceShell.testSupport";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import type { AppViewRequest, WorkspaceUiState } from "../ipc/bridgeContract";
+import { editorTabTestId } from "../testPins";
+import { SAVED_TABS_RESTORE } from "./shell/useSavedTabsReread";
+import type { ExplorerProps } from "./workbench/Explorer";
+import { siteTabPath } from "./workbench/workbenchState";
+import { STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
+
+const requested = vi.hoisted(() => ({ path: "" }));
+vi.mock("./workbench/Explorer", () => ({
+  Explorer: (props: Pick<ExplorerProps, "onOpenFile">) => (
+    <button onClick={() => props.onOpenFile(requested.path)}>Open test tab</button>
+  ),
+}));
+vi.mock("./FileInspector", () => ({
+  FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
+}));
+// The app's real view hook, so each open and close reaches the bridge as it does from the app's tab.
+vi.mock("./SitePreviewPage", async () => {
+  const { AppViewBody, useAppView } = await import("./AppView");
+  return {
+    SitePreviewPage: (props: { workspaceId: string; siteRoot: string; visible?: boolean; focused?: boolean }) => {
+      const view = useAppView({
+        workspaceId: props.workspaceId, appRoot: props.siteRoot, enabled: true,
+        visible: props.visible ?? true, focused: props.focused ?? false, approvals: 0, holdFocus: false,
+      });
+      return (
+        <div data-testid="site-preview-page" data-root={props.siteRoot}>
+          <AppViewBody view={view} onReview={() => undefined} />
+        </div>
+      );
+    },
+  };
+});
+
+const trip = siteTabPath("apps/trip");
+const shop = siteTabPath("apps/shop");
+
+function appBridge(state: Promise<WorkspaceUiState | null>) {
+  let launches = 0;
+  return Object.assign(makeBridge(state), {
+    appView: vi.fn(async (request: AppViewRequest) => {
+      if (request.action === "open") {
+        return { kind: "opened" as const, viewId: request.viewId, publicationId: "d".repeat(64),
+          url: `http://127.0.0.1:4310${++launches}/`, partition: `dohc-app-view-${request.viewId}` };
+      }
+      if (request.action === "close") return { kind: "closed" as const, viewId: request.viewId };
+      return { kind: "colorScheme" as const };
+    }),
+    onAppViewEvent: vi.fn(() => () => undefined),
+  });
+}
+type AppBridge = ReturnType<typeof appBridge>;
+
+// What the app views asked main for, in order. A move asks for nothing.
+const lifecycle = (bridge: AppBridge) => bridge.appView.mock.calls.flatMap(([request]) =>
+  request.action === "open" || request.action === "close" ? [`${request.action} ${request.viewId}`] : []);
+const viewIdOf = (bridge: AppBridge, root: string) => bridge.appView.mock.calls.flatMap(([request]) =>
+  request.action === "open" && request.appRoot === root ? [request.viewId] : [])[0];
+const webviewOf = (root: string) => document.querySelector<HTMLElement>(
+  `[data-testid="site-preview-page"][data-root="${root}"] [data-testid="app-view-webview"]`);
+async function openedWebview(root: string): Promise<HTMLElement> {
+  return waitFor(() => {
+    const webview = webviewOf(root);
+    expect(webview).not.toBeNull();
+    return webview!;
+  });
+}
+// The placed page an app's webview sits in, and the group it lies over.
+const pageOf = (webview: HTMLElement) => webview.closest<HTMLElement>("[data-app-group-id]")!;
+function expectShownIn(webview: HTMLElement, group: HTMLElement) {
+  const page = pageOf(webview);
+  expect(page.dataset.appGroupId).toBe(group.dataset.editorGroupId);
+  expect(page.classList.contains("hidden")).toBe(false);
+  // The group's slot names the page, for its place and for assistive technology.
+  const slot = within(group).getByTestId("app-slot");
+  expect(document.getElementById(slot.getAttribute("aria-owns")!)).toBe(page);
+}
+function stubPointer(target: () => Element | null) {
+  Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: vi.fn() });
+  Object.defineProperty(Element.prototype, "hasPointerCapture", { configurable: true, value: vi.fn(() => false) });
+  Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn(target) });
+}
+function dragTab(tab: HTMLElement) {
+  fireEvent.pointerDown(tab, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+  fireEvent.pointerMove(tab, { buttons: 1, pointerId: 7, clientX: 30, clientY: 40 });
+  fireEvent.pointerUp(tab, { pointerId: 7, clientX: 30, clientY: 40 });
+}
+
+describe("an app's page when its tab moves", () => {
+  it("keeps the page, and the page the target group shows, when the tab is dragged there", async () => {
+    const bridge = appBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [
+        { id: "left", tabs: ["notes.txt", trip], activeTab: trip, size: 0.5 },
+        { id: "right", tabs: [shop], activeTab: shop, size: 0.5 },
+      ],
+      activeEditorGroup: "left",
+    }));
+    renderShell(bridge);
+    const tripView = await openedWebview("apps/trip");
+    const shopView = await openedWebview("apps/shop");
+    const opened = lifecycle(bridge);
+    expect([...opened].sort()).toEqual([`open ${viewIdOf(bridge, "apps/trip")}`, `open ${viewIdOf(bridge, "apps/shop")}`].sort());
+    const left = screen.getByTestId("editor-group-left");
+    const right = screen.getByTestId("editor-group-right");
+    expectShownIn(tripView, left);
+    expectShownIn(shopView, right);
+
+    // The drop lands on the other app's page, which lies over the target group.
+    stubPointer(() => shopView);
+    dragTab(within(left).getByTestId(editorTabTestId(trip)));
+
+    await waitFor(() => expect(within(right).getByTestId(editorTabTestId(trip))).toBeTruthy());
+    expect(within(left).queryByTestId(editorTabTestId(trip))).toBeNull();
+    expect(webviewOf("apps/trip")).toBe(tripView);
+    expect(webviewOf("apps/shop")).toBe(shopView);
+    expect(tripView.isConnected && shopView.isConnected).toBe(true);
+    expectShownIn(tripView, right);
+    expect(pageOf(shopView).classList.contains("hidden")).toBe(true);
+    expect(lifecycle(bridge)).toEqual(opened);
+
+    // Switching back shows the other app's same page.
+    const shopTab = within(right).getByTestId(editorTabTestId(shop));
+    fireEvent.pointerDown(shopTab, { button: 0, pointerId: 8, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(shopTab, { pointerId: 8, clientX: 10, clientY: 10 });
+    await waitFor(() => expect(pageOf(shopView).classList.contains("hidden")).toBe(false));
+    expect(webviewOf("apps/shop")).toBe(shopView);
+    expect(pageOf(tripView).classList.contains("hidden")).toBe(true);
+    expect(lifecycle(bridge)).toEqual(opened);
+  });
+
+  it("keeps the page when its tab moves into a new group", async () => {
+    const bridge = appBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [{ id: "primary", tabs: ["notes.txt", trip], activeTab: trip, size: 1 }],
+      activeEditorGroup: "primary",
+    }));
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    renderShell(bridge);
+    const tripView = await openedWebview("apps/trip");
+    const opened = lifecycle(bridge);
+
+    fireEvent.contextMenu(screen.getByTestId(editorTabTestId(trip)));
+
+    const split = await screen.findByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(within(split).getByTestId(editorTabTestId(trip))).toBeTruthy());
+    expect(webviewOf("apps/trip")).toBe(tripView);
+    expectShownIn(tripView, split);
+    expect(lifecycle(bridge)).toEqual(opened);
+  });
+
+  it("keeps the page when its group takes another place in the layout", async () => {
+    const bridge = appBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [
+        { id: "left", tabs: ["notes.txt"], activeTab: "notes.txt", size: 0.5 },
+        { id: "right", tabs: [trip], activeTab: trip, size: 0.5 },
+      ],
+      activeEditorGroup: "right",
+    }));
+    renderShell(bridge);
+    const tripView = await openedWebview("apps/trip");
+    const opened = lifecycle(bridge);
+    const right = screen.getByTestId("editor-group-right");
+    expect(right.getAttribute("aria-label")).toBe("Editor group 2");
+    expectShownIn(tripView, right);
+
+    fireEvent.click(within(screen.getByTestId("editor-group-left")).getByRole("button", { name: "Close editor group" }));
+
+    await waitFor(() => expect(screen.queryByTestId("editor-group-left")).toBeNull());
+    expect(right.getAttribute("aria-label")).toBe("Editor group 1");
+    expect(webviewOf("apps/trip")).toBe(tripView);
+    expectShownIn(tripView, right);
+    expect(lifecycle(bridge)).toEqual(opened);
+  });
+
+  it("keeps the page when Restore tabs moves it out of a group the saved layout lacks", async () => {
+    const bridge = appBridge(Promise.resolve(STORED_STATE));
+    bridge.getWorkspaceUiState
+      .mockRejectedValueOnce(new Error("dohc has not finished opening this workspace."))
+      .mockRejectedValueOnce(new Error("dohc has not finished opening this workspace."));
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+    requested.path = "notes.txt";
+    await user.click(screen.getByRole("button", { name: "Open test tab" }));
+    requested.path = trip;
+    await user.click(screen.getByRole("button", { name: "Open test tab" }));
+    const tripView = await openedWebview("apps/trip");
+    fireEvent.contextMenu(screen.getByTestId(editorTabTestId(trip)));
+    const split = await screen.findByRole("region", { name: "Editor group 2" });
+    await waitFor(() => expect(within(split).getByTestId(editorTabTestId(trip))).toBeTruthy());
+    expect(STORED_STATE.editorGroups.map((group) => group.id)).not.toContain(split.dataset.editorGroupId);
+    const opened = lifecycle(bridge);
+    expect(opened).toEqual([`open ${viewIdOf(bridge, "apps/trip")}`]);
+
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
+    await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
+
+    const primary = screen.getByTestId("editor-group-primary");
+    await waitFor(() => expect(within(primary).getByTestId(editorTabTestId("b.md"))).toBeTruthy());
+    await waitFor(() => expect(within(primary).getByTestId(editorTabTestId(trip))).toBeTruthy());
+    expect(webviewOf("apps/trip")).toBe(tripView);
+    expectShownIn(tripView, primary);
+    expect(lifecycle(bridge)).toEqual(opened);
+  });
+
+  it("closes the page when its tab closes", async () => {
+    const bridge = appBridge(Promise.resolve({
+      ...STORED_STATE,
+      editorGroups: [{ id: "primary", tabs: ["notes.txt", trip], activeTab: trip, size: 1 }],
+      activeEditorGroup: "primary",
+    }));
+    renderShell(bridge);
+    await openedWebview("apps/trip");
+    const viewId = viewIdOf(bridge, "apps/trip");
+
+    fireEvent.click(within(screen.getByTestId(editorTabTestId(trip))).getByRole("button", { name: /^Close / }));
+
+    await waitFor(() => expect(lifecycle(bridge)).toEqual([`open ${viewId}`, `close ${viewId}`]));
+    expect(webviewOf("apps/trip")).toBeNull();
+  });
+});

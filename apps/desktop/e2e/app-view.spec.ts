@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { editorTabTestId } from "../src/testPins";
 import { siteTabPath } from "../src/renderer/workbench/workbenchState";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, writeWorkspaceFiles } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 import type { AppViewEvent } from "../src/ipc/bridgeContract";
 
 type MainProbe = typeof globalThis & { __appViewProbe?: {
@@ -68,6 +68,15 @@ async function injectGuest(page: Page, src: string, preload: string) {
     document.body.append(view);
   }, { src, preload });
 }
+// A person's drag of a tab into another group, as workspace-editor-groups.spec.ts makes it.
+async function dragTabTo(page: Page, tab: Locator, group: Locator) {
+  const from = (await tab.boundingBox())!;
+  const to = (await group.boundingBox())!;
+  await page.mouse.move(from.x + Math.min(16, from.width / 2), from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to.x + to.width / 2, to.y + 80, { steps: 8 });
+  await page.mouse.up();
+}
 async function shown(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(true); }
 async function hidden(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(false); }
 
@@ -83,6 +92,27 @@ async function overlayAboveApp(page: Page, overlay: Locator) {
     const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
     return hit === element || !!hit && element.contains(hit);
   })).toBe(true);
+}
+
+// A Collection with a form app whose page is the fixture above.
+async function createFormApp(electronApp: ElectronApplication, page: Page, workspace: Parameters<typeof writeWorkspaceFiles>[0]) {
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+  const collectionDialog = page.getByTestId("new-collection-dialog");
+  await shown(collectionDialog);
+  await collectionDialog.getByLabel("Collection name").fill("Registrations");
+  await collectionDialog.getByLabel("Require Name").check();
+  await collectionDialog.getByTestId("new-collection-create").click();
+  await hidden(collectionDialog);
+  const collection = page.getByRole("region", { name: "Registrations", exact: true });
+  await shown(collection);
+  const management = collection.getByLabel("Manage Collection", { exact: true });
+  if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
+  await collection.getByRole("button", { name: "Create form", exact: true }).click();
+  const formDialog = page.getByTestId("create-dataset-form-dialog");
+  await shown(formDialog);
+  await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
+  await hidden(formDialog);
+  await writeWorkspaceFiles(workspace, [{ path: `${appRoot}/frontend.js`, contents: frontend }]);
 }
 
 test("@app-view approved app guests preserve isolation, links, permissions, overlays, and workbench keys", async ({}, testInfo) => {
@@ -118,23 +148,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     const preload = pathToFileURL(join(workspace.baseDir, "injected-preload.js")).href;
     const removeInjected = () => page.evaluate(() => document.querySelectorAll("[data-injected]").forEach(view => view.remove()));
 
-    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
-    const collectionDialog = page.getByTestId("new-collection-dialog");
-    await shown(collectionDialog);
-    await collectionDialog.getByLabel("Collection name").fill("Registrations");
-    await collectionDialog.getByLabel("Require Name").check();
-    await collectionDialog.getByTestId("new-collection-create").click();
-    await hidden(collectionDialog);
-    const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await shown(collection);
-    const management = collection.getByLabel("Manage Collection", { exact: true });
-    if (!await management.evaluate(element => element.closest("details")?.open)) await management.click();
-    await collection.getByRole("button", { name: "Create form", exact: true }).click();
-    const formDialog = page.getByTestId("create-dataset-form-dialog");
-    await shown(formDialog);
-    await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
-    await hidden(formDialog);
-    await writeWorkspaceFiles(workspace, [{ path: `${appRoot}/frontend.js`, contents: frontend }]);
+    await createFormApp(electronApp, page, workspace);
     // Only Explorer Home lists apps.
     await openExplorerHome(page);
     const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
@@ -308,6 +322,80 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
         delete (globalThis as MainProbe).__appViewProbe;
       }).catch(() => {});
     }
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
+test("@app-view an app keeps its page when its tab moves to another editor group", async () => {
+  test.setTimeout(120_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(workspace, [{ path: "notes.md", contents: "# Notes
+" }]);
+    desktop = await launchDesktopApp({ workspace });
+    const { page, app: electronApp } = desktop;
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openWorkspaceFromFirstRun(page, workspace);
+    await createFormApp(electronApp, page, workspace);
+    await openExplorerHome(page);
+    const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
+    await shown(row);
+    await row.click();
+    await page.getByTestId("app-view-review").click();
+    const review = page.getByTestId("app-publication-dialog");
+    await shown(review);
+    await expect(review.getByTestId("app-publication-approve")).toBeEnabled();
+    await review.getByTestId("app-publication-approve").click();
+    await hidden(review);
+    await ready(page);
+    await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
+    const guestId = (await guestIds(electronApp))[0]!;
+    await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
+
+    // What the person typed, a count, and a value only this load of the page holds. A reload resets all three, and
+    // keeps the guest's ID.
+    const typed = "lisbon";
+    await pressApp(page, electronApp, guestId, "#focus");
+    await expect.poll(() => inFrame(electronApp, guestId, "document.activeElement?.id")).toBe("focus");
+    await electronApp.evaluate(({ webContents }, input) => {
+      const guest = webContents.fromId(input.id)!;
+      for (const keyCode of input.text) guest.sendInputEvent({ type: "char", keyCode });
+    }, { id: guestId, text: typed });
+    await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('focus').value")).toBe(typed);
+    await clickApp(electronApp, guestId, "#counter");
+    await clickApp(electronApp, guestId, "#counter");
+    await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("2");
+    const load = await inFrame(electronApp, guestId, "window.pageLoad = String(Math.random())");
+
+    // A note beside the app gives the layout a second group. An app tab can't be split into one.
+    await showExplorerFiles(page);
+    await explorerRow(page, "notes.md").click();
+    await expect(page.getByTestId("view-markdown")).toBeVisible();
+    await page.getByTestId("create-editor-group-right").click();
+    const leftGroup = page.getByRole("region", { name: "Editor group 1" });
+    const rightGroup = page.getByRole("region", { name: "Editor group 2" });
+    await expect(rightGroup.getByTestId(editorTabTestId("notes.md"))).toBeVisible();
+    const appTab = editorTabTestId(siteTabPath(appRoot));
+    // A press near the tab's start, which the tab-row actions never cover.
+    await leftGroup.getByTestId(appTab).click({ position: { x: 16, y: 16 } });
+    await ready(page);
+
+    await dragTabTo(page, leftGroup.getByTestId(appTab), rightGroup);
+
+    await expect(rightGroup.getByTestId(appTab)).toBeVisible();
+    await expect(leftGroup.getByTestId(appTab)).toHaveCount(0);
+    await ready(page);
+    // The page now lies over the group it moved to.
+    await expect.poll(async () => {
+      const [view, group] = [await page.getByTestId("app-view-webview").boundingBox(), await rightGroup.boundingBox()];
+      return !!view && !!group && view.x >= group.x - 1 && view.x + view.width <= group.x + group.width + 1;
+    }).toBe(true);
+    expect(await guestIds(electronApp)).toEqual([guestId]);
+    expect(await inFrame(electronApp, guestId, "window.pageLoad")).toBe(load);
+    expect(await inFrame(electronApp, guestId, "document.getElementById('focus').value")).toBe(typed);
+    expect(await inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("2");
+  } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }
 });
