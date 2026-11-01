@@ -668,7 +668,7 @@ function revokeKeeping(f: Awaited<ReturnType<typeof activated>>, activationId: s
     {workspaceId: binding.workspaceId, objectId: binding.objectId, activationId, kept: () => { keeps++; }}));
   return {ok: revoked.ok, keeps};
 }
-// The owner's later restore of the kept note, unfenced at fence 8, as `beginStopRestore` leaves it when its revocation keeps the same run again.
+// A synthetic later restore of the kept note, begun at fence 8 and not yet fenced, carrying the current run's marker. The test ends it before its fence.
 function laterRestoreKeepingRun(f: Kept) {
   const atFence = {...binding, restoreFenceGeneration: 8};
   const basis = {binding: atFence, ownerBinding: atFence, baselineDigest: binding.lineageClaimId, baselineByteLength: 1, projectedDigest: binding.lineageClaimId,
@@ -739,17 +739,16 @@ it.each([
 });
 
 // Proves: finding a note's latest restore reads only that note's restores,
-// each step through an index of the restore table and in its order. No
-// statement reads the restores that ended before their fence.
+// each step through an index of the restore table and in its order. No step
+// reads the restores that ended before their fence, even for a note with no
+// fenced restore.
 it("finds a note's latest restore through an index", async () => {
   const f = await fixture();
   expect(Object.keys(LATEST_RESTORE)).toEqual(["unfinished", "fenced"]);
-  for (const sql of Object.values(LATEST_RESTORE)) {
-    const parameters = Array.from(sql.matchAll(/\?/g), () => "x");
-    const plan = f.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters).map(row => String(row.detail));
-    expect(plan).toHaveLength(1);
-    expect(plan[0]).toMatch(/^SEARCH sync_relay_live_restore_operations USING (COVERING )?INDEX \S+ \(.*object_id=\?/);
-  }
+  const plan = (sql: string) =>
+    f.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array.from(sql.matchAll(/\?/g), () => "x")).map(row => String(row.detail));
+  expect(plan(LATEST_RESTORE.unfinished)).toEqual([expect.stringMatching(/^SEARCH sync_relay_live_restore_operations USING (COVERING )?INDEX \S+ \(.*object_id=\?/)]);
+  expect(plan(LATEST_RESTORE.fenced)).toEqual([expect.stringMatching(/^SEARCH sync_relay_live_restore_operations USING (COVERING )?INDEX \S+ \(relay_database_namespace=\? AND workspace_id=\? AND main_version_id=\? AND object_id=\? AND new_fence>\?\)$/)]);
 });
 
 // Proves: no other document inherits the continuation: not another object
