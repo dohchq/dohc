@@ -3085,9 +3085,13 @@ it.each(["renamed", "in place"] as const)("ends the owner's kept live session wh
     const runToken = () => f.storage.readServiceHostEnrollmentByObjectId(f.document.workspaceId, f.document.objectId)!.runToken, kept = runToken();
     if (when === "renamed") departFrozenPath(f);
     expect(retirement()).toBeNull();
+    const before = Date.now();
     expect(f.complete().phase).toBe("resumed");
     if (when === "renamed") {
-      expect(retirement()).toMatchObject({...carriedRetirement(f).key, path: "docs/a.md", requestedAtMs: f.resume.recordedAtMs});
+      expect(retirement()).toMatchObject({...carriedRetirement(f).key, path: "docs/a.md"});
+      // The relay's clock, not the host's receipt.
+      expect(retirement()!.requestedAtMs).toBeGreaterThanOrEqual(before);
+      expect(retirement()!.requestedAtMs).toBeLessThanOrEqual(Date.now());
       expect(runToken()).not.toBe(kept);
     } else {
       expect(retirement()).toBeNull();

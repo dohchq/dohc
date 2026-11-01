@@ -1670,7 +1670,8 @@ export class LiveCommittedDeliveryStore {
       if (stage==="resume") {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
-        endKeptRunAwayFromFrozenPath(this.#storage,saved.operation,(value as NativeRestoreResumeReceipt).recordedAtMs);
+        // The relay's clock: completion retires at no earlier time than the request.
+        endKeptRunAwayFromFrozenPath(this.#storage,saved.operation,Date.now());
       }
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);
