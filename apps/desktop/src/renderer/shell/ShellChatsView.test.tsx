@@ -14,7 +14,8 @@ vi.hoisted(() => {
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
+import type { ChatMessageRecord, DohcDesktopBridge, FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
+import { GROUP_NAME_TAKEN_ERROR } from "../../ipc/errorWords";
 import {
   SHARE_VIEW,
   WORKSPACE,
@@ -58,6 +59,71 @@ function lastStoredState(bridge: ReturnType<typeof makeBridge>): WorkspaceUiStat
 }
 
 describe("Chats in the left side panel", () => {
+  it.each(["toast", "Notices"])("opens an existing group from the %s after a create retry finds its name taken", async (surface) => {
+    const user = userEvent.setup();
+    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
+    const existing = channel("channel-9", "launch", 1_700_000_000_002);
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    const createChatChannel = vi.fn<DohcDesktopBridge["createChatChannel"]>()
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockRejectedValueOnce(taken);
+    Object.assign(bridge, { createChatChannel });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+    const first = await screen.findByTestId("workspace-shell-error");
+    bridge.listChatChannels.mockResolvedValue({ channels: [existing], fileThreads: [] });
+    await user.click(within(first).getByRole("button", { name: "Try again" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await within(toast).findByRole("button", { name: "Open" });
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+    let notice = toast;
+    if (surface === "Notices") {
+      await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      notice = within(screen.getByTestId("notice-center")).getByText(taken.message).closest("li")!;
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(within(notice).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    }
+    await user.click(within(notice).getByRole("button", { name: "Open" }));
+    expect((await screen.findByTestId("tab-dohc://chats/channel/channel-9")).dataset.active).toBe("true");
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("launch");
+    expect(createChatChannel).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    if (surface === "Notices") {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(within(screen.getByTestId("notice-center")).queryByText(taken.message)).toBeNull();
+    }
+  });
+
+  it.each(["reserved name", "other failure"])("keeps Try again in the toast and Notices for a group create with %s", async (reason) => {
+    const user = userEvent.setup();
+    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
+    const cause = reason === "reserved name"
+      ? Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR })
+      : new Error("The workspace engine is not running.");
+    Object.assign(bridge, { createChatChannel: vi.fn<DohcDesktopBridge["createChatChannel"]>().mockRejectedValue(cause) });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), `${reason === "reserved name" ? "My agent" : "launch"}{Enter}`);
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(toast).queryByRole("button", { name: "Open" })).toBeNull();
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(within(notices).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(notices).queryByRole("button", { name: "Open" })).toBeNull();
+  });
+
   it.each(["resolution failure", "deleted file"])("opens the file-chat path after %s", async outcome => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));

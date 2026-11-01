@@ -32,7 +32,7 @@ import {
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { registerOperations, type OperationHandlers } from "./operationTable";
-import { ipcWireError } from "./errorWords";
+import { GROUP_NAME_TAKEN_ERROR, ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -808,7 +808,10 @@ export function registerChatsIpcHandlers<
   ]);
   function groupCreateRefusal(error: unknown): unknown {
     const copy = error instanceof Error ? GROUP_CREATE_REFUSALS.get(error.message) : undefined;
-    return copy === undefined ? error : new Error(copy);
+    if (copy === undefined) return error;
+    const refusal = new Error(copy);
+    if (error instanceof Error && error.message === "channel-exists") refusal.name = GROUP_NAME_TAKEN_ERROR;
+    return refusal;
   }
 
   const createChatChannel: ChatHandler<"createChatChannel"> = async (input) => {

@@ -26,8 +26,10 @@ import {
   CollectionMoveUnfinishedError,
   collectionsRefusalError,
   ERROR_WORDS,
+  GROUP_NAME_TAKEN_ERROR,
   HistoryStillPausedError,
   ipcWireError,
+  isGroupNameTaken,
   isChatMentionPageChanged,
   isDatasetServerNotFound,
   markDatasetServerNotFound,
@@ -94,6 +96,19 @@ it("keeps a server Collection's not found code across Electron, with the words o
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
+
+it("keeps the taken group name signal across IPC without matching its words", () => {
+  const error = new Error("A group with that name already exists.");
+  error.name = GROUP_NAME_TAKEN_ERROR;
+  expect(isGroupNameTaken(error)).toBe(true);
+  const received = acrossIpc(error, "desktop:create-chat-channel");
+  expect(isGroupNameTaken(received)).toBe(true);
+  expect(readError(received).words).toBe(error.message);
+  error.message = "The name is taken.";
+  expect(isGroupNameTaken(acrossIpc(error))).toBe(true);
+  expect(isGroupNameTaken(new Error("A group with that name already exists."))).toBe(false);
+  expect(isGroupNameTaken(acrossIpc(new Error("channel-exists")))).toBe(false);
+});
 
 it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
   const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
