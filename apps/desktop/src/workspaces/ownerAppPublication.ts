@@ -138,7 +138,7 @@ async function selectAppSources(input: Pick<OwnerPublicationSelection, "workspac
   assertCurrent(); signal.throwIfAborted();
   const hasManifest = folder.includes(manifestPath);
   if (requireManifest && !hasManifest) throw new Error(`Add app.publish.json to ${input.appRoot} before approving it on this device.`);
-  const capture =async (paths: string[], maxInputBytes: number) => {
+  const capture = async (paths: string[], maxInputBytes: number) => {
     assertCurrent(); signal.throwIfAborted();
     assertSourcePathsNotDeferred(dependencies.deferredWrites, paths);
     const metadata = await adapter.captureSourceMetadata({ workspaceId: input.workspaceId, versionId, paths, bounds: { maxInputFiles: inputBounds.maxInputFiles, maxInputBytes }, signal })

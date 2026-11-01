@@ -1682,7 +1682,7 @@ Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 Prepare an app to open on this computer.
 
-Review the source and the Collection access it asks for, then approve.
+Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
