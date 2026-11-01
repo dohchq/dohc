@@ -385,9 +385,11 @@ fn moment_before_and_fork_snapshots_need_exact_projection_proof() {
 #[test]
 fn delete_sets_require_acceptance_even_when_struct_clocks_already_match() {
     let (_dir, mut store, observed, checkpoint) = fixture();
-    // Yjs deletion of all body children in the pinned owner-source seed. It
-    // carries no new structs, so comparing state vectors would accept it early.
-    let deletion = decode_hex("0001f38ce4ab0d01011d");
+    // Yjs deletion of all body children in the pinned owner-source seed: its
+    // one client's clocks 1 to 29. It carries no new structs, so comparing
+    // state vectors would accept it early.
+    let client_end = 3 + checkpoint[2..].iter().position(|byte| byte & 0x80 == 0).unwrap();
+    let deletion = [&[0, 1][..], &checkpoint[2..client_end], &[1, 1, 0x1d]].concat();
     let before = Ydoc::wire();
     before.apply(&checkpoint).unwrap();
     let vector = before.encode_state_vector();

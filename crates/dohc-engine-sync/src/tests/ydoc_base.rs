@@ -2222,7 +2222,7 @@ fn a_compensated_settle_cannot_restore_seed_source_authority() {
             seed,
             &seed.replace("todo", "done"),
             true,
-            Some("Live body"),
+            Some("Live body\n"),
             reserved,
         );
     }
@@ -2231,7 +2231,7 @@ fn a_compensated_settle_cannot_restore_seed_source_authority() {
 #[test]
 fn a_strict_fold_after_compensation_and_its_file_moment_converge_on_the_peer() {
     let seed = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
-    assert_peer_fold_from(seed, "Recovered", false, Some("Live body"), true);
+    assert_peer_fold_from(seed, "Recovered\n", false, Some("Live body\n"), true);
 }
 
 fn deliver_fold_moment(origin: &mut EngineStore, peer: &mut EngineStore, id: &str, seq: i64) {
@@ -2956,7 +2956,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
         1_500,
     )
     .expect("claim");
-    let chosen = "# Heading\n\nchosen body\n\n- one\n- two";
+    let chosen = "# Heading\n\nchosen body\n\n- one\n- two\n";
     engine
         .write_with(&NoFaults, |tx| {
             crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(

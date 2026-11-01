@@ -4856,7 +4856,8 @@ mod tests {
                 .lineage_claim_id,
             claim
         );
-        assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+        assert_eq!(projected_ydoc_text(&mut store, &key), "current text
+");
     }
 
     #[test]
@@ -8495,7 +8496,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
-            assert_eq!(canonical, expected, "{source:?}");
+            assert_eq!(canonical, format!("{expected}\n"), "{source:?}");
             assert!(loaded.doc.preserved_markdown_source(&canonical).is_none());
             assert_eq!(
                 VersionedTextStore::new(&mut store)

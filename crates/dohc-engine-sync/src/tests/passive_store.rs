@@ -313,8 +313,9 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
     let vectors: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../tests/settle-parity/yjs.json")).unwrap();
     // Each desktop seed settles with the file on disk, then without it, which
-    // writes the vector's Markdown. Main settled `lexical-16` as fenced code,
-    // which its next settle turns back into the source. The file reading
+    // writes the vector's Markdown. Main settled `lexical-16` as fenced code.
+    // Its witness records main's projection, so both settles now write
+    // today's projection. The file reading
     // refuses a `--` heading over two lines, so both settles write its
     // projection, as main did. A bare `-` heading over two lines, and an `=`
     // heading that marked and main both read, keep their file, as on main.
@@ -324,7 +325,7 @@ fn passive_store_settles_desktop_witnesses_from_the_file_on_disk() {
         (
             "lexical-16",
             "```\nindented code\n```",
-            "    indented code\n",
+            "```\nindented code\n```\n",
         ),
         (
             "list-heading",

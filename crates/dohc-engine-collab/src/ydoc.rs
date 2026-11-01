@@ -9059,7 +9059,7 @@ mod projection_tests {
             Err(CollabError::MarkdownQuoteDepthExceeded)
         ));
         assert_eq!(doc.encode_full_state(), before);
-        let code = format!("```\n{deep}\n```");
+        let code = format!("```\n{deep}\n```\n");
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &code)
             .unwrap();
         assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, code);
@@ -9452,7 +9452,7 @@ mod projection_tests {
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
                 .content,
-            "\n| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |"
+            "| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |\n"
         );
     }
 
@@ -9485,7 +9485,7 @@ mod projection_tests {
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
                 .content,
-            "\n| first  | row |\n| ------ | --- |\n| second | row |"
+            "| first  | row |\n| ------ | --- |\n| second | row |\n"
         );
     }
 
@@ -9555,7 +9555,7 @@ mod projection_tests {
                 doc.project(ContentKind::Richdoc)
                     .expect("small projection")
                     .content,
-                "\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |",
+                "| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |\n",
                 "{hostile:?} is not a row height"
             );
         }
@@ -9579,7 +9579,7 @@ mod projection_tests {
                 .expect("checked above")
                 .expect("clamped projection")
                 .content,
-            "###### bounded",
+            "###### bounded\n",
             "out-of-schema heading levels clamp to level six"
         );
     }
@@ -9667,7 +9667,7 @@ mod projection_tests {
             .content;
         assert_eq!(
             markdown,
-            "\n| H               |\n| --------------- |\n| first<br>second |"
+            "| H               |\n| --------------- |\n| first<br>second |\n"
         );
     }
 
@@ -9852,7 +9852,7 @@ mod projection_tests {
         let body = "x".repeat(2 * 1024 * 1024);
         let doc = remote_doc_with_body([paragraph(&body)]);
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert_eq!(doc.project_richdoc_with_node_budget(3).unwrap(), body);
+        assert_eq!(doc.project_richdoc_with_node_budget(3).unwrap(), format!("{body}\n"));
         PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
         assert!(matches!(
@@ -10291,7 +10291,7 @@ mod projection_tests {
     fn resolution_fold_reconstructs_an_annotated_table() {
         // The projector writes this for a table whose two body rows were
         // resized and whose second column is right-aligned.
-        let chosen = "# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n| Metric | Value |\n| ------ | -----: |\n| apples | 10    |\n| pears  | 4     |\n\nAfter.";
+        let chosen = "# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n| Metric | Value |\n| ------ | -----: |\n| apples | 10    |\n| pears  | 4     |\n\nAfter.\n";
         let doc = Ydoc::wire();
         doc.richdoc_append_paragraph("old content");
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
@@ -10398,7 +10398,7 @@ mod projection_tests {
             "&lt;!&#45;&#45; a&#58; b&#44;\n&#10; \t\n&#123;&#123;atom&#58;a&#125;&#125; ",
             "&#92;&#42; https&#58;//in&#46;example &#42;y&#42; &#45;&#45;&gt; **real**.",
             "\n\n",
-            "**&lt;pre&gt;one\n  &#32;**\ntwo&lt;/pre&gt; and **real**.",
+            "**&lt;pre&gt;one\n  &#32;**\ntwo&lt;/pre&gt; and **real**.\n",
         );
         fn mark(name: &str, value: Value) -> Attrs {
             Attrs::from([(name.into(), json_to_any(&value))])
@@ -10653,7 +10653,7 @@ mod projection_tests {
         RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            format!("&lt;b&gt;{}&lt;/b&gt;", "x&#42;".repeat(PAIRS))
+            format!("&lt;b&gt;{}&lt;/b&gt;\n", "x&#42;".repeat(PAIRS))
         );
         RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), PAIRS));
         TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
@@ -10707,7 +10707,7 @@ mod projection_tests {
             let doc = remote_doc_with_body([paragraph(text.as_str())]);
             TEXT_RUN_BYTES_CLONED.with(|count| count.set(0));
             INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
-            assert_eq!(doc.project_richdoc().unwrap(), expected);
+            assert_eq!(doc.project_richdoc().unwrap(), format!("{expected}\n"));
             INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), parts, "{text:.40}"));
             TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
         }
@@ -10795,7 +10795,7 @@ mod projection_tests {
             ),
         ] {
             let doc = remote_doc_with_body([paragraph(text)]);
-            assert_eq!(doc.project_richdoc().unwrap(), expected);
+            assert_eq!(doc.project_richdoc().unwrap(), format!("{expected}\n"));
         }
         // A mark across a line break stays one mark.
         for (runs, expected) in [
@@ -11032,7 +11032,7 @@ mod projection_tests {
             ),
         ] {
             let doc = remote_doc_with_body([paragraph(text)]);
-            assert_eq!(doc.project_richdoc().unwrap(), expected);
+            assert_eq!(doc.project_richdoc().unwrap(), format!("{expected}\n"));
         }
     }
 
@@ -11083,9 +11083,10 @@ mod projection_tests {
         // Four lines of 2^20 `*`, each about 5 MiB written.
         refused(&lines(4, 1 << 20, 1));
         // Four lines of `length` `*` write 20 bytes for each `*` they hold
-        // and 43 bytes besides, and each further `b` writes one byte more.
-        let length = (MAX_PROJECTION_BYTES - 43) / 20;
-        let tail = 1 + MAX_PROJECTION_BYTES - 43 - 20 * length;
+        // and 44 bytes besides, with the final newline, and each further `b`
+        // writes one byte more.
+        let length = (MAX_PROJECTION_BYTES - 44) / 20;
+        let tail = 1 + MAX_PROJECTION_BYTES - 44 - 20 * length;
         let doc = remote_doc_with_body([paragraph(lines(4, length, tail).as_str())]);
         LITERAL_LINKS_WRITTEN.with(|count| count.set(0));
         let projected = doc.project_richdoc().unwrap();
@@ -11093,7 +11094,7 @@ mod projection_tests {
         assert_eq!(
             projected,
             format!(
-                "&#91;&#93;&#40;u &#34;{}&#35; {}&#34;&#41;",
+                "&#91;&#93;&#40;u &#34;{}&#35; {}&#34;&#41;\n",
                 format!("{}\n", "&#42;".repeat(length)).repeat(4),
                 "b".repeat(tail)
             )
@@ -11418,7 +11419,7 @@ mod projection_tests {
                     .project(ContentKind::Richdoc)
                     .expect("projection")
                     .content,
-                projection
+                format!("{projection}\n")
             );
         }
     }
@@ -11820,7 +11821,7 @@ mod projection_tests {
         let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
         doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source));
         let canonical = witness_source(&doc, source);
-        assert_eq!(canonical, "\\***");
+        assert_eq!(canonical, "\\***\n");
         assert_eq!(settled(&doc, &canonical, source), None);
     }
 
@@ -12185,7 +12186,8 @@ fn main() {}
 ---
 
 | a | b |
-|---|---|";
+|---|---|
+";
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
@@ -12222,7 +12224,7 @@ fn main() {}
         // maps (`scalar_line`), and the fold must accept its own output.
         let doc = Ydoc::wire();
         doc.richdoc_append_paragraph("old");
-        let chosen = "---\ntitle: Chosen\nmeta:\n  owner: ice\n  team: dohc\n---\n\nbody text";
+        let chosen = "---\ntitle: Chosen\nmeta:\n  owner: ice\n  team: dohc\n---\n\nbody text\n";
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
@@ -12240,8 +12242,8 @@ fn main() {}
 
     #[test]
     fn empty_frontmatter_mappings_settle_and_roundtrip_as_mappings() {
-        let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text";
-        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text";
+        let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text\n";
+        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text\n";
         let expected_frontmatter = json!({
             "top": {},
             "nested": { "child": {} },
@@ -12263,8 +12265,8 @@ fn main() {}
 
     #[test]
     fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
-        let chosen = "---\n1.5: value\n---\n\nbody text";
-        let canonical = "---\n'1.5': value\n---\n\nbody text";
+        let chosen = "---\n1.5: value\n---\n\nbody text\n";
+        let canonical = "---\n'1.5': value\n---\n\nbody text\n";
         for markdown in [chosen, canonical] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
@@ -12285,14 +12287,14 @@ fn main() {}
         edited.frontmatter_set("1.5", "changed").unwrap();
         assert_eq!(
             edited.project(ContentKind::Richdoc).unwrap().content,
-            "---\n'1.5': changed\n---\n\nbody text"
+            "---\n'1.5': changed\n---\n\nbody text\n"
         );
     }
 
     #[test]
     fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
         let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
-        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text";
+        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
         let result_sha256 = crate::hex_sha256(artifact.as_bytes());
         let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
             key: &key,
@@ -12340,7 +12342,8 @@ fn main() {}
             let doc = Ydoc::wire();
             doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
                 .unwrap();
-            let selected = format!("{} edited", row["markdown"].as_str().unwrap());
+            let markdown = row["markdown"].as_str().unwrap();
+            let selected = format!("{} edited\n", markdown.trim_end_matches('\n'));
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &selected)
                 .unwrap();
             assert_eq!(
@@ -12355,7 +12358,7 @@ fn main() {}
     #[test]
     fn source_preserving_rewrite_replaces_the_previous_frontmatter_source() {
         let doc = Ydoc::wire();
-        let selected = "---\npriority: high\n---\n\nRestored body";
+        let selected = "---\npriority: high\n---\n\nRestored body\n";
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
             .unwrap();
         let meta = doc.doc.get_or_insert_map(ROOT_META);
@@ -12616,18 +12619,18 @@ fn main() {}
 
     #[test]
     fn supplied_frontmatter_candidate_preserves_values_before_mutation() {
-        let original = "---\n{score: .nan, title: Plan}\n---\n\nBody";
+        let original = "---\n{score: .nan, title: Plan}\n---\n\nBody\n";
         for (candidate, accepted) in [
             (
-                "---\n{score: .nan, title: Plan, id: \"record\"}\n---\n\nBody",
+                "---\n{score: .nan, title: Plan, id: \"record\"}\n---\n\nBody\n",
                 true,
             ),
             (
-                "---\n{score: '.nan', title: Plan, id: record}\n---\n\nBody",
+                "---\n{score: '.nan', title: Plan, id: record}\n---\n\nBody\n",
                 false,
             ),
             (
-                "---\n{score: .nan, title: Plan, id: different}\n---\n\nBody",
+                "---\n{score: .nan, title: Plan, id: different}\n---\n\nBody\n",
                 false,
             ),
         ] {
@@ -12653,7 +12656,7 @@ fn main() {}
             "owner: &v [rec_a, rec_b]\ncopy: {nested: *v}",
         ] {
             let doc = Ydoc::wire();
-            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            let markdown = format!("---\n{yaml}\n---\n\nBody\n");
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
                 .unwrap();
             let before = doc.encode_full_state();
@@ -12724,7 +12727,11 @@ fn main() {}
                 if let Some(refused) = row["editsRefused"].as_bool() {
                     assert_eq!(doc.frontmatter_edits_refused(), refused, "{}", row["name"]);
                     if refused {
-                        assert_eq!(doc.project_richdoc().unwrap().as_bytes(), source.as_bytes());
+                        // The fixture's source has no final newline; the file gains one.
+                        assert_eq!(
+                            doc.project_richdoc().unwrap().trim_end_matches('\n'),
+                            source.trim_end_matches('\n')
+                        );
                     }
                 }
             }
@@ -12739,7 +12746,7 @@ fn main() {}
             "!!map &root {owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
             ": note\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: .nan",
         ] {
-            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            let markdown = format!("---\n{yaml}\n---\n\nBody\n");
             for exact_source in [false, true] {
                 for (key, many) in [("owner", false), ("editors", true)] {
                     let doc = Ydoc::wire();
@@ -12783,7 +12790,7 @@ fn main() {}
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_preserving_source(
             ContentKind::Richdoc,
-            "---\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody",
+            "---\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody\n",
         )
         .unwrap();
         assert!(!doc.frontmatter_edits_refused());
@@ -12792,27 +12799,27 @@ fn main() {}
             .unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody"
+            "---\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody\n"
         );
     }
 
     #[test]
     fn empty_frontmatter_blocks_stay_until_a_key_arrives() {
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody")
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody\n")
             .unwrap();
-        assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody");
+        assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody\n");
         doc.frontmatter_set("title", "Plan").unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\ntitle: Plan\n---\n\nBody"
+            "---\ntitle: Plan\n---\n\nBody\n"
         );
 
         let removed = Ydoc::wire();
         removed
             .rewrite_content_to_markdown(
                 ContentKind::Richdoc,
-                "---\nz: 1\ntitle: Plan\n---\n\nBody",
+                "---\nz: 1\ntitle: Plan\n---\n\nBody\n",
             )
             .unwrap();
         let frontmatter = removed.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -12821,12 +12828,12 @@ fn main() {}
             frontmatter.remove(&mut txn, "z");
             frontmatter.remove(&mut txn, "title");
         }
-        assert_eq!(removed.project_richdoc().unwrap(), "Body");
+        assert_eq!(removed.project_richdoc().unwrap(), "Body\n");
     }
 
     #[test]
     fn documents_without_frontmatter_or_with_canonical_frontmatter_keep_no_source() {
-        for markdown in ["\n\n# Title\n", "---\npadding: xxx\n---\n\n"] {
+        for markdown in ["\n\n# Title\n", "---\npadding: xxx\n---\n"] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
                 .unwrap();
@@ -12864,7 +12871,7 @@ fn main() {}
             } else {
                 assert_eq!(
                     doc.project_richdoc().unwrap(),
-                    "---\npriority: high\n---\n\nReal body"
+                    "---\npriority: high\n---\n\nReal body\n"
                 );
             }
         }
@@ -12873,7 +12880,7 @@ fn main() {}
     #[test]
     fn preserved_frontmatter_cannot_replace_zero_with_negative_zero() {
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\nvalue: 0\n---\n\nBody")
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\nvalue: 0\n---\n\nBody\n")
             .unwrap();
         let meta = doc.doc.get_or_insert_map(ROOT_META);
         {
@@ -12884,7 +12891,7 @@ fn main() {}
                 "---\nvalue: -0.0\n---\n\n",
             );
         }
-        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody");
+        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody\n");
     }
 
     fn decode_fixture_int64_markers(value: &mut Value) {
@@ -13053,7 +13060,7 @@ fn main() {}
     #[test]
     fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
         let doc = Ydoc::wire();
-        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text";
+        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
 
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");
@@ -13095,7 +13102,7 @@ fn main() {}
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
             projected.content,
-            "---\nid: '99999999999999999999'\ndone: 'true'\nhex: 0x_1F\nscore: '.nan'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
+            "---\nid: '99999999999999999999'\ndone: 'true'\nhex: 0x_1F\nscore: '.nan'\nsummary: 'TODO: call Bob'\n---\n\nbody text\n"
         );
         let reread = Ydoc::wire();
         reread
