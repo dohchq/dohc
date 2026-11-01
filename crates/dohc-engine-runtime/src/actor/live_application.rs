@@ -5,13 +5,17 @@ use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, AdmittedNativeHistoryReconstruction, ApplicationError, ApplicationHandle,
     ApplicationHostCoordinate, ApplicationOwner, ApplicationResult, BootstrapResult,
-    LiveApplicationAckIdentity, LiveApplicationBootstrap, LiveSettlementResult,
+    JournalEvidence, LiveApplicationAckIdentity, LiveApplicationBootstrap, LiveSettlementResult,
     LiveUpdateHostApplicationAck, LiveUpdateReceipt, NativeRestoreApplication,
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
-    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, UnloadPending,
-    adopt_owner_committed, apply_committed_with_settlement_limit, bootstrap_committed,
-    read_application_ack, unload_pending, validate_application_binding, with_settlement,
+    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, PreparationKey,
+    PreparationPending, Reconciliation, Release, RetiredActivations, RetirementKey,
+    RetirementScope, RetirementTarget, UnloadPending, adopt_owner_committed,
+    apply_committed_with_settlement_limit, begin_retirement, bootstrap_committed,
+    prepare_retirement, read_application_ack, reconcile_activation, release_activation,
+    unload_pending, validate_application_binding, validate_registration_activation,
+    with_retirement_settlement, with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -69,6 +73,7 @@ pub struct ActorLiveApplicationOwner {
     actor: ActorHandle,
     workspace_id: String,
     token: Token,
+    retired: RetiredActivations,
 }
 
 impl Drop for ActorLiveApplicationOwner {
@@ -102,10 +107,11 @@ impl ActorHandle {
         &self,
         workspace_id: String,
     ) -> Result<ActorLiveApplicationOwner, RuntimeError> {
-        let owner = ActorLiveApplicationOwner {
+        let mut owner = ActorLiveApplicationOwner {
             actor: self.clone(),
             workspace_id: workspace_id.clone(),
             token: Arc::new(AtomicBool::new(true)),
+            retired: RetiredActivations::default(),
         };
         current(self, &owner.token)?;
         let (reply, receive) = oneshot::channel();
@@ -117,7 +123,7 @@ impl ActorHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        receive
+        owner.retired = receive
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)??;
         current(self, &owner.token)?;
@@ -433,17 +439,32 @@ impl ActorLiveApplicationOwner {
         current(&self.actor, &self.token).is_ok()
     }
 
-    /// Check durable binding identity before the transport retires output guards.
-    pub async fn validate_binding(&self, binding: LiveObjectBinding) -> Result<(), RuntimeError> {
+    /// Check durable binding identity, and the activation the registration
+    /// would serve, before the transport retires output guards.
+    pub async fn validate_binding(
+        &self,
+        namespace: String,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
         current(&self.actor, &self.token)?;
         let workspace_id = self.workspace_id.clone();
         let token = self.token.clone();
+        let retired = self.retired.clone();
         self.actor
             .run(move |store, _| {
                 if !token.load(Ordering::Acquire) {
                     return Err(RuntimeError::ActorUnavailable);
                 }
-                validate_application_binding(store, &workspace_id, &binding).map_err(Into::into)
+                validate_application_binding(store, &workspace_id, &binding)?;
+                validate_registration_activation(
+                    store,
+                    &namespace,
+                    &binding,
+                    activation_id.as_deref(),
+                    &retired,
+                )?;
+                Ok(())
             })
             .await?;
         current(&self.actor, &self.token)
@@ -456,6 +477,30 @@ impl ActorLiveApplicationOwner {
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
     ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
+        self.register_with(namespace, coordinate, binding, None)
+            .await
+    }
+
+    /// Register a session host for one activation; see
+    /// [`ApplicationOwner::register_activation`].
+    pub async fn register_activation(
+        &self,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: String,
+    ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
+        self.register_with(namespace, coordinate, binding, Some(activation_id))
+            .await
+    }
+
+    async fn register_with(
+        &self,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
+    ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
         current(&self.actor, &self.token)?;
         let (reply, receive) = oneshot::channel();
         self.actor
@@ -466,6 +511,7 @@ impl ActorLiveApplicationOwner {
                 namespace,
                 coordinate,
                 binding,
+                activation_id,
                 reply,
             })))
             .await
@@ -485,9 +531,12 @@ impl ActorLiveApplicationOwner {
     /// Release one document's registration and cached state on the writer queue.
     /// Returns the incomplete work instead, with nothing released. Work is
     /// complete once every applied update is settled and `root` holds the head.
+    /// A registration serving an activation other than `activation_id`
+    /// refuses the unload before anything is read or released.
     pub async fn unload(
         &self,
         object_id: String,
+        activation_id: Option<String>,
         keys: Vec<dohc_engine_collab::DocKey>,
         root: std::path::PathBuf,
         now_ms: i64,
@@ -500,11 +549,188 @@ impl ActorLiveApplicationOwner {
                 workspace_id: self.workspace_id.clone(),
                 token: self.token.clone(),
                 object_id,
+                activation_id,
                 keys,
                 root,
                 now_ms,
                 reply,
             })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// The activations this owner retired; see [`RetiredActivations`].
+    pub fn retired_activations(&self) -> RetiredActivations {
+        self.retired.clone()
+    }
+
+    /// Validate a retirement's key and record its intent, then run its Phase
+    /// A on the writer queue: see [`begin_retirement`] and
+    /// [`ApplicationOwner::retire_activation`]. An invalid key, and a
+    /// released activation's replay, tear nothing down. A `release` also
+    /// validates that its document left the scope.
+    pub async fn begin_retirement(
+        &self,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        release: bool,
+    ) -> Result<RetirementTarget, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::BeginRetirement {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    scope,
+                    coordinate,
+                    key,
+                    release,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// See [`prepare_retirement`]. The block lasts while this owner does.
+    pub async fn prepare_retirement(
+        &self,
+        scope: OwnedRetirementScope,
+        key: PreparationKey,
+    ) -> Result<Option<PreparationPending>, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::PrepareRetirement {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    scope,
+                    key,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// End this owner's preparation of `key`; see
+    /// [`dohc_engine_collab::live_update_application::RetirementPreparations::release`].
+    pub async fn release_retirement_preparation(
+        &self,
+        key: PreparationKey,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::ReleasePreparation {
+                    token: self.token.clone(),
+                    key,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// See [`reconcile_activation`].
+    pub async fn reconcile_activation(
+        &self,
+        scope: OwnedRetirementScope,
+        key: RetirementKey,
+        after: Option<LiveUpdateReceipt>,
+        journal: Option<JournalEvidence>,
+    ) -> Result<Reconciliation, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::Reconcile {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                scope,
+                key,
+                after,
+                journal,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// See [`release_activation`].
+    pub async fn release_activation(
+        &self,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        now_ms: i64,
+    ) -> Result<Release, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::Release {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                scope,
+                coordinate,
+                key,
+                now_ms,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Settle a retiring activation through its durable binding; see
+    /// [`with_retirement_settlement`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn settle_retirement(
+        &self,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        terminal: Option<LiveUpdateReceipt>,
+        max_applications: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reconstruction: AdmittedNativeHistoryReconstruction,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::SettleRetirement {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    scope,
+                    coordinate,
+                    key,
+                    terminal,
+                    max_applications,
+                    root,
+                    now_ms,
+                    faults,
+                    cancel,
+                    reconstruction,
+                    reply,
+                },
+            )))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
@@ -528,6 +754,12 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    /// The activation this registration serves; see
+    /// [`ApplicationHandle::activation_id`].
+    pub fn activation_id(&self) -> Option<String> {
+        self.application.activation_id()
+    }
+
     pub async fn sync_open(
         &self,
         client_vector: Vec<u8>,
@@ -818,6 +1050,25 @@ impl ActorLiveApplicationHandle {
     }
 }
 
+/// [`RetirementScope`] as the writer queue carries it.
+#[derive(Debug, Clone)]
+pub struct OwnedRetirementScope {
+    pub namespace: String,
+    pub max_deliveries: usize,
+    pub max_applications: usize,
+}
+
+impl OwnedRetirementScope {
+    fn scope<'a>(&'a self, workspace_id: &'a str) -> RetirementScope<'a> {
+        RetirementScope {
+            namespace: &self.namespace,
+            workspace_id,
+            max_deliveries: self.max_deliveries,
+            max_applications: self.max_applications,
+        }
+    }
+}
+
 struct OwnedRegistration {
     token: Token,
     application: ApplicationOwner,
@@ -829,14 +1080,19 @@ impl Drop for OwnedRegistration {
 }
 
 #[derive(Default)]
-pub(super) struct Registry(HashMap<String, OwnedRegistration>);
+pub(super) struct Registry {
+    owners: HashMap<String, OwnedRegistration>,
+    /// Each workspace's retired activations. They outlast its owners, so a
+    /// host that reconnects mid-Stop still refuses them.
+    retired: HashMap<String, RetiredActivations>,
+}
 impl Registry {
     fn owner(
         &mut self,
         workspace: &str,
         token: &Token,
     ) -> Result<&mut ApplicationOwner, RuntimeError> {
-        self.0
+        self.owners
             .get_mut(workspace)
             .filter(|entry| Arc::ptr_eq(&entry.token, token) && token.load(Ordering::Acquire))
             .map(|entry| &mut entry.application)
@@ -846,7 +1102,7 @@ impl Registry {
     /// Release every registration of `object_ids` in `workspace_id`, whichever
     /// owner holds it, in memory only. Their durable application state stays.
     pub(super) fn release(&mut self, workspace_id: &str, object_ids: &[String]) {
-        if let Some(entry) = self.0.get_mut(workspace_id) {
+        if let Some(entry) = self.owners.get_mut(workspace_id) {
             for object_id in object_ids {
                 entry.application.release(object_id);
             }
@@ -985,7 +1241,61 @@ pub(super) enum Request {
     Open {
         workspace_id: String,
         token: Token,
-        reply: Reply<()>,
+        reply: Reply<RetiredActivations>,
+    },
+    BeginRetirement {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        release: bool,
+        reply: Reply<RetirementTarget>,
+    },
+    PrepareRetirement {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        key: PreparationKey,
+        reply: Reply<Option<PreparationPending>>,
+    },
+    ReleasePreparation {
+        token: Token,
+        key: PreparationKey,
+        reply: Reply<bool>,
+    },
+    Reconcile {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        key: RetirementKey,
+        after: Option<LiveUpdateReceipt>,
+        journal: Option<JournalEvidence>,
+        reply: Reply<Reconciliation>,
+    },
+    Release {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        now_ms: i64,
+        reply: Reply<Release>,
+    },
+    SettleRetirement {
+        workspace_id: String,
+        token: Token,
+        scope: OwnedRetirementScope,
+        coordinate: ApplicationHostCoordinate,
+        key: RetirementKey,
+        terminal: Option<LiveUpdateReceipt>,
+        max_applications: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reconstruction: AdmittedNativeHistoryReconstruction,
+        reply: Reply<LiveSettlementResult>,
     },
     Register {
         workspace_id: String,
@@ -993,6 +1303,7 @@ pub(super) enum Request {
         namespace: String,
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
+        activation_id: Option<String>,
         reply: Reply<ApplicationHandle>,
     },
     Apply {
@@ -1010,6 +1321,7 @@ pub(super) enum Request {
         workspace_id: String,
         token: Token,
         object_id: String,
+        activation_id: Option<String>,
         keys: Vec<dohc_engine_collab::DocKey>,
         root: std::path::PathBuf,
         now_ms: i64,
@@ -1404,17 +1716,166 @@ impl Request {
                     if !token.load(Ordering::Acquire) {
                         return Err(RuntimeError::ActorUnavailable);
                     }
-                    let application = ApplicationOwner::new(workspace_id.clone())?;
-                    if let Some(old) = registry.0.get_mut(&workspace_id) {
+                    let retired = registry
+                        .retired
+                        .entry(workspace_id.clone())
+                        .or_default()
+                        .clone();
+                    let application =
+                        ApplicationOwner::with_retired(workspace_id.clone(), retired.clone())?;
+                    if let Some(old) = registry.owners.get_mut(&workspace_id) {
                         old.token.store(false, Ordering::Release);
                         old.application.invalidate(store)?;
                     }
                     registry
-                        .0
+                        .owners
                         .insert(workspace_id, OwnedRegistration { token, application });
-                    Ok(())
+                    Ok(retired)
                 })();
                 let _ = reply.send(super::drained(store, result));
+            }
+            Self::BeginRetirement {
+                workspace_id,
+                token,
+                scope,
+                coordinate,
+                key,
+                release,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let target = begin_retirement(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        release,
+                        &dohc_engine_storage::NoFaults,
+                    )?;
+                    cache.retirement_preparations().end(&key.activation_id);
+                    if !target.released {
+                        owner.retire_activation(
+                            cache,
+                            &scope.namespace,
+                            &coordinate,
+                            &target.doc,
+                            &key.activation_id,
+                        );
+                    }
+                    Ok(target)
+                });
+                let _ = reply.send(result);
+            }
+            Self::PrepareRetirement {
+                workspace_id,
+                token,
+                scope,
+                key,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    prepare_retirement(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        &cache.retirement_preparations(),
+                        &token,
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            // An owner that ended blocks nothing, so its release needs no current owner.
+            Self::ReleasePreparation { token, key, reply } => {
+                let _ = reply.send(Ok(cache.retirement_preparations().release(&key, &token)));
+            }
+            Self::Reconcile {
+                workspace_id,
+                token,
+                scope,
+                key,
+                after,
+                journal,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    reconcile_activation(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        after.as_ref(),
+                        journal.as_ref(),
+                        &dohc_engine_storage::NoFaults,
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            Self::Release {
+                workspace_id,
+                token,
+                scope,
+                coordinate,
+                key,
+                now_ms,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    release_activation(
+                        store,
+                        cache,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        &coordinate,
+                        now_ms,
+                        &dohc_engine_storage::NoFaults,
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            Self::SettleRetirement {
+                workspace_id,
+                token,
+                scope,
+                coordinate,
+                key,
+                terminal,
+                max_applications,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reconstruction,
+                reply,
+            } => {
+                let _reservation = reconstruction.reservation;
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    if cancel.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    with_retirement_settlement(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        &coordinate,
+                        terminal,
+                        max_applications,
+                        reconstruction.policy,
+                        |store, audit| {
+                            settle_audited(
+                                store,
+                                cache,
+                                &root,
+                                audit,
+                                now_ms,
+                                faults.as_ref(),
+                                &cancel,
+                                None,
+                            )
+                        },
+                    )
+                });
+                let _ = reply.send(result);
             }
             Self::Register {
                 workspace_id,
@@ -1422,12 +1883,21 @@ impl Request {
                 namespace,
                 coordinate,
                 binding,
+                activation_id,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
-                    owner
-                        .register(store, namespace, coordinate, binding)
-                        .map_err(Into::into)
+                    match activation_id {
+                        Some(activation_id) => owner.register_activation(
+                            store,
+                            namespace,
+                            coordinate,
+                            binding,
+                            activation_id,
+                        ),
+                        None => owner.register(store, namespace, coordinate, binding),
+                    }
+                    .map_err(Into::into)
                 });
                 let _ = reply.send(super::drained(store, result));
             }
@@ -1466,12 +1936,14 @@ impl Request {
                 workspace_id,
                 token,
                 object_id,
+                activation_id,
                 keys,
                 root,
                 now_ms,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    owner.require_unload_activation(&object_id, activation_id.as_deref())?;
                     let mut pending =
                         store.read_with(|conn| unload_pending(conn, &workspace_id, &object_id))?;
                     for key in &keys {
@@ -1483,7 +1955,7 @@ impl Request {
                     if pending.is_some() {
                         return Ok(pending);
                     }
-                    owner.unregister(store, &object_id)?;
+                    owner.unregister(store, &object_id, activation_id.as_deref())?;
                     for key in &keys {
                         cache.remove(key);
                         cache.unpin(key);
@@ -1498,7 +1970,7 @@ impl Request {
                 reply,
             } => {
                 let result = if let Some(entry) = registry
-                    .0
+                    .owners
                     .get_mut(&workspace_id)
                     .filter(|entry| Arc::ptr_eq(&entry.token, &token))
                 {
@@ -1507,7 +1979,7 @@ impl Request {
                     Err(RuntimeError::ActorUnavailable)
                 };
                 if result.is_ok() {
-                    registry.0.remove(&workspace_id);
+                    registry.owners.remove(&workspace_id);
                 }
                 let _ = reply.send(super::drained(store, result));
             }
@@ -1712,6 +2184,7 @@ mod tests {
             1,
             0,
             None,
+            Default::default(),
         )
         .unwrap();
         let mut actor_handle = actor.handle();
@@ -1781,10 +2254,15 @@ mod tests {
                         expected_local_sequence: 0,
                         events: vec![],
                         terminal_receipt: None,
+                        retained_prefix: None,
                         outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                             max_pending_bytes: 1_000_000,
                             max_pending_age_ms: 100_000,
                         },
+                        reconstruction:
+                            dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                                working_reserve_bytes: 8 * 1024 * 1024,
+                            },
                     },
                     1_000_000,
                     100,

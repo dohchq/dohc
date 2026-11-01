@@ -108,13 +108,14 @@ pub(super) fn replaced_head(
         namespace: fence.relay_database_namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: fence.old_binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let terminal = fence.terminal.as_ref().map_or(0, |r| r.journal_cursor);
     let (digest, cursor, sequence) =
         match settlement::restore::read_anchor_in(conn, &old, terminal, budget)? {
             Some(prior) => (prior.markdown, prior.cursor, prior.sequence),
-            None => origin_head(conn, &old, budget)?,
+            None => origin_head(conn, &old, &fence.origin, budget)?,
         };
     if (settled.previous_cursor, settled.previous_sequence) != (cursor, sequence) {
         return Err(ApplicationError::Corrupt);
@@ -122,44 +123,42 @@ pub(super) fn replaced_head(
     Ok(Some(digest))
 }
 
-/// The digest, cursor, and sequence of the origin `with_restore_settlement`
-/// would choose for `held`: its adoption, else its bootstrap at zero.
-fn origin_head(
+/// The digest, cursor, and sequence of the origin the fence recorded, which
+/// `with_restore_settlement` chose for `held`: that adopted activation, even
+/// one released since, else that bootstrap at zero.
+pub(super) fn origin_head(
     conn: &Connection,
     held: &Registration,
+    origin: &RestoreDeliveryOrigin,
     budget: &mut Budget,
 ) -> Result<(String, i64, i64), ApplicationError> {
     let b = &held.binding;
     let row = "WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
-    let p = params![
-        held.namespace,
-        b.workspace_id,
-        b.main_version_id,
-        b.object_id,
-        b.lineage_claim_id
-    ];
-    let adopted: bool = conn
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions {row})"),
-            p,
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
-    let json = if adopted {
-        budget.sql_json_array(
-            conn,
-            &["source_digest", "terminal_cursor", "local_ydoc_sequence"],
-            &format!("FROM live_owner_adoptions {row}"),
-            p,
-        )?
-    } else {
-        budget.sql_json_array(
-            conn,
-            &["projected_markdown_digest", "0", "0"],
-            &format!("FROM live_device_bootstraps {row}"),
-            p,
-        )?
+    let (columns, source, id) = match origin {
+        RestoreDeliveryOrigin::Owner { id } => (
+            ["source_digest", "terminal_cursor", "local_ydoc_sequence"],
+            format!("FROM live_owner_activations {row} AND activation_id=?6 AND evidence_digest IS NOT NULL"),
+            id,
+        ),
+        RestoreDeliveryOrigin::Bootstrap { id } => (
+            ["projected_markdown_digest", "0", "0"],
+            format!("FROM live_device_bootstraps {row} AND bootstrap_id=?6"),
+            id,
+        ),
     };
+    let json = budget.sql_json_array(
+        conn,
+        &columns,
+        &source,
+        params![
+            held.namespace,
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.lineage_claim_id,
+            id
+        ],
+    )?;
     serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)
 }
 
@@ -215,6 +214,7 @@ fn saved_in(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let anchor = settlement::restore::read_anchor_in(
@@ -304,6 +304,7 @@ fn native_saved(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     accepted_history::validate_resume_checkpoint(
@@ -426,6 +427,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate: coordinate.clone(),
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         if let Some(receipt) =

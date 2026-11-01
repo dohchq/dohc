@@ -16,6 +16,8 @@
 use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+use dohc_engine_collab::live_update_application::HeldProofLimit;
+use dohc_engine_sync::HeldProofs;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -31,6 +33,12 @@ enum Slot {
     Reserving,
     Closing,
     Active(Box<WorkspaceActor>),
+    /// The actor closed with a held proof's reader still open past the
+    /// close bound. Until its readers drain, closing the store answers
+    /// [`RuntimeError::StoreInUse`] and so does opening or restarting it, so
+    /// nothing replaces its files or starts a successor under that reader;
+    /// the first of them to find the readers drained removes the slot.
+    Draining(HeldProofs),
 }
 
 #[derive(Clone, Copy)]
@@ -47,12 +55,32 @@ impl Slot {
     }
 }
 
+/// Settle a draining slot for `identity` before anything else uses it: one
+/// whose readers drained goes, and one still draining refuses as the store
+/// in use.
+fn settle_draining(
+    registry: &mut Registry,
+    identity: &EngineDbIdentity,
+) -> Result<(), RuntimeError> {
+    match registry.get(identity) {
+        Some(Slot::Draining(proofs)) if proofs.drained() => {
+            registry.remove(identity);
+            Ok(())
+        }
+        Some(Slot::Draining(_)) => Err(RuntimeError::StoreInUse),
+        _ => Ok(()),
+    }
+}
+
 /// Owns every open workspace actor, keyed by canonical file identity. Dropping
 /// the supervisor drops every actor, each of which joins its worker and
 /// releases its connection.
 pub struct WorkspaceSupervisor {
     registry: Mutex<Registry>,
     ready: Condvar,
+    /// How many held proofs its actors run at once, and the memory they and
+    /// their results keep, shared by every actor it spawns.
+    held_proofs: HeldProofLimit,
 }
 
 /// Result of opening a workspace actor. `created_actor` is true only for the
@@ -75,20 +103,32 @@ pub struct WorkspaceClose<'a> {
 }
 
 impl WorkspaceClose<'_> {
-    /// Close the actor and release its registry marker.
+    /// Close the actor and release its registry marker. When a held proof's
+    /// reader outlives the close bound, the marker becomes the store's
+    /// draining slot instead, and this answers [`RuntimeError::StoreInUse`].
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         let close_result = match self.actor.take() {
-            Some(mut actor) => actor.close(),
+            Some(actor) => self.close(actor),
             None => Ok(()),
         };
         self.clear_marker();
         close_result
     }
 
+    fn close(&mut self, mut actor: WorkspaceActor) -> Result<(), RuntimeError> {
+        let closed = actor.close();
+        if matches!(closed, Err(RuntimeError::StoreInUse)) && self.marker_active {
+            self.supervisor
+                .release_markers(&[], [(self.identity.clone(), actor.held_proofs())]);
+            self.marker_active = false;
+        }
+        closed
+    }
+
     fn clear_marker(&mut self) {
         if self.marker_active {
             self.supervisor
-                .clear_markers(std::slice::from_ref(&self.identity));
+                .release_markers(std::slice::from_ref(&self.identity), []);
             self.marker_active = false;
         }
     }
@@ -96,8 +136,8 @@ impl WorkspaceClose<'_> {
 
 impl Drop for WorkspaceClose<'_> {
     fn drop(&mut self) {
-        if let Some(mut actor) = self.actor.take() {
-            let _ = actor.close();
+        if let Some(actor) = self.actor.take() {
+            let _ = self.close(actor);
         }
         self.clear_marker();
     }
@@ -117,6 +157,7 @@ impl WorkspaceSupervisor {
         WorkspaceSupervisor {
             registry: Mutex::new(HashMap::new()),
             ready: Condvar::new(),
+            held_proofs: HeldProofLimit::default(),
         }
     }
 
@@ -135,7 +176,9 @@ impl WorkspaceSupervisor {
     /// file identity (creating an empty database file if needed), and — if a
     /// live actor for that identity already exists — its handle is returned
     /// without opening a second connection. A dead actor (its worker panicked)
-    /// is evicted and re-opened.
+    /// is evicted and re-opened, unless a held proof's reader keeps its store
+    /// past the close bound: the store then drains, and this answers
+    /// [`RuntimeError::StoreInUse`].
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
         self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None, None)
     }
@@ -224,9 +267,14 @@ impl WorkspaceSupervisor {
                         }
                     }
                     Some(Slot::Reserving | Slot::Closing) => Action::Wait,
+                    Some(Slot::Draining(_)) => Action::Settle,
                     None => Action::Reserve,
                 };
                 match action {
+                    Action::Settle => {
+                        settle_draining(&mut guard, &identity)?;
+                        continue;
+                    }
                     Action::Return => {
                         if let Some(Slot::Active(actor)) = guard.get(&identity) {
                             if matches!(mode, ActorOpenMode::Passive)
@@ -264,9 +312,18 @@ impl WorkspaceSupervisor {
                 }
             }
         }
-        // Release the evicted actor's worker outside the lock.
-        drop(dead);
+        // Close the evicted actor outside the lock. Its held proofs run on
+        // threads of their own, so its worker's end stopped none of them: a
+        // reader past the close bound keeps the store, and the reservation
+        // becomes the draining slot.
+        if let Some(mut dead) = dead {
+            if let Err(RuntimeError::StoreInUse) = dead.close() {
+                self.release_markers(&[], [(identity, dead.held_proofs())]);
+                return Err(RuntimeError::StoreInUse);
+            }
+        }
 
+        let held_limit = self.held_proofs.clone();
         let store_path = store_path.to_path_buf();
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
@@ -278,9 +335,10 @@ impl WorkspaceSupervisor {
                         now_ms,
                         token.to_owned(),
                         work,
+                        held_limit,
                     )
                 } else {
-                    WorkspaceActor::spawn(store_path, identity.clone(), 1, now_ms, work)
+                    WorkspaceActor::spawn(store_path, identity.clone(), 1, now_ms, work, held_limit)
                 }
             }
             ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
@@ -290,9 +348,10 @@ impl WorkspaceSupervisor {
                 now_ms,
                 root_token.map(str::to_owned),
                 work,
+                held_limit,
             ),
             ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(store_path, identity.clone(), 1, work)
+                WorkspaceActor::spawn_read_only(store_path, identity.clone(), 1, work, held_limit)
             }
         };
         let spawned = spawned.map(|actor| actor.holding(prepared));
@@ -310,6 +369,9 @@ impl WorkspaceSupervisor {
     /// Close and reopen the actor for `db_path`, incrementing its session
     /// generation. Generation continuity is preserved even if the predecessor's
     /// worker panicked (a dead predecessor is treated as already-closed).
+    /// While a held proof's reader keeps the store in use, from an earlier
+    /// close or this one, no successor starts: the store drains and this
+    /// answers [`RuntimeError::StoreInUse`].
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
         let prepared = prepare_store(db_path)?;
 
@@ -320,6 +382,7 @@ impl WorkspaceSupervisor {
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
+            settle_draining(&mut guard, &identity)?;
             let old = guard.remove(&identity);
             let next_generation = match &old {
                 Some(Slot::Active(actor)) => actor.generation().saturating_add(1),
@@ -334,9 +397,13 @@ impl WorkspaceSupervisor {
         };
 
         // Close the predecessor outside the lock; a WorkerPanicked from a dead
-        // predecessor is expected here, not an error.
+        // predecessor is expected here, not an error. A held proof's reader
+        // past the close bound is: the reservation becomes the draining slot.
         if let Some(Slot::Active(mut actor)) = old {
-            let _ = actor.close();
+            if let Err(RuntimeError::StoreInUse) = actor.close() {
+                self.release_markers(&[], [(identity, actor.held_proofs())]);
+                return Err(RuntimeError::StoreInUse);
+            }
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
@@ -347,6 +414,7 @@ impl WorkspaceSupervisor {
             mode,
             None,
             None,
+            self.held_proofs.clone(),
         );
         let spawned = spawned.map(|actor| actor.holding(Some(prepared)));
         self.finalize_reservation(identity, spawned)
@@ -356,36 +424,42 @@ impl WorkspaceSupervisor {
     ///
     /// The returned operation owns the actor and marker. It may be moved to a
     /// blocking task; dropping it still closes the actor before waking waiters.
+    /// A store still draining from an earlier close answers
+    /// [`RuntimeError::StoreInUse`]; one that drained has nothing to close.
     pub fn begin_close(&self, db_path: &Path) -> Result<Option<WorkspaceClose<'_>>, RuntimeError> {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
             return Ok(None);
         };
-        Ok(self.begin_close_identity(&identity))
+        self.begin_close_identity(&identity)
     }
 
     /// [`Self::begin_close`] for the actor keyed by `identity`, as its handle
     /// carries it, whatever the workspace's path names now.
-    pub fn begin_close_identity(&self, identity: &EngineDbIdentity) -> Option<WorkspaceClose<'_>> {
+    pub fn begin_close_identity(
+        &self,
+        identity: &EngineDbIdentity,
+    ) -> Result<Option<WorkspaceClose<'_>>, RuntimeError> {
         let identity = identity.clone();
         let actor = {
             let mut guard = lock(&self.registry);
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
+            settle_draining(&mut guard, &identity)?;
             match guard.remove(&identity) {
                 Some(Slot::Active(actor)) => {
                     guard.insert(identity.clone(), Slot::Closing);
-                    Some(*actor)
+                    *actor
                 }
-                _ => None,
+                _ => return Ok(None),
             }
         };
-        Some(WorkspaceClose {
+        Ok(Some(WorkspaceClose {
             supervisor: self,
             identity,
-            actor: Some(actor?),
+            actor: Some(actor),
             marker_active: true,
-        })
+        }))
     }
 
     /// Close the actor for `db_path`, if open. Returns whether one was closed.
@@ -398,53 +472,70 @@ impl WorkspaceSupervisor {
 
     /// [`Self::close`] for the actor keyed by `identity`.
     pub fn close_identity(&self, identity: &EngineDbIdentity) -> Result<bool, RuntimeError> {
-        let Some(closing) = self.begin_close_identity(identity) else {
+        let Some(closing) = self.begin_close_identity(identity)? else {
             return Ok(false);
         };
         closing.finish().map(|()| true)
     }
 
-    /// Close every open actor.
+    /// Close every open actor. A store still draining from an earlier
+    /// close, or left draining by this one, answers
+    /// [`RuntimeError::StoreInUse`]; drained ones go.
     pub fn close_all(&self) -> Result<(), RuntimeError> {
+        let mut first_err = None;
         let mut closing = Vec::new();
-        let drained: Vec<WorkspaceActor> = {
+        let actors: Vec<(EngineDbIdentity, WorkspaceActor)> = {
             let mut guard = lock(&self.registry);
-            let active_keys: Vec<EngineDbIdentity> = guard
+            let keys: Vec<EngineDbIdentity> = guard
                 .iter()
-                .filter(|(_, slot)| matches!(slot, Slot::Active(_)))
+                .filter(|(_, slot)| matches!(slot, Slot::Active(_) | Slot::Draining(_)))
                 .map(|(identity, _)| identity.clone())
                 .collect();
-            active_keys
-                .into_iter()
-                .filter_map(|identity| match guard.remove(&identity) {
-                    Some(Slot::Active(actor)) => {
-                        guard.insert(identity.clone(), Slot::Closing);
-                        closing.push(identity);
-                        Some(*actor)
-                    }
-                    _ => None,
-                })
-                .collect()
+            let mut actors = Vec::new();
+            for identity in keys {
+                if let Err(err) = settle_draining(&mut guard, &identity) {
+                    first_err.get_or_insert(err);
+                    continue;
+                }
+                if let Some(Slot::Active(actor)) = guard.remove(&identity) {
+                    guard.insert(identity.clone(), Slot::Closing);
+                    closing.push(identity.clone());
+                    actors.push((identity, *actor));
+                }
+            }
+            actors
         };
-        let mut first_err = None;
-        for mut actor in drained {
+        let mut draining = Vec::new();
+        for (identity, mut actor) in actors {
             if let Err(err) = actor.close() {
+                if matches!(err, RuntimeError::StoreInUse) {
+                    draining.push((identity, actor.held_proofs()));
+                }
                 first_err.get_or_insert(err);
             }
         }
-        self.clear_markers(&closing);
+        self.release_markers(&closing, draining);
         match first_err {
             Some(err) => Err(err),
             None => Ok(()),
         }
     }
 
-    /// Remove `Closing` markers and wake any threads waiting on those
-    /// identities.
-    fn clear_markers(&self, identities: &[EngineDbIdentity]) {
+    /// Under one lock, remove the markers of `closed`, then mark each store
+    /// of `draining` draining with its held proofs, whose readers kept its
+    /// actor's close from completing, in place of any marker it had; wake
+    /// any threads waiting on them.
+    fn release_markers(
+        &self,
+        closed: &[EngineDbIdentity],
+        draining: impl IntoIterator<Item = (EngineDbIdentity, HeldProofs)>,
+    ) {
         let mut guard = lock(&self.registry);
-        for identity in identities {
+        for identity in closed {
             guard.remove(identity);
+        }
+        for (identity, proofs) in draining {
+            guard.insert(identity, Slot::Draining(proofs));
         }
         self.ready.notify_all();
     }
@@ -500,6 +591,8 @@ enum Action {
     Evict,
     Wait,
     Reserve,
+    /// Remove a drained slot, or refuse while it drains.
+    Settle,
 }
 
 /// A store [`prepare_store`] made ready: the path SQLite opens it by and, on
@@ -853,9 +946,10 @@ mod tests {
         std::fs::create_dir(engine).unwrap();
         let path = prepared.path.clone();
         let identity = crate::identity::EngineDbIdentity::resolve_or_create(&path).unwrap();
-        let actor = crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None)
-            .unwrap()
-            .holding(Some(prepared));
+        let actor =
+            crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None, Default::default())
+                .unwrap()
+                .holding(Some(prepared));
         assert_eq!(std::fs::read_dir(engine).unwrap().count(), 0);
         for file in ["engine.db", "engine.db-wal", "engine.db-shm"] {
             assert!(moved.join(file).exists(), "{file}");

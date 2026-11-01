@@ -70,6 +70,19 @@ describe("native imported owner activation", () => {
       `"fullStateDigest":"${row.source.fullStateDigest}","fullStateByteLength":3}`);
   });
 
+  it("keeps a successor's predecessor last, as native writes it, and omits an absent one", () => {
+    const { row } = fixture();
+    expect(parseNativeOwnerActivationSource(row.source, "notes.md", 1000)).not.toHaveProperty("predecessorActivationId");
+    const successor = { predecessorActivationId: "ordinary-activation-predecessor", ...row.source };
+    const parsed = parseNativeOwnerActivationSource(successor, "notes.md", 1000);
+    expect(Object.keys(parsed).at(-1)).toBe("predecessorActivationId");
+    expect(JSON.stringify(parsed)).toBe(`${JSON.stringify(parseNativeOwnerActivationSource(row.source, "notes.md", 1000)).slice(0, -1)},` +
+      `"predecessorActivationId":"ordinary-activation-predecessor"}`);
+    for (const predecessor of ["", null, 7, "a".repeat(1025), "a\0b"]) {
+      expect(() => parseNativeOwnerActivationSource({ ...row.source, predecessorActivationId: predecessor }, "notes.md", 1000)).toThrow();
+    }
+  });
+
   it("rejects byte corruption and output over budget", () => {
     const { row, bytes } = fixture();
     expect(() => parseNativeOwnerActivation(row, bytes, "notes.md", 4)).toThrow();

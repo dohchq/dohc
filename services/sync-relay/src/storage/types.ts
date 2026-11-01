@@ -133,6 +133,16 @@ export interface AppendLogBatchResult {
   skipped: number;
   currentMaxOriginSeq: number;
   settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
+  // Copies of retained work this batch published again, each with the creation the log accepted first.
+  redundantRecoveries?: RedundantRecovery[];
+}
+
+export interface RedundantRecovery {
+  originSeq: number;
+  recoveryMomentId: string;
+  acceptedOriginId: string;
+  acceptedOriginSeq: number;
+  acceptedRelaySeq: number;
 }
 
 export interface FetchLogPageResult {
@@ -617,6 +627,7 @@ export interface SyncRelayStorage {
   };
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
@@ -627,6 +638,13 @@ export interface SyncRelayStorage {
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
+  /** Proves a settling document's settlement audits before the append's writer. */
+  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean}, signal?: AbortSignal): Promise<void>;
+  /** Under the append's writer: null for a settling document's verified retirement output, otherwise why it is refused. */
+  admitRetirementPublication(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, op: SyncRelayLogInput,
+    batch: import("./serviceActivationPublication").RetirementBatch): import("./serviceActivationPublication").RetirementRefusal | null;
+  /** After confirmation: whether what that row's admission waited on was confirmed. */
+  retirementPublicationConfirmed(op: SyncRelayLogInput): boolean;
   /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
   recordServiceKeptEdits(input: {identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity; outboxId: string;
     binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; refusalKey: string; nowMs: number}): void;
@@ -647,6 +665,15 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
+  /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
+  serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
+    import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  /** The prepared activation a new Stop of the document would retire, once no retirement is open. */
+  retirableServiceActivation(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").RetirableServiceActivation | null;
+  /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */
+  retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
+    {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
@@ -872,6 +899,12 @@ export interface SyncRelayStorage {
     // Runs after the guard, under the same lock, with the ops at coordinates
     // the log does not hold yet. It may refuse an op or mark it departed.
     admit?: (ops: SyncRelayLogInput[]) => void;
+    // Runs after settlement and application confirmation, still under the
+    // lock, with the same ops. It may refuse an op that confirmation did not prove.
+    confirm?: (ops: SyncRelayLogInput[]) => void;
+    // The owner's publication lane: a copy of retained work another device
+    // already published keeps its coordinate and changes nothing else.
+    classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;

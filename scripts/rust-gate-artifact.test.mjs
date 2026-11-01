@@ -259,9 +259,9 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
-    // + 6 required + 2 optional. Endpoints alone would read 2, which is the
+    // + 7 required + 2 optional. Endpoints alone would read 2, which is the
     // shape that cannot see a tree that changes and changes back.
-    assert.match(run.evidence, /, 10 reads\)/);
+    assert.match(run.evidence, /, 11 reads\)/);
 
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
@@ -271,6 +271,11 @@ test("the gate stamps the tree it read, at every step boundary", () => {
       "test --locked --workspace --doc",
       "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
     ]);
+    // The reader phase follows the workspace build it reuses.
+    const reader = commands.indexOf("tools/rust-engine-program/reader-tests.mjs");
+    assert.ok(reader > commands.indexOf("nextest run --locked --workspace --no-fail-fast"), commands.join("\n"));
+    assert.ok(reader < commands.indexOf("test --locked --workspace --doc"), commands.join("\n"));
+    assert.match(run.evidence, /reader tests=PASS/);
     assert.match(run.evidence, /scratch leak=PASS/);
 
     // The stamp names the commit this checkout is on, not any commit.

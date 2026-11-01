@@ -11,7 +11,7 @@ import { readTreeState } from "../../tools/rust-engine-program/tree-provenance.m
 import { finishRustEvidence, readRustReuse, refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
 
 const steps = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "test --workspace",
-  "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
+  "reader tests", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 const tools = {rustc: "rustc fixture", cargo: "cargo fixture", deny: "cargo-deny 0.20.2", audit: "cargo-audit 0.22.2", nextest: "cargo-nextest 0.9.143"};
 
 function fixture() {
@@ -134,7 +134,7 @@ test("missing, mutated, incomplete, forged, dirty, interrupted, and chained rece
 });
 
 test("a step PASS cannot substitute for skipped or missing canonical gate checks", () => {
-  for (const name of ["native target", "test --workspace", "cargo-deny", "cargo-audit", "scratch leak"]) {
+  for (const name of ["native target", "test --workspace", "reader tests", "cargo-deny", "cargo-audit", "scratch leak"]) {
     const f = fixture();
     try {
       const badLog = f.log.replace(`${name}=PASS`, `${name}=SKIP`);

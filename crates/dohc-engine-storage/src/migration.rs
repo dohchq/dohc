@@ -3447,6 +3447,773 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_EMPTY_SETTLEMENTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 76,
+        id: "v2-live-owner-activations",
+        sql: V2_LIVE_OWNER_ACTIVATIONS_DDL,
+        sets_user_version: None,
+    },
+];
+
+/// A lineage keeps its one immutable adoption. Each activation that held the
+/// document since has a row: at most one unreleased per document lineage, at
+/// most one successor per activation, and both links stay on one lineage.
+/// An adopted activation carries every adoption fact, its lineage's origin and
+/// its baseline relay coordinate; a released activation that never adopted
+/// carries no adoption fact or origin, and its baseline only if it had one.
+/// Every adoption becomes its own current activation, and a binding names the
+/// activation of its lineage's adoption. A retirement records the exact
+/// activation and restore generation it began for, before it ends any of the
+/// activation's runtime, and keeps that row until the activation's release.
+/// Capture finds a document lineage's released tails across namespaces by
+/// `live_owner_activations_document`.
+///
+/// A document's released tail generation changes with every row its tails
+/// read: activations, outboxes and their entries, applications and accepted
+/// history, seed captures, the journal rows native entries name, the
+/// document's head and lineage columns, and terminal blobs, and with the
+/// stored bytes of each entry's update, which a held document's inspection
+/// merges. It also moves with the state inspection loads that the
+/// inspection's own coordinates do not name, so none of it can change and
+/// change back unseen: a journal row past the document's latest snapshot
+/// changing, going, or arriving below the top; the latest snapshot going or
+/// moving back, or any snapshot's key or digest changing; an archived
+/// lineage going, or its key or digest changing; and a blob a journal row,
+/// snapshot or archived lineage names arriving, or its bytes changing. While
+/// foreign keys are on such a blob cannot go, but one a damaged store lacks
+/// can arrive. A row that claims another document still moves the document
+/// whose entry holds its delivery, and an activation moves the documents of
+/// every activation whose chain passes through it. Each trigger finds those
+/// documents by index; a blob nothing names or one already stored, an
+/// append, a row a compaction folded, a snapshot a compaction superseded, or
+/// a compaction whose bound passes no sequence an entry names, moves nothing.
+/// The first activation of a document creates its row, which outlives the
+/// document, so a recreated document never reads an earlier generation. A
+/// generation only advances, and a mutation that would take it past its
+/// bound fails, whatever conflict policy the mutation names.
+///
+/// A hosted document held for released retained work keeps the binding it
+/// holds against with its digest, how its work continues, and whether that
+/// binding went stale; no other hold carries them. The binding changes only
+/// with its digest, so a reader that never reads the binding still knows
+/// when it changed. Any change to the binding, a hold carrying one arriving
+/// or going, or such a hold moving to another document, also advances the
+/// hold revision of each document it leaves or reaches, so two writes cannot
+/// change the binding and restore its digest unseen. The revision is its
+/// own, so a hold written never moves the released tail generation its
+/// document's validations are cached by. Like a generation, a revision only
+/// advances and outlives its hold. Writers never `REPLACE` rows of
+/// `hosted_documents`, `ydoc_snapshots` or
+/// `ydoc_inactive_lineages`: without recursive triggers its implicit delete
+/// fires no trigger, and it passes the binding's guard. The binding comes
+/// last in the row, so reading the rest never reaches it. Rebuilding the
+/// table keeps every row, its parked heads and aliases among them. A
+/// deferred Y.Doc update records which ingress deferred it, and a hosted one
+/// the feed it
+/// arrived on: its namespace, epoch, stream and relay sequence. A row
+/// deferred earlier is local in a workspace that is no hosted replica, and
+/// its feed is unknown in one that is.
+///
+/// A device's decision to keep a held document's retained version as an
+/// ordinary copy is keyed by the binding it answers and its attempt. It keeps
+/// that binding, the copy's text by digest and length, the contributions the
+/// copy merged, the copy's identities and allocated path, and, once known, the
+/// relay coordinate that accepted the copy and the resolution's terminal
+/// outcome. The copy's text outlives no decision that names it; the copy
+/// itself may go.
+const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
+CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
+    (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
+CREATE TABLE live_owner_activations (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    activation_id TEXT NOT NULL CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024),
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    origin_adoption_id TEXT,
+    predecessor_activation_id TEXT CHECK (predecessor_activation_id IS NOT activation_id),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_byte_length INTEGER NOT NULL CHECK (source_byte_length BETWEEN 0 AND 9007199254740991),
+    baseline_moment_relay_sequence INTEGER CHECK (baseline_moment_relay_sequence BETWEEN 0 AND 9007199254740991),
+    baseline_registered_at_ms INTEGER CHECK (baseline_registered_at_ms BETWEEN 0 AND 9007199254740991),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    evidence_digest TEXT,
+    coverage_digest TEXT,
+    covered_outbox_sequence INTEGER CHECK (covered_outbox_sequence BETWEEN 0 AND 9007199254740991),
+    local_ydoc_sequence INTEGER CHECK (local_ydoc_sequence BETWEEN 0 AND 9007199254740991),
+    terminal_cursor INTEGER CHECK (terminal_cursor BETWEEN 0 AND 9007199254740991),
+    terminal_receipt_json TEXT CHECK (json_valid(terminal_receipt_json)),
+    max_pending_bytes INTEGER CHECK (max_pending_bytes BETWEEN 1 AND 9007199254740991),
+    max_pending_age_ms INTEGER CHECK (max_pending_age_ms BETWEEN 1 AND 9007199254740991),
+    boundary_json TEXT CHECK (json_valid(boundary_json)),
+    released_at_ms INTEGER CHECK (released_at_ms BETWEEN 0 AND 9007199254740991),
+    released_restore_generation INTEGER CHECK (released_restore_generation BETWEEN 0 AND 9007199254740991),
+    released_accepted_cursor INTEGER CHECK (released_accepted_cursor BETWEEN 0 AND 9007199254740991),
+    released_boundary_json TEXT CHECK (json_valid(released_boundary_json)),
+    carried_manifest_json TEXT CHECK (json_valid(carried_manifest_json)),
+    CHECK ((evidence_digest IS NULL AND coverage_digest IS NULL AND covered_outbox_sequence IS NULL
+            AND local_ydoc_sequence IS NULL AND terminal_cursor IS NULL AND terminal_receipt_json IS NULL
+            AND max_pending_bytes IS NULL AND max_pending_age_ms IS NULL AND boundary_json IS NULL)
+        OR (evidence_digest IS NOT NULL AND coverage_digest IS NOT NULL AND covered_outbox_sequence IS NOT NULL
+            AND local_ydoc_sequence IS NOT NULL AND terminal_cursor IS NOT NULL AND terminal_receipt_json IS NOT NULL
+            AND max_pending_bytes IS NOT NULL AND max_pending_age_ms IS NOT NULL
+            AND baseline_moment_relay_sequence IS NOT NULL)),
+    CHECK ((baseline_moment_relay_sequence IS NULL) = (baseline_registered_at_ms IS NULL)),
+    CHECK ((origin_adoption_id IS NULL) = (evidence_digest IS NULL)),
+    CHECK ((released_at_ms IS NULL AND released_restore_generation IS NULL AND released_accepted_cursor IS NULL
+            AND released_boundary_json IS NULL AND carried_manifest_json IS NULL)
+        OR (released_at_ms IS NOT NULL AND released_restore_generation IS NOT NULL AND released_accepted_cursor IS NOT NULL
+            AND released_boundary_json IS NOT NULL AND carried_manifest_json IS NOT NULL)),
+    CHECK (released_at_ms IS NOT NULL OR evidence_digest IS NOT NULL),
+    PRIMARY KEY (relay_database_namespace, activation_id),
+    UNIQUE (relay_database_namespace, activation_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (relay_database_namespace, origin_adoption_id, workspace_id, main_version_id, object_id, lineage_claim_id)
+        REFERENCES live_owner_adoptions(relay_database_namespace, adoption_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (relay_database_namespace, predecessor_activation_id, workspace_id, main_version_id, object_id, lineage_claim_id)
+        REFERENCES live_owner_activations(relay_database_namespace, activation_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE UNIQUE INDEX live_owner_activations_current ON live_owner_activations
+    (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE released_at_ms IS NULL;
+CREATE UNIQUE INDEX live_owner_activations_successor ON live_owner_activations
+    (relay_database_namespace,predecessor_activation_id) WHERE predecessor_activation_id IS NOT NULL;
+CREATE INDEX live_owner_activations_lineage ON live_owner_activations
+    (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id);
+CREATE INDEX live_owner_activations_document ON live_owner_activations
+    (workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace);
+CREATE TABLE live_owner_retirements (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    activation_id TEXT NOT NULL CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024),
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    restore_fence_generation INTEGER NOT NULL CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (relay_database_namespace, activation_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_owner_retirements_document ON live_owner_retirements
+    (workspace_id,main_version_id,object_id);
+CREATE TABLE released_tail_generations (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (workspace_id, version_id, object_id)
+) STRICT;
+CREATE TRIGGER released_tail_generation_advance BEFORE UPDATE ON released_tail_generations
+WHEN NEW.generation NOT BETWEEN OLD.generation+1 AND 9007199254740991 OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.version_id IS NOT OLD.version_id OR NEW.object_id IS NOT OLD.object_id BEGIN
+    SELECT RAISE(ABORT,'a released tail generation only advances, within its bound');
+END;
+CREATE TRIGGER released_tail_generation_kept BEFORE DELETE ON released_tail_generations BEGIN
+    SELECT RAISE(ABORT,'a released tail generation outlives its document');
+END;
+CREATE INDEX owner_ydoc_outbox_entries_native_sequence ON owner_ydoc_outbox_entries
+    (json_extract(native_source_json,'$.binding.objectId'),json_extract(native_source_json,'$.nativeSequence'));
+CREATE INDEX owner_ydoc_outbox_entries_terminal_blob ON owner_ydoc_outbox_entries(terminal_blob_digest)
+    WHERE terminal_blob_digest IS NOT NULL;
+CREATE TRIGGER released_tail_activation_insert AFTER INSERT ON live_owner_activations BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    INSERT INTO released_tail_generations SELECT NEW.workspace_id,NEW.main_version_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_tail_generations
+          WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (WITH RECURSIVE followers(namespace,activation_id) AS (
+           SELECT NEW.relay_database_namespace,NEW.activation_id
+           UNION SELECT a.relay_database_namespace,a.activation_id FROM live_owner_activations a JOIN followers f
+             ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id)
+         SELECT a.workspace_id,a.main_version_id,a.object_id FROM live_owner_activations a JOIN followers f
+           ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id);
+END;
+CREATE TRIGGER released_tail_activation_update AFTER UPDATE ON live_owner_activations BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    INSERT INTO released_tail_generations SELECT NEW.workspace_id,NEW.main_version_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_tail_generations
+          WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (WITH RECURSIVE followers(namespace,activation_id) AS (
+           SELECT OLD.relay_database_namespace,OLD.activation_id
+           UNION SELECT NEW.relay_database_namespace,NEW.activation_id
+           UNION SELECT a.relay_database_namespace,a.activation_id FROM live_owner_activations a JOIN followers f
+             ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id)
+         SELECT a.workspace_id,a.main_version_id,a.object_id FROM live_owner_activations a JOIN followers f
+           ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id);
+END;
+CREATE TRIGGER released_tail_activation_delete AFTER DELETE ON live_owner_activations BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (WITH RECURSIVE followers(namespace,activation_id) AS (
+           SELECT OLD.relay_database_namespace,OLD.activation_id
+           UNION SELECT a.relay_database_namespace,a.activation_id FROM live_owner_activations a JOIN followers f
+             ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id)
+         SELECT a.workspace_id,a.main_version_id,a.object_id FROM live_owner_activations a JOIN followers f
+           ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id);
+END;
+CREATE TRIGGER released_tail_outbox_insert AFTER INSERT ON owner_ydoc_outboxes BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_outbox_update AFTER UPDATE ON owner_ydoc_outboxes BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_outbox_delete AFTER DELETE ON owner_ydoc_outboxes BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_entry_insert AFTER INSERT ON owner_ydoc_outbox_entries BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT workspace_id,main_version_id,object_id FROM owner_ydoc_outboxes WHERE outbox_id=NEW.outbox_id);
+END;
+CREATE TRIGGER released_tail_entry_update AFTER UPDATE ON owner_ydoc_outbox_entries BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT workspace_id,main_version_id,object_id FROM owner_ydoc_outboxes WHERE outbox_id=OLD.outbox_id);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT workspace_id,main_version_id,object_id FROM owner_ydoc_outboxes WHERE outbox_id=NEW.outbox_id);
+END;
+CREATE TRIGGER released_tail_entry_delete AFTER DELETE ON owner_ydoc_outbox_entries BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT workspace_id,main_version_id,object_id FROM owner_ydoc_outboxes WHERE outbox_id=OLD.outbox_id);
+END;
+CREATE TRIGGER released_tail_application_insert AFTER INSERT ON live_device_update_applications BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=NEW.delivery_id);
+END;
+CREATE TRIGGER released_tail_application_update AFTER UPDATE ON live_device_update_applications BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=OLD.delivery_id);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=NEW.delivery_id);
+END;
+CREATE TRIGGER released_tail_application_delete AFTER DELETE ON live_device_update_applications BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=OLD.delivery_id);
+END;
+CREATE TRIGGER released_tail_accepted_insert AFTER INSERT ON live_accepted_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=NEW.delivery_id);
+END;
+CREATE TRIGGER released_tail_accepted_update AFTER UPDATE ON live_accepted_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=OLD.delivery_id);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=NEW.delivery_id);
+END;
+CREATE TRIGGER released_tail_accepted_delete AFTER DELETE ON live_accepted_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.main_version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id)=
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.delivery_id=OLD.delivery_id);
+END;
+CREATE TRIGGER released_tail_capture_insert AFTER INSERT ON ydoc_owner_activation_sources BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_capture_update AFTER UPDATE ON ydoc_owner_activation_sources BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_capture_delete AFTER DELETE ON ydoc_owner_activation_sources BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_journal_insert AFTER INSERT ON ydoc_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+          AND EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+            WHERE json_extract(e.native_source_json,'$.binding.objectId')=NEW.object_id
+              AND json_extract(e.native_source_json,'$.nativeSequence')=NEW.seq
+              AND o.workspace_id=NEW.workspace_id AND o.main_version_id=NEW.version_id AND o.object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_tail_journal_update AFTER UPDATE ON ydoc_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id
+          AND EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+            WHERE json_extract(e.native_source_json,'$.binding.objectId')=OLD.object_id
+              AND json_extract(e.native_source_json,'$.nativeSequence')=OLD.seq
+              AND o.workspace_id=OLD.workspace_id AND o.main_version_id=OLD.version_id AND o.object_id=OLD.object_id);
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+          AND EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+            WHERE json_extract(e.native_source_json,'$.binding.objectId')=NEW.object_id
+              AND json_extract(e.native_source_json,'$.nativeSequence')=NEW.seq
+              AND o.workspace_id=NEW.workspace_id AND o.main_version_id=NEW.version_id AND o.object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_tail_journal_delete AFTER DELETE ON ydoc_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id
+          AND EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+            WHERE json_extract(e.native_source_json,'$.binding.objectId')=OLD.object_id
+              AND json_extract(e.native_source_json,'$.nativeSequence')=OLD.seq
+              AND o.workspace_id=OLD.workspace_id AND o.main_version_id=OLD.version_id AND o.object_id=OLD.object_id);
+END;
+CREATE TRIGGER released_tail_document_insert AFTER INSERT ON ydoc_docs BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_document_update
+AFTER UPDATE OF workspace_id,version_id,object_id,lineage_claim_status,lineage_claim_id,
+    lineage_parent_claim_id,lineage_epoch_tag ON ydoc_docs
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id
+  OR OLD.object_id IS NOT NEW.object_id
+  OR OLD.lineage_claim_status IS NOT NEW.lineage_claim_status OR OLD.lineage_claim_id IS NOT NEW.lineage_claim_id
+  OR OLD.lineage_parent_claim_id IS NOT NEW.lineage_parent_claim_id OR OLD.lineage_epoch_tag IS NOT NEW.lineage_epoch_tag
+BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_document_compaction AFTER UPDATE OF head_snapshot_seq ON ydoc_docs
+WHEN OLD.head_snapshot_seq IS NOT NEW.head_snapshot_seq BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+          AND EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+            WHERE json_extract(e.native_source_json,'$.binding.objectId')=NEW.object_id
+              AND json_extract(e.native_source_json,'$.nativeSequence')
+                > min(OLD.head_snapshot_seq,NEW.head_snapshot_seq)
+              AND json_extract(e.native_source_json,'$.nativeSequence')
+                <= max(OLD.head_snapshot_seq,NEW.head_snapshot_seq)
+              AND o.workspace_id=NEW.workspace_id AND o.main_version_id=NEW.version_id AND o.object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_tail_document_delete AFTER DELETE ON ydoc_docs BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_blob_insert AFTER INSERT ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=NEW.sha256) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=NEW.sha256);
+END;
+CREATE TRIGGER released_tail_blob_update AFTER UPDATE OF sha256,byte_length,bytes ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest IN (OLD.sha256,NEW.sha256)) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest IN (OLD.sha256,NEW.sha256));
+END;
+CREATE TRIGGER released_tail_blob_delete AFTER DELETE ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=OLD.sha256)
+  OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=OLD.sha256) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=OLD.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=OLD.sha256);
+END;
+DROP INDEX idx_ydoc_updates_doc_blob;
+CREATE INDEX idx_ydoc_updates_blob ON ydoc_updates(update_blob_sha256,workspace_id,version_id,object_id);
+CREATE INDEX ydoc_snapshots_blob ON ydoc_snapshots(snapshot_blob_sha256);
+CREATE INDEX ydoc_inactive_lineages_full_state ON ydoc_inactive_lineages(full_state_blob_sha256);
+CREATE TRIGGER released_tail_head_journal_insert AFTER INSERT ON ydoc_updates
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id
+    AND object_id=NEW.object_id AND seq>NEW.seq) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_head_journal_update
+AFTER UPDATE OF workspace_id,version_id,object_id,seq,update_blob_sha256 ON ydoc_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_head_journal_delete AFTER DELETE ON ydoc_updates
+WHEN OLD.seq > coalesce((SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=OLD.workspace_id
+    AND version_id=OLD.version_id AND object_id=OLD.object_id),0) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_state_blob_update AFTER UPDATE OF sha256,byte_length,bytes ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256)) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
+           WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+           WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256));
+END;
+CREATE TRIGGER released_tail_state_blob_insert AFTER INSERT ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256=NEW.sha256) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+           WHERE full_state_blob_sha256=NEW.sha256);
+END;
+CREATE TRIGGER released_tail_snapshot_update
+AFTER UPDATE OF workspace_id,version_id,object_id,up_to_seq,snapshot_blob_sha256 ON ydoc_snapshots
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id
+  OR OLD.object_id IS NOT NEW.object_id OR OLD.up_to_seq IS NOT NEW.up_to_seq
+  OR OLD.snapshot_blob_sha256 IS NOT NEW.snapshot_blob_sha256 BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_snapshot_delete AFTER DELETE ON ydoc_snapshots
+WHEN OLD.up_to_seq > coalesce((SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=OLD.workspace_id
+    AND version_id=OLD.version_id AND object_id=OLD.object_id),-1) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_archive_update
+AFTER UPDATE OF workspace_id,version_id,object_id,lineage_claim_id,full_state_blob_sha256 ON ydoc_inactive_lineages
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id
+  OR OLD.object_id IS NOT NEW.object_id OR OLD.lineage_claim_id IS NOT NEW.lineage_claim_id
+  OR OLD.full_state_blob_sha256 IS NOT NEW.full_state_blob_sha256 BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_archive_delete AFTER DELETE ON ydoc_inactive_lineages BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+    object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
+    baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
+    covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+  SELECT relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,adoption_id,
+    binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
+    baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,
+    local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms
+  FROM live_owner_adoptions;
+ALTER TABLE live_device_application_bindings ADD COLUMN activation_id TEXT
+    CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024);
+UPDATE live_device_application_bindings SET activation_id=(SELECT a.adoption_id FROM live_owner_adoptions a
+    WHERE a.relay_database_namespace=live_device_application_bindings.relay_database_namespace
+      AND a.workspace_id=live_device_application_bindings.workspace_id
+      AND a.main_version_id=live_device_application_bindings.main_version_id
+      AND a.object_id=live_device_application_bindings.object_id
+      AND a.lineage_claim_id=live_device_application_bindings.lineage_claim_id);
+CREATE TEMP TABLE hosted_parked_snapshots_kept AS SELECT * FROM hosted_parked_snapshots;
+CREATE TEMP TABLE hosted_parked_path_aliases_kept AS SELECT * FROM hosted_parked_path_aliases;
+DROP TABLE hosted_parked_path_aliases;
+DROP TABLE hosted_parked_snapshots;
+CREATE TABLE hosted_documents_next (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready','parked')),
+    held_reason TEXT CHECK (held_reason IN
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld','hosted-live-edit-unadmitted','released-lineage-unsettled')),
+    held_path TEXT CHECK (length(held_path) > 0),
+    held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    unmaterialized_seq INTEGER CHECK (unmaterialized_seq > 0),
+    released_hold_continuation TEXT CHECK (released_hold_continuation IN ('frozen','dependency-drain')),
+    released_hold_binding_stale INTEGER NOT NULL DEFAULT 0 CHECK (released_hold_binding_stale IN (0,1)),
+    released_hold_binding_digest TEXT CHECK (length(released_hold_binding_digest) = 64
+      AND released_hold_binding_digest NOT GLOB '*[^0-9a-f]*'),
+    released_hold_binding_json TEXT CHECK (json_valid(released_hold_binding_json)),
+    PRIMARY KEY (workspace_id, object_id),
+    CHECK ((state = 'held') = (held_reason IS NOT NULL)),
+    CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
+    CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld',
+      'hosted-live-edit-unadmitted','released-lineage-unsettled') OR held_path IS NULL),
+    CHECK (state <> 'parked' OR unmaterialized_seq IS NULL),
+    CHECK ((released_hold_binding_json IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK ((released_hold_binding_digest IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK ((released_hold_continuation IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK (held_reason IS 'released-lineage-unsettled' OR released_hold_binding_stale = 0)
+) STRICT;
+INSERT INTO hosted_documents_next (workspace_id,object_id,path,state,held_reason,held_path,
+    held_by,held_conflict_id,backfill_cursor,scope_generation,unmaterialized_seq)
+  SELECT workspace_id,object_id,path,state,held_reason,held_path,held_by,held_conflict_id,
+    backfill_cursor,scope_generation,unmaterialized_seq FROM hosted_documents;
+DROP TABLE hosted_documents;
+ALTER TABLE hosted_documents_next RENAME TO hosted_documents;
+CREATE TRIGGER released_hold_binding_digest_moves BEFORE UPDATE OF released_hold_binding_json ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
+  AND OLD.released_hold_binding_digest IS NEW.released_hold_binding_digest BEGIN
+    SELECT RAISE(ABORT,'a released hold binding changes with its digest');
+END;
+CREATE TABLE released_hold_revisions (
+    workspace_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (workspace_id, object_id)
+) STRICT;
+CREATE TRIGGER released_hold_revision_advance BEFORE UPDATE ON released_hold_revisions
+WHEN NEW.revision NOT BETWEEN OLD.revision+1 AND 9007199254740991 OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.object_id IS NOT OLD.object_id BEGIN
+    SELECT RAISE(ABORT,'a released hold revision only advances, within its bound');
+END;
+CREATE TRIGGER released_hold_revision_kept BEFORE DELETE ON released_hold_revisions BEGIN
+    SELECT RAISE(ABORT,'a released hold revision outlives its hold');
+END;
+CREATE TRIGGER released_hold_revision_insert AFTER INSERT ON hosted_documents
+WHEN NEW.released_hold_binding_json IS NOT NULL BEGIN
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id;
+    INSERT INTO released_hold_revisions SELECT NEW.workspace_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_hold_revision_update
+AFTER UPDATE OF workspace_id,object_id,released_hold_binding_json ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
+  OR (OLD.released_hold_binding_json IS NOT NULL
+    AND (OLD.workspace_id IS NOT NEW.workspace_id OR OLD.object_id IS NOT NEW.object_id)) BEGIN
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id;
+    INSERT INTO released_hold_revisions SELECT OLD.workspace_id,OLD.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id);
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id;
+    INSERT INTO released_hold_revisions SELECT NEW.workspace_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_hold_revision_delete AFTER DELETE ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NULL BEGIN
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id;
+    INSERT INTO released_hold_revisions SELECT OLD.workspace_id,OLD.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id);
+END;
+CREATE TABLE hosted_parked_snapshots (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    blob_sha256 TEXT REFERENCES blobs(sha256),
+    updated_at_ms INTEGER NOT NULL,
+    latest_moment_id TEXT NOT NULL,
+    metadata_origin TEXT NOT NULL,
+    content_kind TEXT NOT NULL CHECK (content_kind IN ('text', 'binary')),
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    CHECK (
+        (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
+     OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
+    ),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_snapshots_by_document ON hosted_parked_snapshots(workspace_id, object_id);
+CREATE TABLE hosted_parked_path_aliases (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_path_aliases_by_document
+  ON hosted_parked_path_aliases(workspace_id, object_id, version_id, path);
+INSERT INTO hosted_parked_snapshots (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,
+    latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary,metadata_correlation_id)
+  SELECT workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,
+    content_kind,binary_sha256,metadata_summary,metadata_correlation_id FROM temp.hosted_parked_snapshots_kept;
+INSERT INTO hosted_parked_path_aliases (workspace_id,version_id,path,object_id)
+  SELECT workspace_id,version_id,path,object_id FROM temp.hosted_parked_path_aliases_kept;
+DROP TABLE temp.hosted_parked_snapshots_kept;
+DROP TABLE temp.hosted_parked_path_aliases_kept;
+ALTER TABLE ydoc_deferred_updates ADD COLUMN relay_namespace TEXT
+    CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN replication_epoch TEXT
+    CHECK (replication_epoch IS NULL OR length(CAST(replication_epoch AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN stream_identity TEXT
+    CHECK (stream_identity IS NULL OR length(CAST(stream_identity AS BLOB)) > 0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
+    CHECK (ingress_kind IN ('local','hosted','legacy-unknown')
+      AND (ingress_kind <> 'hosted' OR (relay_namespace IS NOT NULL AND replication_epoch IS NOT NULL
+        AND stream_identity IS NOT NULL AND relay_seq IS NOT NULL AND relay_seq > 0)));
+UPDATE ydoc_deferred_updates SET ingress_kind='local'
+  WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=ydoc_deferred_updates.workspace_id);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN lineage_replacement_json TEXT
+    CHECK (lineage_replacement_json IS NULL OR json_valid(lineage_replacement_json));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN applied_refusal TEXT
+    CHECK (applied_refusal IS NULL OR length(applied_refusal) > 0);
+ALTER TABLE relay_deferred_ops ADD COLUMN relay_namespace TEXT
+    CHECK (relay_namespace IS NULL OR length(CAST(relay_namespace AS BLOB)) > 0);
+ALTER TABLE relay_deferred_ops ADD COLUMN ingress_kind TEXT NOT NULL DEFAULT 'legacy-unknown'
+    CHECK (ingress_kind IN ('local','hosted','legacy-unknown')
+      AND (ingress_kind <> 'hosted' OR (relay_namespace IS NOT NULL
+        AND length(CAST(replication_epoch AS BLOB)) > 0 AND length(CAST(stream_identity AS BLOB)) > 0
+        AND json_type(envelope_json,'$.relaySeq') IS 'integer'
+        AND json_extract(envelope_json,'$.relaySeq') > 0)));
+UPDATE relay_deferred_ops SET ingress_kind='local'
+  WHERE NOT EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=relay_deferred_ops.workspace_id);
+CREATE TABLE ydoc_drain_reports (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    report_json TEXT NOT NULL CHECK (json_valid(report_json)),
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+DROP TRIGGER ydoc_pending_artifacts_settled;
+CREATE TRIGGER ydoc_pending_artifacts_settled AFTER UPDATE OF last_settled_sha,settled_update_seq ON ydoc_docs
+WHEN NEW.settled_update_seq=NEW.head_update_seq AND EXISTS (
+    SELECT 1 FROM snapshots s WHERE s.workspace_id=NEW.workspace_id
+      AND s.version_id=NEW.version_id AND s.object_id=NEW.object_id
+      AND s.blob_sha256=NEW.last_settled_sha)
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=NEW.workspace_id
+      AND reason_code='document-artifact-recovery-failed'
+      AND (origin_id,origin_seq) IN (SELECT origin_id,origin_seq FROM ydoc_pending_artifacts
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id);
+    DELETE FROM ydoc_pending_artifacts WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id
+      AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u WHERE u.workspace_id=NEW.workspace_id
+        AND u.version_id=NEW.version_id AND u.object_id=NEW.object_id);
+END;
+CREATE TABLE released_hold_copy_decisions (
+    workspace_id TEXT NOT NULL,
+    binding_digest TEXT NOT NULL CHECK (length(binding_digest)=64 AND binding_digest NOT GLOB '*[^0-9a-f]*'),
+    attempt INTEGER NOT NULL CHECK (attempt BETWEEN 0 AND 9007199254740991),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json) AND json_type(binding_json)='object'
+      AND json_extract(binding_json,'$.workspaceId') IS workspace_id),
+    projection_sha256 TEXT NOT NULL
+      CHECK (length(projection_sha256)=64 AND projection_sha256 NOT GLOB '*[^0-9a-f]*'),
+    projection_byte_length INTEGER NOT NULL CHECK (projection_byte_length BETWEEN 0 AND 9007199254740991),
+    merged_contribution_ids_json TEXT NOT NULL
+      CHECK (json_valid(merged_contribution_ids_json) AND json_type(merged_contribution_ids_json)='array'),
+    recovery_object_id TEXT NOT NULL CHECK (length(recovery_object_id) > 0),
+    recovery_moment_id TEXT NOT NULL CHECK (length(recovery_moment_id) > 0),
+    recovered_path TEXT NOT NULL CHECK (length(recovered_path) > 0),
+    collision_ordinal TEXT NOT NULL
+      CHECK (length(collision_ordinal) > 0 AND collision_ordinal NOT GLOB '*[^0-9]*'),
+    recovery_author_json TEXT NOT NULL CHECK (json_valid(recovery_author_json)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+    accepted_recovery_origin_id TEXT CHECK (length(accepted_recovery_origin_id) > 0),
+    accepted_recovery_origin_seq INTEGER CHECK (accepted_recovery_origin_seq BETWEEN 0 AND 9007199254740991),
+    accepted_recovery_relay_seq INTEGER CHECK (accepted_recovery_relay_seq BETWEEN 1 AND 9007199254740991),
+    resolution_outcome TEXT CHECK (resolution_outcome IN ('resolved','stale')),
+    resolution_outcome_at_ms INTEGER CHECK (resolution_outcome_at_ms BETWEEN 0 AND 9007199254740991),
+    CHECK ((accepted_recovery_origin_id IS NULL AND accepted_recovery_origin_seq IS NULL
+            AND accepted_recovery_relay_seq IS NULL)
+        OR (accepted_recovery_origin_id IS NOT NULL AND accepted_recovery_origin_seq IS NOT NULL
+            AND accepted_recovery_relay_seq IS NOT NULL)),
+    CHECK ((resolution_outcome IS NULL) = (resolution_outcome_at_ms IS NULL)),
+    PRIMARY KEY (workspace_id, binding_digest, attempt),
+    UNIQUE (workspace_id, recovery_object_id),
+    UNIQUE (workspace_id, recovery_moment_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (projection_sha256) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX released_hold_copy_decisions_projection ON released_hold_copy_decisions(projection_sha256);
+";
+
+/// The triggers that keep and move a released tail generation, keep a hold's
+/// binding with its digest, and keep and advance its hold revision. A store
+/// missing one would keep tails, or release proofs, its rows no longer prove.
+pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
+    "released_tail_generation_advance",
+    "released_tail_generation_kept",
+    "released_tail_activation_insert",
+    "released_tail_activation_update",
+    "released_tail_activation_delete",
+    "released_tail_outbox_insert",
+    "released_tail_outbox_update",
+    "released_tail_outbox_delete",
+    "released_tail_entry_insert",
+    "released_tail_entry_update",
+    "released_tail_entry_delete",
+    "released_tail_application_insert",
+    "released_tail_application_update",
+    "released_tail_application_delete",
+    "released_tail_accepted_insert",
+    "released_tail_accepted_update",
+    "released_tail_accepted_delete",
+    "released_tail_capture_insert",
+    "released_tail_capture_update",
+    "released_tail_capture_delete",
+    "released_tail_journal_insert",
+    "released_tail_journal_update",
+    "released_tail_journal_delete",
+    "released_tail_document_insert",
+    "released_tail_document_update",
+    "released_tail_document_compaction",
+    "released_tail_document_delete",
+    "released_tail_blob_insert",
+    "released_tail_blob_update",
+    "released_tail_blob_delete",
+    "released_tail_head_journal_insert",
+    "released_tail_head_journal_update",
+    "released_tail_head_journal_delete",
+    "released_tail_state_blob_update",
+    "released_tail_state_blob_insert",
+    "released_tail_snapshot_update",
+    "released_tail_snapshot_delete",
+    "released_tail_archive_update",
+    "released_tail_archive_delete",
+    "released_hold_binding_digest_moves",
+    "released_hold_revision_advance",
+    "released_hold_revision_kept",
+    "released_hold_revision_insert",
+    "released_hold_revision_update",
+    "released_hold_revision_delete",
 ];
 
 /// The projection an empty live settlement committed, per lineage. The relay
@@ -4646,6 +5413,10 @@ mod tests {
                 "v2-live-empty-settlements",
                 "b4fa8a3c0e71194cd96dd067afd4b867d77ea0691719878388c7d7938335977b",
             ),
+            (
+                "v2-live-owner-activations",
+                "ab7c083adc62cd7ceb164fda18d23f473673bf6c024c091742e292d84683cd5b",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5009,9 +5780,9 @@ mod tests {
         }
 
         let mut conn = open_bare(&path);
+        let through = &BASELINE_MIGRATIONS[..=before];
         assert_eq!(
-            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
-                .expect("upgrade"),
+            run_migrations(&mut conn, through, &ctx, &NoFaults).expect("upgrade"),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let runs = conn
@@ -5053,6 +5824,324 @@ mod tests {
                 )
                 .unwrap()
         );
+        assert_eq!(
+            run_migrations(&mut conn, through, &ctx, &NoFaults).expect("reopen"),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    const ADOPTION_FACTS: &str = "json_array(binding_json,source_moment_id,source_digest,source_byte_length,\
+        baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,\
+        coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,\
+        max_pending_bytes,max_pending_age_ms)";
+
+    #[test]
+    fn live_owner_activations_upgrade_backfills_each_adoption_and_its_binding() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-owner-activations");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 75);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 76);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("previous store version");
+        let lineage = crate::blob::put_binary_blob(&conn, b"lineage").unwrap();
+        let other = crate::blob::put_binary_blob(&conn, b"other").unwrap();
+        let source = crate::blob::hex_sha256(b"");
+        conn.execute(
+            "INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",
+            [&source],
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main')")
+            .unwrap();
+        for (adoption, object, receipt) in [
+            ("adoption-a", "a", "null"),
+            (
+                "adoption-b",
+                "b",
+                r#"{"deliveryId":"d","updateDigest":"u","journalCursor":7,"acceptingHostEpoch":1}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO live_owner_adoptions VALUES ('relay',?1,'ws','main',?2,?3,?4,'moment',?5,0,3,4,'evidence','coverage',5,6,?6,?7,'{\"hostId\":\"host\"}',1000,2000)",
+                rusqlite::params![adoption, object, lineage, format!("{{\"objectId\":\"{object}\"}}"), source,
+                    if object == "a" { 0 } else { 7 }, receipt],
+            )
+            .unwrap();
+        }
+        for (object, claim) in [("a", &lineage), ("b", &other), ("c", &lineage)] {
+            conn.execute(
+                "INSERT INTO live_device_application_bindings VALUES ('relay','ws','main',?1,?2,'a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)",
+                rusqlite::params![object, claim],
+            )
+            .unwrap();
+        }
+        let adoptions = |conn: &Connection| -> Vec<String> {
+            conn.prepare(&format!("SELECT json_array(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id)||{ADOPTION_FACTS} FROM live_owner_adoptions ORDER BY adoption_id"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let roots = adoptions(&conn);
+
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
+                .expect("upgrade"),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(
+            adoptions(&conn),
+            roots,
+            "the lineage origin stays as it was"
+        );
+        let backfilled: Vec<(String, String, Option<String>, bool)> = conn
+            .prepare(&format!(
+                "SELECT v.activation_id,v.origin_adoption_id,v.predecessor_activation_id,
+                    {ADOPTION_FACTS}=(SELECT {ADOPTION_FACTS} FROM live_owner_adoptions a WHERE a.adoption_id=v.activation_id)
+                    AND v.boundary_json IS NULL AND v.released_at_ms IS NULL
+                 FROM live_owner_activations v ORDER BY v.activation_id"
+            ))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            backfilled,
+            vec![
+                ("adoption-a".into(), "adoption-a".into(), None, true),
+                ("adoption-b".into(), "adoption-b".into(), None, true),
+            ]
+        );
+        let bindings: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT object_id,activation_id FROM live_device_application_bindings ORDER BY object_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            bindings,
+            vec![
+                ("a".into(), Some("adoption-a".into())),
+                ("b".into(), None),
+                ("c".into(), None),
+            ],
+            "a binding names the adoption of its own lineage only"
+        );
+        let document: (i64, String) = conn
+            .query_row(
+                "SELECT l.partial,(SELECT group_concat(name,',') FROM
+                    (SELECT name FROM pragma_index_info('live_owner_activations_document') ORDER BY seqno))
+                 FROM pragma_index_list('live_owner_activations') l WHERE l.name='live_owner_activations_document'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            document,
+            (
+                0,
+                "workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace"
+                    .into()
+            ),
+            "every activation of a document lineage is found by its document"
+        );
+
+        // `baseline` is the relay sequence and registration time, each present or absent.
+        let insert_with = |id: &str,
+                           predecessor: Option<&str>,
+                           object: &str,
+                           released: bool,
+                           adopted: bool,
+                           baseline: (Option<i64>, Option<i64>),
+                           origin: Option<&str>| {
+            conn.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+                    object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,
+                    source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
+                    host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                    terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,released_at_ms,
+                    released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
+                 VALUES ('relay',?1,'ws','main',?3,?4,?10,?2,'{}','moment',?5,0,?8,?9,'{}',
+                    iif(?7,'e',NULL),iif(?7,'c',NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,'null',NULL),
+                    iif(?7,1,NULL),iif(?7,1,NULL),iif(?6,9,NULL),iif(?6,1,NULL),iif(?6,0,NULL),iif(?6,'[]',NULL),iif(?6,'[]',NULL))",
+                rusqlite::params![id, predecessor, object, lineage, source, released, adopted, baseline.0, baseline.1, origin],
+            )
+        };
+        // An adopted row names its lineage's origin; one that never adopted names none.
+        let insert = |id: &str,
+                      predecessor: Option<&str>,
+                      object: &str,
+                      released: bool,
+                      adopted: bool,
+                      baseline: (Option<i64>, Option<i64>)| {
+            insert_with(
+                id,
+                predecessor,
+                object,
+                released,
+                adopted,
+                baseline,
+                (adopted && object == "a").then_some("adoption-a"),
+            )
+        };
+        let known = (Some(0), Some(0));
+        assert!(
+            insert("second-current", None, "a", false, true, known).is_err(),
+            "one unreleased activation per document lineage"
+        );
+        assert!(
+            insert("never-adopted", None, "a", false, false, known).is_err(),
+            "an unreleased activation is adopted"
+        );
+        insert("released", Some("adoption-a"), "a", true, false, known)
+            .expect("a released successor");
+        assert!(
+            insert("sibling", Some("adoption-a"), "a", true, false, known).is_err(),
+            "one successor per activation"
+        );
+        assert!(
+            insert("elsewhere", Some("released"), "b", true, false, known).is_err(),
+            "a predecessor stays on its lineage"
+        );
+        insert(
+            "unregistered",
+            Some("released"),
+            "a",
+            true,
+            false,
+            (None, None),
+        )
+        .expect("a release that never adopted needs no baseline");
+        for (id, baseline) in [("half", (Some(1), None)), ("other-half", (None, Some(1)))] {
+            assert!(
+                insert(id, None, "c", true, false, baseline).is_err(),
+                "a baseline's sequence and time arrive together"
+            );
+        }
+        assert!(
+            insert(
+                "unanchored",
+                Some("unregistered"),
+                "a",
+                true,
+                true,
+                (None, None)
+            )
+            .is_err(),
+            "an adoption carries its baseline"
+        );
+        assert!(
+            insert_with(
+                "unrooted",
+                Some("unregistered"),
+                "a",
+                true,
+                true,
+                known,
+                None
+            )
+            .is_err(),
+            "an adoption names its lineage's origin"
+        );
+        assert!(
+            insert_with(
+                "rooted",
+                Some("unregistered"),
+                "a",
+                true,
+                false,
+                known,
+                Some("adoption-a")
+            )
+            .is_err(),
+            "an activation that never adopted names no origin"
+        );
+        // Sol's any-namespace ruling: a document lineage has one adopted
+        // origin in any namespace, and succession stays in its own.
+        let copied = |table: &str, id_column: &str, id: &str, changes: &str| {
+            conn.execute_batch(&format!(
+                "CREATE TEMP TABLE copied AS SELECT * FROM {table} WHERE {id_column}='{id}';
+                 UPDATE copied SET relay_database_namespace='other',{changes};"
+            ))
+            .unwrap();
+            let inserted = conn
+                .execute(&format!("INSERT INTO {table} SELECT * FROM copied"), [])
+                .map_err(|error| error.to_string());
+            conn.execute_batch("DROP TABLE copied").unwrap();
+            inserted
+        };
+        let refused = |inserted: Result<usize, String>, constraint: &str, case: &str| {
+            assert!(
+                inserted
+                    .as_ref()
+                    .is_err_and(|error| error.contains(constraint)),
+                "{case}: {inserted:?}"
+            );
+        };
+        refused(
+            copied(
+                "live_owner_adoptions",
+                "adoption_id",
+                "adoption-a",
+                "adoption_id='adoption-other'",
+            ),
+            "UNIQUE",
+            "a second adopted origin in another namespace",
+        );
+        refused(
+            copied(
+                "live_owner_activations",
+                "activation_id",
+                "released",
+                "activation_id='across'",
+            ),
+            "FOREIGN KEY",
+            "a successor of an activation in another namespace",
+        );
+        refused(
+            copied(
+                "live_owner_activations",
+                "activation_id",
+                "adoption-a",
+                "activation_id='adopted-across',released_at_ms=9,released_restore_generation=1,
+                 released_accepted_cursor=0,released_boundary_json='[]',carried_manifest_json='[]'",
+            ),
+            "FOREIGN KEY",
+            "an adoption naming the origin of another namespace",
+        );
+        let unregistered: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT baseline_moment_relay_sequence,baseline_registered_at_ms
+                 FROM live_owner_activations WHERE activation_id='unregistered'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unregistered, (None, None), "nothing invents a baseline");
+        assert!(
+            conn.execute(
+                "UPDATE live_owner_activations SET carried_manifest_json=NULL WHERE activation_id='released'",
+                []
+            )
+            .is_err(),
+            "release facts arrive together"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE live_owner_activations SET terminal_receipt_json=NULL WHERE activation_id='adoption-a'",
+                []
+            )
+            .is_err(),
+            "adoption facts arrive together"
+        );
+        assert_eq!(adoptions(&conn), roots);
         assert_eq!(
             run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
                 .expect("reopen"),
@@ -5464,6 +6553,360 @@ mod tests {
             })
             .unwrap();
         assert_eq!(documents, 0, "documents leave with their replica");
+    }
+
+    /// Hosted documents, held and parked ones among them, with their parked
+    /// heads and aliases, and deferred Y.Doc updates of a hosted and an
+    /// ordinary workspace.
+    const HOSTED_AND_DEFERRED_ROWS: &str = "\
+        INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+          VALUES ('hosted','service-host:a','epoch','stream',1),('ordinary','origin:a','epoch','stream',1); \
+        INSERT INTO hosted_replicas (workspace_id,scope_generation,cursor_commits,created_at_ms) \
+          VALUES ('hosted',2,5,1); \
+        INSERT INTO versioned_workspaces VALUES ('hosted','main'),('ordinary','main'); \
+        INSERT INTO versions (workspace_id,version_id,kind,name,created_at_ms) \
+          VALUES ('hosted','main','main','main',0),('ordinary','main','main','main',0); \
+        INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+          VALUES ('hosted','held',0),('ordinary','doc',0); \
+        INSERT INTO blobs (sha256,byte_length,text) VALUES (printf('%064d',0),1,'x'); \
+        INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (printf('%064d',1),1,x'01'); \
+        INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,held_path, \
+          held_by,backfill_cursor,scope_generation,unmaterialized_seq) \
+          VALUES ('hosted','held','a.md','held','hosted-backfill-path-held','a.md','ready',4,2,NULL), \
+                 ('hosted','ready','b.md','ready',NULL,NULL,NULL,7,2,9), \
+                 ('hosted','parked','c.md','parked',NULL,NULL,NULL,3,1,NULL), \
+                 ('hosted','image','d.png','parked',NULL,NULL,NULL,2,1,NULL); \
+        INSERT INTO hosted_parked_snapshots (workspace_id,version_id,object_id,path,blob_sha256, \
+          updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256,metadata_summary, \
+          metadata_correlation_id) \
+          VALUES ('hosted','main','parked','c.md',printf('%064d',0),5,'moment','sync','text',NULL,NULL,NULL), \
+                 ('hosted','main','image','d.png',NULL,6,'binary-moment','sync','binary', \
+                   printf('%064d',1),'a summary','a correlation'); \
+        INSERT INTO hosted_parked_path_aliases (workspace_id,version_id,path,object_id) \
+          VALUES ('hosted','main','old/c.md','parked'); \
+        INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+          recorded_at_ms,relay_seq) \
+          VALUES ('hosted','main','held','peer',1,5,3),('ordinary','main','doc','peer',1,5,NULL); \
+        INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+          stream_identity,envelope_json,retained_bytes) \
+          VALUES ('hosted','peer',1,'epoch','stream','{\"relaySeq\":3}',1), \
+                 ('ordinary','peer',1,'epoch','stream','{}',1);";
+
+    /// Every row the hosted tables and deferred Y.Doc updates hold, by the
+    /// columns both schemas share.
+    fn hosted_and_deferred_rows(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT json_array( \
+               (SELECT json_group_array(json_array(workspace_id,object_id,path,state,held_reason,held_path, \
+                  held_by,held_conflict_id,backfill_cursor,scope_generation,unmaterialized_seq)) \
+                FROM (SELECT * FROM hosted_documents ORDER BY object_id)), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,object_id,path,blob_sha256, \
+                  updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256, \
+                  metadata_summary,metadata_correlation_id)) \
+                FROM (SELECT * FROM hosted_parked_snapshots ORDER BY object_id)), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,path,object_id)) \
+                FROM hosted_parked_path_aliases), \
+               (SELECT json_group_array(json_array(workspace_id,version_id,object_id,origin_id,origin_seq, \
+                  recorded_at_ms,lineage_claim_id,relay_seq)) \
+                FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)), \
+               (SELECT json_group_array(json_array(workspace_id,origin_id,origin_seq,replication_epoch, \
+                  stream_identity,envelope_json,retained_bytes,checked_sequence,report_id)) \
+                FROM (SELECT * FROM relay_deferred_ops ORDER BY workspace_id)))",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Plan r3's local decision table: one row per binding and attempt, with
+    /// unique copy identities in a workspace, every digest, length, integer
+    /// and JSON value checked, accepted coordinates and terminal outcomes
+    /// whole or absent, the copy's text pinned while a decision names it, and
+    /// the rows gone with their workspace.
+    #[test]
+    fn released_hold_copy_decisions_check_every_column() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("decisions.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let text = "c".repeat(64);
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'),('other','main');
+             INSERT INTO blobs VALUES ('{text}',4,'copy');"
+        ))
+        .unwrap();
+        let digest = "a".repeat(64);
+        // A decision of `attempt` naming `copy` and `moment`, its binding in
+        // `bound`'s workspace and its text at `projection`.
+        let insert = |attempt: i64, copy: &str, moment: &str, bound: &str, projection: &str| {
+            format!(
+                "INSERT INTO released_hold_copy_decisions (workspace_id,binding_digest,attempt,binding_json,
+                   projection_sha256,projection_byte_length,merged_contribution_ids_json,recovery_object_id,
+                   recovery_moment_id,recovered_path,collision_ordinal,recovery_author_json,created_at_ms)
+                 VALUES ('ws','{digest}',{attempt},'{{\"workspaceId\":\"{bound}\"}}','{projection}',4,'[]',
+                   '{copy}','{moment}','notes/plan (retained).md','0','{{}}',1)"
+            )
+        };
+        conn.execute(&insert(0, "copy", "moment", "ws", &text), [])
+            .unwrap();
+        for valid in [
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_origin_id='owner', \
+             accepted_recovery_origin_seq=0,accepted_recovery_relay_seq=7",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='resolved',resolution_outcome_at_ms=2",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='stale'",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='12', \
+             merged_contribution_ids_json='[{\"kind\":\"carried\"}]'",
+        ] {
+            conn.execute(valid, []).unwrap();
+        }
+        // Another attempt at the same binding names other copy identities.
+        conn.execute(&insert(1, "copy-1", "moment-1", "ws", &text), [])
+            .unwrap();
+        let unstored = "d".repeat(64);
+        for invalid in [
+            // The same attempt, or another attempt reusing a copy identity.
+            insert(0, "copy-2", "moment-2", "ws", &text),
+            insert(2, "copy", "moment-2", "ws", &text),
+            insert(2, "copy-2", "moment", "ws", &text),
+            // A binding of another workspace, a projection never stored.
+            insert(3, "copy-3", "moment-3", "other", &text),
+            insert(3, "copy-3", "moment-3", "ws", &unstored),
+        ] {
+            assert!(conn.execute(&invalid, []).is_err(), "{invalid}");
+        }
+        for invalid in [
+            "UPDATE released_hold_copy_decisions SET binding_digest='ABC' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET attempt=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET attempt=9007199254740992 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET binding_json='not json' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET binding_json='[]' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET projection_byte_length=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET merged_contribution_ids_json='{}' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovered_path='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='-1' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_author_json='not json' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET created_at_ms=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_relay_seq=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_relay_seq=0 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_origin_id='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome_at_ms=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='refused' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_object_id='copy-1' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_moment_id='moment-1' WHERE attempt=0",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        assert!(
+            conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), [])
+                .is_err(),
+            "a decision pins its copy's text"
+        );
+        conn.execute(
+            "DELETE FROM versioned_workspaces WHERE workspace_id='ws'",
+            [],
+        )
+        .unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM released_hold_copy_decisions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "decisions leave with their workspace");
+        conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), [])
+            .unwrap();
+    }
+
+    /// A released-lineage hold carries its binding with its digest, and its
+    /// continuation, and no other hold does; the binding is the row's last
+    /// column. A hosted deferral names its whole feed, and a local one needs
+    /// none.
+    fn released_hold_and_deferred_feed_constraints_hold(conn: &Connection) {
+        let new_columns: (Option<String>, Option<String>, Option<String>, i64) = conn
+            .query_row(
+                "SELECT released_hold_binding_json,released_hold_binding_digest, \
+                 released_hold_continuation,released_hold_binding_stale \
+                 FROM hosted_documents WHERE object_id='held'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(new_columns, (None, None, None, 0));
+        let last: String = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('hosted_documents') ORDER BY cid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, "released_hold_binding_json");
+        let digest = "a".repeat(64);
+        let hold = format!(
+            "UPDATE hosted_documents SET held_reason='released-lineage-unsettled',held_path=NULL, \
+             held_by=NULL,released_hold_binding_json='{{}}',released_hold_binding_digest='{digest}', \
+             released_hold_continuation='frozen' WHERE object_id='held'"
+        );
+        let rebound = format!(
+            "UPDATE hosted_documents SET released_hold_binding_json='{{\"rebound\":1}}', \
+             released_hold_binding_digest='{}' WHERE object_id='held'",
+            "b".repeat(64)
+        );
+        for valid in [
+            hold.as_str(),
+            rebound.as_str(),
+            "UPDATE hosted_documents SET released_hold_binding_json=released_hold_binding_json \
+             WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_continuation='dependency-drain', \
+             released_hold_binding_stale=1 WHERE object_id='held'",
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+             recorded_at_ms,relay_seq,ingress_kind,relay_namespace,replication_epoch,stream_identity) \
+             VALUES ('hosted','main','held','peer',2,6,4,'hosted','relay','epoch','stream')",
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
+             recorded_at_ms,ingress_kind) VALUES ('ordinary','main','doc','peer',2,6,'local')",
+            "UPDATE ydoc_deferred_updates SET lineage_replacement_json='{}' WHERE origin_seq=2",
+            "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+             stream_identity,envelope_json,retained_bytes,ingress_kind,relay_namespace) \
+             VALUES ('hosted','peer',2,'epoch','stream','{\"relaySeq\":4}',1,'hosted','relay')",
+            "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq,replication_epoch, \
+             stream_identity,envelope_json,retained_bytes,ingress_kind) \
+             VALUES ('ordinary','peer',2,'epoch','stream','{}',1,'local')",
+        ] {
+            conn.execute(valid, []).unwrap();
+        }
+        for invalid in [
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled' \
+             WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_binding_json='{}' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_continuation='frozen' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_json='{}', \
+             released_hold_continuation='frozen' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_digest=NULL WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_digest='abc' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_digest=upper(released_hold_binding_digest) \
+             WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_json='not json' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_json='{}' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_continuation='thawed' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_stale=2 WHERE object_id='held'",
+            "UPDATE hosted_documents SET held_path='a.md' WHERE object_id='held'",
+            "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='held'",
+            "UPDATE ydoc_deferred_updates SET ingress_kind='hosted' WHERE origin_seq=1",
+            "UPDATE ydoc_deferred_updates SET ingress_kind='remote' WHERE origin_seq=1",
+            "UPDATE ydoc_deferred_updates SET relay_namespace=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_namespace='' WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET replication_epoch=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET stream_identity=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_seq=NULL WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET relay_seq=0 WHERE ingress_kind='hosted'",
+            "UPDATE ydoc_deferred_updates SET lineage_replacement_json='not json' WHERE origin_seq=1",
+            "UPDATE relay_deferred_ops SET ingress_kind='hosted' WHERE origin_seq=1",
+            "UPDATE relay_deferred_ops SET ingress_kind='remote' WHERE origin_seq=1",
+            "UPDATE relay_deferred_ops SET relay_namespace=NULL WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET relay_namespace='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET replication_epoch='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET stream_identity='' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{}' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{\"relaySeq\":0}' WHERE ingress_kind='hosted'",
+            "UPDATE relay_deferred_ops SET envelope_json='{\"relaySeq\":\"4\"}' WHERE ingress_kind='hosted'",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        for invalid in [
+            format!("UPDATE hosted_documents SET released_hold_binding_digest='{digest}' WHERE object_id='ready'"),
+            format!(
+                "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+                 released_hold_binding_digest='{digest}',released_hold_continuation='frozen' \
+                 WHERE object_id='ready'"
+            ),
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_binding_json='{}',released_hold_continuation='frozen' WHERE object_id='ready'"
+                .to_owned(),
+        ] {
+            assert!(conn.execute(&invalid, []).is_err(), "{invalid}");
+        }
+        conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM hosted_documents) \
+                 + (SELECT COUNT(*) FROM hosted_parked_snapshots) \
+                 + (SELECT COUNT(*) FROM hosted_parked_path_aliases)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            left, 0,
+            "documents and their parked heads leave with their replica"
+        );
+    }
+
+    /// The activations migration rebuilds the hosted documents table for the
+    /// released-lineage hold and gives deferred Y.Doc updates and retained
+    /// relay work their feed. An upgrade keeps every hosted document, hold,
+    /// parked head and alias, and deferred row; a deferred row of a
+    /// workspace that is no hosted replica
+    /// is local, and one of a hosted replica keeps an unknown feed. A fresh
+    /// store enforces the same rules.
+    #[test]
+    fn live_owner_activations_upgrade_keeps_hosted_documents_and_classifies_deferred_rows() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut fresh = open_bare(&dir.join("fresh.db"));
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        fresh.execute_batch(HOSTED_AND_DEFERRED_ROWS).unwrap();
+        released_hold_and_deferred_feed_constraints_hold(&fresh);
+
+        let mut conn = open_bare(&dir.join("upgraded.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-live-owner-activations");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(HOSTED_AND_DEFERRED_ROWS).unwrap();
+        let kept = hosted_and_deferred_rows(&conn);
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(hosted_and_deferred_rows(&conn), kept);
+        let foreign: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign, 0);
+        let feeds: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(workspace_id,ingress_kind,relay_namespace, \
+                   replication_epoch,stream_identity)) \
+                 FROM (SELECT * FROM ydoc_deferred_updates ORDER BY workspace_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            feeds,
+            r#"[["hosted","legacy-unknown",null,null,null],["ordinary","local",null,null,null]]"#
+        );
+        let relay_feeds: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(workspace_id,ingress_kind,relay_namespace)) \
+                 FROM (SELECT * FROM relay_deferred_ops ORDER BY workspace_id)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            relay_feeds,
+            r#"[["hosted","legacy-unknown",null],["ordinary","local",null]]"#
+        );
+        released_hold_and_deferred_feed_constraints_hold(&conn);
     }
 
     #[test]
@@ -8529,5 +9972,873 @@ mod tests {
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {
         dohc_test_scratch::ScratchDir::new_named("r04-mig").expect("mkdir")
+    }
+
+    /// A store with documents `a` and `b`, each with an activation, whose
+    /// writes skip the schema's checks. `a`'s outbox entry names native
+    /// sequence 5, its delivery `delivery-a`, and terminal blob `refused`.
+    fn released_tail_store(dir: &dohc_test_scratch::ScratchDir) -> Connection {
+        let path = dir.join("engine.db");
+        drop(crate::EngineStore::open(&path, 0).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+             INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('ws','main','a',0),('ws','main','b',0);
+             {activation_a}; {activation_b};
+             INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,
+               selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,
+               pending_bytes,next_sequence,created_at_ms)
+             VALUES ('outbox-a','ws','main','a','lineage','a.md','[]',0,'base','base',1,'active',0,2,0),
+                    ('outbox-b','ws','main','b','lineage','b.md','[]',0,'base','base',1,'active',0,1,0);
+             {entry}",
+            activation_a = released_tail_activation("activation", "a", "lineage", None),
+            activation_b = released_tail_activation("activation-b", "b", "lineage", None),
+            entry = released_tail_entry(1, "delivery-a", 5),
+        ))
+        .unwrap();
+        conn
+    }
+
+    fn released_tail_activation(
+        id: &str,
+        object: &str,
+        lineage: &str,
+        predecessor: Option<&str>,
+    ) -> String {
+        format!(
+            "INSERT INTO live_owner_activations VALUES ('relay','{id}','ws','main','{object}','{lineage}','{id}',{},
+               '{{}}','source','source',0,1,0,'{{}}','evidence','coverage',0,0,0,'null',1000000,60000,
+               NULL,NULL,NULL,NULL,NULL,NULL)",
+            predecessor.map_or("NULL".to_owned(), |id| format!("'{id}'"))
+        )
+    }
+
+    fn released_tail_entry(sequence: i64, delivery: &str, native_sequence: i64) -> String {
+        format!(
+            "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+               native_source_json,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,
+               result_state,terminal_blob_digest,terminal_reason)
+             VALUES ('outbox-a',{sequence},'key-{sequence}','{delivery}','refused',
+               json_object('binding',json_object('objectId','a'),'nativeSequence',{native_sequence}),1,0,0,1,0,
+               'active','refused','refused')"
+        )
+    }
+
+    fn released_tail_application(table: &str, delivery: &str, object: &str, cursor: i64) -> String {
+        match table {
+            "live_device_update_applications" => format!(
+                "INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,
+                   main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,
+                   update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,
+                   received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,
+                   applied_instance_id,applied_connection_id)
+                 VALUES ('relay','ws','{delivery}','main','{object}','lineage','a.md','[]',0,'update',1,{cursor},1,
+                   'owner','owner',0,0,1,'host',1,'instance','connection')"
+            ),
+            _ => format!(
+                "INSERT INTO live_accepted_updates VALUES ('relay','ws','main','{object}','lineage',{cursor},{cursor},
+                   '{delivery}','{{}}','update',1,1,'evidence')"
+            ),
+        }
+    }
+
+    fn released_tail_generation(conn: &Connection, object: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT generation FROM released_tail_generations WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+            [object],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// Sol's tails-cache ruling: each of the nine tables a document's
+    /// released tails read moves its generation, old and new rows alike. A
+    /// delivery moves the document whose entry holds it, whatever document
+    /// its row claims; an activation moves the document of every activation
+    /// whose chain passes through it. So does the state a held document's
+    /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
+    /// finding 1), including a latest snapshot removed after it folded rows,
+    /// an archive rebound, and a missing blob restored (Sol's r2c-3c-3
+    /// findings 1 and 2, Opus's finding 1). A blob nothing names, a folded
+    /// journal row no entry names, an append, a superseded snapshot pruned,
+    /// and a document column neither reads move nothing. The generation
+    /// outlives its document.
+    #[test]
+    fn every_released_tail_input_moves_its_documents_generation() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        assert_eq!(
+            released_tail_generation(&conn, "c"),
+            None,
+            "no activation, no generation"
+        );
+        let step = |sql: &str, moved: &[&str]| {
+            let objects = ["a", "b", "c"];
+            let before = objects.map(|object| released_tail_generation(&conn, object));
+            conn.execute_batch(sql).unwrap();
+            for (object, before) in objects.into_iter().zip(before) {
+                let after = released_tail_generation(&conn, object);
+                if moved.contains(&object) {
+                    assert!(after > before, "{sql} moves {object}");
+                } else {
+                    assert_eq!(after, before, "{sql} keeps {object}");
+                }
+            }
+        };
+        step(
+            "UPDATE live_owner_activations SET source_byte_length=1 WHERE activation_id='activation'",
+            &["a"],
+        );
+        step(
+            &released_tail_activation("follower", "b", "follower", Some("activation")),
+            &["b"],
+        );
+        // Past the store's checks, a chain can pass through other documents:
+        // `c`'s runs through `b`'s activation to `a`'s.
+        step(
+            &released_tail_activation("third", "c", "third", Some("follower")),
+            &["c"],
+        );
+        step(
+            "UPDATE live_owner_activations SET binding_json='[]' WHERE activation_id='activation'",
+            &["a", "b", "c"],
+        );
+        step(
+            "DELETE FROM live_owner_activations WHERE activation_id='follower'",
+            &["b", "c"],
+        );
+        step(
+            "UPDATE owner_ydoc_outboxes SET created_at_ms=1 WHERE outbox_id='outbox-a'",
+            &["a"],
+        );
+        step(
+            "UPDATE owner_ydoc_outboxes SET object_id='b' WHERE outbox_id='outbox-a'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE owner_ydoc_outboxes SET object_id='a' WHERE outbox_id='outbox-a'",
+            &["a", "b"],
+        );
+        step(&released_tail_entry(2, "delivery-2", 6), &["a"]);
+        step(
+            "UPDATE owner_ydoc_outbox_entries SET created_at_ms=1 WHERE sequence=2",
+            &["a"],
+        );
+        step(
+            "UPDATE owner_ydoc_outbox_entries SET outbox_id='outbox-b' WHERE sequence=2",
+            &["a", "b"],
+        );
+        step(
+            "DELETE FROM owner_ydoc_outbox_entries WHERE sequence=2",
+            &["b"],
+        );
+        for table in ["live_device_update_applications", "live_accepted_updates"] {
+            step(
+                &released_tail_application(table, "delivery-a", "b", 1),
+                &["a", "b"],
+            );
+            step(&released_tail_application(table, "unheld", "b", 2), &["b"]);
+            step(
+                &format!("UPDATE {table} SET delivery_id='moved' WHERE delivery_id='delivery-a'"),
+                &["a", "b"],
+            );
+            step(
+                &format!("UPDATE {table} SET delivery_id='delivery-a' WHERE delivery_id='moved'"),
+                &["a", "b"],
+            );
+            step(
+                &format!("DELETE FROM {table} WHERE delivery_id='delivery-a'"),
+                &["a", "b"],
+            );
+            step(
+                &format!("DELETE FROM {table} WHERE delivery_id='unheld'"),
+                &["b"],
+            );
+        }
+        step(
+            "INSERT INTO ydoc_owner_activation_sources VALUES ('seed','relay','ws','main','a','lineage','moment','source','state','{}')",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_owner_activation_sources SET full_state_digest='other'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_owner_activation_sources SET object_id='b'",
+            &["a", "b"],
+        );
+        step("DELETE FROM ydoc_owner_activation_sources", &["b"]);
+        let journal = |seq: i64| {
+            format!(
+                "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) VALUES ('ws','main','a',{seq},'update',0)"
+            )
+        };
+        let snapshot = |seq: i64| {
+            format!(
+                "INSERT INTO ydoc_snapshots VALUES ('ws','main','a',{seq},'snapshot','vector',0)"
+            )
+        };
+        // Rows up to `a`'s latest snapshot, 4, are folded: inspection never
+        // loads them.
+        step(&snapshot(4), &[]);
+        step(&journal(4), &[]);
+        step(&journal(5), &["a"]);
+        step("UPDATE ydoc_updates SET recorded_at_ms=1 WHERE seq=4", &[]);
+        step("UPDATE ydoc_updates SET seq=7 WHERE seq=5", &["a"]);
+        step("UPDATE ydoc_updates SET seq=5 WHERE seq=7", &["a"]);
+        step("DELETE FROM ydoc_updates WHERE seq=4", &[]);
+        step("DELETE FROM ydoc_updates WHERE seq=5", &["a"]);
+        // The rows past it, which inspection loads the head from, move `a`
+        // however they change, unless appended at the top, which the head's
+        // coordinates name; so do the bytes of any blob a journal row, a
+        // snapshot or an archive names. A compaction's own snapshot, and
+        // pruning the rows it folded, move nothing.
+        step(&journal(8), &[]);
+        step(&journal(9), &[]);
+        step(&journal(10), &[]);
+        step("DELETE FROM ydoc_updates WHERE seq=9", &["a"]);
+        step(&journal(9), &["a"]);
+        step(
+            "UPDATE ydoc_updates SET update_blob_sha256='other' WHERE seq=9",
+            &["a"],
+        );
+        step("UPDATE ydoc_updates SET recorded_at_ms=2 WHERE seq=9", &[]);
+        step(&snapshot(9), &[]);
+        step(
+            "DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9",
+            &[],
+        );
+        // Removing the latest snapshot once it folded rows moves `a`, so the
+        // folded rows cannot change unseen and the snapshot come back; so
+        // does moving it back or changing its digest. Pruning a snapshot a
+        // later one supersedes, or a compaction rewriting the latest as it
+        // was, moves nothing.
+        step(
+            "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq=9",
+            &["a"],
+        );
+        step(&snapshot(9), &[]);
+        step(
+            "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq>0 AND up_to_seq<9",
+            &[],
+        );
+        step(
+            "INSERT INTO ydoc_snapshots VALUES ('ws','main','a',9,'snapshot','vector',1)
+             ON CONFLICT(workspace_id,version_id,object_id,up_to_seq) DO UPDATE SET
+               snapshot_blob_sha256=excluded.snapshot_blob_sha256,recorded_at_ms=excluded.recorded_at_ms",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET up_to_seq=8 WHERE object_id='a' AND up_to_seq=9",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET up_to_seq=9 WHERE object_id='a' AND up_to_seq=8",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET snapshot_blob_sha256='other' WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET snapshot_blob_sha256='snapshot' WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET object_id='b' WHERE object_id='a'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET object_id='a' WHERE object_id='b'",
+            &["a", "b"],
+        );
+        // A blob a journal row or snapshot names, missing from a damaged
+        // store, moves its document once restored.
+        step("INSERT INTO binary_blobs VALUES ('update',1,X'00')", &["a"]);
+        step(
+            "INSERT INTO binary_blobs VALUES ('snapshot',1,X'00')",
+            &["a"],
+        );
+        step("INSERT INTO binary_blobs VALUES ('archive',1,X'00')", &[]);
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'",
+            &["a"],
+        );
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'",
+            &["a"],
+        );
+        let archive = "INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,
+               disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms)
+             VALUES ('ws','main','b','archived','superseded-predecessor','richdoc','archive','vector',0,0)";
+        step(archive, &[]);
+        step(
+            "UPDATE binary_blobs SET byte_length=2 WHERE sha256='archive'",
+            &["b"],
+        );
+        // An archive moves its document as it goes or its key or digest
+        // changes, so neither can change and change back unseen; its kind
+        // and bookkeeping, which the proof compares or never reads, move
+        // nothing. Its blob restored moves it too.
+        step(
+            "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='other' WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='archive' WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET content_kind='plaintext',updated_at_ms=1 WHERE lineage_claim_id='archived'",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET object_id='a' WHERE lineage_claim_id='archived'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET object_id='b' WHERE lineage_claim_id='archived'",
+            &["a", "b"],
+        );
+        step(
+            "DELETE FROM ydoc_inactive_lineages WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
+        step(archive, &[]);
+        conn.execute_batch("DELETE FROM binary_blobs WHERE sha256='archive'")
+            .unwrap();
+        step(
+            "INSERT INTO binary_blobs VALUES ('archive',1,X'00')",
+            &["b"],
+        );
+        step("DELETE FROM ydoc_updates WHERE seq=10", &["a"]);
+        step(
+            "UPDATE ydoc_docs SET head_update_seq=9,updated_at_ms=1,path='a.md' WHERE object_id='a'",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq WHERE object_id='a'",
+            &[],
+        );
+        // A compaction moves the generation only past a sequence an entry
+        // names, here 5, whichever way its bound goes.
+        step(
+            "UPDATE ydoc_docs SET head_snapshot_seq=4 WHERE object_id='a'",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_docs SET head_snapshot_seq=5 WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_docs SET head_snapshot_seq=9 WHERE object_id='a'",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_docs SET head_snapshot_seq=3 WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_docs SET lineage_claim_status='exact',lineage_claim_id='lineage' WHERE object_id='a'",
+            &["a"],
+        );
+        let retired = released_tail_generation(&conn, "a").unwrap();
+        step("DELETE FROM ydoc_docs WHERE object_id='a'", &["a"]);
+        step(
+            "INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('ws','main','a',0)",
+            &["a"],
+        );
+        assert!(
+            released_tail_generation(&conn, "a").unwrap() > retired + 1,
+            "kept across retirement and recreation"
+        );
+        step("INSERT INTO binary_blobs VALUES ('unrelated',1,X'00')", &[]);
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='unrelated'",
+            &[],
+        );
+        step(
+            "INSERT INTO binary_blobs VALUES ('refused',1,X'00')",
+            &["a"],
+        );
+        step(
+            "UPDATE binary_blobs SET bytes=X'0102' WHERE sha256='refused'",
+            &["a"],
+        );
+        step(
+            "UPDATE binary_blobs SET byte_length=2 WHERE sha256='refused'",
+            &["a"],
+        );
+        step("DELETE FROM binary_blobs WHERE sha256='refused'", &["a"]);
+        step("DELETE FROM binary_blobs WHERE sha256='unrelated'", &[]);
+        // The bytes an entry's update names, which a held document's
+        // inspection merges, move that entry's document as a terminal blob
+        // does: arriving, changing and going.
+        step(
+            "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+               byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state)
+             VALUES ('outbox-b',3,'key-b-3','delivery-b','merged',1,0,0,1,0,'active')",
+            &["b"],
+        );
+        step("INSERT INTO binary_blobs VALUES ('merged',1,X'00')", &["b"]);
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'",
+            &["b"],
+        );
+        step("DELETE FROM binary_blobs WHERE sha256='merged'", &["b"]);
+    }
+
+    fn released_hold_revision(conn: &Connection, object: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT revision FROM released_hold_revisions WHERE workspace_id='ws' AND object_id=?1",
+            [object],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// Sol's r2c-3c-7 ruling on their and Opus's r2c-3c-5 finding 1: a hold's
+    /// binding advances its document's hold revision as it is set, changes,
+    /// moves to another document and back, goes and comes back, so two
+    /// writes cannot change it and restore its digest unseen. Its digest
+    /// alone, the binding rewritten as it was, the hold's other columns, and
+    /// a document with no binding arriving or going advance nothing. No hold
+    /// write moves a released tail generation. A revision only advances,
+    /// within its bound, and outlives its hold.
+    #[test]
+    fn every_change_to_a_holds_binding_advances_its_revision() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main')")
+            .unwrap();
+        let objects = ["a", "b"];
+        let generations = objects.map(|object| released_tail_generation(&conn, object));
+        let step = |sql: &str, advanced: &[&str]| {
+            let before = objects.map(|object| released_hold_revision(&conn, object));
+            conn.execute_batch(sql).unwrap();
+            for (object, before) in objects.into_iter().zip(before) {
+                let after = released_hold_revision(&conn, object);
+                if advanced.contains(&object) {
+                    assert!(after > before, "{sql} advances {object}");
+                } else {
+                    assert_eq!(after, before, "{sql} keeps {object}");
+                }
+            }
+            assert_eq!(
+                objects.map(|object| released_tail_generation(&conn, object)),
+                generations,
+                "{sql} moves no generation"
+            );
+        };
+        step(
+            "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+             VALUES ('ws','a','a.md','ready',0)",
+            &[],
+        );
+        let digest = |n: u8| char::from(b'0' + n).to_string().repeat(64);
+        let bind = |json: &str, digest: &str| {
+            format!(
+                "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled',
+                   released_hold_continuation='frozen',released_hold_binding_json='{json}',
+                   released_hold_binding_digest='{digest}' WHERE object_id='a'"
+            )
+        };
+        step(&bind("[1]", &digest(1)), &["a"]);
+        step(&bind("[2]", &digest(2)), &["a"]);
+        step(&bind("[3]", &digest(1)), &["a"]);
+        step(&bind("[3]", &digest(2)), &[]);
+        step(
+            "UPDATE hosted_documents SET released_hold_binding_json=released_hold_binding_json,
+               released_hold_binding_stale=1,path='moved.md',scope_generation=1 WHERE object_id='a'",
+            &[],
+        );
+        step(
+            "UPDATE hosted_documents SET object_id='b' WHERE object_id='a'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE hosted_documents SET object_id='a' WHERE object_id='b'",
+            &["a", "b"],
+        );
+        conn.execute_batch(
+            "CREATE TEMP TABLE kept_hold AS SELECT * FROM hosted_documents WHERE object_id='a'",
+        )
+        .unwrap();
+        step("DELETE FROM hosted_documents WHERE object_id='a'", &["a"]);
+        step(
+            "INSERT INTO hosted_documents SELECT * FROM temp.kept_hold",
+            &["a"],
+        );
+        step(
+            "UPDATE hosted_documents SET state='ready',held_reason=NULL,released_hold_continuation=NULL,
+               released_hold_binding_stale=0,released_hold_binding_json=NULL,released_hold_binding_digest=NULL
+             WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+             VALUES ('ws','b','b.md','ready',0)",
+            &[],
+        );
+        step("DELETE FROM hosted_documents", &[]);
+        for reset in [
+            "UPDATE released_hold_revisions SET revision=1 WHERE object_id='a'",
+            "UPDATE released_hold_revisions SET revision=revision WHERE object_id='a'",
+            "UPDATE released_hold_revisions SET object_id='c' WHERE object_id='a'",
+            "DELETE FROM released_hold_revisions WHERE object_id='a'",
+        ] {
+            let before = released_hold_revision(&conn, "a");
+            assert!(conn.execute_batch(reset).is_err(), "{reset}");
+            assert_eq!(released_hold_revision(&conn, "a"), before, "{reset}");
+        }
+        conn.execute_batch(
+            "UPDATE released_hold_revisions SET revision=9007199254740991 WHERE object_id='a'",
+        )
+        .unwrap();
+        assert!(
+            conn.execute_batch("INSERT INTO hosted_documents SELECT * FROM temp.kept_hold")
+                .is_err(),
+            "a hold whose revision is at its bound cannot arrive"
+        );
+        let held: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(held, 0);
+    }
+
+    /// A generation at its bound fails the mutation that would move it, even
+    /// one whose conflict policy ignores failures, and the mutation leaves
+    /// nothing. A generation never goes back, and never goes away.
+    #[test]
+    fn a_released_tail_generation_at_its_bound_fails_the_mutation() {
+        let dir = tempdir();
+        let unchecked = released_tail_store(&dir);
+        unchecked
+            .execute_batch("UPDATE released_tail_generations SET generation=9007199254740991 WHERE object_id='a'")
+            .unwrap();
+        drop(unchecked);
+        let conn = Connection::open(dir.join("engine.db")).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let moved = conn.execute(
+            "UPDATE owner_ydoc_outboxes SET created_at_ms=7 WHERE outbox_id='outbox-a'",
+            [],
+        );
+        assert!(moved.is_err(), "{moved:?}");
+        let kept: i64 = conn
+            .query_row(
+                "SELECT created_at_ms FROM owner_ydoc_outboxes WHERE outbox_id='outbox-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0);
+        let ignored = conn.execute(
+            "INSERT OR IGNORE INTO binary_blobs VALUES ('refused',1,X'00')",
+            [],
+        );
+        assert!(ignored.is_err(), "{ignored:?}");
+        let blobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM binary_blobs WHERE sha256='refused'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blobs, 0);
+        assert_eq!(
+            released_tail_generation(&conn, "a"),
+            Some(9_007_199_254_740_991)
+        );
+        for reset in [
+            "UPDATE released_tail_generations SET generation=1 WHERE object_id='b'",
+            "UPDATE released_tail_generations SET generation=generation WHERE object_id='b'",
+            "UPDATE released_tail_generations SET object_id='c' WHERE object_id='b'",
+            "DELETE FROM released_tail_generations WHERE object_id='b'",
+        ] {
+            let before = released_tail_generation(&conn, "b");
+            assert!(conn.execute_batch(reset).is_err(), "{reset}");
+            assert_eq!(released_tail_generation(&conn, "b"), before, "{reset}");
+        }
+    }
+
+    /// Sol's tails-cache ruling: a trigger finds what it moves by index, so
+    /// its work stays the same however long a lineage's history grows.
+    #[test]
+    fn released_tail_triggers_never_scan_retained_history() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        let steps = |sql: &str| vm_steps(&conn, sql);
+        let journal = |seq: i64| {
+            format!(
+                "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                 VALUES ('ws','main','a',{seq},'update',0)"
+            )
+        };
+        // Each write once over one entry, then over 20,000: an unrelated
+        // blob, a journal row no entry names and one an entry names, an
+        // application of a held delivery, an entry's own change, an
+        // activation's, a seed capture's and a compaction's.
+        let writes = |sequence: i64| {
+            [
+                "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq+1 WHERE object_id='a'".to_owned(),
+                format!("UPDATE live_owner_activations SET source_byte_length={sequence} WHERE activation_id='activation'"),
+                format!(
+                    "INSERT INTO ydoc_owner_activation_sources VALUES
+                       ('seed-{sequence}','relay','ws','main','a','lineage','moment','source','state','{{}}')"
+                ),
+                format!("INSERT INTO binary_blobs VALUES ('unrelated-{sequence}',1,X'00')"),
+                journal(1_000_000 + sequence),
+                journal(if sequence == 1 { 5 } else { sequence }),
+                released_tail_application(
+                    "live_device_update_applications",
+                    &format!("delivery-{}", if sequence == 1 { "a" } else { "held" }),
+                    "b",
+                    sequence,
+                ),
+                format!("UPDATE owner_ydoc_outbox_entries SET created_at_ms=1 WHERE outbox_id='outbox-a' AND sequence={sequence}"),
+            ]
+        };
+        let short = writes(1).map(|write| steps(&write));
+        conn.execute_batch("BEGIN").unwrap();
+        for sequence in 2..20_002 {
+            let delivery = if sequence == 10_000 {
+                "delivery-held".to_owned()
+            } else {
+                format!("delivery-{sequence}")
+            };
+            conn.execute_batch(&released_tail_entry(sequence, &delivery, sequence))
+                .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let long = writes(10_000).map(|write| steps(&write));
+        for ((write, short), long) in writes(10_000).iter().zip(short).zip(long) {
+            assert!(
+                long < short + 100,
+                "{write}: {short} steps over one entry, {long} over 20,000"
+            );
+        }
+    }
+
+    /// How many virtual machine steps `sql` takes on `conn`, its triggers'
+    /// included.
+    fn vm_steps(conn: &Connection, sql: &str) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let counted = std::sync::Arc::new(AtomicU64::new(0));
+        let counter = std::sync::Arc::clone(&counted);
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+        conn.execute_batch(sql).unwrap();
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        counted.load(Ordering::Relaxed)
+    }
+
+    /// What `EXPLAIN QUERY PLAN` details of `sql`, with `?1` and `?2` bound.
+    fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let bound = statement.parameter_count();
+        let params = ["digest", "other"];
+        statement
+            .query_map(rusqlite::params_from_iter(&params[..bound]), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// Opus's r2c-3c-1 finding 5 and r2c-3c-3 finding 2: a trigger that
+    /// matches moves its documents by the generations' key. Over 20,000
+    /// documents with generations, entries naming blobs, journal rows past
+    /// the latest snapshot, and snapshots and archives naming blobs of their
+    /// own, every installed trigger that matches takes as many steps as over
+    /// one: a blob one entry names arriving and going, the bytes of a blob a
+    /// journal row, a snapshot or an archive names changing, an inner journal
+    /// row going, coming back and changing its digest, a missing blob it
+    /// names arriving, a snapshot changing its digest, the latest snapshot
+    /// going, and an archive changing its digest and going. Every statement
+    /// those triggers run searches by index, never scans.
+    #[test]
+    fn released_tail_triggers_that_match_move_by_key() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        let grow = |from: i64, to: i64| {
+            conn.execute_batch("BEGIN").unwrap();
+            for n in from..to {
+                conn.execute_batch(&format!(
+                    "INSERT INTO released_tail_generations VALUES ('ws','main','doc-{n}',1);
+                     INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+                       byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state)
+                     VALUES ('outbox-b',{n},'key-b-{n}','delivery-b-{n}','merged-{n}',1,0,0,1,0,'active');
+                     INSERT INTO binary_blobs VALUES ('journal-{n}',1,X'00');
+                     INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                       VALUES ('ws','main','a',{n},'journal-{n}',0);
+                     INSERT INTO binary_blobs VALUES ('snapshot-{n}',1,X'00');
+                     INSERT INTO ydoc_snapshots VALUES ('ws','main','b',{n},'snapshot-{n}','vector',0);
+                     INSERT INTO binary_blobs VALUES ('archive-{n}',1,X'00');
+                     INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,
+                       disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,
+                       updated_at_ms)
+                     VALUES ('ws','main','b','archived-{n}','superseded-predecessor','richdoc','archive-{n}',
+                       'vector',0,0)"
+                ))
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        };
+        // Row `n` has a row past it, so it is inner. `b`'s latest snapshot
+        // is the last one grown.
+        let writes = |n: i64| {
+            let row =
+                format!("workspace_id='ws' AND version_id='main' AND object_id='a' AND seq={n}");
+            let b = "workspace_id='ws' AND version_id='main' AND object_id='b'";
+            [
+                format!("INSERT INTO binary_blobs VALUES ('merged-{n}',1,X'00')"),
+                format!("DELETE FROM binary_blobs WHERE sha256='merged-{n}'"),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='journal-{n}'"),
+                format!("DELETE FROM ydoc_updates WHERE {row}"),
+                format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     VALUES ('ws','main','a',{n},'journal-{n}',0)"
+                ),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot-{n}'"),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='archive-{n}'"),
+                format!("UPDATE ydoc_updates SET update_blob_sha256='missing-{n}' WHERE {row}"),
+                format!("INSERT INTO binary_blobs VALUES ('missing-{n}',1,X'00')"),
+                format!("UPDATE ydoc_snapshots SET snapshot_blob_sha256='missing-{n}' WHERE {b} AND up_to_seq={n}"),
+                format!(
+                    "DELETE FROM ydoc_snapshots WHERE {b} AND up_to_seq=
+                       (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE {b})"
+                ),
+                format!(
+                    "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='missing-{n}'
+                     WHERE {b} AND lineage_claim_id='archived-{n}'"
+                ),
+                format!("DELETE FROM ydoc_inactive_lineages WHERE {b} AND lineage_claim_id='archived-{n}'"),
+            ]
+        };
+        let moved = || {
+            released_tail_generation(&conn, "a").unwrap()
+                + released_tail_generation(&conn, "b").unwrap()
+        };
+        grow(1, 3);
+        let short = writes(1).map(|write| {
+            let before = moved();
+            let steps = vm_steps(&conn, &write);
+            assert!(moved() > before, "{write} matches");
+            steps
+        });
+        grow(3, 20_002);
+        let long = writes(10_000).map(|write| vm_steps(&conn, &write));
+        for ((write, short), long) in writes(10_000).iter().zip(short).zip(long) {
+            assert!(
+                long < short + 100,
+                "{write}: {short} steps over one, {long} over 20,000"
+            );
+        }
+
+        // One statement for each source of a blob's documents: SQLite scans
+        // the generations for a key `IN` a union of them.
+        let generations = "UPDATE released_tail_generations SET generation=generation+1 \
+            WHERE (workspace_id,version_id,object_id) IN";
+        let outbox = "SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e \
+            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE";
+        let mut sources = Vec::new();
+        for digest in ["=?1", " IN (?1,?2)"] {
+            sources.extend([
+                format!("{outbox} e.terminal_blob_digest{digest}"),
+                format!("{outbox} e.update_digest{digest}"),
+                format!("SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256{digest}"),
+                format!(
+                    "SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256{digest}"
+                ),
+                format!(
+                    "SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages \
+                     WHERE full_state_blob_sha256{digest}"
+                ),
+            ]);
+        }
+        for sql in sources
+            .iter()
+            .map(|source| format!("{generations} ({source})"))
+        {
+            let plan = query_plan(&conn, &sql);
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.starts_with("SEARCH released_tail_generations")),
+                "{sql}: {plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")),
+                "{sql}: {plan:#?}"
+            );
+        }
+        // The activation triggers' walk over successors, from an inserted or
+        // deleted activation, or from an updated one's old and new rows: it
+        // scans only its own queue, and searches activations by the
+        // successor index.
+        let followers = |seeds: &str| {
+            format!(
+                "{generations} (WITH RECURSIVE followers(namespace,activation_id) AS ({seeds} \
+                 UNION SELECT a.relay_database_namespace,a.activation_id FROM live_owner_activations a \
+                   JOIN followers f ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id) \
+                 SELECT a.workspace_id,a.main_version_id,a.object_id FROM live_owner_activations a \
+                   JOIN followers f ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id)"
+            )
+        };
+        for sql in [
+            followers("SELECT ?1,?2"),
+            followers("SELECT ?1,?2 UNION SELECT ?2,?1"),
+        ] {
+            let plan = query_plan(&conn, &sql);
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.starts_with("SEARCH released_tail_generations")),
+                "{sql}: {plan:#?}"
+            );
+            assert_eq!(
+                plan.iter()
+                    .filter(|detail| detail
+                        .starts_with("SEARCH a USING INDEX live_owner_activations_successor"))
+                    .count(),
+                2,
+                "{sql}: {plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")
+                    && !detail.starts_with("SCAN f")
+                    && !detail.starts_with("SCAN CONSTANT ROW")),
+                "{sql}: {plan:#?}"
+            );
+        }
+        for gate in [
+            "SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=?1",
+            "SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=?1",
+            "SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_updates WHERE update_blob_sha256=?1",
+            "SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256=?1",
+            "SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256=?1",
+            "SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id='a' AND seq>5",
+            "SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id='a'",
+        ] {
+            let plan = query_plan(&conn, gate);
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")),
+                "{gate}: {plan:#?}"
+            );
+        }
     }
 }

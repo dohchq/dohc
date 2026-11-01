@@ -1,0 +1,24 @@
+[package]
+name = "dohc-heap-profiler"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "dhat as the global allocator of a test binary that links it, for heap measurements."
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+dhat = "0.3"
+
+# `#[global_allocator]` expands to unsafe allocator shims, which the
+# workspace's `unsafe_code = "forbid"` would refuse. This crate holds nothing
+# else, and allows them.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

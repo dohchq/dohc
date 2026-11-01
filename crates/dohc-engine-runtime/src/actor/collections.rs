@@ -770,7 +770,7 @@ mod collection_adoption_update_tests {
                     } else {
                         tx.execute(
                             "INSERT INTO live_device_application_bindings VALUES \
-                             ('relay','workspace','main',?1,'lineage',?2,'[]',0,'host',1,'instance','connection',1)",
+                             ('relay','workspace','main',?1,'lineage',?2,'[]',0,'host',1,'instance','connection',1,NULL)",
                             rusqlite::params![key.object_id, path],
                         )
                     }

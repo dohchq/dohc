@@ -429,7 +429,7 @@ fn publication_source_before_in_tx(
         // The first unavailable interval from that exact cut kept its preimage.
         let moment: String = tx
             .query_row(
-                "SELECT s.moment_id FROM live_owner_adoptions a
+                "SELECT s.moment_id FROM live_owner_activations a
              JOIN live_device_settlements s ON s.relay_database_namespace=a.relay_database_namespace
                AND s.workspace_id=a.workspace_id AND s.main_version_id=a.main_version_id
                AND s.object_id=a.object_id AND s.lineage_claim_id=a.lineage_claim_id
@@ -438,7 +438,7 @@ fn publication_source_before_in_tx(
                AND u.settlement_id=s.settlement_id AND u.moment_id=s.moment_id
              WHERE a.workspace_id=?1 AND a.relay_database_namespace=?2 AND a.main_version_id=?3
                AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.terminal_cursor=?6
-               AND a.binding_json=?7 AND s.terminal_cursor<?8
+               AND a.evidence_digest IS NOT NULL AND a.binding_json=?7 AND s.terminal_cursor<?8
              ORDER BY s.terminal_cursor LIMIT 1",
                 params![
                     b.workspace_id,
@@ -463,21 +463,45 @@ fn publication_source_before_in_tx(
     if record.previous_cursor > 0 {
         return Ok(None);
     }
-    tx.query_row(
-        concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
-         FROM live_owner_adoptions a
+    // The adopted activation whose cut this settlement follows, released or
+    // not. Activations that adopted the same cut from different sources
+    // cannot name one before-image.
+    let mut statement = tx.prepare(
+        concat!("SELECT DISTINCT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+         FROM live_owner_activations a
          JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
            AND m.path=?7 AND m.after_content_kind='text' AND m.after_blob_sha256=a.source_digest
          JOIN blobs t ON t.sha256=a.source_digest AND t.byte_length=a.source_byte_length
          WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
-           AND a.binding_json=?6 AND a.terminal_cursor=?8
-           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))"),
-        params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
-            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor,skipped],
-        portable_before_from_row,
-    )
-    .optional()
-    .map_err(SyncError::corrupt)
+           AND a.evidence_digest IS NOT NULL AND a.binding_json=?6 AND a.terminal_cursor=?8
+           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))
+         LIMIT 2"),
+    ).map_err(SyncError::corrupt)?;
+    let mut before = statement
+        .query_map(
+            params![
+                record.relay_database_namespace,
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                serde_json::to_string(b).map_err(SyncError::corrupt)?,
+                b.current_path,
+                record.previous_cursor,
+                record.terminal_cursor,
+                skipped
+            ],
+            portable_before_from_row,
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    if before.len() > 1 {
+        return Err(invalid(
+            "settlement follows activations with different sources",
+        ));
+    }
+    Ok(before.pop())
 }
 
 /// Ordinary activation can adopt an edited replica. Event zero still names
@@ -551,21 +575,7 @@ pub(super) fn apply_settlement_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-        let payload: SettlementPayload = serde_json::from_value(op.payload.clone())
-            .map_err(|_| invalid("invalid historical settlement payload"))?;
-        if payload.format_version != 1
-            || serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload
-        {
-            return Err(invalid("noncanonical historical settlement payload"));
-        }
-        let record = payload.record;
-        record.validate(&op.workspace_id)?;
-        let json =
-            serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
-                .map_err(SyncError::corrupt)?;
-        if hex_sha256(json.as_bytes()) != payload.record_digest {
-            return Err(invalid("historical settlement digest differs"));
-        }
+        let (record, json, record_digest) = imported_record(&op.payload, &op.workspace_id)?;
         if accepted_interval(
             tx,
             &record.relay_database_namespace,
@@ -589,17 +599,48 @@ pub(super) fn apply_settlement_envelope(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some(prior) = prior {
-            if prior == payload.record_digest {
+            if prior == record_digest {
                 return Ok(MutationOutcome::Applied(()));
             }
-            tx.execute("INSERT INTO live_audit_settlement_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5,?6)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
+            tx.execute("INSERT INTO live_audit_settlement_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5,?6)",params![op.workspace_id,op.origin_id,op.origin_seq,record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "historical settlement identity contains different evidence".into(),
             });
         }
-        tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
         Ok(MutationOutcome::Applied(()))
     })
+}
+
+/// Import's checks that need no store: a canonical current-format payload
+/// whose record carries its own ID, and the digest of its record JSON.
+fn imported_record(
+    payload: &serde_json::Value,
+    workspace: &str,
+) -> Result<(SettlementRecord, String, String), SyncError> {
+    let parsed: SettlementPayload = serde_json::from_value(payload.clone())
+        .map_err(|_| invalid("invalid historical settlement payload"))?;
+    if parsed.format_version != 1
+        || serde_json::to_value(&parsed).map_err(SyncError::corrupt)? != *payload
+    {
+        return Err(invalid("noncanonical historical settlement payload"));
+    }
+    let record = parsed.record;
+    record.validate(workspace)?;
+    let json = serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
+        .map_err(SyncError::corrupt)?;
+    if hex_sha256(json.as_bytes()) != parsed.record_digest {
+        return Err(invalid("historical settlement digest differs"));
+    }
+    Ok((record, json, parsed.record_digest))
+}
+
+#[cfg(test)]
+pub(super) fn check_imported_payload(
+    payload: &serde_json::Value,
+    workspace: &str,
+) -> Result<(), SyncError> {
+    imported_record(payload, workspace).map(|_| ())
 }
 
 fn portable_before_from_row(
@@ -612,4 +653,356 @@ fn portable_before_from_row(
             "metadata":{"origin":row.get::<_,String>(7)?, "summary":row.get::<_,Option<String>>(8)?, "correlationId":row.get::<_,Option<String>>(9)?}
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+
+    const SOURCES: [(&str, &str); 3] = [
+        ("first-source", "First source."),
+        ("second-source", "Second source."),
+        ("third-source", "Third source."),
+    ];
+
+    /// The digest the settlement after `previous` names as its before-image.
+    fn before(
+        store: &mut EngineStore,
+        binding: &LiveObjectBinding,
+        previous: i64,
+    ) -> Result<Option<String>, SyncError> {
+        let record = SettlementRecord {
+            settlement_id: "settlement".into(),
+            relay_database_namespace: "relay".into(),
+            binding: binding.clone(),
+            host_coordinate: ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            previous_cursor: previous,
+            terminal_cursor: previous + 1,
+            previous_ydoc_sequence: 1,
+            local_ydoc_sequence: 2,
+            application_count: 1,
+            native_interval_digest: String::new(),
+            accepted_event_count: 1,
+            accepted_interval_digest: String::new(),
+            moment_id: "settled".into(),
+            markdown_digest: String::new(),
+            source_state_vector_digest: String::new(),
+            accepted_state_blob_sha256: String::new(),
+            recorded_at_ms: 30,
+            restore_operation_id: None,
+        };
+        let outcome = store.write_with(&NoFaults, |tx| {
+            Ok::<_, SyncError>(publication_source_before_in_tx(tx, &record)?.map(|before| {
+                let mut payload = serde_json::json!({});
+                before.apply_to(&mut payload);
+                payload["payloadBeforeBlobSha256"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            }))
+        })?;
+        match outcome {
+            TxnOutcome::Committed(digest) => Ok(digest),
+            TxnOutcome::Crashed { .. } => panic!("no fault was injected"),
+        }
+    }
+
+    /// A positive cut keeps the settlement moment's recorded before-image,
+    /// regardless of released, current, or competing activation sources.
+    #[test]
+    fn a_positive_cut_keeps_the_settlement_moments_recorded_before_image() {
+        let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let mut text = VersionedTextStore::new(&mut store);
+        text.ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        for (moment, body) in SOURCES {
+            text.write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: moment.into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let lineage = store
+            .write_with(&NoFaults, |tx| {
+                Ok::<_, SyncError>(dohc_engine_storage::put_binary_blob(tx, b"lineage")?)
+            })
+            .unwrap();
+        let TxnOutcome::Committed(lineage) = lineage else {
+            panic!("no fault was injected")
+        };
+        let binding = LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: lineage,
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        };
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        // `source` indexes SOURCES; a released activation keeps its cut.
+        let activate = |store: &mut EngineStore,
+                        id: &str,
+                        predecessor: Option<&str>,
+                        source: usize,
+                        cursor: i64| {
+            let (moment, body) = SOURCES[source];
+            store
+                .write_with(&NoFaults, |tx| {
+                    if let Some(predecessor) = predecessor {
+                        tx.execute(
+                            "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,
+                                released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',
+                                released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),
+                                  'eventCount',0,'historyEvidenceDigest',evidence_digest)
+                             WHERE activation_id=?1",
+                            [predecessor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    } else {
+                        tx.execute(
+                            "INSERT INTO live_owner_adoptions VALUES ('relay',?1,'ws','main','object',?2,?3,?4,?5,?6,1,1,
+                                'evidence','coverage',0,1,?7,'null','{}',1,1)",
+                            params![id, binding.lineage_claim_id, binding_json, moment,
+                                hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    }
+                    tx.execute(
+                        "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,
+                            main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,
+                            binding_json,source_moment_id,source_digest,source_byte_length,
+                            baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,
+                            evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                            terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+                         VALUES ('relay',?1,'ws','main','object',?2,'first',?3,?4,?5,?6,?7,1,1,'{}',
+                            'evidence','coverage',0,1,?8,'null',1,1)",
+                        params![id, binding.lineage_claim_id, predecessor, binding_json, moment,
+                            hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+        };
+        activate(&mut store, "first", None, 0, 5);
+        activate(&mut store, "second", Some("first"), 1, 9);
+        assert_eq!(
+            before(&mut store, &binding, 5).unwrap(),
+            None,
+            "the released predecessor does not override the before-image"
+        );
+        assert_eq!(
+            before(&mut store, &binding, 9).unwrap(),
+            None,
+            "the current activation does not override the before-image"
+        );
+        assert_eq!(before(&mut store, &binding, 7).unwrap(), None);
+        activate(&mut store, "third", Some("second"), 2, 9);
+        assert_eq!(
+            before(&mut store, &binding, 9).unwrap(),
+            None,
+            "competing activation sources do not override the before-image"
+        );
+    }
+
+    fn cursor_zero_store(
+        sources: &[usize],
+    ) -> (
+        dohc_engine_testkit::ScratchDir,
+        EngineStore,
+        LiveObjectBinding,
+    ) {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let mut text = VersionedTextStore::new(&mut store);
+        text.ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        for (moment, body) in SOURCES {
+            text.write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: moment.into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+        ))
+        .unwrap();
+        let base_bytes: Vec<u8> = serde_json::from_value(vector["bytes"].clone()).unwrap();
+        let lineage = store
+            .write_with(&NoFaults, |tx| {
+                Ok::<_, SyncError>(dohc_engine_storage::put_binary_blob(tx, &base_bytes)?)
+            })
+            .unwrap();
+        let TxnOutcome::Committed(lineage) = lineage else {
+            panic!("no fault was injected")
+        };
+        let binding = LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: lineage,
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        };
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        // `source` indexes SOURCES; a released activation keeps its cut.
+        let activate = |store: &mut EngineStore,
+                        id: &str,
+                        predecessor: Option<&str>,
+                        source: usize,
+                        cursor: i64| {
+            let (moment, body) = SOURCES[source];
+            store
+                .write_with(&NoFaults, |tx| {
+                    if let Some(predecessor) = predecessor {
+                        tx.execute(
+                            "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,
+                                released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',
+                                released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),
+                                  'eventCount',0,'historyEvidenceDigest',evidence_digest)
+                             WHERE activation_id=?1",
+                            [predecessor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    } else {
+                        tx.execute(
+                            "INSERT INTO live_owner_adoptions VALUES ('relay',?1,'ws','main','object',?2,?3,?4,?5,?6,1,1,
+                                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,?7,'null','{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}',1,1)",
+                            params![id, binding.lineage_claim_id, binding_json, moment,
+                                hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                        )
+                        .map_err(SyncError::persist)?;
+                    }
+                    tx.execute(
+                        "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,
+                            main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,
+                            binding_json,source_moment_id,source_digest,source_byte_length,
+                            baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,
+                            evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                            terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+                         VALUES ('relay',?1,'ws','main','object',?2,'activation-0',?3,?4,?5,?6,?7,1,1,'{}',
+                            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,?8,'null',1,1)",
+                        params![id, binding.lineage_claim_id, predecessor, binding_json, moment,
+                            hex_sha256(body.as_bytes()), body.len() as i64, cursor],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+        };
+        for (index, source) in sources.iter().enumerate() {
+            let id = format!("activation-{index}");
+            let predecessor = index.checked_sub(1).map(|i| format!("activation-{i}"));
+            activate(&mut store, &id, predecessor.as_deref(), *source, 0);
+        }
+        crate::journal_local_replication_op(
+            &mut store,
+            "ws",
+            "origin",
+            "epoch",
+            "stream",
+            "workspace.init",
+            &serde_json::json!({}),
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            let key = DocKey::new("ws", "main", "object").unwrap();
+            let base_sequence = journal_local_op_in_tx(tx, "ws", "ydoc.update",
+                &crate::ydoc_update_payload(&key, "note.md", ContentKind::Richdoc,
+                    &binding.lineage_claim_id, &binding.lineage_claim_id, None, None, true), 1)?;
+            let origin = origin_record::read(tx, "relay", &binding)?;
+            let base = BaseRecord {
+                relay_database_namespace: "relay".into(),
+                checkpoint: NativeAcceptedCheckpoint {
+                    canonical_version: None,
+                    restore_operation_id: None,
+                    event_count: 0,
+                    terminal: None,
+                    binding: binding.clone(),
+                    state_digest: binding.lineage_claim_id.clone(),
+                    evidence_digest: hex_sha256(&serde_json::to_vec(&(
+                        "accepted-history-v1", scope("relay", &binding),
+                    )).unwrap()),
+                },
+                origin_stamp: origin.stamp(tx, &binding)?,
+                origin,
+                base_byte_length: base_bytes.len(),
+                base_coordinate: super::super::BaseCoordinate {
+                    origin_id: "origin".into(),
+                    origin_seq: base_sequence,
+                },
+            };
+            base.validate("ws")?;
+            let sequence = journal_local_op_in_tx(tx, "ws", BASE_OP, &base.payload()?, 1)?;
+            tx.execute("INSERT INTO live_audit_base_publications
+                (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,
+                 record_json,base_blob_sha256,origin_id,origin_seq)
+                VALUES ('relay','ws','main','object',?1,?2,?1,'origin',?3)",
+                params![binding.lineage_claim_id, base.canonical_json()?, sequence])
+                .map_err(SyncError::persist)?;
+            let imported: bool = tx.query_row(
+                "SELECT imported FROM replication_log WHERE workspace_id='ws' AND origin_id='origin' AND origin_seq=?1",
+                [base_sequence], |row| row.get(0)).map_err(SyncError::corrupt)?;
+            assert!(!imported, "event zero was published locally");
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        (scratch, store, binding)
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_takes_its_before_image_from_the_activation_source() {
+        let (_scratch, mut store, binding) = cursor_zero_store(&[1]);
+        assert_eq!(
+            before(&mut store, &binding, 0).unwrap(),
+            Some(hex_sha256(SOURCES[1].1.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn a_cursor_zero_settlement_rejects_activations_with_different_sources() {
+        let (_scratch, mut store, binding) = cursor_zero_store(&[0, 1]);
+        assert!(matches!(
+            before(&mut store, &binding, 0),
+            Err(SyncError::InvalidInput {
+                reason: "settlement follows activations with different sources",
+            })
+        ));
+    }
 }

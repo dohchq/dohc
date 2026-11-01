@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_collab::live_update_application::ReleasedTails;
 use dohc_engine_collab::{ContentKind, DocKey, LocalAppend, WriterDocCache, Ydoc};
 use dohc_engine_domain::WriteText;
 
@@ -102,7 +103,14 @@ fn count(store: &EngineStore, table: &str) -> i64 {
         .unwrap()
 }
 fn apply(store: &mut EngineStore, op: &ReplicationEnvelope) {
-    let result = apply_moment_envelope(store, op, &NoFaults, &NoLiveLeases).unwrap();
+    let result = apply_moment_envelope(
+        store,
+        op,
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     let ApplyDisposition::Applied(result) = result.primary else {
         panic!("{result:?}")
     };
@@ -387,8 +395,14 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
     })
     .unwrap();
     hydrate(&peer, &mut source);
-    let imported =
-        apply_moment_envelope(&mut source, &exports(&peer)[0], &NoFaults, &NoLiveLeases).unwrap();
+    let imported = apply_moment_envelope(
+        &mut source,
+        &exports(&peer)[0],
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     assert_eq!(imported.primary, ApplyDisposition::Applied(1));
     let conflicts = VersionedTextStore::new(&mut source)
         .list_text_conflicts_page("ws", Some("open"), None)
@@ -541,6 +555,7 @@ fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
         exports(&peer).last().unwrap(),
         &NoFaults,
         &NoLiveLeases,
+        &ReleasedTails::default(),
     )
     .unwrap();
     assert_eq!(continued.primary, ApplyDisposition::Applied(0));
@@ -757,9 +772,15 @@ fn lane_many_settles_deliver_one_head_and_keep_owner_history() {
     hydrate(&source, &mut peer);
     apply(&mut peer, &second[1]);
     assert_eq!(
-        apply_moment_envelope(&mut peer, &second[1], &NoFaults, &NoLiveLeases)
-            .unwrap()
-            .primary,
+        apply_moment_envelope(
+            &mut peer,
+            &second[1],
+            &NoFaults,
+            &NoLiveLeases,
+            &ReleasedTails::default(),
+        )
+        .unwrap()
+        .primary,
         ApplyDisposition::Skipped
     );
     assert_eq!(count(&peer, "moments"), 2);
@@ -1402,8 +1423,14 @@ fn lane_divergence_uses_existing_conflict_and_never_echoes_imports() {
     write(&mut source, "doc", "b", "doc.md", "remote", "ydoc", 20);
     drain(&mut source);
     hydrate(&source, &mut peer);
-    let result =
-        apply_moment_envelope(&mut peer, &exports(&source)[1], &NoFaults, &NoLiveLeases).unwrap();
+    let result = apply_moment_envelope(
+        &mut peer,
+        &exports(&source)[1],
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Applied(1)));
 
     peer.write_with(&NoFaults, |tx| {
@@ -1436,6 +1463,7 @@ impl RelayTransport for RecordingRelay {
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -2067,7 +2095,7 @@ fn lane_drain_and_promotion_keep_deferred_and_owner_binding_exclusions() {
             match blocker {
                 "deferred"=>{tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) VALUES ('ws','main','doc','peer',0,20)",[]).map_err(SyncError::persist)?;}
                 "owner"=>{tx.execute("INSERT INTO ydoc_owner_bindings VALUES ('ws','main','doc',?1,'{}','relay',1,0,0,?1,1024,1000)",[&binary]).map_err(SyncError::persist)?;}
-                "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1)",[]).map_err(SyncError::persist)?;}
+                "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1,NULL)",[]).map_err(SyncError::persist)?;}
                 _=>unreachable!(),
             }
             crate::enrolment::backfill_file_versions_in_tx(tx,"ws")?;assert_eq!(originate_ydoc_base_in_tx(tx,&key,"doc.md",None,None,30)?,BaseOrigination::NothingToDo);Ok::<_,SyncError>(())

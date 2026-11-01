@@ -12,16 +12,33 @@ import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
 import {markdownToYDoc} from './import-export.js'
-import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from './liveDocumentValidation.js'
+import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator,createLiveMarkdownHistoryValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
-import {readOrdinaryActivationHistory,validateOrdinaryActivation,verifyOrdinaryActivationCut,type OrdinaryActivationValidator}
-  from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
+import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
+import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
+import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
 import {createLiveValidationExecutor} from '../../../services/sync-relay/src/liveValidation.js'
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
 import type {StorageContext} from '../../../services/sync-relay/src/storage/context.js'
+import {openServiceActivationRetirement,readServiceActivationRetirement} from '../../../services/sync-relay/src/storage/serviceActivationRetirement.js'
+import {allowsServiceActivation,type ServiceActivationAccess} from '../../../services/sync-relay/src/storage/serviceActivationAccess.js'
+import {readServiceActivationOrigin} from '../../../services/sync-relay/src/storage/serviceActivationOrigin.js'
+import {authorizeServiceHostReplication,deriveServiceHostBearer} from '../../../services/sync-relay/src/serviceHostCredential.js'
+import {createServiceHostReplication} from '../../../services/sync-relay/src/serviceHostReplication.js'
+import {parseLogOp,SERVICE_HOST_ORIGIN_PREFIX} from '../../../services/sync-relay/src/relayLogInputs.js'
+import {canonicalVersionedAcceptedMetadata,initialAcceptedHistoryDigest} from '../../../services/sync-relay/src/liveAcceptedHistory.js'
+import {stableJsonStringify} from '../../../services/sync-relay/src/canonicalJson.js'
+import {nativeSettlementId,settlementRecordDigest} from '../../../services/sync-relay/src/storage/hostedSettlement.js'
+import {liveValidation} from '../../../services/sync-relay/src/liveValidation.js'
+import {nativeBaseRecord} from '../../../services/sync-relay/src/storage/serviceActivationPublication.js'
+import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
+import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerRestoreRoutes.js'
+import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
+import {preparedStop} from '../../../services/sync-relay/src/liveTickets.test-helper.js'
+import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -35,11 +52,11 @@ const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
-function fixture(note='Original',large=false){
+function fixture(note='Original',large=false,clientID?:number){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
   const history=createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}),store=storage.createServiceActivationStore(history)
-  const doc=markdownToYDoc(note),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
+  const doc=markdownToYDoc(note,{clientID}),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
   doc.getMap('frontmatter').set('title','Edited')
   const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
   const document={workspaceId:'workspace',mainVersionId:'main' as const,objectId:'object',lineageClaimId:hash(baselineBytes)}
@@ -272,6 +289,32 @@ it('keeps an earlier projecting moment when a later ordinary suffix only adds de
     expect(await f.prepare()).toMatchObject({completed:false})
   }finally{changed.destroy();f.close()}
 })
+// Proves: an earlier source moment stands only while every later prefix keeps
+// its projection. A visible change and its reversal end at the same
+// projection, yet no longer prove the earlier source.
+it('refuses an earlier projecting moment when a later suffix changes the projection and changes it back',async()=>{
+  const f=fixture(),changed=new Y.Doc({gc:false});try{
+    Y.applyUpdate(changed,f.capture.fullState)
+    const frontmatter=changed.getMap('frontmatter'),title=frontmatter.get('title')
+    const edit=(originSeq:number,value:unknown)=>{
+      const before=Y.encodeStateVector(changed);frontmatter.set('title',value);const suffix=Y.encodeStateAsUpdate(changed,before)
+      append(f,'origin',originSeq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}),suffix)
+    }
+    edit(3,'Changed');edit(4,title)
+    const fullState=Y.encodeStateAsUpdate(changed)
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    await expect(f.prepare()).rejects.toThrow('does not project the captured source')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{changed.destroy();f.close()}
+})
+// Proves: a receiver-generated source names an ordinarily admitted Y.Doc row,
+// never a departed host publication.
+it('refuses a source moment that names a departed Y.Doc row',async()=>{
+  const f=fixture();try{
+    f.raw.exec("UPDATE sync_relay_log SET relay_admission='departed' WHERE origin_id='origin' AND origin_seq=2")
+    await expect(f.prepare()).rejects.toThrow('not an ordinary history coordinate')
+  }finally{f.close()}
+})
 it('checks configured history entry and byte budgets before loading relay blobs',async()=>{
   const f=fixture();try{
     const read=vi.spyOn(f.storage,'getBlob')
@@ -305,8 +348,8 @@ async function verify(f:ReturnType<typeof fixture>,readBounds=bounds){
   const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
   const validation=await validateActivation({document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
     cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain:readBounds.maxBytesPerDrain}})
-  if(validation.kind!=='accepted')throw new Error(JSON.stringify(validation))
-  return verifyOrdinaryActivationCut(f.storage as StorageContext,{...input,baseline:validation.baseline,history})
+  if(validation.kind!=='accepted')throw new Error(validation.kind==='refused'?validation.message:JSON.stringify(validation))
+  return verifyOrdinaryActivationCut(f.storage as StorageContext,{...input,baseline:validation.baseline,history,proof:validation.proof})
 }
 it('activates past a losing base from a second device and keeps one lineage through Resume and a fresh capture',async()=>{
   const f=fixture(),loser=losingDevice(f);try{
@@ -383,6 +426,145 @@ it.each([
     add(f,loser)
     await expect(f.prepare()).rejects.toThrow(message)
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{loser.doc.destroy();f.close()}
+})
+// Proves: the complete history is charged and validated once, however many
+// later prefixes must keep the source's projection.
+it('activates a source followed by many projection-neutral rows over a 1 MB baseline within the self-hosted budget',async()=>{
+  const f=fixture('x'.repeat(1_000_000)),doc=new Y.Doc();try{
+    const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation
+    expect(f.capture.baselineBytes.length).toBeGreaterThan(1_000_000)
+    Y.applyUpdate(doc,f.capture.baselineBytes);const base=Y.encodeStateVector(doc)
+    Y.applyUpdate(doc,f.capture.fullState);const edit=Y.encodeStateAsUpdate(doc,base)
+    f.raw.prepare("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.updateBlobSha256',?) WHERE origin_id='origin' AND origin_seq=2").run(hash(edit))
+    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(edit),edit.length,edit)
+    const frontmatter=doc.getMap('frontmatter')
+    for(let seq=3;seq<3+24;seq++){
+      const before=Y.encodeStateVector(doc);frontmatter.set('temporary',seq);frontmatter.delete('temporary');const neutral=Y.encodeStateAsUpdate(doc,before)
+      append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(neutral)}),neutral)
+    }
+    const fullState=Buffer.from(Y.encodeStateAsUpdate(doc))
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(await f.prepare({maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain})).toMatchObject({completed:false})
+  }finally{doc.destroy();f.close()}
+})
+// A later native-shaped write of the document under a native settlement name,
+// whose projection the edit at origin sequence 2 made stale, unless given another.
+function staleArtifact(f:ReturnType<typeof fixture>,origin='origin',originSeq=3,
+  stale=f.raw.prepare("SELECT blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='original-moment'").get()!){
+  const momentId=`moment-ydoc-${hash(Buffer.from(`${origin}:${originSeq}`))}`
+  append(f,origin,originSeq,'moment.append',{momentId,versionId:'main',objectId:'object',objectCreatedAtMs:0,path:'docs/a.md',recordedAtMs:3,
+    operation:'write',payloadBeforeBlobSha256:null,payloadBeforePath:null,payloadAfterBlobSha256:stale.blob_sha256,payloadAfterPath:'docs/a.md',
+    payloadBeforeContentKind:null,payloadBeforeByteLength:null,payloadAfterContentKind:'text',payloadAfterByteLength:stale.byte_length,
+    metadata:{origin:'sync',summary:null,correlationId:null},authors:null,beforePresent:'null',beforeObjectId:null,beforeVersionId:null,beforePath:null,
+    beforeBlobSha256:null,beforeContentKind:null,beforeByteLength:null,beforeUpdatedAtMs:null,beforeLatestMomentId:null,beforeMetadata:null})
+  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES ('workspace','object',?,?,'main','docs/a.md',?,'text',?,3)`).run(f.capture.source.committedCursor,momentId,stale.blob_sha256,stale.byte_length)
+}
+const otherWrite=(changes:Record<string,unknown>)=>({versionId:'main',objectId:'other-object',momentId:'other',path:'docs/c.md',operation:'write',
+  payloadAfterPath:'docs/c.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:'c'.repeat(64),payloadAfterByteLength:1,...changes})
+// Proves: a later divergent file moment of the same lineage leaves an earlier
+// source standing, beside a losing device's base and delta that break nothing.
+it('activates past a same-lineage stale settlement artifact and a losing base from another device',async()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(Buffer.from('losing'))}))
+    staleArtifact(f)
+    expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{loser.doc.destroy();f.close()}
+})
+// A second device's same-lineage edit that leaves the projection unchanged, as
+// its own nearest row before a settlement it publishes.
+function neutralDevice(f:ReturnType<typeof fixture>){
+  const doc=new Y.Doc();try{
+    Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc),frontmatter=doc.getMap('frontmatter')
+    frontmatter.set('temporary',1);frontmatter.delete('temporary')
+    const neutral=Y.encodeStateAsUpdate(doc,before),fullState=Buffer.from(Y.encodeStateAsUpdate(doc))
+    append(f,'second-device',0,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(neutral)}),neutral)
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+  }finally{doc.destroy()}
+}
+const edited=(f:ReturnType<typeof fixture>)=>({blob_sha256:f.capture.source.sourceDigest,byte_length:f.capture.source.sourceByteLength})
+// Proves: writes of the document between a stale artifact's nearest row and
+// the artifact that native folds break nothing: an echo of the lineage's
+// projection at that point, settlement-named or ordinary, and an earlier
+// stale settlement of the same lineage.
+it.each([
+  ['a settlement echo of the edit before another device\'s stale settlement',f=>{neutralDevice(f);staleArtifact(f,'origin',3,edited(f));staleArtifact(f,'second-device',1)}],
+  ['an ordinary write echoing the edit',f=>{append(f,'other',0,'moment.append',otherWrite({objectId:'object',momentId:'echo',path:'docs/a.md',payloadAfterPath:'docs/a.md',
+    payloadAfterBlobSha256:f.capture.source.sourceDigest,payloadAfterByteLength:f.capture.source.sourceByteLength}));staleArtifact(f)}],
+  ['an earlier stale settlement of the same lineage',f=>{neutralDevice(f);staleArtifact(f,'origin',3);staleArtifact(f,'second-device',1)}],
+] as [string,(f:ReturnType<typeof fixture>)=>void][])('activates past a stale settlement artifact after %s',async(_case,add)=>{
+  const f=fixture();try{
+    add(f)
+    expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{f.close()}
+})
+const divergent='Ordinary activation found a later ordinary file moment with a divergent projection.'
+it.each([
+  // The artifact origin's nearest row names another lineage; its favourable row behind that doesn't count.
+  ['an unfavourable nearer row',f=>{append(f,'origin',3,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'b'.repeat(64),updateBlobSha256:'b'.repeat(64)}));staleArtifact(f,'origin',4)},divergent],
+  // A refused row keeps no object, so it may have been the document's.
+  ['a refused nearer row',f=>{append(f,'origin',3,'relay.refused',{opKind:'ydoc.update',payloadSha256:'b'.repeat(64),reason:'outside-hosted-documents'})
+    f.raw.exec("UPDATE sync_relay_log SET relay_admission='refused' WHERE origin_id='origin' AND origin_seq=3");staleArtifact(f,'origin',4)},divergent],
+  ['a losing base that is its origin\'s nearest row',f=>{losingDevice(f).doc.destroy();staleArtifact(f,'losing-device',2)},divergent],
+  ['no nearest row in the captured history',f=>staleArtifact(f,'other-device',0),divergent],
+  ['a name native does not give a settlement',f=>{staleArtifact(f);f.raw.exec("UPDATE sync_relay_object_moments SET moment_id='moment-ydoc-short' WHERE object_id='object' AND relay_seq=4")
+    f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.momentId','moment-ydoc-short') WHERE relay_seq=4")},divergent],
+  ['another object taking the path',f=>{staleArtifact(f);append(f,'other',0,'moment.append',otherWrite({path:'docs/a.md',payloadAfterPath:'docs/a.md'}))},divergent],
+  ['another object moving onto the path and away again',f=>{staleArtifact(f)
+    append(f,'other',0,'moment.append',otherWrite({operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md',beforePath:'docs/c.md'}))
+    append(f,'other',1,'moment.append',otherWrite({operation:'move',beforePath:'docs/a.md'}))},divergent],
+  ['a before-image naming the document',f=>{staleArtifact(f);append(f,'other',0,'moment.append',otherWrite({beforeObjectId:'object'}))},divergent],
+  ['an ordinary replacement write to the same object',f=>{append(f,'origin',3,'moment.append',otherWrite({objectId:'object',momentId:'replacement',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))
+    staleArtifact(f,'origin',4)},divergent],
+  ['a replacement whose bytes a later write restores',f=>{const stale=f.raw.prepare("SELECT blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='original-moment'").get()!
+    append(f,'other',0,'moment.append',otherWrite({objectId:'object',momentId:'replacement',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))
+    append(f,'other',1,'moment.append',otherWrite({objectId:'object',momentId:'restoration',path:'docs/a.md',payloadAfterPath:'docs/a.md',
+      payloadAfterBlobSha256:stale.blob_sha256,payloadAfterByteLength:stale.byte_length}))
+    staleArtifact(f,'origin',3)},divergent],
+  ['the document moving away and back',f=>{staleArtifact(f)
+    append(f,'origin',4,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/b.md',payloadAfterPath:'docs/b.md'}))
+    append(f,'origin',5,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))},
+    'Ordinary activation history replaced the live document.'],
+  ['unclaimed lineage evidence',f=>{staleArtifact(f);append(f,'other',0,'ydoc.update',ydocUpdate({isBaseState:false,updateBlobSha256:'d'.repeat(64)}))},
+    'Ordinary activation history differs from the captured lineage.'],
+  ['a base inconsistent with the captured claim',f=>{staleArtifact(f);const other=Buffer.from('another base')
+    append(f,'other',0,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(other)}),other)},
+    'Ordinary activation has a different baseline.'],
+] as [string,(f:ReturnType<typeof fixture>)=>void,string][])('refuses a stale settlement artifact after %s',async(_case,add,message)=>{
+  const f=fixture();try{
+    add(f)
+    await expect(f.prepare()).rejects.toThrow(message)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{f.close()}
+})
+// Proves: every row the replacement scan examines between the artifact's
+// nearest row and the cut is charged to the proof budget, so a long unrelated
+// interval refuses for this pass instead of stalling the writer.
+it('charges a long unrelated interval before a stale settlement artifact to the proof budget',async()=>{
+  const f=fixture();try{
+    for(let seq=0;seq<300;seq++)append(f,'other',seq,'moment.append',otherWrite({momentId:`unrelated-${seq}`,padding:'p'.repeat(4096)}))
+    staleArtifact(f)
+    await expect(verify(f)).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')
+    expect(await verify(f,{...bounds,maxBytesPerDrain:4_000_000})).toEqual({verified:true})
+  }finally{f.close()}
+})
+// Proves: the search for the artifact origin's nearest row charges every row
+// of the document it walks back over, so a long losing-lineage interval
+// refuses for this pass instead of an uncharged sort, and walks the index in
+// relay order without one.
+it('charges the walk back over a long losing-lineage interval to an artifact origin\'s nearest row',async()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    for(let seq=2;seq<300;seq++)append(f,'losing-device',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,
+      updateBlobSha256:hash(Buffer.from(`losing-${seq}`)),padding:'p'.repeat(4096)}))
+    staleArtifact(f,'other-device',0)
+    const context=f.storage as StorageContext,prepare=vi.spyOn(context.db,'prepare')
+    await expect(verify(f)).rejects.toThrow('Ordinary activation history exceeds its configured byte budget.')
+    await expect(verify(f,{...bounds,maxBytesPerDrain:4_000_000})).rejects.toThrow(divergent)
+    const walk=prepare.mock.calls.map(call=>call[0]).find(sql=>sql.includes('idx_sync_relay_log_document_page')&&sql.includes('ORDER BY relay_seq DESC'))!
+    prepare.mockRestore()
+    const plan=f.raw.prepare(`EXPLAIN QUERY PLAN ${walk}`).all('workspace','main','object',2,f.capture.source.committedCursor).map(row=>String(row.detail))
+    expect(plan).toEqual(['SEARCH sync_relay_log USING INDEX idx_sync_relay_log_document_page (workspace_id=? AND <expr>=? AND <expr>=? AND relay_seq>? AND relay_seq<?)'])
   }finally{loser.doc.destroy();f.close()}
 })
 it('rejects a different replication epoch even at the same relay cursor',async()=>{
@@ -605,18 +787,22 @@ async function completeActivation(f:ReturnType<typeof fixture>){
   const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
     expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
   delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+  admitSeed(f,access)
+  const owner=delivery.openOwnerDelivery({host,document:f.document,actor})
+  const event=delivery.nextOwnerApplication(owner)!
+  delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:2,applicationReplayed:false})
+  f.store.complete({document:f.document,host,access,nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})
+}
+// Admits the captured full state as the pending activation's seed.
+function admitSeed(f:ReturnType<typeof fixture>,access:ServiceActivationAccess,deliveryId='seed'){
   const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
   const cut=f.storage.readLiveUpdateJournalCut({document:f.document})
   if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing activation authority')
   const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
     checkpoint:cut.cut.checkpoint.bytes,suffix:cut.cut.suffix.map(row=>row.bytes),candidate:f.capture.fullState})
-  f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
-    metadata:{deliveryId:'seed',updateDigest:hash(f.capture.fullState),binding:current.binding},cutToken:cut.cut,validation,
+  return f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+    metadata:{deliveryId,updateDigest:hash(f.capture.fullState),binding:current.binding},cutToken:cut.cut,validation,
     updateBytes:f.capture.fullState,receivedAtMs:4},access)
-  const owner=delivery.openOwnerDelivery({host,document:f.document,actor})
-  const event=delivery.nextOwnerApplication(owner)!
-  delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:2,applicationReplayed:false})
-  f.store.complete({document:f.document,host,access,nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})
 }
 function deferred(){
   let resolve!:()=>void
@@ -634,7 +820,8 @@ function reopen(f:ReturnType<typeof fixture>,fence:number){
 }
 const ownerTip=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT tip_cursor FROM sync_relay_live_delivery_owners').get()!.tip_cursor)
 // Admits an owner edit after the seed for the next drain to apply natively.
-function commitEdit(f:ReturnType<typeof fixture>){
+const commitEdit=(f:ReturnType<typeof fixture>)=>admitEdit(f).metadata.accepted.receipt
+function admitEdit(f:ReturnType<typeof fixture>){
   const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}),cut=f.storage.readLiveUpdateJournalCut({document:f.document})
   if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing owner authority')
   const doc=new Y.Doc();Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc)
@@ -645,7 +832,7 @@ function commitEdit(f:ReturnType<typeof fixture>){
   const committed=f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
     metadata:{deliveryId:'edit',updateDigest:hash(bytes),binding:current.binding},cutToken:cut.cut,validation,updateBytes:bytes,receivedAtMs:5})
   if(!committed.admitted)throw new Error(JSON.stringify(committed.result))
-  return committed.admitted.metadata.accepted.receipt
+  return committed.admitted
 }
 // Native replies for the resumed, adopted service owner. `park` holds the next
 // call to one method after it enters, until the test releases it.
@@ -722,7 +909,7 @@ it('reports a restore fence that lands while a completed activation waits for do
     const {d,work,key,send,capture,signal,fence,queueBehind}=await serializedActivation(f)
     const settle=vi.fn(async()=>{expect(work.busy(key)).toBe(true)})
     let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
-    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    expect(await d.driver.activate(d.target,signal,settle,new Map())).toMatchObject({kind:'done'})
     expect(settle).toHaveBeenCalledTimes(1)
     // Only this first pass, which has no owner yet, catches up first.
     expect(d.pull).toHaveBeenCalledTimes(1)
@@ -1068,7 +1255,7 @@ it('restarts a pending activation with its retained ID and cut after catching up
       f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
       return {hasMore:false}
     })
-    await expect(resumed.driver.activate(resumed.target,new AbortController().signal)).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
+    await expect(resumed.driver.activate(resumed.target,new AbortController().signal,undefined,new Map())).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
     expect(order).toEqual(['pull','capture'])
     expect(capture).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
     expect(send).not.toHaveBeenCalled()
@@ -1091,4 +1278,1212 @@ it('retries the exact stale lease release before another ordinary pull after res
     expect(order).toEqual(['pull','capture','release-lost','release','pull','capture','release'])
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
+})
+
+// Enrolls the fixture's document for the service host under an active Edit grant.
+const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',ownerUserId:'owner',guard(){}}
+function enroll(f:ReturnType<typeof fixture>){
+  f.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)`)
+  return f.storage.enrollServiceHostDocument({...enrollment,nowMs:1})
+}
+// Stops as a running service host does, with its preparation of the activation its engine blocked.
+const stopDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>preparedStop(f.storage,{...enrollment,enabled:false,retire:true,nowMs})
+const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs})
+const retirement=(storage:unknown)=>readServiceActivationRetirement(storage as StorageContext,{workspaceId:'workspace',objectId:'object'})
+const generation=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
+const refused={kind:'refused',reason:'host-unavailable'}
+const credential={key:new Uint8Array(32).fill(7),namespace:'history'}
+const keyOf=({objectId,lineageClaimId,activationId,restoreFenceGeneration,acceptedThrough}:NonNullable<ReturnType<typeof retirement>>)=>
+  ({objectId,lineageClaimId,activationId,restoreFenceGeneration,acceptedThrough})
+// The released boundary at the journal row a receipt names.
+function boundaryAt(f:ReturnType<typeof fixture>,receipt:LiveUpdateReceipt){
+  const row=f.raw.prepare('SELECT accepted_event_count AS count,accepted_evidence_digest AS digest FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(receipt.journalCursor)!
+  return {terminalReceipt:{deliveryId:receipt.deliveryId,updateDigest:receipt.updateDigest,journalCursor:receipt.journalCursor,acceptingHostEpoch:receipt.acceptingHostEpoch},
+    eventCount:Number(row.count),historyEvidenceDigest:String(row.digest)}
+}
+// The boundary a release keeps: the retiring owner's applied tip.
+const ownerBoundary=(f:ReturnType<typeof fixture>)=>
+  boundaryAt(f,JSON.parse(String(f.raw.prepare('SELECT tip_receipt_json FROM sync_relay_live_delivery_owners').get()!.tip_receipt_json)))
+
+it('records the exact activation and F in Stop, and keeps that fence through a duplicate Stop, a restart and an early Resume',async()=>{
+  const f=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    enroll(f);await completeActivation(f);const edit=commitEdit(f)
+    expect(stopDocument(f,10)).toMatchObject({retired:true,acceptedCursor:edit.journalCursor})
+    const recorded={relayDatabaseNamespace:'history',activationId:f.capture.activationId,workspaceId:'workspace',mainVersionId:'main',objectId:'object',
+      lineageClaimId:f.document.lineageClaimId,path:'docs/a.md',restoreFenceGeneration:generation(f),acceptedThrough:edit.journalCursor,requestedAtMs:10}
+    expect(retirement(f.storage)).toEqual(recorded)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    // A duplicate Stop returns the original fence, and the accepted cursor it names cannot move.
+    expect(stopDocument(f,30)).toMatchObject({acceptedCursor:edit.journalCursor})
+    expect(retirement(f.storage)).toEqual(recorded)
+    reopened=openSyncRelayStorage(f.path)
+    expect(retirement(reopened)).toEqual(recorded)
+    // Resume enables the enrollment but never reopens the retiring activation.
+    expect(resumeDocument(f,40)).toMatchObject({enabled:true,retired:false})
+    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:50})).toMatchObject({enabled:true})
+    expect(retirement(f.storage)).toEqual(recorded)
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:6,guard(){}})).toThrow()
+  }finally{reopened?.close();f.close()}
+})
+
+it('commits Stop and its obligation together, and records none without a prepared activation',async()=>{
+  const f=fixture();try{
+    enroll(f)
+    expect(stopDocument(f,10)).toMatchObject({retired:true,acceptedCursor:0})
+    expect(retirement(f.storage)).toBeNull()
+    resumeDocument(f,20);await completeActivation(f)
+    f.raw.exec("CREATE TRIGGER stop_failure BEFORE UPDATE ON sync_relay_service_host_enrollments BEGIN SELECT RAISE(ABORT,'stop fault'); END")
+    expect(()=>stopDocument(f,30)).toThrow('stop fault')
+    expect(retirement(f.storage)).toBeNull()
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+  }finally{f.close()}
+})
+
+it("records the held activation's obligation inside its Resume's enrollment transaction",async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);const edit=commitEdit(f)
+    const held=(changes={})=>({activationId:f.capture.activationId,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){},...changes})
+    const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.enrollServiceHostDocument({...enrollment,nowMs,held:snapshot})
+    expect(()=>resume(held({activationId:'other-activation'}))).toThrow('changed while live editing was resuming')
+    expect(()=>resume(held({streamIdentity:'other-stream'}))).toThrow('changed while live editing was resuming')
+    expect(()=>resume(held({assertHeld(){throw new Error('hold ended')}}))).toThrow('hold ended')
+    f.raw.exec("CREATE TRIGGER resume_failure BEFORE UPDATE ON sync_relay_service_host_enrollments BEGIN SELECT RAISE(ABORT,'resume fault'); END")
+    expect(()=>resume(held())).toThrow('resume fault')
+    f.raw.exec('DROP TRIGGER resume_failure')
+    expect(retirement(f.storage)).toBeNull()
+    expect(resume(held())).toMatchObject({enabled:true})
+    const recorded={activationId:f.capture.activationId,restoreFenceGeneration:generation(f),acceptedThrough:edit.journalCursor,requestedAtMs:10}
+    expect(retirement(f.storage)).toMatchObject(recorded)
+    expect(resume(held(),20)).toMatchObject({enabled:true})
+    expect(retirement(f.storage)).toMatchObject(recorded)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+  }finally{f.close()}
+})
+
+it('denies ordinary live admission to a retiring pending activation, whatever access it held',async()=>{
+  const f=fixture();try{
+    enroll(f);await f.prepare()
+    const access=f.store.pending(f.document,host),current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
+    if(current.kind!=='current')throw new Error('Missing pending activation authority')
+    const allows=()=>allowsServiceActivation(f.storage as StorageContext,{document:f.document,actor},host,current.binding,access)
+    expect(allows()).toBe(true)
+    stopDocument(f,10);resumeDocument(f,20)
+    expect(retirement(f.storage)).toMatchObject({activationId:f.capture.activationId,acceptedThrough:0})
+    expect(allows()).toBe(false)
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
+    expect(()=>f.store.pending(f.document,host)).toThrow('Pending activation is unavailable.')
+    expect(()=>f.store.complete({document:f.document,host,access,nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})).toThrow()
+  }finally{f.close()}
+})
+
+it('completes a retirement once: archives the owner row, refunds the retained state exactly once, and replays without touching a successor',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);const edit=commitEdit(f)
+    const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})
+    if(current.kind!=='current')throw new Error('Missing owner authority')
+    stopDocument(f,10);resumeDocument(f,15)
+    const owner=f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').get()!,tip=JSON.parse(String(owner.tip_receipt_json)) as LiveUpdateReceipt
+    const endpoint=(receipt:LiveUpdateReceipt)=>boundaryAt(f,receipt)
+    const key={objectId:'object',lineageClaimId:f.document.lineageClaimId,activationId:f.capture.activationId,restoreFenceGeneration:generation(f),acceptedThrough:edit.journalCursor}
+    const complete=(boundary=endpoint(tip),changes={})=>f.store.completeRetirement({workspaceId:'workspace',key,boundary,host,registeredAtMs:20,nowMs:20,guard(){},...changes})
+    const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)
+    const activation=()=>f.raw.prepare('SELECT state_bytes,accounted_bytes,retired_at_ms,retired_boundary_json FROM sync_relay_service_activations').get()!
+    const before={usage:usage(),accounted:Number(activation().accounted_bytes)}
+    // Retirement keeps what the owner applied; the accepted edit it never applied refuses.
+    expect(()=>complete(endpoint(edit))).toThrow('differs from its release')
+    expect(()=>complete({...endpoint(tip),eventCount:99})).toThrow('differs from the live journal')
+    expect(()=>complete(endpoint(tip),{key:{...key,acceptedThrough:edit.journalCursor+1}})).toThrow('retirement is unavailable')
+    // A generation that moved with no restore running is not the one the key names.
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1')
+    expect(()=>complete()).toThrow('names another generation')
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation-1')
+    expect(usage()).toBe(before.usage)
+    const origin=()=>readServiceActivationOrigin(f.storage as StorageContext,'history',f.document,f.capture.activationId)
+    expect(origin()).not.toBeNull()
+    expect(complete()).toEqual({status:'retired',replayed:false})
+    const boundaryJson=JSON.stringify(endpoint(tip)),refund=f.capture.fullState.length-Buffer.byteLength(boundaryJson)
+    // Only a successor's prepare reserves the next adoption.
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0').all()).toEqual([])
+    expect(usage()).toBe(before.usage-refund)
+    expect(activation()).toEqual({state_bytes:null,accounted_bytes:before.accounted-refund,retired_at_ms:20,retired_boundary_json:boundaryJson})
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([])
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owner_history').all()).toEqual([{...owner,activation_id:f.capture.activationId}])
+    expect(retirement(f.storage)).toBeNull()
+    // Retired with no successor, the document admits no ordinary live update and offers no retained activation.
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(true)
+    expect(allowsServiceActivation(f.storage as StorageContext,{document:f.document,actor},host,current.binding)).toBe(false)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toBeNull()
+    // Its archived owner row's origin starts no delivery.
+    expect(origin).toThrow('Retained service activation origin differs.')
+    // An exact replay changes nothing, not even a successor's owner row on the same lineage.
+    const successor={...owner,origin_json:JSON.stringify({...JSON.parse(String(owner.origin_json)),adoptionId:'successor-activation'})}
+    f.raw.prepare(`INSERT INTO sync_relay_live_delivery_owners(${Object.keys(successor).join(',')}) VALUES (${Object.keys(successor).map(()=>'?').join(',')})`)
+      .run(...Object.values(successor) as never[])
+    expect(complete()).toEqual({status:'retired',replayed:true})
+    expect(usage()).toBe(before.usage-refund)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([successor])
+    expect(()=>complete({...endpoint(tip),eventCount:endpoint(tip).eventCount+1})).toThrow('another boundary')
+  }finally{f.close()}
+})
+
+// Proves: the host's drain of a stopped last document leaves the workspace its
+// hosted credential and settling scope while the activation retires, and both
+// end once it has.
+it('keeps the hosted credential and settling scope through the release of a stopped last document until its activation retires',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f)
+    const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
+    const hosted=()=>authorizeServiceHostReplication(f.storage,{...credential,workspaceId:'workspace',bearer,method:'GET',pathname:'/sync/workspace/hosted/log'})
+    stopDocument(f,10)
+    const open=retirement(f.storage)!
+    expect(f.storage.releaseServiceHostEnrollment({workspaceId:'workspace',objectId:'object',nowMs:11})).toMatchObject({retired:true,hostDrainedAtMs:11})
+    expect(hosted()).toBe('owner')
+    expect(f.storage.readServiceHostFeedScope('workspace')?.settling).toEqual(new Map([['object',open]]))
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(hosted()).toBeNull()
+    expect(f.storage.readServiceHostFeedScope('workspace')).toBeNull()
+  }finally{f.close()}
+})
+
+// Proves: completion checks the document's current generation, not only the
+// one saved with the obligation. A restore that advanced it after the
+// obligation opened refuses completion, and nothing is archived or refunded.
+it('refuses completing a retirement while a restore that advanced its generation is unfinished',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f)
+    const fence=generation(f)
+    f.storage.beginStopRestore({deliveryKind:'owner',operationId:'restore',ownerUserId:'owner',document:f.document,shareId:'share',grantId:'grant',
+      expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:fence,restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId},20)
+    // The shared retirement path can open an obligation while a restore runs.
+    const open=(f.storage as StorageContext).tx(()=>openServiceActivationRetirement(f.storage as StorageContext,f.document,30))!
+    expect(open.restoreFenceGeneration).toBe(fence)
+    f.storage.advanceStopRestoreFence({operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'},40)
+    expect(generation(f)).toBe(fence+1)
+    const rows=()=>f.raw.prepare(`SELECT (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT count(*) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT count(*) FROM sync_relay_live_delivery_owner_history) AS archived,(SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
+    const before=rows()
+    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}}))
+      .toThrow('Service activation retirement overlaps a restore.')
+    expect(rows()).toEqual({...before,owners:1,archived:0,retired:null})
+    expect(retirement(f.storage)).toEqual(open)
+  }finally{f.close()}
+})
+
+// Proves: a workspace identity change leaves an open obligation behind. Its
+// lineage is stale, so it could never retire, and once the document is
+// enrolled under the new identity the obligation neither fences it nor names
+// it settling.
+it('stops fencing a document with an open retirement once the workspace identity changes',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);stopDocument(f,10)
+    expect(retirement(f.storage)).toMatchObject({activationId:f.capture.activationId})
+    expect(f.storage.rotateWorkspaceIdentity({workspaceId:'workspace',ownerUserId:'owner',replicationEpoch:'next-epoch',streamIdentity:'next-stream',rotatedAtMs:20})).toBe('rotated')
+    expect(retirement(f.storage)).toBeNull()
+    // Nothing enrolls a document again under a new identity yet, so the test writes its enrollment there.
+    f.raw.exec("UPDATE sync_relay_service_host_enrollments SET replication_epoch='next-epoch',stream_identity='next-stream',owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL")
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(true)
+    expect(f.storage.readServiceHostFeedScope('workspace')?.settling).toEqual(new Map())
+    // Only the old lineage's staleness refuses it now. Re-enrolling, and a successor lineage after an identity change, aren't supported yet.
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual({kind:'refused',reason:'stale-document'})
+  }finally{f.close()}
+})
+
+// Proves: a duplicate Stop returns the open obligation's F even after the
+// document's current lineage changed.
+it("returns the original F to a duplicate Stop after the document's current lineage changed",async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);const edit=commitEdit(f)
+    expect(stopDocument(f,10)).toMatchObject({acceptedCursor:edit.journalCursor})
+    const recorded=retirement(f.storage)
+    f.raw.exec(`UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=20;
+      INSERT INTO sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id,replaces_lineage_claim_id,current_path,baseline_moment_relay_seq,
+        baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,lineage_state,admission_state,restore_fence_generation,registered_at_ms,retired_at_ms)
+      SELECT workspace_id,main_version_id,object_id,'${'b'.repeat(64)}',lineage_claim_id,current_path,baseline_moment_relay_seq,baseline_projected_sha256,
+        baseline_projected_byte_length,'${'b'.repeat(64)}',baseline_bytes,'current','open',restore_fence_generation,20,NULL FROM sync_relay_live_documents`)
+    expect(stopDocument(f,30)).toMatchObject({acceptedCursor:edit.journalCursor})
+    expect(retirement(f.storage)).toEqual(recorded)
+  }finally{f.close()}
+})
+
+const SUCCESSOR=`ordinary-activation-${'b'.repeat(64)}`
+// A completed activation retired at the seed its owner applied. The edit accepted after it, at F, waits for a successor.
+async function retirePredecessor(f:ReturnType<typeof fixture>){
+  enroll(f);await completeActivation(f);const edit=commitEdit(f)
+  stopDocument(f,10);resumeDocument(f,15)
+  const boundary=ownerBoundary(f)
+  expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary,host,registeredAtMs:20,nowMs:20,guard(){}}))
+    .toEqual({status:'retired',replayed:false})
+  return {edit,boundary}
+}
+const successor=(f:ReturnType<typeof fixture>,source={})=>
+  ({...f.capture,activationId:SUCCESSOR,source:{...f.capture.source,predecessorActivationId:f.capture.activationId,...source}})
+const prepareSuccessor=(f:ReturnType<typeof fixture>,capture:NativeOwnerActivation=successor(f))=>
+  f.store.prepare({capture,host,shareId:'share',registeredAtMs:21,guard(){},validate:validateActivation,bounds})
+const activations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT activation_id,predecessor_activation_id FROM sync_relay_service_activations ORDER BY rowid').all()
+
+it("prepares a successor of the lineage's retired tail, closed to ordinary admission and reserved for its own owner row",async()=>{
+  const f=fixture();try{
+    await retirePredecessor(f)
+    expect(await prepareSuccessor(f)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(activations(f)).toEqual([{activation_id:f.capture.activationId,predecessor_activation_id:null},
+      {activation_id:SUCCESSOR,predecessor_activation_id:f.capture.activationId}])
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    const access=f.store.pending(f.document,host)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
+    expect(f.raw.prepare("SELECT journal_cursor FROM sync_relay_live_delivery_reservations WHERE host_id='service' AND journal_cursor=0").all()).toEqual([{journal_cursor:0}])
+    expect(await prepareSuccessor(f)).toEqual({document:f.document,replayed:true,completed:false})
+  }finally{f.close()}
+})
+
+it('refuses a successor while its predecessor retires, or that names another tail or none',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);commitEdit(f);stopDocument(f,10)
+    await expect(prepareSuccessor(f)).rejects.toThrow('Service activation is retiring.')
+    resumeDocument(f,15)
+    f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}})
+    await expect(prepareSuccessor(f,{...f.capture,activationId:SUCCESSOR})).rejects.toThrow('names another predecessor')
+    await expect(prepareSuccessor(f,successor(f,{predecessorActivationId:`ordinary-activation-${'c'.repeat(64)}`}))).rejects.toThrow('names another predecessor')
+    expect(activations(f)).toHaveLength(1)
+  }finally{f.close()}
+})
+
+it('refuses a successor beside a current activation or a sibling successor',async()=>{
+  const f=fixture();try{
+    await retirePredecessor(f)
+    const columns=`relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,
+      state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
+    // A successor that already followed the tail, and retired before it, is the tail now.
+    f.raw.exec(`INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${'c'.repeat(64)}',workspace_id,main_version_id,
+      object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,share_id,completion_json,accounted_bytes,10,retire_restore_generation,
+      retire_accepted_cursor,10,retired_boundary_json FROM sync_relay_service_activations`)
+    await expect(prepareSuccessor(f)).rejects.toThrow('names another predecessor')
+    f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${'c'.repeat(64)}'`)
+    // An activation of the document's other lineage that has not retired.
+    const other='d'.repeat(64)
+    f.raw.exec(`INSERT INTO sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id,replaces_lineage_claim_id,current_path,baseline_moment_relay_seq,
+        baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,lineage_state,admission_state,restore_fence_generation,registered_at_ms,retired_at_ms)
+      SELECT workspace_id,main_version_id,object_id,'${other}',NULL,current_path,baseline_moment_relay_seq,baseline_projected_sha256,
+        baseline_projected_byte_length,'${other}',baseline_bytes,'retired','closed',restore_fence_generation,1,1 FROM sync_relay_live_documents;
+      INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${other}',workspace_id,main_version_id,object_id,'${other}',
+        NULL,source_json,binding_json,state_digest,x'0000',owner_user_id,share_id,NULL,accounted_bytes,NULL,NULL,NULL,NULL,NULL FROM sync_relay_service_activations`)
+    await expect(prepareSuccessor(f)).rejects.toThrow('already has a current activation')
+    f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${other}';
+      DELETE FROM sync_relay_live_documents WHERE lineage_claim_id='${other}'`)
+    // A pending successor is the lineage's current activation; another capture of the same tail refuses.
+    await prepareSuccessor(f)
+    await expect(prepareSuccessor(f,{...successor(f),activationId:`ordinary-activation-${'e'.repeat(64)}`})).rejects.toThrow('already has another retained source')
+    expect(activations(f)).toHaveLength(2)
+  }finally{f.close()}
+})
+
+it('refuses a successor under a changed workspace identity, from another baseline, or from an unverified source',async()=>{
+  const f=fixture();try{
+    await retirePredecessor(f)
+    await expect(prepareSuccessor(f,successor(f,{baseRelaySeq:1}))).rejects.toThrow('successor has another baseline')
+    await expect(prepareSuccessor(f,successor(f,{sourceDigest:'b'.repeat(64)}))).rejects.toThrow('Native activation differs from the complete ordinary CRDT history.')
+    expect(activations(f)).toHaveLength(1)
+    expect(f.storage.rotateWorkspaceIdentity({workspaceId:'workspace',ownerUserId:'owner',replicationEpoch:'next-epoch',streamIdentity:'next-stream',rotatedAtMs:30})).toBe('rotated')
+    await expect(prepareSuccessor(f,successor(f,{replicationEpoch:'next-epoch',streamIdentity:'next-stream'}))).rejects.toThrow('another owner or workspace identity')
+    await expect(prepareSuccessor(f)).rejects.toThrow('another owner or workspace identity')
+    expect(activations(f)).toHaveLength(1)
+  }finally{f.close()}
+})
+
+// The prepared successor's adoption at its predecessor's released boundary, and the owner delivery after it.
+async function adoptSuccessor(f:ReturnType<typeof fixture>,boundary:ReturnType<typeof ownerBoundary>){
+  await prepareSuccessor(f)
+  const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:SUCCESSOR,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  expect(adoption.cut).toMatchObject({events:[],terminalReceipt:boundary.terminalReceipt,retainedPrefix:{...boundary,predecessorActivationId:f.capture.activationId}})
+  delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:SUCCESSOR,localYDocSequence:2,terminalCursor:boundary.terminalReceipt.journalCursor,adoptionReplayed:false})
+  let sequence=2
+  const apply=()=>{
+    const owner=delivery.openOwnerDelivery({host,document:f.document,actor}),event=delivery.nextOwnerApplication(owner)!
+    delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:++sequence,applicationReplayed:false})
+    return event.metadata.accepted.receipt
+  }
+  const complete=(pendingBytes=0)=>f.store.complete({document:f.document,host,access,nativeState:{adoptionId:SUCCESSOR,pendingBytes},guard(){}})
+  return {access,apply,complete}
+}
+const completed=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT completion_json IS NOT NULL AS done FROM sync_relay_service_activations WHERE activation_id=?').get(SUCCESSOR)!.done
+
+it.each([false,true])('completes a successor once its owner applied the suffix through F (seeded: %s)',async seeded=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary)
+    expect(f.raw.prepare("SELECT tip_cursor FROM sync_relay_live_delivery_owners").get()).toEqual({tip_cursor:boundary.terminalReceipt.journalCursor})
+    expect(adopted.apply()).toEqual(edit)
+    if(seeded){
+      expect(admitSeed(f,adopted.access,'successor-seed').result.kind).toBe('accepted')
+      expect(adopted.apply().deliveryId).toBe('successor-seed')
+    }
+    adopted.complete()
+    expect(completed(f)).toBe(1)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+  }finally{f.close()}
+})
+
+it('refuses to complete a successor without real ACKs through the last row, or with native bytes pending',async()=>{
+  const f=fixture();try{
+    const {boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary)
+    expect(()=>adopted.complete()).toThrow('application acknowledgement is missing')
+    adopted.apply()
+    expect(admitSeed(f,adopted.access,'successor-seed').result.kind).toBe('accepted')
+    expect(()=>adopted.complete()).toThrow('application acknowledgement is missing')
+    adopted.apply()
+    expect(()=>adopted.complete(1)).toThrow('Native activation has not completed.')
+    expect(completed(f)).toBe(0)
+    adopted.complete()
+    expect(completed(f)).toBe(1)
+  }finally{f.close()}
+})
+
+it("refuses to complete a successor whose prefix differs, or whose journal holds another row or a second one after F",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary)
+    adopted.apply()
+    const predecessor=(set:string)=>f.raw.prepare(`UPDATE sync_relay_service_activations SET ${set} WHERE activation_id=?`).run(f.capture.activationId)
+    predecessor(`retired_boundary_json='${JSON.stringify({...boundary,eventCount:boundary.eventCount+1})}'`)
+    expect(()=>adopted.complete()).toThrow('differs from activation')
+    predecessor(`retired_boundary_json='${JSON.stringify(boundary)}'`)
+    // With F one row earlier, the predecessor's edit is a suffix beyond it.
+    predecessor(`retire_accepted_cursor=${edit.journalCursor-1}`)
+    expect(()=>adopted.complete()).toThrow('another update after its predecessor')
+    predecessor(`retire_accepted_cursor=${edit.journalCursor}`)
+    expect(admitSeed(f,adopted.access,'successor-seed').result.kind).toBe('accepted')
+    adopted.apply()
+    predecessor(`retire_accepted_cursor=${edit.journalCursor-1}`)
+    expect(()=>adopted.complete()).toThrow('another update after its predecessor')
+    expect(completed(f)).toBe(0)
+    predecessor(`retire_accepted_cursor=${edit.journalCursor}`)
+    adopted.complete()
+    expect(completed(f)).toBe(1)
+  }finally{f.close()}
+})
+
+it("records a held Resume's obligation for a pending successor",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    await adoptSuccessor(f,boundary)
+    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:30,
+      held:{activationId:SUCCESSOR,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){}}})).toMatchObject({enabled:true})
+    expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor,requestedAtMs:30})
+  }finally{f.close()}
+})
+
+const NEXT=`ordinary-activation-${'c'.repeat(64)}`
+// Proves: the chain tail is the retired activation no other follows, however
+// its retirement time compares with its predecessor's.
+it.each([['the same',20],['an earlier',5]])('follows a successor that retired at %s time as its predecessor',async(_,retiredAtMs)=>{
+  const f=fixture();try{
+    const {boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    stopDocument(f,20);resumeDocument(f,20)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    f.raw.prepare('UPDATE sync_relay_service_activations SET retire_requested_at_ms=?,retired_at_ms=? WHERE activation_id=?').run(retiredAtMs,retiredAtMs,SUCCESSOR)
+    const next={...f.capture,activationId:NEXT,source:{...f.capture.source,predecessorActivationId:SUCCESSOR}}
+    await expect(prepareSuccessor(f)).rejects.toThrow('names another predecessor')
+    expect(await prepareSuccessor(f,next)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(activations(f)).toEqual([{activation_id:f.capture.activationId,predecessor_activation_id:null},
+      {activation_id:SUCCESSOR,predecessor_activation_id:f.capture.activationId},{activation_id:NEXT,predecessor_activation_id:SUCCESSOR}])
+  }finally{f.close()}
+})
+
+const optionsOf=(f:ReturnType<typeof fixture>)=>(f.storage as StorageContext).options
+const usageOf=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)
+// Workspace usage less what the live delivery and activation rows account for. A step that writes only those rows keeps it.
+const unaccounted=(f:ReturnType<typeof fixture>)=>usageOf(f)-Number(f.raw.prepare(`SELECT
+  (SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) FROM sync_relay_live_delivery_reservations)+(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_service_activations)+
+  ${['owners','owner_history','hosts','documents','bootstraps','edges'].map(table=>`(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_live_delivery_${table})`).join('+')} AS bytes`).get()!.bytes)
+const adoptionReservations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT host_id FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0 ORDER BY host_id').all()
+
+// Proves: Stop and retirement make no quota decision, and a retired tail no
+// Resume followed holds no adoption reservation, through a later registration.
+it('retires a document in a workspace at its quota, holding no adoption reservation without a Resume',async()=>{
+  const f=fixture();try{
+    enroll(f);await completeActivation(f);commitEdit(f)
+    const ledger=unaccounted(f)
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)
+    stopDocument(f,10)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...host,updatedAtMs:30,guard(){}}).ok).toBe(true)
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: Resume makes the successor's quota decision. Refused, it leaves the
+// retired tail and its accounting as they were; once space is freed it
+// prepares the successor with its adoption reservation.
+it('refuses a successor at quota retryably, then prepares it with its adoption reservation once space is freed',async()=>{
+  // One client ID gives both fixtures the same bytes, so `sized` measures f.
+  const sized=fixture('Original',false,1),f=fixture('Original',false,1);try{
+    await retirePredecessor(sized);const free=usageOf(sized);await prepareSuccessor(sized)
+    const needed=usageOf(sized)-free,reservation=Number(sized.raw.prepare('SELECT reserved_bytes+accounted_bytes AS bytes FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0').get()!.bytes)
+    await retirePredecessor(f)
+    const ledger=unaccounted(f),retired=f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()
+    // Room for the successor's activation, not its adoption.
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)+needed-reservation
+    await expect(prepareSuccessor(f)).rejects.toThrow(SyncRelayQuotaExceededError)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual(retired)
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    optionsOf(f).workspaceQuotaBytes+=reservation
+    expect(await prepareSuccessor(f)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
+    expect(adoptionReservations(f)).toEqual([{host_id:'service'}])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close();sized.close()}
+})
+
+function transitionHost(f:ReturnType<typeof fixture>,from:typeof host|{mode:'device'|'service';hostId:string;hostEpoch:ReturnType<typeof parseHostEpoch>;instanceId:string;connectionId:string},
+  toMode:'device'|'service',toHostId:string){
+  const transitionId=`transition-${from.hostEpoch}`
+  const begin=f.storage.beginLiveHostTransition({from,toMode,toHostId,transitionId,startedAtMs:40,guard(){}})
+  if(!begin.ok||!begin.snapshot.transition)throw new Error('transition refused')
+  const transitionGeneration=begin.snapshot.transition.transitionGeneration
+  if(!f.storage.commitLiveHostTransitionEpoch({transitionId,transitionGeneration,updatedAtMs:41}).ok)throw new Error('transition commit refused')
+  const coordinate={mode:toMode,hostId:toHostId,hostEpoch:parseHostEpoch(from.hostEpoch+1),instanceId:`instance-${toHostId}`,connectionId:`connection-${toHostId}`}
+  if(!f.storage.activateLiveHostTransition({...coordinate,transitionId,transitionGeneration,transitionFromEpoch:from.hostEpoch,updatedAtMs:42,guard(){}}).ok)throw new Error('activation refused')
+  return coordinate
+}
+
+const reservedOn=(f:ReturnType<typeof fixture>,hostId:string)=>
+  f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_delivery_reservations WHERE host_id=? ORDER BY journal_cursor').all(hostId).map(row=>Number(row.cursor))
+const journalCursors=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor').all().map(row=>Number(row.cursor))
+// The pending successor's adoption on `on` at its predecessor's released boundary.
+function adoptSuccessorOn(f:ReturnType<typeof fixture>,on:ReturnType<typeof transitionHost>,boundary:ReturnType<typeof ownerBoundary>){
+  const access=f.store.pending(f.document,on),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const adoption=delivery.captureOwnerCut({host:on,document:f.document,actor,adoptionId:SUCCESSOR,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:SUCCESSOR,localYDocSequence:2,terminalCursor:boundary.terminalReceipt.journalCursor,adoptionReplayed:false})
+  return {access,delivery}
+}
+
+// Proves: a successor adopting on another host than its predecessor's needs
+// no delivery through the prefix there, and is funded only there. The hosts it
+// does not use keep what the earlier transitions funded until it retires,
+// which releases all of it, and the host registers again throughout.
+it("adopts a successor on another host than its predecessor's, funded only there until it retires",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    expect(unaccounted(f)).toBe(ledger)
+    await f.store.prepare({capture:successor(f),host:other,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    expect(adoptionReservations(f)).toEqual([{host_id:'other'}])
+    const {access,delivery}=adoptSuccessorOn(f,other,boundary)
+    const terminal=boundary.terminalReceipt.journalCursor,cursors=journalCursors(f)
+    expect(reservedOn(f,'other')).toEqual([edit.journalCursor])
+    expect(reservedOn(f,'device')).toEqual(cursors.filter(cursor=>cursor>terminal))
+    expect(reservedOn(f,'service')).toEqual(cursors.filter(cursor=>cursor>terminal))
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...other,updatedAtMs:60,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+    const owner=delivery.openOwnerDelivery({host:other,document:f.document,actor}),event=delivery.nextOwnerApplication(owner)!
+    delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:3,applicationReplayed:false})
+    f.store.complete({document:f.document,host:other,access,nativeState:{adoptionId:SUCCESSOR,pendingBytes:0},guard(){}})
+    stopDocument(f,60)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host:other,registeredAtMs:70,nowMs:70,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations').all()).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...other,updatedAtMs:80,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: Resume funds only the configured host. A -> B -> A: the transition
+// to B funds only what a successor adopting at the retired boundary needs
+// there, a quota with room for B's adoption alone admits Resume there,
+// and the transition back to A funds A's released adoption again, refused at
+// quota retryably with nothing changed. Usage matches the stored rows throughout.
+it("funds a lineage only on the host its successor uses, and again on a known host it moves back to",async()=>{
+  // One client ID gives both fixtures the same bytes, and B's ID is as long as A's, so `sized` measures B's adoption.
+  const sized=fixture('Original',false,1),f=fixture('Original',false,1);try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor
+    // A keeps only the suffix its successor would deliver there.
+    expect(reservedOn(f,'service')).toEqual(journalCursors(f).filter(cursor=>cursor>terminal))
+    const funded=usageOf(f),b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual(journalCursors(f).filter(cursor=>cursor>terminal))
+    // The transition charges B's host row and the suffix's reservations, nothing through the boundary.
+    expect(usageOf(f)-funded).toBe(Number(f.raw.prepare(`SELECT (SELECT SUM(reserved_bytes+accounted_bytes) FROM sync_relay_live_delivery_reservations WHERE host_id='other-b')+
+      (SELECT accounted_bytes FROM sync_relay_live_delivery_hosts WHERE host_id='other-b') AS bytes`).get()!.bytes))
+    expect(unaccounted(f)).toBe(ledger)
+    // Room for the successor's activation and its adoption on B alone.
+    await retirePredecessor(sized);const free=usageOf(sized);await prepareSuccessor(sized)
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)+usageOf(sized)-free
+    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    expect(adoptionReservations(f)).toEqual([{host_id:'other-b'}])
+    expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
+    expect(unaccounted(f)).toBe(ledger)
+    adoptSuccessorOn(f,b,boundary)
+    expect(reservedOn(f,'other-b')).toEqual([edit.journalCursor])
+    expect(unaccounted(f)).toBe(ledger)
+    // Back to A, which needs its adoption funded again.
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)
+    const transitionId=`transition-${b.hostEpoch}`,state=()=>f.raw.prepare(`SELECT
+      (SELECT json_group_array(json_array(host_id,journal_cursor)) FROM sync_relay_live_delivery_reservations) AS reservations,
+      (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT configured_host_id FROM sync_relay_session_host_control) AS configured`).get()
+    const begin=f.storage.beginLiveHostTransition({from:b,toMode:'service',toHostId:'service',transitionId,startedAtMs:60,guard(){}})
+    if(!begin.ok||!begin.snapshot.transition)throw new Error('transition refused')
+    const commit=()=>f.storage.commitLiveHostTransitionEpoch({transitionId,transitionGeneration:begin.snapshot.transition!.transitionGeneration,updatedAtMs:61})
+    const refusedAt=state()
+    expect(commit).toThrow(SyncRelayQuotaExceededError)
+    expect(state()).toEqual(refusedAt)
+    optionsOf(f).workspaceQuotaBytes=Number.MAX_SAFE_INTEGER
+    expect(commit().ok).toBe(true)
+    expect(reservedOn(f,'service')).toEqual([0,...journalCursors(f).filter(cursor=>cursor>terminal)])
+    expect(unaccounted(f)).toBe(ledger)
+    const back={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(b.hostEpoch+1),instanceId:'instance-service',connectionId:'connection-service'}
+    expect(f.storage.activateLiveHostTransition({...back,transitionId,transitionGeneration:begin.snapshot.transition.transitionGeneration,
+      transitionFromEpoch:b.hostEpoch,updatedAtMs:62,guard(){}}).ok).toBe(true)
+    expect(f.storage.registerLiveHost({...back,updatedAtMs:63,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close();sized.close()}
+})
+
+// Proves: a pending successor keeps its retired predecessor's boundary as the
+// delivery floor on a host with no owner row. The driver's Resume and the
+// host's registration on B, between the successor's preparation and its
+// adoption, find nothing missing, and B holds nothing at or below the boundary.
+it("resumes and registers a successor prepared on a host a transition funded after its predecessor retired, before it adopts",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    const b=transitionHost(f,host,'device','other-b')
+    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(f.store.resume({document:f.document,activationId:SUCCESSOR,host:b,registeredAtMs:51,guard(){}})).toMatchObject({completed:false})
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:52,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(unaccounted(f)).toBe(ledger)
+    const {access,delivery}=adoptSuccessorOn(f,b,boundary)
+    expect(reservedOn(f,'other-b')).toEqual([edit.journalCursor])
+    const owner=delivery.openOwnerDelivery({host:b,document:f.document,actor}),event=delivery.nextOwnerApplication(owner)!
+    delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:3,applicationReplayed:false})
+    f.store.complete({document:f.document,host:b,access,nativeState:{adoptionId:SUCCESSOR,pendingBytes:0},guard(){}})
+    stopDocument(f,60)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host:b,registeredAtMs:70,nowMs:70,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations').all()).toEqual([])
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:80,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a transition while a successor is pending funds the new host only
+// above the predecessor's boundary, so the successor's never-adopted
+// retirement there leaves that host nothing at or below it, and it registers again.
+it("registers a host where a successor prepared on another retired never-adopted at its predecessor's boundary",async()=>{
+  const f=fixture();try{
+    const {boundary}=await retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    await prepareSuccessor(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    stopDocument(f,50)
+    expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR})
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary,host:b,registeredAtMs:60,nowMs:60,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations ORDER BY host_id,journal_cursor').all())
+      .toEqual(suffix.map(cursor=>({host_id:'other-b',journal_cursor:cursor})))
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual(suffix)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a completed successor, and then a retiring one, keeps its retired
+// predecessor's boundary as the delivery floor on a host with no owner row. A
+// transition to B funds only the adoption and the suffix above the boundary,
+// and B registers with nothing reserved through it in both states.
+it("registers a host a transition funded while a completed successor adopted on another, through the successor's Stop",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    expect(suffix).toEqual([edit.journalCursor])
+    const adopted=await adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    expect(completed(f)).toBe(1)
+    const ledger=unaccounted(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(unaccounted(f)).toBe(ledger)
+    stopDocument(f,60)
+    expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor})
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(reservedOn(f,'service')).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a plain committed delivery never bootstraps a lineage that has a
+// service activation. On a host a transition funded only above the retired
+// boundary, it refuses before it takes the adoption reservation there.
+it("refuses a plain committed delivery's bootstrap of a service activation's lineage before it takes the adoption reservation",async()=>{
+  const f=fixture();try{
+    const {boundary}=await retirePredecessor(f)
+    const suffix=journalCursors(f).filter(cursor=>cursor>boundary.terminalReceipt.journalCursor)
+    await prepareSuccessor(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    const ledger=unaccounted(f),usage=usageOf(f)
+    const store=f.storage.createLiveCommittedDeliveryStore(f.history)
+    expect(()=>store.open({host:b,document:f.document})).toThrow("Committed delivery cannot bootstrap a service activation's lineage.")
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_bootstraps').all()).toEqual([])
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(usageOf(f)).toBe(usage)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a Stop restore of a service activation's lineage on a host with no
+// owner adoption there is refused before it revokes anything. Committed
+// delivery refuses that lineage's bootstrap, so the operation could not finish.
+// The owner reads why in each step, and the choices are refused the same way.
+it("refuses a bootstrap Stop restore of a service activation's lineage before it revokes the grant",async()=>{
+  const f=fixture();try{
+    await completeActivation(f)
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const restoreHost:OwnerRestoreHost={restoreConfigured:true,prepareRestore:vi.fn(),reviewRestore:vi.fn(),confirmRestore:vi.fn()}
+    const handler=testHandler(f.storage,{ownerRestoreHost:()=>restoreHost,newId:()=>'restore'})
+    const post=(suffix:string,body:unknown)=>handler(new Request(`https://relay.test/sync/workspace/live-restores${suffix}`,{method:'POST',
+      headers:{authorization:'Bearer user:owner','content-type':'application/json'},body:JSON.stringify(body)}))
+    // The service host that adopted the lineage still offers Stop.
+    const offered=await post('/options',{path:'docs/a.md'})
+    expect(offered.status).toBe(200)
+    expect((await offered.json()).grants).toMatchObject([{grantId:'grant'}])
+    const b=transitionHost(f,host,'device','other-b')
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    const message="Stop access isn't available for this file on this session host. Access hasn't changed. Switch back to the session host this file used before, then try again."
+    expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow(message)
+    const intent:StopRestoreIntent={deliveryKind:'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
+      shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
+      restorePointReceiptDigest:f.document.lineageClaimId}
+    expect(()=>f.storage.beginStopRestore(intent,60)).toThrow(message)
+    const {ownerUserId:_owner,...publicIntent}=intent
+    for(const [suffix,body] of [['/options',{path:'docs/a.md'}],
+      ['/plan',{document:f.document,shareId:'share',grantId:'grant',restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId}],
+      ['',{intent:publicIntent}]] as const){
+      const refused=await post(suffix,body)
+      expect(refused.status).toBe(409)
+      expect(await refused.json()).toEqual({ok:false,code:'conflict',error:message})
+    }
+    expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_restore_operations').all()).toEqual([])
+    expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
+    expect(restoreHost.prepareRestore).not.toHaveBeenCalled()
+  }finally{f.close()}
+})
+
+// Proves: an activation that adopted on A never retires as never-adopted on
+// the host its configuration moved to, whatever that host's engine releases.
+// The obligation stays open, and A's provisioning keeps working. Back on A it
+// retires, which closes the obligation and refunds what the transitions funded.
+it.each([false,true])("refuses a never-adopted retirement on another host of an activation that adopted (completed: %s)",async completedHere=>{
+  const f=fixture();try{
+    enroll(f)
+    if(completedHere)await completeActivation(f)
+    else{
+      await f.prepare()
+      const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+      const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+      delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+    }
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    stopDocument(f,50)
+    const open=retirement(f.storage)!,rows=()=>f.raw.prepare(`SELECT (SELECT json_group_array(host_id) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT count(*) FROM sync_relay_live_delivery_reservations) AS reservations,(SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,
+      (SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
+    const before=rows()
+    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:null,host:other,registeredAtMs:60,nowMs:60,guard(){}}))
+      .toThrow('Retiring activation adopted on another host.')
+    expect(rows()).toEqual(before)
+    expect(retirement(f.storage)).toEqual(open)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    // Back on A, the configured host provisions and registers as before.
+    const again=transitionHost(f,transitionHost(f,other,'device','device'),'service','service') as typeof host
+    expect(f.storage.registerLiveHost({...again,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+    const boundary=completedHere?ownerBoundary(f):{terminalReceipt:null,eventCount:0,historyEvidenceDigest:initialAcceptedHistoryDigest('history',f.document)}
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary,host:again,registeredAtMs:80,nowMs:80,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(retirement(f.storage)).toBeNull()
+    expect(f.raw.prepare("SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations WHERE host_id<>'service'").all()).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: an activation adopts on one host. Once the configuration moved, its
+// adoption on the new host is refused with nothing changed, and A keeps provisioning.
+it.each([false,true])("refuses an activation's adoption on the host its configuration moved to after it adopted on another (completed: %s)",async completedHere=>{
+  const f=fixture();try{
+    enroll(f)
+    const adopt=(on:typeof host,access?:ServiceActivationAccess)=>{
+      const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+      const adoption=delivery.captureOwnerCut({host:on,document:f.document,actor,adoptionId:f.capture.activationId,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+      delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+    }
+    if(completedHere)await completeActivation(f)
+    else{await f.prepare();adopt(host,f.store.pending(f.document,host))}
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    const rows=()=>f.raw.prepare(`SELECT (SELECT json_group_array(json_array(host_id,origin_json)) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT json_group_array(json_array(host_id,journal_cursor)) FROM sync_relay_live_delivery_reservations) AS reservations,
+      (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage`).get()
+    const before=rows()
+    expect(()=>adopt(other,completedHere?undefined:f.store.pending(f.document,other))).toThrow('Service activation adopted on another host.')
+    expect(rows()).toEqual(before)
+    const again=transitionHost(f,transitionHost(f,other,'device','device'),'service','service') as typeof host
+    expect(f.storage.registerLiveHost({...again,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a transition funds again only what a retirement released. A host
+// that owns a bootstrap for the lineage keeps its own reservations, so one
+// missing below its watermark is still damage.
+it('refuses a transition to a bootstrap host missing a reservation below its watermark, though the lineage retired',async()=>{
+  const f=fixture();try{
+    const {edit}=await retirePredecessor(f)
+    const device=transitionHost(f,host,'device','device')
+    expect(reservedOn(f,'device')).toEqual([edit.journalCursor])
+    f.raw.prepare(`INSERT INTO sync_relay_live_delivery_bootstraps(bootstrap_id,bootstrap_moment_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,
+        binding_json,baseline_moment_relay_seq,baseline_registered_at_ms,baseline_digest,baseline_byte_length,projected_markdown_digest,projected_markdown_byte_length,
+        local_ydoc_sequence,ack_host_mode,ack_host_epoch,ack_instance_id,ack_connection_id,accounted_bytes)
+      SELECT 'bootstrap','bootstrap-moment','history',workspace_id,main_version_id,object_id,lineage_claim_id,'device','{}',baseline_moment_relay_seq,registered_at_ms,
+        baseline_digest,length(baseline_bytes),baseline_projected_sha256,baseline_projected_byte_length,2,'device',?,?,?,1 FROM sync_relay_live_documents`)
+      .run(device.hostEpoch,device.instanceId,device.connectionId)
+    f.raw.prepare("DELETE FROM sync_relay_live_delivery_reservations WHERE host_id='device'").run()
+    const service=transitionHost(f,device,'service','service')
+    expect(()=>transitionHost(f,service,'device','device')).toThrow('Live delivery reservation is missing or damaged.')
+    expect(reservedOn(f,'device')).toEqual([])
+  }finally{f.close()}
+})
+
+const HOST_ORIGIN=`${SERVICE_HOST_ORIGIN_PREFIX}native`
+type Row=[string,Record<string,unknown>]
+// The service host's feed once Stop opened the retirement (or before, with
+// `stopped` false): the owner applied the seed, and the edit accepted after
+// it, at F, waits for its application.
+async function retiringFeed(f:ReturnType<typeof fixture>,stopped=true){
+  enroll(f);await completeActivation(f);const edit=admitEdit(f)
+  const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
+  const handle=createServiceHostReplication({storage:f.storage,prefix:'dohc-service-v1.',hostedFeed:true,
+    authorize:input=>authorizeServiceHostReplication(f.storage,{...credential,...input})})
+  const stop=()=>stopDocument(f,10)
+  if(stopped)stop()
+  const request=(method:string,suffix:string,body?:BodyInit,type='application/json')=>handle(new Request(`https://relay.test/sync/workspace/hosted/${suffix}`,
+    {method,headers:{authorization:`Bearer ${bearer}`,...(body===undefined?{}:{'content-type':type})},...(body===undefined?{}:{body})}))
+  const push=async(rows:Row[],firstSeq:number)=>{
+    const response=await request('POST','log',JSON.stringify({replicationEpoch:'epoch',streamIdentity:'stream',originId:HOST_ORIGIN,
+      ops:rows.map(([opKind,payload],index)=>({originSeq:firstSeq+index,opKind,recordedAtMs:20,payload}))}))
+    return {status:response.status,body:await response.json() as Record<string,unknown>}
+  }
+  const upload=async(bytes:Uint8Array)=>{
+    const response=await request('PUT',`blobs/${hash(bytes)}`,new Uint8Array(bytes),'application/octet-stream')
+    expect(response.status).toBe(200)
+    return await response.json() as Record<string,unknown>
+  }
+  const coordinate=(originSeq:number)=>f.raw.prepare('SELECT op_kind,relay_admission FROM sync_relay_log WHERE origin_id=? AND origin_seq=?').get(HOST_ORIGIN,originSeq)
+  const receipt=edit.metadata.accepted.receipt
+  const editBytes=new Uint8Array(f.raw.prepare('SELECT update_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(receipt.journalCursor)!.update_bytes as Uint8Array)
+  // Stands in for reconciliation recording that the retiring owner applied the edit.
+  const applyEdit=()=>f.raw.prepare('UPDATE sync_relay_live_delivery_owners SET tip_cursor=?,tip_receipt_json=?').run(receipt.journalCursor,JSON.stringify(receipt))
+  const ydocRow=(bytes:Uint8Array,changes:Record<string,unknown>={}):Row=>['ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',
+    isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(bytes),...changes}]
+  const refusals=(...rows:Array<[number,string,string]>)=>rows.map(([originSeq,opKind,reason])=>({originId:HOST_ORIGIN,originSeq,opKind,reason}))
+  return {edit,receipt,request,push,upload,coordinate,editBytes,applyEdit,ydocRow,refusals,stop}
+}
+const departed=(opKind:string)=>({op_kind:opKind,relay_admission:'departed'})
+const markdownOf=(f:ReturnType<typeof fixture>,state:Uint8Array)=>{
+  const projected=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:state})
+  if(projected.kind!=='accepted')throw new Error(JSON.stringify(projected))
+  return new TextEncoder().encode(projected.evidence.projectedMarkdown)
+}
+
+// Proves: a retiring document's host may publish its baseline, its retained
+// source state and source moment as native writes it, each as a departed row
+// that moves no projection; the moment's author fields prove no authorship.
+// Anything else of the same document is refused at its coordinate.
+it("admits only a retiring document's verified Y.Doc rows and source moment",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const source=markdownOf(f,f.capture.fullState),stray=new TextEncoder().encode('unproved bytes')
+    expect(hash(source)).toBe(f.capture.source.sourceDigest)
+    for(const bytes of [f.capture.baselineBytes,f.capture.fullState,source,stray])await r.upload(bytes)
+    // The payload `outbound.rs` builds for a moment with no stored authors.
+    const moment=(changes:Record<string,unknown>={}):Row=>['moment.append',{momentId:f.capture.source.sourceMomentId,versionId:'main',objectId:'object',
+      objectCreatedAtMs:1,path:'docs/a.md',recordedAtMs:20,operation:'write',payloadBeforeBlobSha256:null,payloadBeforePath:null,
+      payloadAfterBlobSha256:hash(source),payloadAfterPath:'docs/a.md',payloadBeforeContentKind:null,payloadBeforeByteLength:null,
+      payloadAfterContentKind:'text',payloadAfterByteLength:source.length,metadata:{origin:'sync',summary:null,correlationId:null},authors:null,
+      beforePresent:'null',beforeObjectId:null,beforeVersionId:null,beforePath:null,beforeBlobSha256:null,beforeContentKind:null,beforeByteLength:null,
+      beforeUpdatedAtMs:null,beforeLatestMomentId:null,beforeMetadata:null,...changes}]
+    const {beforePresent:_,...partial}=moment()[1],{authors:_authors,...unattributed}=moment()[1]
+    const rows=[r.ydocRow(f.capture.baselineBytes,{isBaseState:true}),r.ydocRow(f.capture.fullState),moment(),
+      r.ydocRow(f.capture.fullState,{lineageClaimId:'b'.repeat(64)}),r.ydocRow(stray),r.ydocRow(f.capture.baselineBytes),moment({momentId:'another-moment'}),
+      moment({operation:'rename',path:'docs/b.md',payloadAfterPath:'docs/b.md',beforePath:'docs/a.md'}),moment({operation:'delete'}),moment({beforeObjectId:'other-object'}),
+      moment({authors:[]}),['moment.append',partial] as Row,
+      ['moment.append',{...unattributed,attributionUnavailable:{settlementId:'settlement',reason:'authorship-mismatch'},
+        metadata:{origin:'sync',summary:'Attribution unavailable',correlationId:null}}] as Row,
+      moment({authorContext:{kind:'account',accountId:'owner'}})]
+    const answer=await r.push(rows,0)
+    expect(answer).toMatchObject({status:200,body:{inserted:14}})
+    expect(answer.body.refusals).toEqual(r.refusals([3,'ydoc.update','unproved-retirement-output'],[4,'ydoc.update','unproved-retirement-output'],
+      [5,'ydoc.update','unproved-retirement-output'],[6,'moment.append','unproved-retirement-output'],[7,'moment.append','outside-hosted-documents'],
+      [8,'moment.append','outside-hosted-documents'],[9,'moment.append','outside-hosted-documents'],[10,'moment.append','unproved-retirement-output'],
+      [11,'moment.append','unproved-retirement-output']))
+    for(const originSeq of [0,1,2,12,13])expect(r.coordinate(originSeq)).toEqual(departed(rows[originSeq]![0]))
+    expect(f.raw.prepare('SELECT admitted_author_snapshot_json AS authors FROM sync_relay_log WHERE origin_id=? AND origin_seq IN (2,12,13)').all(HOST_ORIGIN))
+      .toEqual([{authors:null},{authors:null},{authors:null}])
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(f.capture.source.sourceMomentId)).toBeUndefined()
+  }finally{f.close()}
+})
+
+// Proves: an application row and its authorless audit, in separate pushes,
+// retry until the retiring owner applied them, keeping their coordinates; then
+// publish as departed rows. Past F the same rows are refused.
+it('retries a retiring application until its owner applied it, confirms its authorless audit in a later push, and refuses both beyond F',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    await r.upload(r.editBytes)
+    const content=r.ydocRow(r.editBytes)
+    expect(await r.push([content],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    r.applyEdit()
+    expect(await r.push([content],0)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
+    const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
+    const record={kind:'application',relayDatabaseNamespace:'history',eventCount:Number(row.accepted_event_count),evidenceDigest:String(row.accepted_evidence_digest),
+      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,
+      contentCoordinate:{originId:HOST_ORIGIN,originSeq:0}}
+    expect(record.metadata.authorSnapshot??[]).toEqual([])
+    const bytes=new TextEncoder().encode(JSON.stringify(record));await r.upload(bytes)
+    const audit:Row=['live.audit.application',{relayDatabaseNamespace:'history',mainVersionId:'main',objectId:'object',lineageClaimId:f.document.lineageClaimId,
+      eventCount:record.eventCount,updateBlobSha256:r.receipt.updateDigest,
+      manifest:{formatVersion:1,recordDigest:hash(bytes),byteLength:bytes.length,chunks:[{sha256:hash(bytes),byteLength:bytes.length}]}}]
+    expect(await r.push([audit],1)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(1)).toEqual(departed('live.audit.application'))
+    // Before the owner applied it, the audit waits too.
+    f.raw.exec('UPDATE sync_relay_live_delivery_owners SET tip_cursor=tip_cursor-1')
+    expect(await r.push([audit],2)).toMatchObject({status:503})
+    r.applyEdit()
+    // The edit is past a lower F.
+    f.raw.exec('UPDATE sync_relay_service_activations SET retire_accepted_cursor=retire_accepted_cursor-1')
+    expect((await r.push([content,audit],2)).body).toMatchObject({inserted:2,refusals:r.refusals([2,'ydoc.update','unproved-retirement-output'],
+      [3,'live.audit.application','unproved-retirement-output'])})
+  }finally{f.close()}
+})
+
+// Proves: a sibling document's write behind a retiring application in the
+// host's origin waits with it, then both publish once the engine's ACK is
+// recorded with the connection's standing, as the driver records it before
+// any push, though the retiring owner has no live authority.
+it("publishes a sibling document's write behind a retiring application once its ACK is recorded with the connection's standing",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const created=new TextEncoder().encode('sibling'),edited=new TextEncoder().encode('sibling edited')
+    const write=(momentId:string,bytes:Uint8Array)=>({momentId,objectId:'sibling',versionId:'main',operation:'write',path:'docs/b.md',payloadAfterPath:'docs/b.md',
+      payloadAfterBlobSha256:hash(bytes),payloadAfterByteLength:bytes.length,payloadAfterContentKind:'text',recordedAtMs:1})
+    f.storage.putBlob({workspaceId:'workspace',sha256:hash(created),content:created,createdAtMs:1})
+    f.storage.appendLogBatch({workspaceId:'workspace',originId:'owner-device',ops:[parseLogOp({originSeq:0,opKind:'moment.append',recordedAtMs:1,payload:write('sibling-created',created)})]})
+    f.storage.enrollServiceHostDocument({...enrollment,path:'docs/b.md',nowMs:2})
+    for(const bytes of [r.editBytes,edited])await r.upload(bytes)
+    const rows=[r.ydocRow(r.editBytes),['moment.append',write('sibling-edited',edited)] as Row]
+    expect(await r.push(rows,0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    const delivery=f.storage.createLiveCommittedDeliveryStore(f.history),input={host,document:f.document,adoptionId:f.capture.activationId}
+    const pending=delivery.departedOwnerDelivery(input)!
+    expect(pending.next).toEqual(r.receipt)
+    delivery.recordDepartedApplication({...input,binding:pending.binding},{...r.receipt,localYDocSequence:3,applicationReplayed:true})
+    const answer=await r.push(rows,0)
+    expect(answer).toMatchObject({status:200,body:{inserted:2}})
+    expect(answer.body.refusals??[]).toEqual([])
+    expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
+    expect(f.raw.prepare("SELECT path FROM sync_relay_object_moments WHERE moment_id='sibling-edited'").get()).toEqual({path:'docs/b.md'})
+  }finally{f.close()}
+})
+
+// A native-complete settlement of the retiring document through the edit at
+// F, with its uploaded state and projection, as an audit or as its moment.
+async function retiringSettlement(f:ReturnType<typeof fixture>,r:Awaited<ReturnType<typeof retiringFeed>>){
+  const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState);Y.applyUpdate(doc,r.editBytes)
+  const state=Y.encodeStateAsUpdate(doc);doc.destroy()
+  const markdown=markdownOf(f,state),before=markdownOf(f,f.capture.baselineBytes)
+  for(const bytes of [state,markdown,before])await r.upload(bytes)
+  const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
+  const record:Record<string,unknown>={settlementId:'',relayDatabaseNamespace:'history',binding:r.edit.metadata.accepted.binding,
+    hostCoordinate:{hostId:host.hostId,hostEpoch:1,instanceId:host.instanceId,connectionId:host.connectionId},previousCursor:0,
+    terminalCursor:r.receipt.journalCursor,previousYdocSequence:0,localYdocSequence:2,applicationCount:1,nativeIntervalDigest:hash(Buffer.from('native-interval')),
+    acceptedEventCount:Number(row.accepted_event_count),
+    acceptedIntervalDigest:hash(Buffer.from(JSON.stringify(['live-settlement-accepted-interval-v1',['history','workspace','main','object',f.document.lineageClaimId],
+      [0,0,initialAcceptedHistoryDigest('history',f.document)],[Number(row.accepted_event_count),r.receipt.journalCursor,row.accepted_evidence_digest]]))),
+    momentId:'retiring-settlement-moment',markdownDigest:hash(markdown),sourceStateVectorDigest:hash(Buffer.from('state-vector')),
+    acceptedStateBlobSha256:hash(state),recordedAtMs:20,restoreOperationId:null}
+  record.settlementId=nativeSettlementId(record)
+  const reference=(value:Record<string,unknown>)=>({formatVersion:1,recordDigest:settlementRecordDigest(value),record:value})
+  const audit=(value=record):Row=>['live.audit.settlement',reference(value)]
+  const moment=(value=record):Row=>['moment.append',{momentId:value.momentId,objectId:'object',versionId:'main',path:'docs/a.md',operation:'write',
+    payloadBeforePath:'docs/a.md',payloadAfterPath:'docs/a.md',payloadBeforeContentKind:'text',payloadAfterContentKind:'text',
+    payloadBeforeBlobSha256:hash(before),payloadAfterBlobSha256:hash(markdown),payloadAfterByteLength:markdown.length,recordedAtMs:20,settlementReference:reference(value)}]
+  return {record,audit,moment}
+}
+
+// Proves: a settlement audit is proved on its own, before its moment arrives
+// in a later push; both wait for the owner's applied tip; a record native
+// would refuse proves nothing, as an audit or a moment.
+it('proves a retiring settlement audit before its later moment, and refuses a settlement native would refuse',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const {record,audit,moment}=await retiringSettlement(f,r)
+    expect(await r.push([audit()],0)).toMatchObject({status:503})
+    r.applyEdit()
+    const {nativeIntervalDigest:_,...abbreviated}=record
+    const invalid=[{...record,acceptedEventCount:Number(record.acceptedEventCount)+1},abbreviated,{...record,settlementId:'retiring-settlement'},{...record,extra:true}]
+    expect((await r.push([audit(invalid[0]),moment(invalid[0]),...invalid.slice(1).map(value=>audit(value))],0)).body).toMatchObject({inserted:5,
+      refusals:r.refusals([0,'live.audit.settlement','unproved-retirement-output'],[1,'moment.append','unproved-retirement-output'],
+        ...[2,3,4].map(seq=>[seq,'live.audit.settlement','unproved-retirement-output'] as [number,string,string]))})
+    expect(await r.push([audit()],5)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(5)).toEqual(departed('live.audit.settlement'))
+    expect(await r.push([moment()],6)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(6)).toEqual(departed('moment.append'))
+    expect(f.raw.prepare('SELECT settlement_id FROM sync_relay_live_settlement_bindings').all()).toEqual([{settlement_id:record.settlementId}])
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(String(record.momentId))).toBeUndefined()
+  }finally{f.close()}
+})
+
+// A successor's capture whose source is the retiring host's settlement moment:
+// the host published the edit it settled as a departed Y.Doc row, then the
+// settlement's audit and, unless only the audit, its moment.
+async function departedSettlementSource(f:ReturnType<typeof fixture>,published:'moment'|'audit'){
+  const r=await retiringFeed(f);r.applyEdit()
+  await r.upload(r.editBytes)
+  const {record,audit,moment}=await retiringSettlement(f,r)
+  const rows:Row[]=[r.ydocRow(r.editBytes),audit(),...(published==='moment'?[moment()]:[])]
+  expect(await r.push(rows,0)).toMatchObject({status:200,body:{inserted:rows.length}})
+  for(const [originSeq,[opKind]] of rows.entries())expect(r.coordinate(originSeq)).toEqual(departed(opKind))
+  const state=Buffer.from(f.raw.prepare('SELECT content FROM sync_relay_blobs WHERE sha256=?').get(String(record.acceptedStateBlobSha256))!.content as Uint8Array)
+  const markdown=markdownOf(f,state)
+  Object.assign(f.capture,{fullState:state})
+  Object.assign(f.capture.source,{committedCursor:Number(f.raw.prepare('SELECT MAX(relay_seq) AS seq FROM sync_relay_log').get()!.seq),
+    sourceMomentId:String(record.momentId),sourceDigest:hash(markdown),sourceByteLength:markdown.length,fullStateDigest:hash(state),fullStateByteLength:state.length})
+  return record
+}
+// Proves: a successor's source may be the retiring host's departed settlement
+// moment, proved by the binding the relay committed with it. The departed
+// Y.Doc row it settled counts as history: without it the states differ.
+it('verifies a capture whose source is a departed settlement moment the relay proved',async()=>{
+  const f=fixture();try{
+    await departedSettlementSource(f,'moment')
+    expect(await verify(f)).toEqual({verified:true})
+  }finally{f.close()}
+})
+const unsettled='neither ordinary history nor a proved settlement',unproved='Native activation source settlement is not proved.'
+it.each([
+  ['its moment without the committed binding','moment',f=>{f.raw.exec('DELETE FROM sync_relay_live_settlement_bindings')},unsettled],
+  ['a departed flag alone','audit',f=>{const source=f.capture.source
+    append(f,HOST_ORIGIN,2,'moment.append',{versionId:'main',objectId:'object',momentId:source.sourceMomentId,path:'docs/a.md',operation:'write',payloadAfterPath:'docs/a.md',
+      payloadAfterContentKind:'text',payloadAfterBlobSha256:source.sourceDigest,payloadAfterByteLength:source.sourceByteLength})
+    f.raw.prepare("UPDATE sync_relay_log SET relay_admission='departed' WHERE relay_seq=?").run(source.committedCursor)},unsettled],
+  ['a matching settlement name alone','audit',f=>{f.capture.source.sourceMomentId=`moment-ydoc-${'d'.repeat(64)}`},unsettled],
+  ['an audit without a committed binding','audit',()=>{},unsettled],
+  ['a pruned terminal cut','moment',f=>{f.raw.exec('DELETE FROM sync_relay_live_settlement_cuts')},unproved],
+  ['pruned settled state','moment',f=>{f.raw.prepare('DELETE FROM sync_relay_blobs WHERE sha256=?').run(f.capture.source.fullStateDigest)},unproved],
+  ['a projection change after the source','moment',f=>{
+    const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState)
+    const frontmatter=doc.getMap('frontmatter'),title=frontmatter.get('title')
+    for(const [originSeq,value] of [[3,'Changed'],[4,title]] as const){
+      const before=Y.encodeStateVector(doc);frontmatter.set('title',value);const suffix=Y.encodeStateAsUpdate(doc,before)
+      append(f,'origin',originSeq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}),suffix)
+    }
+    const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+  },'does not project the captured source'],
+] as [string,'moment'|'audit',(f:ReturnType<typeof fixture>)=>void,string][])('refuses a departed settlement source with %s',async(_case,published,change,message)=>{
+  const f=fixture();try{
+    await departedSettlementSource(f,published)
+    change(f)
+    await expect(verify(f)).rejects.toThrow(message)
+  }finally{f.close()}
+})
+
+// Proves: a settlement audit pushed while its document was hosted, whose
+// retirement opened after the push was screened, retries without using its
+// coordinate, and publishes once a later push proves it.
+it('retries a settlement audit whose document began settling after its push was screened',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f,false)
+    const {audit}=await retiringSettlement(f,r)
+    r.applyEdit()
+    const prepare=f.storage.prepareLogAppend.bind(f.storage)
+    // Stop commits while the push awaits its preparation, between screening and the writer.
+    const spy=vi.spyOn(f.storage,'prepareLogAppend').mockImplementationOnce(async(...args)=>{r.stop();return await prepare(...args)})
+    expect(await r.push([audit()],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(spy).toHaveBeenCalledOnce()
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    expect(await r.push([audit()],0)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(0)).toEqual(departed('live.audit.settlement'))
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: a retiring proof that runs out of budget retries only while its
+// push holds another proof a smaller push could leave out; alone, it is
+// refused with its own reason, so later rows from the origin still publish.
+it('retries an over-budget retiring proof only beside another proof, and refuses it alone',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f);r.applyEdit()
+    const {audit,moment}=await retiringSettlement(f,r)
+    const overBudget=()=>vi.spyOn(liveValidation,'normalizeSettlement').mockResolvedValueOnce({kind:'refused',reason:'capacity-refused',source:'call'})
+    overBudget()
+    expect(await r.push([audit(),moment()],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    overBudget()
+    expect((await r.push([audit()],0)).body).toMatchObject({inserted:1,refusals:r.refusals([0,'live.audit.settlement','retirement-proof-over-budget'])})
+    expect(await r.push([audit()],1)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(1)).toEqual(departed('live.audit.settlement'))
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: the event-zero audit publishes with the root owner origin, its stamp,
+// the immutable baseline and a real, earlier base coordinate; a changed stamp
+// or base coordinate, or an origin native would refuse, proves nothing.
+it("admits a retiring document's event-zero audit only with its root origin, stamp, baseline and base coordinate",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    await r.upload(f.capture.baselineBytes)
+    const owner=JSON.parse(String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json))
+    const {workspaceId,mainVersionId,objectId,lineageClaimId,currentPath,selectorPaths,restoreFenceGeneration}=owner.originalBinding
+    const binding={workspaceId,mainVersionId,objectId,lineageClaimId,currentPath,selectorPaths,restoreFenceGeneration}
+    const hostCoordinate={hostId:host.hostId,hostEpoch:1,instanceId:host.instanceId,connectionId:host.connectionId}
+    const source={adoptionId:owner.adoptionId,evidenceDigest:owner.originEvidenceDigest,sourceMomentId:owner.sourceMomentId,sourceDigest:owner.sourceDigest,
+      sourceByteLength:owner.sourceByteLength,baselineMomentRelaySequence:owner.baselineMomentRelaySequence,baselineRegisteredAtMs:owner.baselineRegisteredAtMs,
+      coverageDigest:'c'.repeat(64),coveredOutboxSequence:0,localYDocSequence:owner.expectedLocalSequence,terminalCursor:0,terminalReceipt:null,
+      hostCoordinate,maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}
+    // The native stamp hashes SQLite's JSON array of the origin, with its binding, receipt and host as JSON strings.
+    const stamp=(value:typeof source)=>hash(Buffer.from(JSON.stringify([value.adoptionId,value.evidenceDigest,JSON.stringify(binding),value.sourceMomentId,
+      value.sourceDigest,value.sourceByteLength,value.baselineMomentRelaySequence,value.baselineRegisteredAtMs,value.coverageDigest,value.coveredOutboxSequence,
+      value.localYDocSequence,value.terminalCursor,JSON.stringify(value.terminalReceipt),JSON.stringify(value.hostCoordinate),value.maxPendingBytes,value.maxPendingAgeMs])))
+    // Both hashes follow `value`, so only native's validation of the origin can refuse it.
+    const base=(changes:Record<string,unknown>={},value:Record<string,unknown>=source):Row=>{
+      const record={relayDatabaseNamespace:'history',checkpoint:{eventCount:0,terminal:null,binding,stateDigest:f.document.lineageClaimId,
+        evidenceDigest:initialAcceptedHistoryDigest('history',f.document)},originStamp:stamp(value as typeof source),origin:{kind:'owner',source:value},
+        baseByteLength:f.capture.baselineBytes.length,baseCoordinate:{originId:'origin',originSeq:1},...changes}
+      return ['live.audit.base',{formatVersion:1,recordDigest:hash(Buffer.from(JSON.stringify(record))),record}]
+    }
+    const baseRow=r.ydocRow(f.capture.baselineBytes,{isBaseState:true})
+    const answer=await r.push([baseRow,base({baseCoordinate:{originId:HOST_ORIGIN,originSeq:0}}),base(),
+      base({originStamp:stamp({...source,coveredOutboxSequence:1})}),base({baseCoordinate:{originId:'origin',originSeq:2}}),
+      base({baseByteLength:f.capture.baselineBytes.length+1}),base({baseCoordinate:{originId:HOST_ORIGIN,originSeq:7}}),baseRow,
+      ...[{coverageDigest:'not-a-digest'},{maxPendingBytes:0},{maxPendingAgeMs:0},{coveredOutboxSequence:-1},{hostCoordinate:{...hostCoordinate,hostEpoch:0}},
+        {hostCoordinate:{...hostCoordinate,connectionId:''}}].map(changes=>base({},{...source,...changes}))],0)
+    // A base row later in its own push, and every origin native's stamp refuses, prove nothing.
+    expect(answer.body).toMatchObject({inserted:14,refusals:r.refusals(...[3,4,5,6,8,9,10,11,12,13].map(seq=>[seq,'live.audit.base','unproved-retirement-output'] as [number,string,string]))})
+    for(const seq of [1,2])expect(r.coordinate(seq)).toEqual(departed('live.audit.base'))
+  }finally{f.close()}
+})
+
+// Proves: the relay reads the engine's own event-zero audit bytes, which the
+// engine's `update_native_audit_fixture` writes, in native's field order,
+// with native's record digest and origin stamp, and refuses one field changed.
+it("verifies the engine's own event-zero audit record digest and origin stamp",()=>{
+  const db=new DatabaseSync(':memory:');try{
+    const {payload}=nativeAuthoredSettlement.find(op=>op.opKind==='live.audit.base') as unknown as {payload:{record:Record<string,unknown>}}
+    expect(nativeBaseRecord(db as unknown as SqliteDb,payload).record).toEqual(payload.record)
+    expect(()=>nativeBaseRecord(db as unknown as SqliteDb,{...payload,record:{...payload.record,baseByteLength:Number(payload.record.baseByteLength)+1}})).toThrow()
+  }finally{db.close()}
+})
+
+// Proves: while its document settles, the host may ask after and upload bytes
+// its verified output names, without the settling document joining the blob
+// reach it may read; that upload proof outlasts the release of the stopped
+// last document and ends when the activation retires.
+it('lets a settling document upload and ask after its bytes without growing the readable blob reach, until its activation retires',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const have=async(sha256:string)=>(await (await r.request('POST','blobs/have',JSON.stringify({sha256s:[sha256]}))).json())
+    const digest=f.document.lineageClaimId,uploads=()=>Number(f.raw.prepare('SELECT count(*) AS count FROM sync_relay_service_host_uploads').get()!.count)
+    expect(await have(digest)).toEqual({ok:true,missing:[digest]})
+    expect((await r.request('GET',`blobs/${digest}`)).status).toBe(404)
+    // The relay holds the owner's baseline bytes, but the host could not read them, so it learns nothing.
+    expect(await r.upload(f.capture.baselineBytes)).toMatchObject({alreadyHad:false})
+    expect(await have(digest)).toEqual({ok:true,missing:[]})
+    expect((await r.request('GET',`blobs/${hash(f.capture.fullState)}`)).status).toBe(404)
+    expect(f.storage.readServiceHostFeedScope('workspace')!.shared.size).toBe(0)
+    f.storage.releaseServiceHostEnrollment({workspaceId:'workspace',objectId:'object',nowMs:11})
+    expect(uploads()).toBe(1)
+    const open=retirement(f.storage)!
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(uploads()).toBe(0)
+  }finally{f.close()}
+})
+
+const V1_ACTIVATIONS=`CREATE TABLE sync_relay_service_activations (
+  relay_database_namespace TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL CHECK (main_version_id='main'),
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  source_json TEXT NOT NULL CHECK (json_valid(source_json)),
+  binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+  state_digest TEXT NOT NULL CHECK (length(state_digest)=64 AND state_digest NOT GLOB '*[^0-9a-f]*'),
+  state_bytes BLOB NOT NULL CHECK (length(state_bytes) BETWEEN 2 AND 20971520),
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  completion_json TEXT CHECK (completion_json IS NULL OR json_valid(completion_json)),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  PRIMARY KEY (relay_database_namespace,activation_id),
+  UNIQUE (workspace_id,main_version_id,object_id,lineage_claim_id),
+  FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
+    REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
+) STRICT`
+// Rebuilds the fixture's v2 activation storage as the v1 layout, keeping its rows.
+function downgradeActivations(f:ReturnType<typeof fixture>,sql=V1_ACTIVATIONS){
+  const columns='relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes'
+  f.raw.exec(`BEGIN;DROP TABLE sync_relay_live_delivery_owner_history;
+    ALTER TABLE sync_relay_service_activations RENAME TO v2_activations;${sql};
+    INSERT INTO sync_relay_service_activations(${columns}) SELECT ${columns} FROM v2_activations;DROP TABLE v2_activations;
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v2';
+    INSERT OR IGNORE INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES ('service-activation-v1',0);COMMIT`)
+}
+it('migrates v1 activations as current ones with no obligation, and refuses damaged v1 storage',async()=>{
+  const f=fixture(),damaged=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    enroll(f);await completeActivation(f)
+    const before=f.raw.prepare('SELECT * FROM sync_relay_service_activations').all(),usage=f.raw.prepare('SELECT * FROM sync_relay_workspace_usage').all()
+    downgradeActivations(f)
+    reopened=openSyncRelayStorage(f.path)
+    // The migrating connection reads its own schema; the test's raw one may still hold the old one.
+    const db=(reopened as StorageContext).db
+    expect(db.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual(before.map(row=>({...row,predecessor_activation_id:null,
+      retire_requested_at_ms:null,retire_restore_generation:null,retire_accepted_cursor:null,retired_at_ms:null,retired_boundary_json:null})))
+    expect(db.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-activation-v%' ORDER BY migration_id").all())
+      .toEqual([{migration_id:'service-activation-v1'},{migration_id:'service-activation-v2'}])
+    expect(db.prepare('SELECT * FROM sync_relay_workspace_usage').all()).toEqual(usage)
+    expect(retirement(reopened)).toBeNull()
+    expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    reopened.close();reopened=openSyncRelayStorage(f.path)
+    await damaged.prepare()
+    downgradeActivations(damaged,V1_ACTIVATIONS.replace(' STRICT',''))
+    expect(()=>openSyncRelayStorage(damaged.path)).toThrow('Service activation storage is damaged.')
+  }finally{reopened?.close();f.close();damaged.close()}
 })

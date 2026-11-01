@@ -5071,6 +5071,519 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
     }
 }
 
+/// Sol's second finding: a queued base replaced its document's lineage and
+/// opened a conflict, then its drain stopped before removing the row, as a
+/// drain that waits for validation does. The drain that removes the row
+/// after a restart reports the replacement and the conflict once, though
+/// the base's apply derives neither again, and changes nothing twice.
+#[test]
+fn a_queued_base_reports_its_replacement_once_after_its_drain_stopped_before_cleanup() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let (_scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/seed-conflict.md";
+    seed_text_head(&mut engine, "seed-conflict", path, "local seed");
+    let key = DocKey::new("ws", "main", "seed-conflict").unwrap();
+    let local = Ydoc::wire();
+    local.richdoc_append_paragraph("local seed");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Richdoc,
+        &local.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256=?1 WHERE object_id='seed-conflict'",
+                [dohc_engine_storage::hex_sha256(b"local seed")],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "local".into(),
+            origin_seq: 1,
+            bytes: local.richdoc_append_paragraph("unsaved local edit"),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_200,
+    )
+    .unwrap();
+    let remote = Ydoc::wire();
+    remote.richdoc_append_paragraph("remote seed");
+    let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+    let mut base_op = envelope(
+        "remote",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "richdoc", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    let deferred = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .unwrap();
+    assert!(matches!(
+        deferred.primary,
+        ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. })
+    ));
+    let state = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM conflicts WHERE status='open'), \
+                       (SELECT COUNT(*) FROM moments), (SELECT COUNT(*) FROM ydoc_updates), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap()
+    };
+    // The drain applies the base, then stops before its cleanup.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(stopped.conflicts_opened, 1);
+    assert_eq!(stopped.lineage_replacements.len(), 1);
+    let (conflicts, moments, updates, queued): (i64, i64, i64, i64) = state(&engine);
+    assert_eq!((conflicts, queued), (1, 1), "the base's row stays queued");
+
+    drop(engine);
+    let mut engine = EngineStore::open(&store_path, 3_000).unwrap();
+    let drained =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(drained.conflicts_opened, 1, "{drained:?}");
+    assert_eq!(
+        drained.lineage_replacements, stopped.lineage_replacements,
+        "the replacement its first apply derived"
+    );
+    assert_eq!(
+        state(&engine),
+        (conflicts, moments, updates, 0),
+        "nothing applied twice"
+    );
+    let idle =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(
+        (idle.conflicts_opened, idle.lineage_replacements.len()),
+        (0, 0)
+    );
+}
+
+/// The paths of `changes`, sorted.
+fn changed_paths_of(changes: &[crate::MomentMaterializationChange]) -> Vec<String> {
+    let mut paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
+    paths.sort();
+    paths
+}
+
+/// Sol's second finding on 3409694c7: a pass's ingress drain applies a
+/// queued base that replaces the lineage and leaves its losing side at a
+/// recovered path. Nothing else reports those files, so the drain report
+/// carries the recovered path and the head, and an abandoned request or a
+/// restart reports them once. Opus's fifth: a drain that applied the base,
+/// then stopped before its cleanup while the head's file was written, loses
+/// neither when the next drain replays the base, and keeps one sibling.
+#[test]
+fn an_ingress_drains_recovered_sibling_and_head_reach_its_drain_report_once() {
+    for stopped_first in [false, true] {
+        ingress_drain_reports_its_sibling(stopped_first);
+    }
+}
+
+fn ingress_drain_reports_its_sibling(stopped_first: bool) {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    const HEAD: &str = "notes/arbitrated.md";
+    let (_scratch, store_path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id,cursor,replication_epoch,stream_identity) \
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("relay contact");
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "object-arbitrated", HEAD, "losing draft");
+    let key = DocKey::new("ws", "main", "object-arbitrated").expect("doc key");
+    let loser = Ydoc::wire();
+    loser.plaintext_insert(0, "losing draft");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Plaintext,
+        &loser.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20).expect("coordinate"),
+        &NoFaults,
+        1_100,
+    )
+    .expect("claim the losing base");
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::project_and_write_in_tx(
+                tx,
+                &key,
+                HEAD,
+                &loser,
+                ContentKind::Plaintext,
+                "loser",
+                0,
+                1_100,
+                None,
+                None,
+            )
+        })
+        .expect("settle the losing base projection");
+    dohc_engine_collab::apply_remote_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "loser".to_owned(),
+            origin_seq: 1,
+            bytes: loser.plaintext_insert(12, " plus edit"),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_150,
+    )
+    .expect("the losing lineage's unsettled edit");
+    // An external head that matches neither the losing side nor its last
+    // settled text, so the base's replacement needs three copies.
+    engine
+        .write_with(&NoFaults, |tx| {
+            let sha = dohc_engine_storage::hex_sha256(b"relay winner");
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,12,'relay winner')",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='object-arbitrated'",
+                [&sha],
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("a third copy from an external editor");
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "relay winner");
+    let winner_claim = engine
+        .put_binary_blob(&winner.encode_full_state())
+        .expect("winner blob");
+    // A real delta queues behind the base, so the drain's head differs from
+    // the external head and is written.
+    let queued_delta = winner.plaintext_insert(12, " queued");
+    let queued_sha = engine
+        .put_binary_blob(&queued_delta)
+        .expect("queued delta blob");
+    for (seq, relay_seq, sha, is_base) in
+        [(0, 10, &winner_claim, true), (1, 11, &queued_sha, false)]
+    {
+        let mut queued = envelope(
+            "winner",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "object-arbitrated", "path": HEAD,
+                "contentKind": "plaintext", "updateBlobSha256": sha,
+                "lineageClaimId": winner_claim, "isBaseState": is_base
+            }),
+        );
+        queued.relay_seq = Some(relay_seq);
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &queued,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("queue the winning base and delta");
+    }
+    let siblings = |engine: &EngineStore| -> Vec<(String, String)> {
+        engine
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT object_id,path FROM snapshots \
+                     WHERE path<>?1 AND path LIKE 'notes/arbitrated%' ORDER BY path",
+                )?;
+                statement
+                    .query_map([HEAD], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("siblings")
+    };
+
+    let mut stopped_siblings = None;
+    if stopped_first {
+        // The drain applies the base, then stops before its cleanup; the
+        // head's file is written before the next drain, and the store
+        // restarts.
+        let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &key,
+            &NoFaults,
+        )
+        .expect("stopped drain");
+        assert_eq!(stopped.lineage_replacements.len(), 1, "{stopped:?}");
+        stopped_siblings = Some(siblings(&engine));
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='complete',completed_at_ms=0 \
+                     WHERE status='pending'",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("the files are written");
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+
+    // The pass's next op of the document drains the queue before it applies.
+    let later = winner.plaintext_insert(19, " later");
+    let later_sha = engine.put_binary_blob(&later).expect("later blob");
+    let mut incoming = envelope(
+        "winner",
+        2,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": "object-arbitrated", "path": HEAD,
+            "contentKind": "plaintext", "updateBlobSha256": later_sha,
+            "lineageClaimId": winner_claim, "isBaseState": false
+        }),
+    );
+    incoming.relay_seq = Some(12);
+    let outcome = crate::ydoc_apply::apply_ydoc_envelope_in_batch(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+        true,
+        None,
+    )
+    .expect("the envelope's ingress");
+    let ApplyDisposition::Applied(applied) = outcome.primary else {
+        panic!("stopped_first={stopped_first}: the envelope applies");
+    };
+    let recovered = applied
+        .lineage_replacement
+        .expect("the drained base replaced the lineage")
+        .recovered_paths;
+    assert_eq!(recovered.len(), 1, "stopped_first={stopped_first}");
+    let mut expected = vec![HEAD.to_owned(), recovered[0].clone()];
+    expected.sort();
+    if let Some(stopped) = stopped_siblings {
+        assert_eq!(siblings(&engine), stopped, "one sibling, the same one");
+    }
+    assert_eq!(siblings(&engine).len(), 1);
+
+    // The request is abandoned at a later wait: the next one claims the
+    // same report once more, and only a commit acknowledges it.
+    let mut first = None;
+    let claimed = crate::drain_report::claim(&mut engine, "ws", &mut first, &NoFaults)
+        .expect("claim the drain reports");
+    assert_eq!(
+        changed_paths_of(&claimed.extras.changes),
+        expected,
+        "stopped_first={stopped_first}: {claimed:?}"
+    );
+    assert_eq!(claimed.extras.conflicts_opened, 0);
+    let mut second = None;
+    let again =
+        crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults).expect("claim again");
+    assert_eq!(changed_paths_of(&again.extras.changes), expected);
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::cursor::release_settlement_report_in_tx(
+                tx,
+                "ws",
+                second.as_deref().expect("a report token"),
+            )
+        })
+        .expect("commit the cursor");
+    assert!(
+        crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+            .expect("claim nothing")
+            .extras
+            .changes
+            .is_empty()
+    );
+}
+
+/// Sol's re-drain case and Opus's fifth finding on 3409694c7: a queued base
+/// that opened a conflict, applied by a drain that stopped before its
+/// cleanup, is replayed by a pass's ingress drain. The conflict is counted
+/// once, in the drain report, and nothing of it is applied twice.
+#[test]
+fn a_replayed_conflict_opening_base_reports_its_conflict_once() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let path = "notes/replayed-conflict.md";
+    let (_scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    seed_text_head(&mut engine, "replayed-conflict", path, "local seed");
+    let key = DocKey::new("ws", "main", "replayed-conflict").unwrap();
+    let local = Ydoc::wire();
+    local.richdoc_append_paragraph("local seed");
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Richdoc,
+        &local.encode_full_state(),
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256=?1 WHERE object_id='replayed-conflict'",
+                [dohc_engine_storage::hex_sha256(b"local seed")],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "local".into(),
+            origin_seq: 1,
+            bytes: local.richdoc_append_paragraph("unsaved local edit"),
+        },
+        None,
+        None,
+        &NoFaults,
+        1_200,
+    )
+    .unwrap();
+    let remote = Ydoc::wire();
+    remote.richdoc_append_paragraph("remote seed");
+    let claim = engine.put_binary_blob(&remote.encode_full_state()).unwrap();
+    let mut base_op = envelope(
+        "remote",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "richdoc", "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .unwrap();
+    let state = |engine: &EngineStore| -> (i64, i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM conflicts), \
+                       (SELECT COUNT(*) FROM moments WHERE object_id<>'replayed-conflict'), \
+                       (SELECT COUNT(*) FROM snapshots), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap()
+    };
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(stopped.conflicts_opened, 1);
+    let (conflicts, others, snapshots, queued) = state(&engine);
+    assert_eq!((conflicts, queued), (1, 1), "the base's row stays queued");
+    drop(engine);
+    let mut engine = EngineStore::open(&store_path, 3_000).unwrap();
+
+    let later = remote.richdoc_append_paragraph("remote later");
+    let later_sha = engine.put_binary_blob(&later).unwrap();
+    let mut incoming = envelope(
+        "remote",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": "richdoc", "updateBlobSha256": later_sha,
+            "lineageClaimId": claim, "isBaseState": false,
+        }),
+    );
+    incoming.relay_seq = Some(11);
+    let outcome = crate::ydoc_apply::apply_ydoc_envelope_in_batch(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+        true,
+        None,
+    )
+    .unwrap();
+    let ApplyDisposition::Applied(applied) = outcome.primary else {
+        panic!("the envelope applies");
+    };
+    assert_eq!(applied.conflicts_opened, 0, "the report counts it");
+    let claimed = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults).unwrap();
+    assert_eq!(claimed.extras.conflicts_opened, 1, "{claimed:?}");
+    assert_eq!(
+        state(&engine),
+        (conflicts, others, snapshots, 0),
+        "no conflict, recovered copy or snapshot twice"
+    );
+}
+
 fn resolve_seed_conflict(
     engine: &mut EngineStore,
     key: &dohc_engine_collab::DocKey,

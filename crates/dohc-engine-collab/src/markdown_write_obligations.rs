@@ -76,11 +76,18 @@ impl AuditedRetry {
         key: &DocKey,
         head_update_seq: i64,
     ) -> Result<Option<Self>, CollabError> {
-        let row: Option<(String, String, i64)> = conn.query_row(
-            "SELECT relay_database_namespace,binding_json,terminal_cursor FROM live_owner_adoptions \
+        let row: Option<(String, String, i64)> = conn
+            .query_row(
+                &format!(
+                    "SELECT relay_database_namespace,binding_json,terminal_cursor FROM {} \
              WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
-            params![key.workspace_id,key.version_id,key.object_id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(crate::durable::map_sql)?;
+                    crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS
+                ),
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(crate::durable::map_sql)?;
         let Some((namespace, json, adopted_cursor)) = row else {
             return Ok(None);
         };
