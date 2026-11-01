@@ -258,8 +258,9 @@ export interface EngineYDocBinding {
   readonly headSha256?: string | null;
   readonly lastSave: EngineYDocSaveReceipt | null;
   // Counts the file's states main installed other than this session's own
-  // saves: each state with a head other than the newest save's, and each
-  // replacement. A read of the head that save wrote is that save.
+  // saves: each state with a file head other than the newest save's, and
+  // each replacement. A read of the head that save wrote is that save. A null
+  // head names no file state, so it is not counted.
   readonly pairedInstalls: number;
   // A delivery changed the head of the current doc, or installed a state
   // with its head. A replacement doc brings its head with
@@ -638,7 +639,9 @@ export async function bindEngineYDoc(
     // State whose head is unknown waits for the read that pairs one with it.
     if (sha256 === undefined) return undefined;
     if (committed) lastSave = { sha256, pairedInstalls };
-    else if (sha256 !== lastSave?.sha256) pairedInstalls += 1;
+    // A null head names no file state to count. The check, and Edit anyway's
+    // recorded source, judge the state's own source instead.
+    else if (sha256 !== null && sha256 !== lastSave?.sha256) pairedInstalls += 1;
     return sha256;
   };
 

@@ -1230,6 +1230,18 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("keeps a null head through an update that changes the source, and does not count it", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const remote = new Y.Doc();
+    remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64));
+    mock.pushRemote(Y.encodeStateAsUpdate(remote), 1, { sha256: null });
+    expect(binding.headSha256).toBeNull();
+    expect(binding.pairedInstalls, "count a null head -> a teammate's edit to a shared note drops Edit anyway").toBe(0);
+    remote.destroy();
+    await binding.destroy();
+  });
+
   it("installs a replacement with its head, then the head of state buffered behind it", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);
