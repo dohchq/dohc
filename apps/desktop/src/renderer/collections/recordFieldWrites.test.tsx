@@ -271,7 +271,7 @@ describe("retained failures", () => {
     'id: rec-1\nstatus: &v .nan\nscore: *v',
     'id: rec-1\nstatus: &v .nan\nscore: {nested: [*v]}',
   ])("refuses a field write before changing the document: %s", yaml => {
-    const markdown = `---\n${yaml}\n---\n\nBody`;
+    const markdown = `---\n${yaml}\n---\n\nBody\n`;
     const doc = markdownToYDoc(markdown);
     const before = Y.encodeStateAsUpdate(doc);
     try {

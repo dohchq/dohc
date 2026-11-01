@@ -421,7 +421,7 @@ describe('desktop editor markdown round-trip', () => {
           },
         ]),
       ),
-    ).toBe('![backslash]()')
+    ).toBe('![backslash]()\n')
   })
 
   // SHARED CONTRACT TABLE. sanitizeImageSrc lives once, in
@@ -728,7 +728,7 @@ describe('desktop editor markdown round-trip', () => {
     expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==\n')
     // A lone `=` adjacent to the closing delimiter must also be escaped, or the
     // mark would close one char early (`==a=` → `==a===`).
-    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===')
+    expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===\n')
     for (const text of [
       'a==b',
       'a ==b== c',

@@ -79,7 +79,7 @@ it("keeps a resized row and an external cell edit across a settled close and reo
     await capture.flush();
     const versionId = (await capture.listVersions()).activeVersionId;
     await expect.poll(() => headText(versionId), daemonWork).toBe(original);
-    const settled = `# Sizes\n\n<!-- dohc:table row-heights=1:84 -->\n${TABLE}`;
+    const settled = `# Sizes\n\n<!-- dohc:table row-heights=1:84 -->\n${TABLE}\n`;
 
     await sessions.run(workspace, async (binding) => {
       const adapter = new YdocLiveAdapter(binding.client as EngineTransport);

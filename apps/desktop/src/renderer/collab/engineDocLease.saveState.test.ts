@@ -586,7 +586,7 @@ it.each(["plain text", "rich text"] as const)(
     harness.emitLineageReplacement("winner");
     await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
 
-    const expected = format === "plain text" ? "seed before during" : "Typed before\n\nTyped during";
+    const expected = format === "plain text" ? "seed before during" : "Typed before\n\nTyped during\n";
     expect(harness.applied).toHaveLength(1);
     await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual([expected]));
     // Reading storage again brings the same text back.

@@ -91,7 +91,7 @@ describe("PropertiesPanel", () => {
 
   it.each([false, true])("refuses removing an anchor before mutation (shared: %s)", async (shared) => {
     const user = userEvent.setup();
-    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody";
+    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody\n";
     const doc = markdownToYDoc(initialBody);
     const before = Y.encodeStateAsUpdate(doc);
     const onChange = vi.fn();
@@ -702,7 +702,7 @@ describe("PropertiesPanel", () => {
     await user.click(screen.getByLabelText("Remove property wifi"));
     doc.getMap("frontmatter").set("wifi", "new");
 
-    expect(yDocToMarkdown(doc)).toBe("---\nwifi: new\n# Monthly\nbudget: '200'\n---\n\nBody");
+    expect(yDocToMarkdown(doc)).toBe("---\nwifi: new\n# Monthly\nbudget: '200'\n---\n\nBody\n");
     doc.destroy();
   });
 
@@ -720,33 +720,33 @@ describe("PropertiesPanel", () => {
       {
         name: "its leading and inline comments",
         markdown: budget, from: "budget", to: "cost", rows: ["cost", "wifi"],
-        expected: "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody",
+        expected: "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n",
       },
       {
         name: "a quoted key",
         markdown: '---\nstatus: draft\n"owner": ice # lead\n---\n\nBody', from: "owner", to: "lead", rows: ["status", "lead"],
-        expected: "---\nstatus: draft\nlead: ice # lead\n---\n\nBody",
+        expected: "---\nstatus: draft\nlead: ice # lead\n---\n\nBody\n",
       },
       {
         name: "a key that needs quotes",
         markdown: budget, from: "budget", to: "2026", rows: ["2026", "wifi"],
-        expected: "---\n# Monthly\n'2026': 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody",
+        expected: "---\n# Monthly\n'2026': 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n",
       },
       {
         name: "a nested value",
         markdown: "---\ntags:   # labels\n  - a   # first\n  - b\nwifi: x\n---\n\nBody", from: "tags", to: "labels",
         rows: ["labels", "wifi"],
-        expected: "---\nlabels:   # labels\n  - a   # first\n  - b\nwifi: x\n---\n\nBody",
+        expected: "---\nlabels:   # labels\n  - a   # first\n  - b\nwifi: x\n---\n\nBody\n",
       },
       {
         name: "a value that keeps its text",
         markdown: "---\nbudget: .nan # unknown\nwifi: x\n---\n\nBody", from: "budget", to: "cost", rows: ["cost", "wifi"],
-        expected: "---\ncost: .nan # unknown\nwifi: x\n---\n\nBody",
+        expected: "---\ncost: .nan # unknown\nwifi: x\n---\n\nBody\n",
       },
       {
         name: "canonical frontmatter",
         markdown: "---\nbudget: 100\nwifi: hunter2\n---\n\nBody", from: "budget", to: "yearly", rows: ["yearly", "wifi"],
-        expected: "---\nyearly: 100\nwifi: hunter2\n---\n\nBody",
+        expected: "---\nyearly: 100\nwifi: hunter2\n---\n\nBody\n",
       },
     ])("keeps $name in place while a person types the name", async ({ markdown, from, to, rows, expected }) => {
       const user = userEvent.setup();
@@ -767,7 +767,7 @@ describe("PropertiesPanel", () => {
         await rename(user, "budget", "cost");
         await user.clear(screen.getByLabelText("Property cost value"));
         await user.type(screen.getByLabelText("Property cost value"), "200");
-        expect(yDocToMarkdown(doc)).toBe("---\n# Monthly\ncost: '200'\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody");
+        expect(yDocToMarkdown(doc)).toBe("---\n# Monthly\ncost: '200'\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n");
       } finally { doc.destroy(); }
     });
 
@@ -787,7 +787,7 @@ describe("PropertiesPanel", () => {
         await user.clear(screen.getByLabelText("Property 1 name"));
         await user.type(screen.getByLabelText("Property 1 name"), "cost");
         expect(names()).toEqual(["cost", "wifi"]);
-        expect(yDocToMarkdown(doc)).toBe("---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody");
+        expect(yDocToMarkdown(doc)).toBe("---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n");
       } finally { doc.destroy(); }
     });
 
@@ -799,7 +799,7 @@ describe("PropertiesPanel", () => {
         const { unmount } = render(<PropertiesPanel ydoc={onto} />);
         await user.click(screen.getByLabelText("Remove property wifi"));
         await rename(user, "budget", "wifi");
-        expect(yDocToMarkdown(onto)).toBe("---\n# Monthly\nwifi: 100 # euros\n---\n\nBody");
+        expect(yDocToMarkdown(onto)).toBe("---\n# Monthly\nwifi: 100 # euros\n---\n\nBody\n");
         unmount();
 
         render(<PropertiesPanel ydoc={recreated} />);
@@ -808,7 +808,7 @@ describe("PropertiesPanel", () => {
         await user.click(screen.getByTestId("property-add"));
         await user.type(screen.getByLabelText("Property 2 name"), "cost");
         await user.type(screen.getByLabelText("Property cost value"), "100");
-        expect(yDocToMarkdown(recreated)).toBe("---\ncost: '100'\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody");
+        expect(yDocToMarkdown(recreated)).toBe("---\ncost: '100'\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n");
       } finally { onto.destroy(); recreated.destroy(); }
     });
 
@@ -874,7 +874,7 @@ describe("PropertiesPanel", () => {
         Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
 
         expect(names()).toEqual(["cost", "wifi", "owner"]);
-        const expected = "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody";
+        const expected = "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody\n";
         expect(yDocToMarkdown(doc)).toBe(expected);
         expect(yDocToMarkdown(peer)).toBe(expected);
       } finally { doc.destroy(); peer.destroy(); }
@@ -925,7 +925,7 @@ describe("PropertiesPanel", () => {
         options: { pinned: true },
         title: "Plan",
       });
-      expect(yDocToMarkdown(replica)).toBe("---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody");
+      expect(yDocToMarkdown(replica)).toBe("---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody\n");
     } finally {
       replica.destroy();
       doc.destroy();
@@ -962,7 +962,7 @@ describe("PropertiesPanel", () => {
       const values = frontmatterMapValues(replica.getMap("frontmatter"));
       expect(Object.keys(values)).toEqual(["options", "status"]);
       expect(values.options).toEqual(ZONE);
-      expect(yDocToMarkdown(replica)).toBe(`${settled}Body`);
+      expect(yDocToMarkdown(replica)).toBe(`${settled}Body\n`);
     } finally {
       replica.destroy();
       doc.destroy();
@@ -992,7 +992,7 @@ describe("PropertiesPanel", () => {
 
       expect(new Set(changed)).toEqual(new Set(["status"]));
       expect(yDocToMarkdown(doc)).toBe(
-        `${EDGE_FRONTMATTER.replace("status: draft", "status: ready")}Body`,
+        `${EDGE_FRONTMATTER.replace("status: draft", "status: ready")}Body\n`,
       );
     } finally {
       doc.destroy();
@@ -1167,7 +1167,7 @@ describe("PropertiesPanel", () => {
 
       expect(changed).toEqual(new Set(["tags"]));
       expect(frontmatterMapValues(frontmatter).tags).toEqual(["kyoto", "food", "2026"]);
-      expect(yDocToMarkdown(doc)).toBe("---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody");
+      expect(yDocToMarkdown(doc)).toBe("---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody\n");
       expect(propertyValue("tags")).toBe("kyoto, food, 2026");
     } finally {
       doc.destroy();
