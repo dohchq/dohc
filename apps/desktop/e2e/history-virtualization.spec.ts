@@ -97,9 +97,24 @@ test.describe("history virtualization", () => {
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
 
       await firstGroup.locator('[data-moment-id="moment-1"]').focus();
-      // Rows are 48px, the open pass's files 28px and a day heading 32px:
-      // moment-399 starts near 15,500px, under four day headings.
+      // The list places rows it hasn't drawn at an estimated height, so a fixed
+      // offset doesn't reach the same moment everywhere. Start near moment-399,
+      // under four day headings, then move half a screen at a time toward it.
+      const onScreen = () => list.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return [...element.querySelectorAll<HTMLElement>("[data-moment-id^='moment-']")]
+          .filter((row) => row.getBoundingClientRect().bottom > box.top && row.getBoundingClientRect().top < box.bottom)
+          .map((row) => Number(row.dataset.momentId!.slice("moment-".length)));
+      });
       await list.evaluate((element) => { element.scrollTop = 15_200; });
+      for (let step = 0; ; step += 1) {
+        await expect.poll(onScreen).not.toEqual([]);
+        const shown = await onScreen();
+        if (shown.includes(399)) break;
+        expect(step).toBeLessThan(40);
+        await list.evaluate((element, down) => element.scrollBy(0, (down ? 1 : -1) * element.clientHeight / 2), Math.max(...shown) < 399);
+        await expect.poll(async () => (await onScreen()).join()).not.toBe(shown.join());
+      }
       await expect(page.locator('[data-moment-id="moment-399"]')).toBeVisible();
       await expect(firstGroup.locator('[data-moment-id="moment-1"]')).toBeFocused();
       await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
