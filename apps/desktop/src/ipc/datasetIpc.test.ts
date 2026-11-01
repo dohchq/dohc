@@ -13,7 +13,7 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/loc
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
-import type { DatasetPlace } from "@dohc/cli/dataset";
+import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
@@ -485,6 +485,27 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
 });
 
 const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+
+it("returns an unclaimed Collections list refusal as data on every refresh (#3016)", async () => {
+  const root = await createTestScratch("dohc-dataset-ipc-unclaimed-");
+  await mkdir(join(root, ".dohc"));
+  const localHost = vi.fn(() => createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, localPersonId: () => "person-local",
+    holder: { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true } }));
+  const f = fixture(undefined, undefined, undefined, localHost);
+  const refusal = { kind: "collections-refused", refusal: { kind: "unclaimed", words: unclaimed } };
+
+  // main registers this handler directly for desktop:dataset. A rejection
+  // reaches Electron's handler error log before the renderer can read it.
+  for (let refresh = 0; refresh < 2; refresh++) {
+    const result = f.handler("window", { action: "list", workspaceId: "workspace", limit: 50 });
+    await expect(result).resolves.toEqual(refusal);
+    expect(DatasetResult.parse(await result)).toEqual(refusal);
+  }
+  expect(await readdir(join(root, ".dohc"))).toEqual([]);
+  expect(f.host.list).not.toHaveBeenCalled();
+  expect(f.withAdapter).not.toHaveBeenCalled();
+});
+
 const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
 it.each([
   ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
