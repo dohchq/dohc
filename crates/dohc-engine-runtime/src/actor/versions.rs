@@ -330,6 +330,23 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
     std::fs::symlink_metadata(root_dir.join(path)).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Whether a switch writing a file at `path` replaces a real folder there:
+/// one of the `previous` paths it deletes or holds lies inside that folder.
+/// The write then waits in replay until the folder is empty and gone.
+fn replaces_folder<'a>(
+    root_dir: &std::path::Path,
+    path: &str,
+    previous: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if !is_folder(root_dir, path) {
+        return false;
+    }
+    let folder = path_key(path);
+    previous
+        .into_iter()
+        .any(|inner| is_inside(&path_key(inner), &folder))
+}
+
 /// Remove each folder above `path` that is empty, nearest first, through
 /// `top` in any case, or to the root when `top` is `None`. Walks past a
 /// folder already gone, which an interrupted pass removed, and stops at the
@@ -778,6 +795,14 @@ fn plan_plaintext_switch(
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
                 .or_else(|| projection_preimage(&state))
+                .or_else(|| {
+                    replaces_folder(
+                        root_dir,
+                        &snapshot.path,
+                        previous_paths.iter().map(|(path, _)| path.as_str()),
+                    )
+                    .then_some(Preimage::Absent)
+                })
             else {
                 continue;
             };
@@ -944,6 +969,17 @@ fn plan_secret_switch(
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
             .or_else(|| projection_preimage(&state))
+            .or_else(|| {
+                replaces_folder(
+                    root_dir,
+                    &stat.path,
+                    previous
+                        .iter()
+                        .map(|file| file.path.as_str())
+                        .chain(holds.entries().map(|(path, _)| path)),
+                )
+                .then_some(Preimage::Absent)
+            })
         else {
             continue;
         };

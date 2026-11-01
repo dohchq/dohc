@@ -612,6 +612,16 @@ pub(super) fn rollback_job_matches_active(
     .map(Some)
 }
 
+/// The folders above the path keyed `key`, nearest first.
+fn ancestor_keys(key: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(key.rsplit_once('/').map(|(parent, _)| parent), |path| {
+        path.rsplit_once('/').map(|(parent, _)| parent)
+    })
+}
+
+/// Switch deletes that must clear the way for a switch write run first: a
+/// file where a write needs a folder, and a file inside a folder a write
+/// replaces with a file.
 fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<MaterializationJob> {
     if !jobs.iter().any(|job| {
         job.operation == MaterializationOperation::Delete
@@ -619,31 +629,89 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     }) {
         return jobs;
     }
+    let mut writes = HashSet::new();
     let mut ancestors = HashSet::new();
     for job in &jobs {
         if job.operation == MaterializationOperation::Write
             && job.job_id.starts_with("version-switch-")
         {
             let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
-            let mut path = path.as_str();
-            while let Some((parent, _)) = path.rsplit_once('/') {
-                ancestors.insert(parent.to_owned());
-                path = parent;
-            }
+            ancestors.extend(ancestor_keys(&path).map(str::to_owned));
+            writes.insert(path);
         }
     }
-    if ancestors.is_empty() {
+    if writes.is_empty() {
         return jobs;
     }
-    let (mut parents, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
-        job.operation == MaterializationOperation::Delete
-            && job.job_id.starts_with("version-switch-")
-            && ancestors.contains(&dohc_engine_files::floor::path_collision_key(
-                &job.target_path,
-            ))
+    let (mut first, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
+        if job.operation != MaterializationOperation::Delete
+            || !job.job_id.starts_with("version-switch-")
+        {
+            return false;
+        }
+        let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
+        ancestors.contains(&path) || ancestor_keys(&path).any(|folder| writes.contains(folder))
     });
-    parents.extend(others);
-    parents
+    first.extend(others);
+    first
+}
+
+/// Whether a switch write must wait for the real folder at its path. The
+/// folder gives way only when no hold lies inside it and it holds nothing but
+/// empty folders, which go first. Anything else in it stays, and so does the
+/// pending write.
+fn switch_write_waits_for_folder(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    holds: &dohc_engine_files::PlacementHolds,
+    job: &MaterializationJob,
+) -> bool {
+    if job.operation != MaterializationOperation::Write
+        || !std::fs::symlink_metadata(root_dir.join(&job.target_path))
+            .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return false;
+    }
+    let folder = job.target_path.as_str();
+    holds
+        .entries()
+        .any(|(held, _)| dohc_engine_files::path_is_held(folder, held))
+        || !(empty_folder_tree(store, root_dir, folder, false)
+            && empty_folder_tree(store, root_dir, folder, true))
+}
+
+/// Whether the folder at `rel` holds only folders and files the OS writes,
+/// such as `.DS_Store`. With `remove`, also remove it and the folders inside
+/// it, deepest first, and say whether it is gone.
+fn empty_folder_tree(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    rel: &str,
+    remove: bool,
+) -> bool {
+    let Ok(entries) = std::fs::read_dir(root_dir.join(rel))
+        .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+    else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(name) = entry.file_name().into_string() else {
+            return false;
+        };
+        let empty = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            empty_folder_tree(store, root_dir, &format!("{rel}/{name}"), remove)
+        } else {
+            dohc_engine_files::floor::names_os_metadata(&name)
+        };
+        if !empty {
+            return false;
+        }
+    }
+    !remove
+        || matches!(
+            dohc_engine_files::remove_empty_directory_target(store, root_dir, rel),
+            Ok(true)
+        )
 }
 
 pub(super) fn replay_pending_materializations(
@@ -933,6 +1001,10 @@ fn replay_materializations(
                     }
                     continue;
                 }
+                if switch_secret && switch_write_waits_for_folder(store, root_dir, holds, &job) {
+                    summary.parked += 1;
+                    continue;
+                }
                 if secret_key.is_none() {
                     let Ok(Some(key)) = load_key_file(super::store_folder(store.database_path()))
                     else {
@@ -1047,6 +1119,12 @@ fn replay_materializations(
                         summary.failed += 1;
                     }
                 }
+                continue;
+            }
+            if job.job_id.starts_with("version-switch-mat_")
+                && switch_write_waits_for_folder(store, root_dir, holds, &job)
+            {
+                summary.parked += 1;
                 continue;
             }
             if matches!(

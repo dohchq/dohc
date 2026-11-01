@@ -1023,3 +1023,108 @@ async fn switch_leaves_the_same_bytes_alone_when_only_their_kind_differs() {
         .expect("switch jobs");
     assert_eq!(jobs, 0, "equal bytes need no switch write");
 }
+
+/// `main` has `plans/trip.md` on disk and `later` has a file at `plans`.
+/// Switch to `later`, with `untracked` also in the folder when given.
+async fn switch_folder_to_file(
+    workspace_id: &str,
+    untracked: Option<&str>,
+) -> (ScratchDir, PathBuf) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = engine_db_path(&scratch).expect("database");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            workspace_id.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    actor
+        .create_named_version(
+            CreateNamedVersion {
+                workspace_id: workspace_id.to_owned(),
+                new_version_id: "later".to_owned(),
+                name: "Later".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("later");
+    for (version_id, path, text, moment_id, now_ms) in [
+        ("later", "plans", "target\n", "folder-to-file-later", 3),
+        ("main", "plans/trip.md", "trip\n", "folder-to-file-main", 4),
+    ] {
+        actor
+            .versioned_text_write(
+                write_for(workspace_id, version_id, path, text, moment_id, now_ms),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("write");
+    }
+    std::fs::create_dir_all(scratch.path().join("plans")).expect("plans folder");
+    std::fs::write(scratch.path().join("plans/trip.md"), "trip\n").expect("trip");
+    if let Some(name) = untracked {
+        std::fs::write(scratch.path().join("plans").join(name), "mine\n").expect("untracked");
+    }
+    actor
+        .set_active_version(
+            ActiveVersionSwitch {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "later".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(()),
+                now_ms: 5,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("switch");
+    supervisor.close(&database).expect("close");
+    (scratch, database)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_a_folder_to_a_same_named_file_places_the_file() {
+    let (scratch, _) = switch_folder_to_file("ws-folder-to-file", None).await;
+    let plans = scratch.path().join("plans");
+    assert!(plans.is_file(), "the folder gives way to the file");
+    assert_eq!(std::fs::read_to_string(plans).expect("plans"), "target\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_untracked_file_keeps_its_folder_and_the_file_waits() {
+    let (scratch, database) =
+        switch_folder_to_file("ws-folder-keeps-untracked", Some("notes.txt")).await;
+    let plans = scratch.path().join("plans");
+    assert!(plans.is_dir(), "a folder with an untracked file stays");
+    assert_eq!(
+        std::fs::read_to_string(plans.join("notes.txt")).expect("untracked"),
+        "mine\n"
+    );
+    assert!(
+        !plans.join("trip.md").exists(),
+        "the switch deletes main's file"
+    );
+    let connection = Connection::open(&database).expect("sqlite");
+    let pending: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-mat_*' AND target_path = 'plans' \
+             AND status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("switch jobs");
+    assert_eq!(pending, 1, "the file write waits for the folder");
+}

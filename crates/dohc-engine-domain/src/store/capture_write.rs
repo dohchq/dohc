@@ -1276,7 +1276,9 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// Includes capture heads, eligible Y.Doc heads, and capture-owned secret tips.
 /// Other origins are excluded because their content may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
-/// Matching pending rollback restores also exclude their destination heads.
+/// Matching pending rollback restores also exclude their destination heads,
+/// and so do pending switch writes with no file to replace, such as one that
+/// waits for a folder at its path to empty.
 ///
 /// Pending rollback deletes contribute transient last-known-disk entries when
 /// their target has no alias in this version. These entries keep that path out
@@ -1335,7 +1337,9 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3)) \
+                                    length(?3)) = ?3 \
+                              OR (j.job_id GLOB 'version-switch-mat_*' \
+                                  AND j.preimage_present = 0))) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
                         j.content_sha256, bb.byte_length \
