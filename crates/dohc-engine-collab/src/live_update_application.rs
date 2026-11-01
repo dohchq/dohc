@@ -91,14 +91,17 @@ pub use restore_content::{
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreProposalReceipt,
     NativeRestoreSource,
 };
+pub use restore_fence::require_crossed_since as require_crossed_cancellations;
 pub use restore_fence::require_open as require_restore_open;
 pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
-    current_generation as restore_generation, require_generation as require_restore_generation,
+    cancel_restore_fence, cancelled_restores, NativeRestoreCancellationReceipt, NativeRestoreFence,
+    NativeRestoreFenceReceipt, NativeRestoreRefusal, NativeRestoreRefusalReason,
+    NativeRestoreSelection, RestoreDeliveryOrigin, RestoreFenceCancellation,
+    RestoreFenceCancellationOutcome, MAX_CANCELLED_RESTORES,
 };
 pub use restore_fence::{
-    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestoreRefusal,
-    NativeRestoreRefusalReason, NativeRestoreSelection, RestoreDeliveryOrigin,
+    current_generation as restore_generation, require_generation as require_restore_generation,
 };
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
@@ -1321,7 +1324,8 @@ impl ApplicationOwner {
 /// Work a host must finish before it unloads a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnloadPending {
-    /// A restore fence for the document has not resumed.
+    /// A restore fence for the document has neither resumed nor been
+    /// cancelled.
     Restore,
     /// Owner updates or deferred replicated updates have not been delivered.
     Delivery,
@@ -1354,7 +1358,7 @@ macro_rules! frozen_at_refused_seed {
 /// delivery, unless the owner's Try again granted its head an attempt.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
-        WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
+        WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL AND cancelled_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0

@@ -88,6 +88,7 @@ function renderPage(readEngineMoment: Mock, restoreEngineMomentFile: Mock = vi.f
     onSettled: vi.fn(),
     onReopenRestore: vi.fn(),
     onRestoreRequestTaken: vi.fn(),
+    onOpenSharedRestore: vi.fn(),
   };
   let props: PageProps = {
     workspaceId: "ws-1",
@@ -302,6 +303,7 @@ describe("a History diff the rules hide", () => {
             onReopenRestore={noop}
             restoreRequested={requested}
             onRestoreRequestTaken={takeRequest}
+            onOpenSharedRestore={noop}
           />
           <RejectInSameCommit when={requested} />
         </>

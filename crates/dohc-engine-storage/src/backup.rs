@@ -64,6 +64,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_accepted_checkpoints",
     "live_accepted_reader_history",
     "live_restore_fences",
+    "live_restore_cancellations",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
@@ -587,6 +588,7 @@ mod tests {
             tx.execute("INSERT INTO live_accepted_checkpoints VALUES ('relay','workspace','main','object',?1,0,0,'null','{}',?1,?1,?1,NULL,NULL)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_accepted_reader_history VALUES ('relay','workspace','main','object',?1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
+            tx.execute("INSERT INTO live_restore_cancellations VALUES ('relay','cancelled','workspace','main','object',?1,1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1,'adoption')", []).unwrap();
             tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection',NULL)", [&sha]).unwrap();
@@ -618,7 +620,7 @@ mod tests {
             tx.execute("INSERT INTO live_audit_settlement_publications VALUES ('settlement','workspace','relay','main','object',?1,0,?2,'peer',0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
-            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1,0)",[&sha]).unwrap();
             tx.execute(r#"INSERT INTO live_audit_projection_authors VALUES ('workspace','peer',0,'main','object','note.md','lineage','[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]',NULL)"#,[]).unwrap();
             tx.execute(r#"INSERT INTO live_audit_projection_contributions VALUES ('workspace','peer',0,?1,'[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]')"#,[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
@@ -644,6 +646,7 @@ mod tests {
             "live_accepted_checkpoints",
             "live_accepted_reader_history",
             "live_restore_fences",
+            "live_restore_cancellations",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
             "live_owner_adoptions",
@@ -705,6 +708,7 @@ mod tests {
             "live_accepted_checkpoints",
             "live_accepted_reader_history",
             "live_restore_fences",
+            "live_restore_cancellations",
             "live_owner_adoptions",
             "live_owner_activations",
             "live_owner_retirements",

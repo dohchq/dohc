@@ -498,7 +498,7 @@ pub(crate) fn validate_retirement(
 }
 
 /// The document's binding in `namespace` and the activation it names.
-fn read_bound_binding(
+pub(super) fn read_bound_binding(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,

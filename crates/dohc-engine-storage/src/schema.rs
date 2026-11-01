@@ -82,6 +82,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "replica_frontiers",
     "replica_documents",
     "replica_first_seen",
+    "replica_restore_cancellations",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
@@ -100,6 +101,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_accepted_checkpoints",
     "live_accepted_reader_history",
     "live_restore_fences",
+    "live_restore_cancellations",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
@@ -255,6 +257,10 @@ const REQUIRED_TABLES: &[&str] = &[
     "automation_schedule_marks",
     "remote_changes",
 ];
+
+/// Columns a migration added to an existing table, which the table's presence
+/// does not prove.
+const REQUIRED_COLUMNS: &[(&str, &str)] = &[("live_audit_events", "restore_generation")];
 
 /// How an existing file was classified by the fingerprint fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,6 +686,18 @@ fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
             return Err(StorageError::StateCorrupt { source: None });
         }
     }
+    for (table, column) in REQUIRED_COLUMNS {
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt)?;
+        if !present {
+            return Err(StorageError::StateCorrupt { source: None });
+        }
+    }
     let triggers = conn
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger'")
         .map_err(StorageError::corrupt)?
@@ -834,6 +852,7 @@ mod tests {
             "live_accepted_checkpoints",
             "live_accepted_reader_history",
             "live_restore_fences",
+            "live_restore_cancellations",
             "live_owner_adoptions",
             "live_owner_activations",
             "live_owner_retirements",
@@ -861,6 +880,28 @@ mod tests {
                     Err(crate::StorageError::StateCorrupt { .. })
                 ),
                 "missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_rejects_each_missing_added_column() {
+        for (table, column) in super::REQUIRED_COLUMNS {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("added-column-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "missing {table}.{column}"
             );
         }
     }

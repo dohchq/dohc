@@ -46,7 +46,7 @@ const RECOVERY_STATE_SQL: &str = "SELECT json_array(d.head_update_seq,d.head_sna
          (SELECT latest_moment_id FROM snapshots s WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id), \
          (SELECT json_array(COUNT(*),MAX(rowid)) FROM ydoc_deferred_updates u WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id), \
          (SELECT EXISTS(SELECT 1 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id)), \
-         (SELECT group_concat(operation_id || COALESCE(resume_receipt_json,'')) FROM live_restore_fences f WHERE f.workspace_id=d.workspace_id AND f.main_version_id=d.version_id AND f.object_id=d.object_id), \
+         (SELECT group_concat(operation_id || COALESCE(resume_receipt_json,cancelled_json,'')) FROM live_restore_fences f WHERE f.workspace_id=d.workspace_id AND f.main_version_id=d.version_id AND f.object_id=d.object_id), \
          (SELECT COUNT(*) FROM conflicts c WHERE c.workspace_id=d.workspace_id AND c.target_version_id=d.version_id AND c.status='open' AND (c.current_object_id=d.object_id OR c.incoming_object_id=d.object_id))) \
          FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3";
 

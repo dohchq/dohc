@@ -1,4 +1,4 @@
-import { requireResumedBinding } from "./liveRestoreLifecycleStorage";
+import { requireFinishedRestoreBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
@@ -23,6 +23,8 @@ import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
+import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
+import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 function retirementKey(value: RetirementKey): RetirementKey {
@@ -77,7 +79,7 @@ export class ServiceActivationStore {
       }
       const original=parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
       if(row.completion_json===null && !isDeepStrictEqual(current.binding,original))throw new Error("Pending service activation binding changed.");
-      requireResumedBinding(this.storage.db,this.history.namespace,original,current.binding);
+      requireFinishedRestoreBinding(this.storage.db,this.history.namespace,original,current.binding);
       return {access, binding:current.binding, completed: row.completion_json !== null};
     });
   }
@@ -151,16 +153,14 @@ export class ServiceActivationStore {
   }
 
   /**
-   * Retires the activation its open obligation names, once the engine released
-   * it at `boundary` and its document parked. Archives its owner row, releases
-   * the lineage's adoption reservation here and every reservation it holds on
-   * another host, keeps that boundary, and drops its retained state, refunding
-   * those bytes once. It needs no quota. An activation that adopted retires
-   * only on the host it adopted on. Exact replay changes nothing, so it never
-   * touches a successor's owner row.
+   * Retires the activation after the engine released it and its document parked.
+   * Archives its owner, releases its reservations on every host, and refunds its retained state.
+   * A restore carried by this retirement must finish and publish its settlement first.
+   * Replay changes nothing and cannot touch a successor's owner row.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
-    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}): {status: "retired"; replayed: boolean} {
+    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
+    {status: "retired"; replayed: boolean} | {status: "pending"; reason: "restore"} {
     const key = retirementKey(input.key), boundary = retainedBoundary(input.boundary), boundaryJson = JSON.stringify(boundary);
     const nowMs = authorityInteger(input.nowMs);
     return this.storage.tx(() => {
@@ -187,8 +187,10 @@ export class ServiceActivationStore {
           row.replication_epoch !== identity.replicationEpoch || row.stream_identity !== identity.streamIdentity) {
         throw new Error("Service activation retirement owner changed.");
       }
-      // Stop and a restore refuse each other.
-      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) throw new Error("Service activation retirement overlaps a restore.");
+      // A restore moves the generation the key names, so retirement waits for it.
+      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) return {status: "pending", reason: "restore"};
+      // A key at a restore's accepted row carries that restore, which the retiring host finishes by publishing its settlement.
+      if (!this.#carriedRestorePublished(document, key)) return {status: "pending", reason: "restore"};
       const current = this.storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
         WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(document.workspaceId, document.objectId);
       if (current?.lineage_claim_id !== key.lineageClaimId || current.restore_fence_generation !== key.restoreFenceGeneration) {
@@ -239,6 +241,16 @@ export class ServiceActivationStore {
     });
   }
 
+  // The restore publishes at its own fence. A later restore declined after its fence moves the key's generation past it.
+  #carriedRestorePublished(document: LiveDocumentKey, key: RetirementKey): boolean {
+    const params = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+    const row = this.storage.db.prepare(`SELECT j.restore_operation_id,o.new_fence FROM ${LIVE_JOURNAL_TABLE} j
+      LEFT JOIN ${LIVE_RESTORE_OPERATIONS} o ON o.relay_database_namespace=j.relay_database_namespace AND o.operation_id=j.restore_operation_id
+      WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`).get(...params, key.acceptedThrough);
+    if (!row || row.restore_operation_id === null) return true;
+    return this.storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
+      AND namespace=? AND restore_fence=? AND terminal_cursor>=?`).get(...params, this.history.namespace, authorityInteger(row.new_fence, 2), key.acceptedThrough) !== undefined;
+}
   /**
    * A successor follows its lineage's exact retired chain tail, which the same
    * owner kept under the workspace's current identity from the same verified
@@ -283,20 +295,21 @@ export class ServiceActivationStore {
     }
   }
 
-  read(workspaceId: string, path: string, maxBytes: number) {
+  /** The activation retained at the path, the live document's registered one. With `objectId`, only that document's. */
+  read(workspaceId: string, path: string, maxBytes: number, objectId?: string) {
     requireLiveJournalHistory(this.storage, this.history);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Invalid service activation read budget.");
+    const where = `WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL
+      AND (? IS NULL OR a.object_id=?)`, params = [this.history.namespace, workspaceId, path, objectId ?? null, objectId ?? null];
     return this.storage.readTx(() => {
     const size = this.storage.db.prepare(`SELECT length(a.state_bytes)+length(d.baseline_bytes)+length(CAST(a.source_json AS BLOB)) AS bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
-      .get(this.history.namespace,workspaceId,path);
+      ${where}`).get(...params);
     if (!size) return null;
     if (typeof size.bytes !== "number" || size.bytes > maxBytes) throw new Error("Retained service activation exceeds its read budget.");
     const row = this.storage.db.prepare(`SELECT a.*,d.baseline_bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
-      .get(this.history.namespace, workspaceId, path);
+      ${where}`).get(...params);
     if (!row) return null;
     const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
     const document = key(source);

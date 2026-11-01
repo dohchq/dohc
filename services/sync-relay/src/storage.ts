@@ -498,6 +498,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
   }
+  serviceRestoreInProgress(document: {workspaceId: string; objectId: string}) {
+    return serviceHostEnrollmentStorage.restoreInProgress(this, document.workspaceId, document.objectId);
+  }
+  serviceRetirementHadRestore(retirement: ServiceActivationRetirement) {
+    return serviceActivationRetirementStorage.retirementHadRestore(this, retirement);
+  }
   serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: serviceActivationRetirementStorage.RetirableServiceActivation) {
     return serviceActivationRetirementStorage.readServiceActivationRetirementDecision(this, document, activation);
   }
@@ -522,11 +528,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readOwnerRestoreStatus(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1]) {
     return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
   }
+  readOwnerUnfinishedRestores(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerUnfinishedRestores>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerUnfinishedRestores(this, input);
+  }
   beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
     return liveRestoreOperationStorage.beginStopRestore(this, input, now);
   }
   advanceStopRestoreFence(input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1], now: number) {
     return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
+  }
+  declineStopRestore(input: Parameters<typeof liveRestoreOperationStorage.declineStopRestore>[1], now: number) {
+    return liveRestoreOperationStorage.declineStopRestore(this, input, now);
   }
   readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
     return liveRestoreOperationStorage.readStopRestore(this, input);

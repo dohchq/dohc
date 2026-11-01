@@ -278,11 +278,11 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts[2] === "live-restores") {
     if (parts.length === 3) return {route: "owner-restore", workspaceId, action: "begin"};
-    if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options")) return {route: "owner-restore", workspaceId, action: parts[3]};
+    if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options" || parts[3] === "unfinished")) return {route: "owner-restore", workspaceId, action: parts[3]};
     const operationId = parseString(parts[3], "operationId", 512);
     if (parts.length === 4) return {route: "owner-restore", workspaceId, operationId, action: "status"};
     const action = parts[4];
-    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm")) {
+    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm" || action === "decline")) {
       return {route: "owner-restore", workspaceId, operationId, action};
     }
     throw notFound();

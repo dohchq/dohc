@@ -15,7 +15,7 @@ const base = {id: "baseline", workspaceId: "workspace", versionId: "main", objec
 const text = {path: base.path, contentKind: "text" as const, sha256: "a".repeat(64), byteLength: 5, text: "Hello"};
 const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, payload: {before: null, after: text}}};
 
-async function open(detail: WorkspaceEngineMomentDetail) {
+async function open(detail: WorkspaceEngineMomentDetail, onOpenSharedRestore: (momentId: string, path: string) => void = noop) {
   const moment = engineMomentDetailForIpc(detail, {
     named: () => "Someone you shared with",
     agent: () => "Owner",
@@ -23,24 +23,24 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
     presentations: neutralHistoryPresentations,
   });
-  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], authors: [], pendingOperation: null,
-    nextGrantCursor: null, nextBeforeCursor: null});
-  vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
+  vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment})});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
     onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop}
-    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} />);
+    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} onOpenSharedRestore={onOpenSharedRestore} />);
   await screen.findByTestId("engine-diff-restore-file");
   // The rarer ways back wait behind More.
   fireEvent.click(screen.getByTestId("engine-diff-more"));
-  return {moment, ownerRestore};
+  return {moment};
 }
 
-it("opens shared restore for the text detail produced by the real IPC mapper", async () => {
-  const {moment, ownerRestore} = await open(textDetail);
+// The shell owns the dialog, so the page only names the change and its file.
+it("asks the shell for shared restore of the text detail produced by the real IPC mapper", async () => {
+  const onOpenSharedRestore = vi.fn();
+  const {moment} = await open(textDetail, onOpenSharedRestore);
   expect(moment.contentKind).toBeUndefined();
   fireEvent.click(screen.getByTestId("engine-diff-shared-restore"));
-  await screen.findByTestId("owner-restore-dialog");
-  expect(ownerRestore).toHaveBeenCalledWith({workspaceId: "workspace", action: "options", path: "docs/a.md"});
+  expect(onOpenSharedRestore).toHaveBeenCalledWith("baseline", "docs/a.md");
+  expect(screen.queryByTestId("owner-restore-dialog")).toBeNull();
 });
 
 it("offers Copy your version on a recovery change only, and copies the kept file whole", async () => {

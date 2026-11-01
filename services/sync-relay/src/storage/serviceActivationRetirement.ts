@@ -2,14 +2,18 @@ import {parseLiveUpdateReceipt, type LiveUpdateReceipt} from "@dohc/live-session
 import type {StorageContext} from "./context";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {LIVE_JOURNAL_TABLE} from "./schema";
+import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 
 // The retirement of one exact service activation, recorded on its row when
-// Stop, or a Resume of a document held for an unadmitted edit, fences live
-// admission. It names the activation as the engine retires it. Once recorded
-// it stays as it was, and admission stays fenced, until the activation
-// retires: Resume, a new share or a restored grant leaves it in place. An
-// authority-reducing change must always commit, so it charges no quota; its
-// three integers are fixed-size row columns.
+// Pause, Stop, the loss of its document's last Edit grant, or a Resume of a
+// document held for an unadmitted edit fences live admission. It names the
+// activation as the engine retires it. Once recorded it stays, and admission
+// stays fenced, until the activation retires: Resume, a new share or a
+// restored grant leaves it in place. A restore that fences the document
+// carries it to the fenced generation, and its admission to the restore's
+// accepted cursor. An authority-reducing change must
+// always commit, so it charges no quota; its three integers are fixed-size
+// row columns.
 export interface ServiceActivationRetirement {
   readonly relayDatabaseNamespace: string;
   readonly activationId: string;
@@ -42,7 +46,7 @@ const currentIdentity = (table: string) => `EXISTS(SELECT 1 FROM sync_relay_work
     AND current_identity.replication_epoch=json_extract(${table}.source_json,'$.replicationEpoch')
     AND current_identity.stream_identity=json_extract(${table}.source_json,'$.streamIdentity'))`;
 /**
- * An obligation is open from Stop until the activation retires, while the
+ * An obligation is open from its request until the activation retires, while the
  * workspace keeps the identity the activation was captured under. A later
  * identity leaves its lineage stale, so it could never retire.
  */
@@ -77,6 +81,22 @@ export function readServiceActivationRetirementDecision(storage: StorageContext,
     .get(document.workspaceId, document.objectId, activation.activationId, activation.lineageClaimId, activation.restoreFenceGeneration);
   return value ? retirement(value) : null;
 }
+
+/**
+ * Whether a restore of the retiring activation began, whatever phase it is in
+ * now. The restore saved the owner origin it continues, whose adoption ID is
+ * that activation, so a restore before a later Pause counts and one of an
+ * earlier activation does not.
+ */
+export function retirementHadRestore(storage: StorageContext, retirement: ServiceActivationRetirement): boolean {
+  return storage.db.prepare(`SELECT basis_json FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=?
+    AND lineage_claim_id=?`).all(retirement.relayDatabaseNamespace, retirement.workspaceId, retirement.objectId, retirement.lineageClaimId)
+    .some(row => restoredActivation(String(row.basis_json)) === retirement.activationId);
+}
+const restoredActivation = (basisJson: string): unknown => {
+  const origin: unknown = JSON.parse(basisJson)?.ownerOrigin;
+  return typeof origin === "string" ? JSON.parse(origin)?.adoptionId : undefined;
+};
 
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
@@ -156,4 +176,34 @@ export function openServiceActivationRetirement(storage: StorageContext, documen
     .get(activation.relay_database_namespace, activation.activation_id);
   if (!recorded) throw new Error("Service activation retirement is damaged.");
   return retirement(recorded);
+}
+
+type LineageDocument = {workspaceId: string; objectId: string; lineageClaimId: string};
+
+/**
+ * Inside the transaction that moves the lineage's restore generation from
+ * `from` to `to`, a restore fence or a native cancellation proving that fence
+ * absent, moves its open obligation with it. Only the generation changes: an
+ * open obligation fences admission, so its accepted-through is still
+ * `acceptedThrough`, the journal cursor the fence closed at.
+ */
+export function moveServiceActivationRetirement(storage: StorageContext, document: LineageDocument, from: number, to: number, acceptedThrough: number): void {
+  const where = `workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`;
+  const params = [document.workspaceId, document.objectId, document.lineageClaimId, integer(from)];
+  const open = storage.db.prepare(`SELECT retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} WHERE ${where}`).all(...params);
+  if (open.some(row => row.retire_accepted_cursor !== integer(acceptedThrough))) throw new Error("Service activation retirement is damaged.");
+  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_restore_generation=? WHERE ${where}`).run(integer(to), ...params);
+}
+
+/**
+ * Inside the transaction that admits a restore at `generation`, names the
+ * restore's own accepted journal cursor as the open obligation's
+ * accepted-through. An admitted restore always finishes, and its output up to
+ * that cursor is then publishable under the retirement before it resumes. The
+ * obligation keeps its activation, generation and request time.
+ */
+export function carryServiceActivationRetirement(storage: StorageContext, document: LineageDocument, generation: number, acceptedThrough: number): void {
+  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_accepted_cursor=?
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`)
+    .run(integer(acceptedThrough), document.workspaceId, document.objectId, document.lineageClaimId, integer(generation));
 }

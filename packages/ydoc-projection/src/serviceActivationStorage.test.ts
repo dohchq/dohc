@@ -103,6 +103,25 @@ it('retains the original lineage and edited ordinary cut, closing ordinary autho
     expect(await f.prepare()).toMatchObject({replayed:true,completed:false})
   }finally{f.close()}
 })
+// Proves: Pause retires a captured activation the host never adopted, keyed
+// as the engine's release case expects. Its pending access admits nothing
+// more, and Resume does not reopen it while the retirement is pending.
+it('retires a captured activation the host never adopted when its owner pauses',async()=>{
+  const f=fixture();try{
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',ownerUserId:'owner',nowMs:10,guard(){}}
+    f.storage.enrollServiceHostDocument(enrollment)
+    expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    const access=f.store.pending(f.document,host),refused={kind:'refused',reason:'host-unavailable'}
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
+    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:false,nowMs:20})
+    expect(readServiceActivationRetirement(f.storage as StorageContext,f.document)).toEqual({relayDatabaseNamespace:'history',
+      activationId:f.capture.activationId,...f.document,path:'docs/a.md',restoreFenceGeneration:1,acceptedThrough:0,requestedAtMs:20})
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
+    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs:30})
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
+  }finally{f.close()}
+})
 it('activates a receiver projection derived from the ordinary Ydoc base and suffix without a matching file moment',async()=>{
   const f=fixture();try{
     expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
@@ -1092,11 +1111,11 @@ it.each([['before',false],['after',true]] as const)('refuses to start a restore 
     if(adopted)(await ownerCapture(f)).acknowledge();else await f.prepare()
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
     expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
-      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('conflicts with current authority')
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('Live editing is still starting.')
     const intent:StopRestoreIntent={deliveryKind:adopted?'owner':'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
       shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
       restorePointReceiptDigest:f.document.lineageClaimId}
-    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('conflicts with current authority')
+    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('Live editing is still starting.')
     expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
     expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
   }finally{f.close()}
@@ -1452,10 +1471,11 @@ it('keeps the hosted credential and settling scope through the release of a stop
   }finally{f.close()}
 })
 
-// Proves: completion checks the document's current generation, not only the
-// one saved with the obligation. A restore that advanced it after the
-// obligation opened refuses completion, and nothing is archived or refunded.
-it('refuses completing a retirement while a restore that advanced its generation is unfinished',async()=>{
+// Proves: a restore that advanced the generation after the obligation opened
+// carries the obligation to it, so the old key no longer completes it, and
+// defers completion at the carried key while it is unfinished. Nothing is
+// archived or refunded.
+it('defers completing a retirement while a restore that advanced its generation is unfinished',async()=>{
   const f=fixture();try{
     enroll(f);await completeActivation(f)
     const fence=generation(f)
@@ -1468,11 +1488,13 @@ it('refuses completing a retirement while a restore that advanced its generation
     expect(generation(f)).toBe(fence+1)
     const rows=()=>f.raw.prepare(`SELECT (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT count(*) FROM sync_relay_live_delivery_owners) AS owners,
       (SELECT count(*) FROM sync_relay_live_delivery_owner_history) AS archived,(SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
-    const before=rows()
-    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}}))
-      .toThrow('Service activation retirement overlaps a restore.')
+    const before=rows(),carried={...open,restoreFenceGeneration:fence+1}
+    expect(retirement(f.storage)).toEqual(carried)
+    const complete=(key:ReturnType<typeof keyOf>)=>f.store.completeRetirement({workspaceId:'workspace',key,boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}})
+    expect(()=>complete(keyOf(open))).toThrow('Service activation retirement is unavailable.')
+    expect(complete(keyOf(carried))).toEqual({status:'pending',reason:'restore'})
     expect(rows()).toEqual({...before,owners:1,archived:0,retired:null})
-    expect(retirement(f.storage)).toEqual(open)
+    expect(retirement(f.storage)).toEqual(carried)
   }finally{f.close()}
 })
 
@@ -1961,7 +1983,7 @@ it("refuses a bootstrap Stop restore of a service activation's lineage before it
   const f=fixture();try{
     await completeActivation(f)
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
-    const restoreHost:OwnerRestoreHost={restoreConfigured:true,prepareRestore:vi.fn(),reviewRestore:vi.fn(),confirmRestore:vi.fn()}
+    const restoreHost:OwnerRestoreHost={restoreConfigured:true,prepareRestore:vi.fn(),reviewRestore:vi.fn(),confirmRestore:vi.fn(),declineRestore:vi.fn()}
     const handler=testHandler(f.storage,{ownerRestoreHost:()=>restoreHost,newId:()=>'restore'})
     const post=(suffix:string,body:unknown)=>handler(new Request(`https://relay.test/sync/workspace/live-restores${suffix}`,{method:'POST',
       headers:{authorization:'Bearer user:owner','content-type':'application/json'},body:JSON.stringify(body)}))
@@ -2173,7 +2195,7 @@ it('retries a retiring application until its owner applied it, confirms its auth
     expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
     const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
     const record={kind:'application',relayDatabaseNamespace:'history',eventCount:Number(row.accepted_event_count),evidenceDigest:String(row.accepted_evidence_digest),
-      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,
+      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,cancelledRestores:[],
       contentCoordinate:{originId:HOST_ORIGIN,originSeq:0}}
     expect(record.metadata.authorSnapshot??[]).toEqual([])
     const bytes=new TextEncoder().encode(JSON.stringify(record));await r.upload(bytes)

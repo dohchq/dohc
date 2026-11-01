@@ -124,6 +124,7 @@ fn track_touched(conn: &rusqlite::Connection) -> Result<(), SyncError> {
         ("snapshots", "version_id"),
         ("ydoc_docs", "version_id"),
         ("replica_documents", "main_version_id"),
+        ("replica_restore_cancellations", "main_version_id"),
     ] {
         for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")] {
             let old = if event == "UPDATE" {
@@ -246,8 +247,10 @@ pub fn collect_current_view_cached(
             let scene_key=(version.clone(),object.clone());
             if marker.as_ref().is_some_and(|m|m.content_kind==dohc_engine_collab::ContentKind::Scene) {cache.scenes.insert(scene_key);} else {cache.scenes.remove(&scene_key);}
             let lineage = marker.as_ref().and_then(|m| m.lineage_claim_id.clone());
+            // Before its first accepted event a lineage stands at the
+            // generation its last cancelled restore reached.
             let generation = if let Some(claim) = &lineage {
-                tx.query_row("SELECT restore_generation FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4", params![workspace, version, object, claim], |r| r.get::<_,i64>(0)).optional().map_err(SyncError::corrupt)?.or(Some(1))
+                Some(tx.query_row("SELECT COALESCE((SELECT restore_generation FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4),(SELECT max(restore_generation) FROM replica_restore_cancellations WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4),1)", params![workspace, version, object, claim], |r| r.get::<_,i64>(0)).map_err(SyncError::corrupt)?)
             } else { None };
             let kind: String = row.get(3).map_err(SyncError::corrupt)?;
             let mut sha: String = row.get(4).map_err(SyncError::corrupt)?;

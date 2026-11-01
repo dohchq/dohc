@@ -191,9 +191,10 @@ describe("text kept in History", () => {
           pendingOperation: { operationId: "restore", phase, proposalDigest } };
       }
       if (input.action === "status") return status();
+      if (input.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
       if (input.action === "confirm") {
         phase = "resumed";
-        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {} } };
+        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {}, moved: false } };
       }
       throw new Error(`Unexpected owner restore action ${input.action}.`);
     });

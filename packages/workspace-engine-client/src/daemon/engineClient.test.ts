@@ -8,6 +8,7 @@ import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
+import { encodeReplicaJournalPage, type ReplicaRestoreCancellation } from "./replicaJournal";
 import {
   EngineClient,
   EngineClientError,
@@ -77,6 +78,26 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
     expect(field()).toEqual(Buffer.from(update));expect(field()).toEqual(Buffer.from(checkpoint));expect(offset).toBe(bytes.length);
     expect(chunks.length).toBeGreaterThan(1);
   } finally {transport.close();}
+});
+
+// A cancellation control entry keeps its place among the rows and adds no span.
+it("encodes a replica cancellation entry in order and without byte spans", () => {
+  const update=Uint8Array.from([1,2,3]), binding={workspaceId:"ws",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1};
+  const metadata={accepted:{receipt:{deliveryId:"replica",updateDigest:createHash("sha256").update(update).digest("hex"),journalCursor:9,acceptingHostEpoch:parseHostEpoch(1)},
+    binding,authority:{principalKind:"owner" as const,principalId:"owner",grantId:null,grantGeneration:null},receivedAtMs:10},firstSeen:[]};
+  const cancellation:ReplicaRestoreCancellation={relayDatabaseNamespace:"relay",journalCursor:8,cancellation:{
+    fence:{operation:{point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...binding,restoreFenceGeneration:0},hostId:"host",newFence:1,
+      origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
+    binding,endpoint:{terminalReceipt:null,eventCount:0,historyEvidenceDigest:"b".repeat(64)},recordedAtMs:11},
+    authority:{lineageClaimId:binding.lineageClaimId,baselineSequence:1,restoreFenceGeneration:1}};
+  const bytes=encodeReplicaJournalPage([cancellation,{admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"c".repeat(64),journalCursor:9,authority:null,restore:null}]);
+  let offset=0;
+  const field=()=>{const size=bytes.readUInt32LE(offset);offset+=4;const value=bytes.subarray(offset,offset+size);offset+=size;return value;};
+  const entries=JSON.parse(field().toString());
+  expect(entries[0]).toEqual(cancellation);
+  expect(entries[1].admitted).toEqual({metadata,updateBytes:[]});
+  expect(field()).toEqual(Buffer.from(update));
+  expect(offset).toBe(bytes.length);
 });
 
 describe("private owner delivery transport", () => {
@@ -3304,12 +3325,11 @@ describe("EngineClient", () => {
     const transport = client(peer);
     peer.acknowledge();
     await transport.ready();
-    const cancel = new AbortController();
-    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancel.signal);
+    const cancelling = new AbortController();
+    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancelling.signal);
     await nextImmediate();
-    cancel.abort();
-    await nextImmediate();
-    expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+    cancelling.abort();
+    await vi.waitFor(() => expect(peer.received).toContainEqual({ type: "cancel", id: 1 }));
     // Its handler had answered; the engine writes the cancellation instead.
     peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "held document answer cancelled", retry: "no" } });
     await expect(reading).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });

@@ -21,7 +21,7 @@ const names = {named: () => "Someone", agent: () => "Owner", person: () => undef
 function page(momentId: string, steps: MomentSteps, onOpenMoment: (momentId: string, path: string) => void, workspaceId = "workspace") {
   return <EngineMomentDiffPage workspaceId={workspaceId} tabPath={momentDiffTabPath(momentId)}
     onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={noop} onError={noop} onSettled={noop}
-    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} steps={steps} onOpenMoment={onOpenMoment} />;
+    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} onOpenSharedRestore={noop} steps={steps} onOpenMoment={onOpenMoment} />;
 }
 
 const step = (momentId: string) => ({momentId, path: "docs/a.md"});

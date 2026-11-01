@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import {createRequire} from "node:module";
+import {markdownToYDoc} from "@dohc/ydoc-projection";
+import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
+import {parseServiceActivationConfig} from "./serviceActivationDriver.js";
+import {selfHostLiveProfile} from "./selfHostLiveProfile.js";
+import {liveValidation} from "./liveValidation.js";
+import {afterAll} from "vitest";
 import { expect, it, vi } from "vitest";
 import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import { drainOwnerOutbox, type OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
@@ -22,15 +29,17 @@ const serviceHost = {mode: "service", hostId: "host", hostEpoch: 1, instanceId: 
  * of that full state at that entry's sequence.
  */
 function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true,
-  seedDigest?: string, sequences = [1, 3, 7]) {
+  seedDigest?: string, sequences = [1, 3, 7], candidate?: Uint8Array) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
   const first = sequences[0];
+  const update = (sequence: number) => candidate ?? Buffer.from([sequence]);
   const entries = sequences.map(sequence => ({sequence,
-    appendKey: sequence === first && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
-    deliveryId: sequence === first && seedDigest ? seedDelivery(seedDigest, sequence) : `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    appendKey: sequence === first && firstKey ? firstKey(sha(update(sequence))) : `append-${sequence}`,
+    deliveryId: sequence === first && seedDigest ? seedDelivery(seedDigest, sequence) : `delivery-${sequence}`,updateDigest: sha(update(sequence)),byteLength: update(sequence).byteLength,createdAtMs: sequence,
     ...(personEdit ? {personEdit: true} : {}),
     ...(sequence === first && agentDeclaration ? {agentDeclaration} : {})}));
+  const pendingBytes = () => entries.reduce((bytes, entry) => bytes + entry.byteLength, 0);
   const applied = vi.fn();
   const host = {...serviceHost};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [], order: string[] = [];
@@ -48,9 +57,9 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const method = methods[request.method] ?? request.method;
     if (method === "liveApplication.register") return {id: request.id,result: {registrationId: 1}};
     if (method === "liveApplication.ownerState") return {id: request.id,result: {adoptionId: native.activationId,expectedLocalSequence: 7,
-      throughCursor: native.adopted ? 0 : null,outboxId: native.adopted ? "outbox" : null,pendingBytes: entries.length,outboxState: state.value,
+      throughCursor: native.adopted ? 0 : null,outboxId: native.adopted ? "outbox" : null,pendingBytes: pendingBytes(),outboxState: state.value,
       retryDeliveryId: state.retryDeliveryId}};
-    if (method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: entries.length,state: state.value,retryDeliveryId: state.retryDeliveryId}};
+    if (method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pendingBytes(),state: state.value,retryDeliveryId: state.retryDeliveryId}};
     if (method === "liveApplication.acknowledgeOwnerOutbox") {
       const receipt = (request.params.receipts as Array<{deliveryId: string; updateDigest: string}>)[0]!;
       expect(receipt).toMatchObject({deliveryId: entries[0]!.deliveryId,updateDigest: entries[0]!.updateDigest});
@@ -60,7 +69,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
         state.value = "active"; state.retryDeliveryId = null;
       }
       order.push("acknowledge"); receipts.push(receipt); entries.shift();
-      return {id: request.id,result: {acknowledged: 1,pendingBytes: entries.length,oldestEntryAtMs: entries[0]?.createdAtMs ?? null}};
+      return {id: request.id,result: {acknowledged: 1,pendingBytes: pendingBytes(),oldestEntryAtMs: entries[0]?.createdAtMs ?? null}};
     }
     expect(method).toBe("liveApplication.readOwnerOutbox");
     const snapshot = sha(Buffer.from(JSON.stringify(entries)));
@@ -71,11 +80,11 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const entry = entries.find(row => row.sequence === current.sequence);
     let bytes: Buffer, following: ReturnType<typeof cursor> | null;
     if (current.part === "header") {
-      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor,frozenAtRefusedSeed: false,checkpointDigest: null,recoveryCheckpointDigest: null}));
+      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: pendingBytes(),pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor,frozenAtRefusedSeed: false,checkpointDigest: null,recoveryCheckpointDigest: null}));
       following = cursor(snapshot,"base");
     } else if (current.part === "base") {bytes = base; following = firstEntryCursor;}
     else if (current.part === "entryHeader") {bytes = Buffer.from(JSON.stringify(entry)); following = cursor(snapshot,"update",current.sequence);}
-    else {bytes = Buffer.from([current.sequence]); const next = entries.find(row => row.sequence > current.sequence); following = next ? cursor(snapshot,"entryHeader",next.sequence) : null;}
+    else {bytes = Buffer.from(update(current.sequence)); const next = entries.find(row => row.sequence > current.sequence); following = next ? cursor(snapshot,"entryHeader",next.sequence) : null;}
     const chunk = bytes.subarray(current.offset,current.offset + 1024);
     requests.push({part: current.part,bytes: chunk.toString("base64").length});
     return {id: request.id,result: {kind: "page",...current,totalBytes: bytes.length,digest: sha(bytes),bytesBase64: chunk.toString("base64"),nextCursor: current.offset + chunk.length < bytes.length ? {...current,offset: current.offset + chunk.length} : following}};
@@ -739,3 +748,28 @@ it("keeps submitted context when an admitted head retries across a missing accou
   await f.run();
   expect(f.storage.commitLiveUpdateJournal.mock.calls[1]![0].metadata).toEqual(first);
 });
+
+it("admits an owner-outbox entry when its admitted cut exceeds the former activation limit", async () => {
+  const {encodeStateAsUpdate} = createRequire(new URL("../../../packages/ydoc-projection/package.json", import.meta.url))("yjs") as {
+    encodeStateAsUpdate(doc: ReturnType<typeof markdownToYDoc>): Uint8Array;
+  };
+  const doc = markdownToYDoc(Array.from({length: 5000}, (_, i) =>
+    `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`).join("\n\n"));
+  const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const f = fixture(1, 10_000, undefined, undefined, false, undefined, [1], Uint8Array.of(0, 0));
+  const profile = selfHostLiveProfile();
+  const config = parseServiceActivationConfig({...profile.service.activation, targets: []})!;
+  const input = {document: {workspaceId: f.binding.workspaceId, mainVersionId: f.binding.mainVersionId,
+    objectId: f.binding.objectId, lineageClaimId: f.binding.lineageClaimId},
+    currentPath: f.binding.currentPath, checkpoint, suffix: [], candidate: Uint8Array.of(0, 0)};
+  expect(createLiveMarkdownJournalValidator({...profile.validation, maxIndexOperations: 10_000_000})(input))
+    .toMatchObject({kind: "refused", reason: "capacity-refused", source: "admitted-cut"});
+  f.storage.readLiveUpdateJournalCut = () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array(checkpoint)}, suffix: []}});
+  const validate = vi.fn(config.validateAdmission);
+  expect(await f.run({admission: {...f.admission, validate}})).toEqual({admittedEntries: 1, hasMore: false});
+  expect(await validate.mock.results[0]!.value).toMatchObject({kind: "accepted"});
+  expect(f.storage.commitLiveUpdateJournal).toHaveBeenCalledTimes(1);
+  expect(f.receipts).toHaveLength(1);
+}, 60_000);
+
+afterAll(async () => {await liveValidation.close();});
