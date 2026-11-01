@@ -90,7 +90,7 @@ export async function seedGoToPeers(baseUrl: string, owner: string, signal: Abor
 export async function provisionGoToFixture(options: FixtureOptions) {
   const started = performance.now();
   const { workspace, runDir } = options;
-  const relay = await spawnSyncRelay({ dbPath: join(runDir, 'go-to-relay.sqlite') });
+  const relay = await spawnSyncRelay({ dbPath: join(runDir, 'go-to-relay', 'relay.sqlite') });
   const claims = new Set<string>();
   const owners = new Set<string>();
   let call = options.call;
