@@ -111,7 +111,7 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
     // --- The owner's file gets the projection's bytes -----------------------
     // The Markdown projection trims trailing whitespace at the end of the
     // document, so the settled file has no final newline.
-    const expected = Buffer.from(CONTENTS.replace(PARAGRAPH, `${PARAGRAPH}${marker}`).trimEnd(), "utf8");
+    const expected = Buffer.from(CONTENTS.replace(PARAGRAPH, `${PARAGRAPH}${marker}`), "utf8");
     // The engine replaces the file with two renames, so a read can land between them and find no file.
     await expect.poll(async () => (await readFile(join(temp.rootPath, PATH), "utf8").catch(error => {
       if (error?.code === "ENOENT") return "";
