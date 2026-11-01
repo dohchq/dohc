@@ -176,15 +176,11 @@ fn a_mixed_page_reports_only_each_items_own_decision() {
     assert_eq!(resolved.options, ["Train", "Bus"]);
     assert_eq!(resolved.chosen_option.as_deref(), Some("Train"));
     assert_eq!(resolved.resolved_by_message_id.as_deref(), Some("answer"));
-    assert_eq!(
-        stream.items[1].post.as_ref().expect("post").open_decision_count,
-        0
-    );
+    let resolved_post = stream.items[1].post.as_ref().expect("post");
+    assert_eq!(resolved_post.open_decision_count, 0);
     assert_eq!(stream.items[2].decision, None);
-    assert_eq!(
-        stream.items[2].post.as_ref().expect("post").open_decision_count,
-        1
-    );
+    let plain_post = stream.items[2].post.as_ref().expect("post");
+    assert_eq!(plain_post.open_decision_count, 1);
 
     let newest = page(&mut store, None, 1);
     assert_eq!(ids(&newest), ["chat-poll"]);
