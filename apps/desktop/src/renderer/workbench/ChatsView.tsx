@@ -662,7 +662,7 @@ export function ChatsView(props: {
   // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const computerDispatchPaused = useChatDispatchPaused((error) =>
-    props.onError(withErrorWords("dohc could not read whether agent dispatch is paused.", error), error));
+    props.onError(withErrorWords("dohc could not read whether agent replies are paused.", error), error));
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
   const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
@@ -3811,7 +3811,7 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not resume dispatch."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not resume agent replies."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
