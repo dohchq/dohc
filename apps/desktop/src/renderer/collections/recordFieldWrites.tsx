@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
-import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
+import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
@@ -237,13 +237,13 @@ export function CollectionRecordFieldWrite({
       return;
     }
     if (frontmatterEditsRefused(doc)) {
-      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+      onFailed(PROPERTIES_READ_ONLY_REASON);
       return;
     }
     try {
       setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
     } catch {
-      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+      onFailed(PROPERTIES_READ_ONLY_REASON);
       return;
     }
     applied.current = true;

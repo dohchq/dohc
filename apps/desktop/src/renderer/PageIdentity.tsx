@@ -1,10 +1,6 @@
 import { useFocusReturn } from "./ui/focusReturn";
 import { isComposingKey } from "./ui/keys";
-import {
-  frontmatterEditsRefused,
-  markdownFrontmatterEditsRefused,
-  FRONTMATTER_EDIT_REFUSED_MESSAGE,
-} from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterEditsRefused, markdownFrontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { announceOverlayOpen } from "./overlayStack";
@@ -20,7 +16,7 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 import { lexesAsH1, opensWithH1 } from "./markdown/firstBlock";
-import { TOPMATTER_FLAG } from "./pageTopmatter";
+import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
 // are reserved keys the document system owns — this
@@ -164,6 +160,8 @@ export type PageIdentityProps = (
   onEnterBody?: () => void;
   // A new page opens with the cursor in its title.
   autoFocus?: boolean;
+  // The note's file, which a refused title or icon offers to open externally.
+  file?: OpenExternallyTarget;
 };
 
 // A title is one line, so pasted or dropped line breaks become spaces.
@@ -394,7 +392,9 @@ export function PageIdentity(props: PageIdentityProps) {
       {/* The icon's line, then the title on its own line. Folded, the title
           joins the icon's line. */}
       <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
-        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in Source</span> : null}
+        {editRefused ? (
+          <ReadOnlyPropertiesFlag role="status" label="Title and icon are read-only" file={props.file} className="basis-full px-1.5" />
+        ) : null}
         <div className="relative min-h-5">
           {icon ? (
             <button

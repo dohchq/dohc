@@ -8,7 +8,7 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { Lexer } from "marked";
 import { PageIdentity } from "./PageIdentity";
 import { NoticeCenter } from "./workbench/NoticeCenter";
-import { parseFrontmatter } from "./markdown/frontmatter";
+import { parseFrontmatter, PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 
 function ControlledPageIdentity(props: { initialBody: string; stem: string }) {
   const [body, setBody] = useState(props.initialBody);
@@ -60,6 +60,30 @@ describe("PageIdentity", () => {
 
       expect(currentMeta().title).toBe("Roadmap");
       expect(screen.getByTestId("current-body").textContent).toContain("# Body\n");
+    });
+
+    it("says the title and icon are read-only when dohc refuses a title change", async () => {
+      const user = userEvent.setup();
+      // The alias reads the title's anchor, so a new title would rewrite it.
+      const body = "---\ntitle: &t Plan\nalias: *t\n---\n\n# Body\n";
+      const onChange = vi.fn();
+      render(<PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />);
+      expect(screen.queryByText("Title and icon are read-only")).toBeNull();
+
+      await user.type(screen.getByTestId("page-title"), "!");
+
+      expect(onChange).not.toHaveBeenCalled();
+      const flag = screen.getByRole("status");
+      const label = screen.getByText("Title and icon are read-only");
+      expect(flag.contains(label)).toBe(true);
+      expect(label.title).toBe(PROPERTIES_READ_ONLY_REASON);
+      expect(label.className).toContain("text-warning");
+      expect(label.className).not.toContain("text-danger");
+      const lock = flag.querySelector("svg.lucide-lock");
+      expect(lock?.getAttribute("aria-hidden")).toBe("true");
+      expect(lock?.getAttribute("width")).toBe("12");
+      const open = screen.getByRole("button", { name: "Open externally" });
+      expect(flag.contains(open)).toBe(true);
     });
 
     it("removes the title key when the field is cleared", async () => {

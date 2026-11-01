@@ -17,12 +17,12 @@ import { shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
   applyFrontmatter,
-  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromPairs,
   type FrontmatterEntry,
   listItems,
 } from "./markdown/frontmatter";
+import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
@@ -66,6 +66,8 @@ export type PropertiesPanelProps = (
   // The engine's ID for the record this note is. An `id` line with exactly
   // that value hides nothing, so it counts as shown.
   recordId?: string;
+  // The note's file, which read-only properties offer to open externally.
+  file?: OpenExternallyTarget;
 };
 
 function isReserved(key: string): boolean {
@@ -494,9 +496,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
       <div ref={line} className={PROPERTIES_LINE}>
         {(locked || editRefused) && !readOnly ? (
-          <span data-testid="properties-locked" className={TOPMATTER_FLAG} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>
-            Edit in Source
-          </span>
+          <ReadOnlyPropertiesFlag testId="properties-locked" label="Properties are read-only" file={props.file} />
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
