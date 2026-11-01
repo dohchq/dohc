@@ -25,7 +25,7 @@ const SIDE_BY_SIDE_PX = 720;
 export function ThreadedChat(props: {
   testIdPrefix: string;
   // The conversation's thread, once it has one, so an agent's notice about
-  // a reply shown here is skipped.
+  // a run shown here is skipped.
   chatId?: string | null;
   messages: readonly ChatMessageRecord[];
   loading: boolean;

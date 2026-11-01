@@ -431,31 +431,17 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The failure's toast sits above the message box, so Send stays in reach.
-    const toasts = page.getByTestId("notice-toasts");
-    await expect(toasts).toContainText("Nova didn't reply");
-    // The same words sit under the message that asked. Nothing can run it
-    // again today, so the line offers no Try again.
+    // The words sit under the message that asked. Nothing can run it again
+    // today, so the line offers no Try again.
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line).toHaveText("Nova didn't reply. Its run ended with an error.");
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
-    await waitForVisibleAnimations(page);
-    if (process.env.UI_AUDIT_SHOT_DIR) {
-      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
-      for (const theme of ["light", "dark"]) {
-        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-        await waitForVisibleAnimations(page);
-        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
-      }
-    }
-    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
-    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
-    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
-    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
 
-    // The failure is a row in Notices. The conversation keeps only what
-    // people and the agent wrote, so once the notice is there it still holds
-    // one message.
+    // The failure is a row in Notices. Its chat was on screen, so it posts no
+    // toast in a focused window; focus differs between test hosts, so the
+    // unit tests check that part. The conversation keeps only what people
+    // and the agent wrote, so once the notice is there it still holds one
+    // message.
     await page.getByTestId("notice-center-toggle").click();
     // An agent DM's conversation has no title, so the title names no thread.
     const center = page.getByTestId("notice-center");
@@ -473,6 +459,7 @@ test("a runner that exits silently says why under the message and posts a notice
     const panel = page.getByTestId("chats-lane-thread-panel");
     await expect(panel.getByTestId("chats-lane-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
     if (process.env.UI_AUDIT_SHOT_DIR) {
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
         await waitForVisibleAnimations(page);
@@ -480,10 +467,37 @@ test("a runner that exits silently says why under the message and posts a notice
       }
     }
 
-    // A post in a group says the same under its opening message.
+    // A run that fails while the person is in another chat posts a toast.
+    // Agent replies wait while paused, so the post's run starts only once
+    // the person is back in Nova's DM.
+    await setDispatchPaused(page, true);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
+    await setDispatchPaused(page, false);
+
+    // The toast sits above the message box, so Send stays in reach.
+    const toasts = page.getByTestId("notice-toasts");
+    await expect(toasts).toContainText("Nova didn't reply in \"");
+    await waitForVisibleAnimations(page);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
+      }
+    }
+    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
+    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
+    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
+    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
+
+    // Its Open goes to the post, which says the same under its opening
+    // message.
+    await toasts.getByTestId("sent-notice-toast-open").click();
     await expect(page.getByTestId("chats-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
@@ -497,6 +511,16 @@ test("a runner that exits silently says why under the message and posts a notice
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Pauses or resumes agent replies on this computer, as Settings does.
+async function setDispatchPaused(page: Page, paused: boolean): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as {
+      dohcDesktop: { setChatDispatchPaused(payload: { paused: boolean }): Promise<void> };
+    }).dohcDesktop.setChatDispatchPaused({ paused: value }),
+    paused,
+  );
+}
 
 // What the pointer reaches at a toast's center: the toast, a workbench
 // modal (`data-dohc-modal` on its backdrop), something else, or nothing.
