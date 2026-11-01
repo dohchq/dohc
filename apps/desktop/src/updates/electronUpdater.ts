@@ -83,6 +83,9 @@ type AutoUpdaterLike = {
   // neither an AppImage nor a package. Its checks then resolve without events.
   isUpdaterActive?(): boolean;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  // Starts the installer without quitting. Returns false, and starts nothing,
+  // once an install already started.
+  install(isSilent?: boolean, isForceRunAfter?: boolean): boolean;
   on(eventName: "checking-for-update", listener: () => void): void;
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
   on(eventName: "update-not-available", listener: () => void): void;
@@ -245,10 +248,19 @@ export async function startAutoUpdates(options: {
   startupDelayMs?: number;
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
-  // Completes a restart that was already staged. quitAndInstall starts its
-  // own quit on the first call and has none left to start on a second, so
-  // main makes it.
-  quitForStagedRestart?: () => void;
+  // Quits dohc through its ordinary close path, where every window can still
+  // stop the quit. Restart to update quits this way on Windows. Elsewhere it
+  // completes a restart already staged: quitAndInstall starts its own quit on
+  // the first call and has none left to start on a second.
+  quit: () => void;
+  // Runs the handler with the exit code when dohc finally quits. It is added
+  // at start, and electron-updater adds its own install on quit only after a
+  // download, so this handler runs first.
+  onQuit: (handler: (exitCode: number) => void) => void;
+  // Whether the quit under way is the one Restart to update asked for. A
+  // window that went back retracts it, and a later quit installs as any quit
+  // does, without opening dohc again. Absent means yes.
+  restartApproved?: () => boolean;
   // The folder that keeps the update a person chose across a quit.
   stateDir?: string;
   importUpdater?: () => Promise<UpdaterModuleLike>;
@@ -322,6 +334,16 @@ export async function startAutoUpdates(options: {
   // On Linux the click installs at once, so a staged restart has nothing
   // left to install.
   autoUpdater.autoInstallOnAppQuit = installsOnQuit(platform);
+  // Windows' installer closes dohc by force about a second after it starts, so
+  // a window that set an edit aside could not keep dohc open with Go back.
+  // The installer starts once dohc has quit instead, after its shutdown.
+  // install() spends electron-updater's latch, so its own install on quit,
+  // which would not open dohc again, does not run as well.
+  options.onQuit((exitCode) => {
+    if (platform !== "win32" || !restartStaged || exitCode !== 0) return;
+    if (!(options.restartApproved?.() ?? true)) return;
+    autoUpdater.install(false, true);
+  });
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = false;
@@ -460,6 +482,7 @@ export async function startAutoUpdates(options: {
   // without quitting. Every recovery decision therefore happens before this
   // runs (the renderer checks its set-aside drafts first, and main
   // pre-approves the quit) — there is deliberately no resume path here.
+  // Windows quits first and installs on the quit, so it has no latch to spend.
   const installUpdate = async (): Promise<UpdateActionResult> => {
     if (stopped || state.status !== "ready") {
       return { accepted: false, state: publicState() };
@@ -472,13 +495,17 @@ export async function startAutoUpdates(options: {
       // to know — it held this fact in a module variable, which a reload
       // reset while this latch stayed set, stranding the update for the rest
       // of the run.
-      options.quitForStagedRestart?.();
+      options.quit();
       return { accepted: true, state: publicState() };
     }
     restartStaged = true;
     failure = null;
     keepChosen(state.version);
     emit();
+    if (platform === "win32") {
+      options.quit();
+      return { accepted: true, state: publicState() };
+    }
     try {
       autoUpdater.quitAndInstall(false, true);
       // The updater's error event sets it while quitAndInstall runs.

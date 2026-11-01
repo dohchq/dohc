@@ -15,6 +15,7 @@ class Updater extends EventEmitter {
   checkForUpdates = vi.fn<() => Promise<unknown>>(async () => undefined);
   downloadUpdate = vi.fn<() => Promise<unknown>>(async () => undefined);
   quitAndInstall = vi.fn<(silent?: boolean, forceRunAfter?: boolean) => void>();
+  install = vi.fn<(silent?: boolean, forceRunAfter?: boolean) => boolean>(() => true);
 }
 
 type Event = { trusted: boolean };
@@ -86,18 +87,25 @@ function harness() {
     }
     return result;
   };
-  const start = async () => {
+  // macOS unless a test asks for Windows, whose Restart quits before it installs.
+  const start = async (options: { platform?: NodeJS.Platform } = {}) => {
     const updater = new Updater();
-    const quitForStagedRestart = vi.fn();
+    const quit = vi.fn();
+    const quitHandlers: ((exitCode: number) => void)[] = [];
     const started = await startAutoUpdates({
       isPackaged: true, env: {}, currentVersion: "1.2.3",
       startupDelayMs: 60 * 60_000, pollIntervalMs: 60 * 60_000,
-      importUpdater: async () => ({ autoUpdater: updater }), quitForStagedRestart,
+      importUpdater: async () => ({ autoUpdater: updater }),
+      platform: options.platform ?? "darwin",
+      quit,
+      onQuit: (handler) => { quitHandlers.push(handler); },
+      restartApproved: () => exitRounds.proceededExit() === "update",
     });
     if (!started) throw new Error("packaged updater did not start");
     controllers.push(started);
     controller = started;
-    return { updater, controller: started, quitForStagedRestart };
+    const exit = (exitCode: number) => { for (const handler of quitHandlers) handler(exitCode); };
+    return { updater, controller: started, quit, exit };
   };
   const canQuit = () => {
     const result = quitGuard.beforeQuit({ preventDefault: vi.fn() });
@@ -357,7 +365,7 @@ describe("registered updater IPC", () => {
 
   it("uses the existing staged-restart path after a quit was held", async () => {
     const h = harness();
-    const { updater, quitForStagedRestart } = await h.start();
+    const { updater, quit } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
     h.invoke(DOWNLOAD, {});
@@ -366,8 +374,28 @@ describe("registered updater IPC", () => {
     h.quitGuard.hold();
     await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: true });
     expect(updater.quitAndInstall).toHaveBeenCalledOnce();
-    expect(quitForStagedRestart).toHaveBeenCalledOnce();
+    expect(quit).toHaveBeenCalledOnce();
     expect(h.canQuit()).toBe(true);
+  });
+
+  it("on Windows, quits on Restart and starts the installer only for the restart a window did not go back on", async () => {
+    for (const goesBack of [false, true]) {
+      const h = harness();
+      const { updater, quit, exit } = await h.start({ platform: "win32" });
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      h.invoke(DOWNLOAD, {});
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: true });
+      expect(quit).toHaveBeenCalledOnce();
+      expect(updater.quitAndInstall).not.toHaveBeenCalled();
+      expect(h.canQuit()).toBe(true);
+      // A draft set aside while the window unloaded, and the person chose Go back.
+      if (goesBack) h.exitRounds.answer(1, h.requests[0]!, "cancel");
+      exit(0);
+      if (goesBack) expect(updater.install).not.toHaveBeenCalled();
+      else expect(updater.install).toHaveBeenCalledExactlyOnceWith(false, true);
+    }
   });
 
   it("propagates a failed round start before approving quit", async () => {

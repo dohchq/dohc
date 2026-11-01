@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { startAutoUpdates } from "../updates/electronUpdater";
+
+type StartOptions = Parameters<typeof startAutoUpdates>[0];
 
 const electron = vi.hoisted(() => ({
   app: {
@@ -7,6 +10,7 @@ const electron = vi.hoisted(() => ({
     getPath: vi.fn(() => "C:\profile"),
     whenReady: vi.fn(async () => undefined),
     quit: vi.fn(),
+    on: vi.fn(),
   },
   dialog: { showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })) },
 }));
@@ -16,7 +20,7 @@ const updater = vi.hoisted(() => {
     installUpdate: vi.fn(async () => ({ accepted: true })),
     stop: vi.fn(),
   };
-  return { controller, startAutoUpdates: vi.fn(async (): Promise<typeof controller | null> => controller) };
+  return { controller, startAutoUpdates: vi.fn(async (_options: StartOptions): Promise<typeof controller | null> => controller) };
 });
 
 vi.mock("electron", () => electron);
@@ -39,6 +43,19 @@ describe("update check before main loads", () => {
     expect(updater.controller.installUpdate).toHaveBeenCalledOnce();
     expect(updater.controller.stop).toHaveBeenCalledOnce();
     expect(electron.app.quit).not.toHaveBeenCalled();
+  });
+
+  it("gives the updater dohc's quit, and its quit event, so a Windows restart installs once dohc has quit", async () => {
+    await checkForUpdateBeforeMain("unfinished-launch");
+    const options = updater.startAutoUpdates.mock.calls[0]![0];
+    options.quit();
+    expect(electron.app.quit).toHaveBeenCalledOnce();
+    const handler = vi.fn();
+    options.onQuit(handler);
+    const [eventName, listener] = electron.app.on.mock.calls[0]! as [string, (event: unknown, exitCode: number) => void];
+    expect(eventName).toBe("quit");
+    listener({}, 0);
+    expect(handler).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it("quits when the person declines a downloaded update, so the install on quit does not race a relaunch", async () => {

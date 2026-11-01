@@ -39,6 +39,7 @@ function fakeUpdater() {
     checkForUpdates: vi.fn(async () => undefined),
     downloadUpdate: vi.fn(async (): Promise<unknown> => undefined),
     quitAndInstall: vi.fn(),
+    install: vi.fn((_isSilent?: boolean, _isForceRunAfter?: boolean): boolean => false),
     on: vi.fn((eventName: string, listener: Listener) => {
       listeners.set(eventName, [...(listeners.get(eventName) ?? []), listener]);
     }),
@@ -49,30 +50,62 @@ function fakeUpdater() {
   // electron-updater's quitAndInstall is ONE-SHOT: a
   // second call returns without quitting. The double models the latch so a
   // test can never pass by relying on a re-call the dependency ignores.
+  // install() spends the same latch.
   let quitAndInstallLatched = false;
   updater.quitAndInstall.mockImplementation(() => {
     if (quitAndInstallLatched) return;
     quitAndInstallLatched = true;
     updater.emit("before-quit-for-update");
   });
+  updater.install.mockImplementation(() => {
+    if (quitAndInstallLatched) return false;
+    quitAndInstallLatched = true;
+    return true;
+  });
   return updater;
+}
+
+// dohc's quit handler runs first. electron-updater's own install on quit
+// (BaseUpdater.addQuitHandler) runs after it: a silent install that does not
+// open dohc again, skipped once an install started or on an error exit.
+function fakeApp(updater: ReturnType<typeof fakeUpdater>) {
+  const handlers: ((exitCode: number) => void)[] = [];
+  return {
+    quit: vi.fn(),
+    onQuit: (handler: (exitCode: number) => void) => {
+      handlers.push(handler);
+    },
+    exit(exitCode: number) {
+      for (const handler of handlers) handler(exitCode);
+      if (updater.autoInstallOnAppQuit && exitCode === 0) updater.install(true, false);
+    },
+  };
+}
+
+// The installs that started, with their (isSilent, isForceRunAfter).
+function startedInstalls(updater: ReturnType<typeof fakeUpdater>): unknown[][] {
+  return updater.install.mock.calls.filter((_call, index) => updater.install.mock.results[index]?.value === true);
 }
 
 async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean }, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
-  quitForStagedRestart?: () => void;
+  app?: ReturnType<typeof fakeApp>;
+  restartApproved?: () => boolean;
   stateDir?: string;
   platform?: NodeJS.Platform;
 } = {}): Promise<AutoUpdateController | null> {
+  const app = options.app ?? fakeApp(updater);
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
     env: options.env ?? {},
     currentVersion: options.currentVersion ?? "1.2.3",
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
-    quitForStagedRestart: options.quitForStagedRestart,
+    quit: app.quit,
+    onQuit: app.onQuit,
+    restartApproved: options.restartApproved,
     stateDir: options.stateDir,
     importUpdater: async () => ({ autoUpdater: updater }),
     platform: options.platform ?? "win32",
@@ -316,10 +349,10 @@ describe("electron updater actions", () => {
   // lost — electron-updater installs it on the next quit — so a second
   // request completes it by quitting, and this is MAIN's fact to hold, not a
   // renderer module variable a reload resets.
-  it("installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
+  it("on macOS, installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
-    const quitForStagedRestart = vi.fn();
-    const controller = await startWith(updater, { quitForStagedRestart });
+    const app = fakeApp(updater);
+    const controller = await startWith(updater, { app, platform: "darwin" });
     expect(controller).not.toBeNull();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -334,14 +367,72 @@ describe("electron updater actions", () => {
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
-    expect(quitForStagedRestart).not.toHaveBeenCalled();
+    expect(app.quit).not.toHaveBeenCalled();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
-    expect(quitForStagedRestart).toHaveBeenCalledTimes(1);
+    expect(app.quit).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall, "one-shot: drop the restartStaged branch so quitAndInstall runs again. electron-updater ignores it, and the app never quits.").toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+  });
+
+  // Windows' installer closes dohc by force about a second after it starts,
+  // so it starts only once dohc has quit, and a window can still go back.
+  describe("on Windows", () => {
+    async function ready(options: { restartApproved?: () => boolean } = {}) {
+      const updater = fakeUpdater();
+      const app = fakeApp(updater);
+      const controller = (await startWith(updater, { app, ...options }))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      return { updater, app, controller };
+    }
+
+    it("quits on Restart to update, then starts the installer that opens dohc again", async () => {
+      const { updater, app, controller } = await ready();
+      await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+      expect(app.quit).toHaveBeenCalledOnce();
+      expect(updater.install).not.toHaveBeenCalled();
+      expect(updater.quitAndInstall).not.toHaveBeenCalled();
+      // A window went back, so dohc did not quit. Restart quits again.
+      await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+      expect(app.quit).toHaveBeenCalledTimes(2);
+      expect(updater.install).not.toHaveBeenCalled();
+
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[false, true]]);
+    });
+
+    it("after a window goes back, a later quit installs without opening dohc again", async () => {
+      let approved = true;
+      const { updater, app, controller } = await ready({ restartApproved: () => approved });
+      await controller.installUpdate();
+      approved = false;
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[true, false]]);
+    });
+
+    it("installs on an ordinary quit as before, and nothing on an error exit", async () => {
+      const ordinary = await ready();
+      ordinary.app.exit(0);
+      expect(startedInstalls(ordinary.updater)).toEqual([[true, false]]);
+
+      const failed = await ready();
+      await failed.controller.installUpdate();
+      failed.app.exit(1);
+      expect(failed.updater.install).not.toHaveBeenCalled();
+    });
+
+    it("starts the installer after the controller stops, as launch recovery's does", async () => {
+      const { updater, app, controller } = await ready();
+      await controller.installUpdate();
+      controller.stop();
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[false, true]]);
+    });
   });
 
   it("bounds progress exposed to the renderer", async () => {
@@ -433,7 +524,7 @@ describe("electron updater actions", () => {
     updater.quitAndInstall.mockImplementationOnce(() => {
       throw new Error("quit failed");
     });
-    const controller = await startWith(updater);
+    const controller = await startWith(updater, { platform: "darwin" });
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
@@ -457,7 +548,7 @@ describe("electron updater actions", () => {
     updater.quitAndInstall.mockImplementationOnce(() => {
       updater.emit("error", new Error("quit failed"));
     });
-    const controller = await startWith(updater);
+    const controller = await startWith(updater, { platform: "darwin" });
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
@@ -503,8 +594,8 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("keeps the generic install failure for a Linux AppImage and on Windows", async () => {
-    for (const [platform, downloadedFile] of [["linux", "/home/sam/dohc-1.2.4-linux-x86_64.AppImage"], ["win32", "C:/Users/sam/dohc-1.2.4.exe"]] as const) {
+  it("keeps the generic install failure for a Linux AppImage and on macOS", async () => {
+    for (const [platform, downloadedFile] of [["linux", "/home/sam/dohc-1.2.4-linux-x86_64.AppImage"], ["darwin", "/Users/sam/dohc-1.2.4-mac.zip"]] as const) {
       const updater = fakeUpdater();
       updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
       const controller = await startWith(updater, { platform });

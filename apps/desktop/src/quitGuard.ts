@@ -103,7 +103,11 @@ export function createExitRounds<Participant>(options: {
   // The members of the last round that proceeded, held until the exit
   // it approved either happens or is retracted. A round is not `current`
   // once settled, but a window that enrolled late still holds its intent.
-  let proceeded: { readonly id: number; readonly members: readonly Participant[] } | null = null;
+  let proceeded: {
+    readonly id: number;
+    readonly kind: ExitKind;
+    readonly members: readonly Participant[];
+  } | null = null;
   // The windows a forced quit may destroy: exactly the ones the user's
   // "quit anyway" dialog covered. A window that answered clear before the
   // dialog can capture another draft after it; it is never destroyed under
@@ -120,7 +124,7 @@ export function createExitRounds<Participant>(options: {
     current = null;
     if (round.timer) clearTimeout(round.timer);
     if (outcome === "proceed") {
-      proceeded = { id: round.id, members: [...round.members.values()] };
+      proceeded = { id: round.id, kind: round.kind, members: [...round.members.values()] };
     }
     for (const [id, participant] of round.members) {
       // A forced window is destroyed without a message; every other member
@@ -231,6 +235,11 @@ export function createExitRounds<Participant>(options: {
   return {
     current(): { roundId: number; kind: ExitKind } | null {
       return current ? { roundId: current.id, kind: current.kind } : null;
+    },
+
+    // The exit the last proceeded round approved, until it is retracted.
+    proceededExit(): ExitKind | null {
+      return proceeded?.kind ?? null;
     },
 
     // Starts a round, or joins the one already asking the same question. A
