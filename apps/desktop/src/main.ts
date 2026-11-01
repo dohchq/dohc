@@ -5186,7 +5186,7 @@ function startUpdates(): Promise<AutoUpdateController | null> {
     // main keeps the staged restart, so a renderer reload cannot reset it.
     quit: () => app.quit(),
     onQuit: (handler) => app.on("quit", (_event, exitCode) => handler(exitCode)),
-    restartApproved: () => exitRounds.proceededExit() === "update",
+    restartApproved: () => exitRounds.approvedExit() === "update",
     stateDir: stateDir(),
     onState: (_state, state) => {
       broadcastUpdateState(state);

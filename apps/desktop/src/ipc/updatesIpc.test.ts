@@ -99,7 +99,7 @@ function harness() {
       platform: options.platform ?? "darwin",
       quit,
       onQuit: (handler) => { quitHandlers.push(handler); },
-      restartApproved: () => exitRounds.proceededExit() === "update",
+      restartApproved: () => exitRounds.approvedExit() === "update",
     });
     if (!started) throw new Error("packaged updater did not start");
     controllers.push(started);
