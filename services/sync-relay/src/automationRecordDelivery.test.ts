@@ -170,8 +170,17 @@ it("keeps a draft pending during transient admission contention", async () => {
 it.each(["stale-binding", "restore-fenced", "binding-changed"] as const)("marks %s not accepted using desktop quarantine rules", async reason => {
   const f = fixture();
   f.capture.mockRejectedValue(new AutomationRecordBindingChanged(reason));
-  await f.delivery.drain(binding, new AbortController().signal);
+  // The update still waits, so the drain does not report it delivered.
+  expect(await f.delivery.drain(binding, new AbortController().signal)).toBe(false);
   expect(f.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason});
+  expect(f.acknowledge).not.toHaveBeenCalled();
+});
+
+it.each(["stale-binding", "restore-fenced", "binding-changed"] as const)("reports a head the host refuses with %s as still waiting", async reason => {
+  const f = fixture();
+  vi.mocked(f.host.submit).mockResolvedValue({result: "refused", reason});
+  expect(await f.delivery.drain(binding, new AbortController().signal)).toBe(false);
+  expect(f.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason, refusal: {deliveryId: "delivery-0", key: expect.any(String)}});
   expect(f.acknowledge).not.toHaveBeenCalled();
 });
 
