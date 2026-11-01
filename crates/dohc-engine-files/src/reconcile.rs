@@ -973,8 +973,9 @@ const MTIME_GRANULARITY_MARGIN_MS: i64 = 2000;
 /// `0` (no pairing) and are simply re-hashed on the next scan, by which point
 /// their mtime is safely in the past. `0` (no observation) stays `0`, and a
 /// broken clock (`now_ms() == 0`) disables pairing entirely — always failing
-/// toward the hash.
-fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
+/// toward the hash. The file change feed reads a file again under the same
+/// rule ([`crate::observation`]).
+pub(crate) fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
     if mtime_ms != 0 && mtime_ms.saturating_add(MTIME_GRANULARITY_MARGIN_MS) <= scan_started_ms {
         mtime_ms
     } else {
@@ -983,7 +984,7 @@ fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
 }
 
 /// Milliseconds since the Unix epoch, or `0` when the clock is unusable.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -1000,7 +1001,7 @@ fn degraded_path_signature(paths: &[String]) -> u64 {
     hasher.finish()
 }
 
-fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
+pub(crate) fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
     let mut out = root.to_path_buf();
     for segment in relative.split('/') {
         let mut components = Path::new(segment).components();
