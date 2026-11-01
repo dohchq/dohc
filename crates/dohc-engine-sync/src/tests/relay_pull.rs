@@ -1703,7 +1703,7 @@ fn divergent_repair_base(base: &ReplicationEnvelope) -> (ReplicationEnvelope, Ve
 }
 
 #[test]
-fn base_repair_publication_blocked_pull_matches_main() {
+fn base_repair_held_push_lets_a_fetched_divergent_base_win_and_the_pull_continue() {
     for mixed_absent in [false, true] {
         let (_scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
         let local = seed_base_repair_candidate(&mut engine, "blocked", "local", 1);
@@ -1719,13 +1719,27 @@ fn base_repair_publication_blocked_pull_matches_main() {
             Ok::<_,SyncError>(())
         }).unwrap();
         let (divergent, bytes) = divergent_repair_base(&local);
+        let text = "an unrelated change";
+        let text_sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        let unrelated = envelope(
+            "peer",
+            0,
+            "moment.append",
+            json!({
+                "momentId":"unrelated-0", "versionId":"main", "objectId":"elsewhere", "objectCreatedAtMs":1,
+                "path":"elsewhere.md", "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+                "payloadAfterBlobSha256":text_sha, "payloadAfterPath":"elsewhere.md", "payloadAfterContentKind":"text",
+                "metadata":{"origin":"sync"}, "beforePresent":"absent"
+            }),
+        );
+        // The fixture numbers the page 119 and 120.
         let mut relay = PagedRelay::new([(
             0,
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
                 reference_has_more: false,
-                ops: vec![divergent.clone()],
+                ops: vec![divergent.clone(), unrelated],
                 next_cursor: 120,
                 has_more: false,
             },
@@ -1733,6 +1747,7 @@ fn base_repair_publication_blocked_pull_matches_main() {
         relay
             .blobs
             .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+        relay.blobs.insert(text_sha, text.as_bytes().to_vec());
         if mixed_absent {
             let mut peer = local.clone();
             peer.origin_id = "absent-peer".into();
@@ -1750,7 +1765,7 @@ fn base_repair_publication_blocked_pull_matches_main() {
             SyncPassOutcome::Complete { pushed: 0, .. }
         ));
         assert!(client.transport().pushes.lock().unwrap().is_empty());
-        let refusal = client
+        let pulled = client
             .pull_chat_workspace(
                 &mut engine,
                 &mut dohc_engine_collab::WriterDocCache::new(),
@@ -1759,16 +1774,20 @@ fn base_repair_publication_blocked_pull_matches_main() {
                 &NoLiveLeases,
                 1200,
             )
-            .unwrap_err();
-        let detail = refusal.to_string();
+            .expect("a held push must not stop the pull");
         assert!(
-            detail.contains("Y.Doc base is waiting for its authenticated relay position"),
-            "{detail}"
+            matches!(
+                pulled,
+                SyncPassOutcome::Complete {
+                    applied: 2,
+                    conflicts_opened: 1,
+                    ..
+                }
+            ),
+            "{pulled:?}"
         );
-        assert!(detail.contains("object blocked, origin "), "{detail}");
-        assert!(
-            matches!(refusal, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
-        );
+        // The probe ran after the page and found the local base unsent.
+        assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
         let lineage: String = engine
             .read_with(|conn| {
                 conn.query_row(
@@ -1778,11 +1797,18 @@ fn base_repair_publication_blocked_pull_matches_main() {
                 )
             })
             .unwrap();
-        assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
-        assert_eq!(
-            base_repair_state(&engine, "blocked"),
-            (None, 0, if mixed_absent { 2 } else { 1 })
-        );
+        assert_eq!(lineage, divergent.payload["lineageClaimId"].as_str().unwrap());
+        assert_eq!(base_repair_state(&engine, "blocked"), (Some(119), 0, 0));
+        let unrelated_heads: i64 = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE object_id='elsewhere'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(unrelated_heads, 1);
         assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
     }
 }
