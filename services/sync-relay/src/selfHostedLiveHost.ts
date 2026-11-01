@@ -96,7 +96,11 @@ export async function startSelfHostedLiveHost(options: {
     const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
     const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
     for (const row of page.documents) {
-      if (departs(row, covered(row))) (matching(row) ? departing : obsolete).push(row);
+      const holds = covered(row);
+      // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+      // opens here, before any update lets the document go, so the host retires its activation.
+      if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
+      if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
       else if (matching(row)) (atPath(row) ? targets : away).push(row);
     }
     // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
