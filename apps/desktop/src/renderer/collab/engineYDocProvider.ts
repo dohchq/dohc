@@ -262,8 +262,8 @@ export interface EngineYDocBinding {
   // each replacement. A read of the head that save wrote is that save. A null
   // head names no file state, so it is not counted.
   readonly pairedInstalls: number;
-  // A delivery changed the head of the current doc, or installed a state
-  // with its head. A replacement doc brings its head with
+  // A delivery changed the head of the current doc, its newest save, or its
+  // count of installs. A replacement doc brings its head with
   // onDocumentReplaced instead.
   onHeadChanged(listener: () => void): () => void;
   // The mirror Y.Doc the editor binds to, or null when the doc is not
@@ -650,8 +650,12 @@ export async function bindEngineYDoc(
   const unsubscribe = transport.onRemoteUpdate((update, updateGeneration, updateHead) => {
     if (destroyed) return;
     if (updateGeneration !== lineageGeneration) return;
+    const saveBefore = lastSave;
+    const installsBefore = pairedInstalls;
     const next = install(doc, head, { update, ...(updateHead ? { head: updateHead } : {}) });
-    if (updateHead === undefined && next === head) return;
+    // A head that changes nothing wakes no one: a shared note's every update
+    // carries one.
+    if (next === head && lastSave === saveBefore && pairedInstalls === installsBefore) return;
     head = next;
     for (const listener of headListeners) listener();
   });

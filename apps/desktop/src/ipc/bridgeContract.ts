@@ -6935,10 +6935,11 @@ const ENGINE_YDOC_UPDATE = z
 // The file head an update's state was read with. `committed` marks the head
 // of this session's own save. A head with no `sha256` installs state whose
 // head is unknown. An update without a head came with none.
-const ENGINE_YDOC_HEAD = z.object({
-  sha256: z.string().min(1).nullable().optional(),
-  committed: z.literal(true).optional(),
-}).strict();
+const ENGINE_YDOC_HEAD = z.union([
+  z.object({ sha256: z.string().min(1).nullable().optional() }).strict(),
+  // A save's receipt names the head it wrote.
+  z.object({ sha256: z.string().min(1), committed: z.literal(true) }).strict(),
+]);
 const ENGINE_YDOC_DELIVERY = z.object({
   update: ENGINE_YDOC_UPDATE,
   head: ENGINE_YDOC_HEAD.optional(),

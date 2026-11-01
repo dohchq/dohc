@@ -135,6 +135,23 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(lossy.result.current).toBe("lossy"));
   });
 
+  // A teammate's update brings no new head, so the source it records is checked from the document.
+  it("checks again when a session with no file head records another source", async () => {
+    const doc = seeded();
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: null }));
+    await waitFor(() => expect(result.current).toBe("lossy"));
+    const source = "Title\n=====\n\n* one\n";
+    const imported = markdownToYDoc(source);
+    act(() => doc.transact(() => {
+      const meta = doc.getMap("meta");
+      meta.set("dohcMarkdownSource", source);
+      meta.set("dohcMarkdownSourceSha256", sha(source));
+      meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(imported)));
+    }));
+    imported.destroy();
+    await waitFor(() => expect(result.current).toBe("clear"));
+  });
+
   describe("after a clear verdict", () => {
     const source = "Title\n=====\n\n* one\n";
     async function checkedClear() {

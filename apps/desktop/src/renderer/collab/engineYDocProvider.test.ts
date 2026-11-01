@@ -1242,6 +1242,32 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("wakes no one for a head that changes nothing, as each update of a shared note carries", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: null });
+    expect(changes).toHaveBeenCalledOnce();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
+    for (const change of [
+      () => typeIntoBody(remote, "Typed."),
+      () => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)),
+    ]) {
+      const before = Y.encodeStateVector(remote);
+      change();
+      mock.pushRemote(Y.encodeStateAsUpdate(remote, before), 1, { sha256: null });
+    }
+    expect(bodyText(binding.doc!)).toContain("Typed.");
+    expect(changes, "wake on every head -> each keystroke on a shared note re-renders the inspector").toHaveBeenCalledOnce();
+    expect([binding.headSha256, binding.lastSave, binding.pairedInstalls]).toEqual([null, null, 0]);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    expect(changes).toHaveBeenCalledTimes(2);
+    remote.destroy();
+    await binding.destroy();
+  });
+
   it("installs a replacement with its head, then the head of state buffered behind it", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);

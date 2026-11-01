@@ -2752,7 +2752,8 @@ describe("engine Y.Doc event boundaries", () => {
     for (const head of [{ sha256: "a".repeat(64) }, { sha256: null }, { sha256: "b".repeat(64), committed: true }, {}]) {
       expect(EngineYDocRemoteUpdateEvent.parse({ sessionId: "s", update, head, lineageGeneration: 1 }).head).toEqual(head);
     }
-    for (const head of [{ sha256: "" }, { sha256: "a", committed: false }, { sha256: "a", extra: 1 }, { extra: 1 }]) {
+    for (const head of [{ sha256: "" }, { sha256: "a", committed: false }, { sha256: "a", extra: 1 }, { extra: 1 },
+      { committed: true }, { sha256: null, committed: true }]) {
       expect(EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, head, lineageGeneration: 1 }).success).toBe(false);
     }
     expect(AcknowledgeEngineYDocLineageReplacementResult.parse({
