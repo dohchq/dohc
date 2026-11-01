@@ -52,6 +52,26 @@ describe("New workspace's claim that it made a folder from nothing", () => {
     expect((await create(root)).fresh).toBeNull();
   });
 
+  it("names a folder whose only other files are the AppleDouble files macOS writes for its records on exFAT", async () => {
+    const root = join(await createTestScratch("dohc-fresh-"), "Trip");
+    meanwhile = async (rootPath) => {
+      await mkdir(join(rootPath, ".dohc"));
+      for (const name of ["._.dohc", ".dohc/._manifest.json", ".dohc/._sync-history.json", ".dohc/._collections.json"]) {
+        await writeFile(join(rootPath, name), "");
+      }
+    };
+    expect((await create(root)).fresh).not.toBeNull();
+  });
+
+  it.each(["._package.json", ".dohc/._settings.json"])("names no folder that also holds %s", async (name) => {
+    const root = join(await createTestScratch("dohc-fresh-"), "Trip");
+    meanwhile = async (rootPath) => {
+      await mkdir(join(rootPath, ".dohc"));
+      await writeFile(join(rootPath, name), "");
+    };
+    expect((await create(root)).fresh).toBeNull();
+  });
+
   it("names no folder that a file arrived in between the check and the manifest", async () => {
     const root = join(await createTestScratch("dohc-fresh-"), "Trip");
     meanwhile = async (rootPath) => { await writeFile(join(rootPath, "package.json"), "{}"); };
