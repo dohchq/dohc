@@ -112,8 +112,11 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
     // The Markdown projection trims trailing whitespace at the end of the
     // document, so the settled file has no final newline.
     const expected = Buffer.from(CONTENTS.replace(PARAGRAPH, `${PARAGRAPH}${marker}`).trimEnd(), "utf8");
-    await expect.poll(async () => (await readFile(join(temp.rootPath, PATH), "utf8")).includes(marker),
-      { timeout: 120_000, intervals: [1000] }).toBe(true);
+    // The engine replaces the file with two renames, so a read can land between them and find no file.
+    await expect.poll(async () => (await readFile(join(temp.rootPath, PATH), "utf8").catch(error => {
+      if (error?.code === "ENOENT") return "";
+      throw error;
+    })).includes(marker), { timeout: 120_000, intervals: [1000] }).toBe(true);
     expect(await readFile(join(temp.rootPath, PATH))).toEqual(expected);
 
     expect(shared.failures).toEqual([]);
