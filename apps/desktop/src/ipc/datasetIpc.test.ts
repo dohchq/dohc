@@ -509,6 +509,8 @@ it("returns an unclaimed Collections list refusal as data on every refresh (#301
 const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
 const holderRecord = (installId: string, label: string, storeId: string | null) => (root: string) => writeFile(join(root, ".dohc", "collections.json"),
   JSON.stringify({ version: 1, workspaceId: "workspace", installId, label, storeId }));
+// A name the record takes: 64 characters outside the BMP, 128 UTF-16 units.
+const turtles = "🐢".repeat(64);
 it.each([
   ["another computer keeps them", { kind: "elsewhere", computer: "Laptop",
     words: "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server." },
@@ -518,6 +520,9 @@ it.each([
   ["no record names a computer for an old copy of a store", { kind: "unclaimed", words: unclaimed }, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
   ["this computer keeps them but their store is not there", { kind: "missing", words: new CollectionsRefusalError({ kind: "missing" }).message },
     holderRecord("install-here", "Studio", "00000000-0000-4000-8000-0000000000aa"), ["collections.json"], null],
+  ["another computer whose name is outside the BMP keeps them", { kind: "elsewhere", computer: turtles,
+    words: new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-turtles", label: turtles }, sameName: false }).message },
+  holderRecord("install-turtles", turtles, null), ["collections.json"], null],
 ] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, refusal, arrange, left, folder) => {
   const root = await createTestScratch("dohc-dataset-ipc-holder-");
   await mkdir(join(root, ".dohc"));
@@ -544,8 +549,8 @@ it.each([
   ]) {
     for (const caller of ["window", "cli"]) {
       const answer = f.handler(caller, request);
-      // A list returns its refusal (#3016).
-      if (request.action === "list") await expect(answer).resolves.toEqual({ kind: "collections-refused", refusal });
+      // A list returns its refusal (#3016), as the CLI reads it.
+      if (request.action === "list") expect(DatasetResult.parse(await answer)).toEqual({ kind: "collections-refused", refusal });
       else await expect(answer, request.action).rejects.toThrow(refusal.words);
     }
   }
