@@ -12,7 +12,7 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./collectionMove";
+import { collectionPlace, finishedTransfer, movedTransfer, moveCollectionToServer } from "./collectionMove";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 
@@ -88,6 +88,10 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
   };
   const move = { workspaceId: "w", credentials: credentials("owner"), credentialGeneration: 1, currentCredentialGeneration: () => 1, relayStream };
   const finished = (datasetId: string) => finishedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
+  // How a background read goes by the transfer record, such as the automations panel's and the buttons'.
+  const moved = (datasetId: string) => movedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
+  const data = (status = finished) => createDatasetAuthorityRouter(local, { status, marker: datasetId => local.transferStatus(datasetId),
+    async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } });
   const owner = createRemoteDatasetData({ workspaceId: "w", credentials: credentials("owner"), ...session, relayJson: authorized("owner") });
   const teammate = createRemoteDatasetData({ workspaceId: "w", shareId: "team", credentials: credentials("teammate"), ...session, relayJson: authorized("teammate") });
   const workspace = { workspaceId: "w" };
@@ -97,8 +101,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
       return work({ workspace, signal: controller.signal, assertCurrent() {} });
     },
     hostForWorkspace: async () => local,
-    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: finished, marker: datasetId => local.transferStatus(datasetId),
-      async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } }),
+    dataForWorkspace: async () => data(),
     collectionPlace: async (_workspace, datasetId) => collectionPlace({ transfer: await finished(datasetId), relayUrl: "https://relay.test",
       automations: async () => ({ automations: 0, scheduledAutomations: 0 }), runs: async () => { throw Error("Nothing asks without automations."); } }),
     moveToServer: (_workspace, datasetId, signal) => moveCollectionToServer({ local, datasetId, ...move, signal }),
@@ -112,7 +115,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
     collection("window", { ...address, action: "invoke", ...pinned, operationId, idempotencyKey, input });
   await ownerInvoke(id(6), "owner-before", { name: "Owner" });
   const setGrant = { ...address, action: "setGrant", grantId: "team-grant", grant: { ...pinned, operationIds: [id(6)], discover: true } };
-  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
+  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, data, moved, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
 }
 
 it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
@@ -232,6 +235,22 @@ it("lists a Collection whose move stopped from this computer, without trying the
 
   // The shell reads its Collections again after the access dialog has said the move stopped. The list has nothing to report.
   expect(await collection("window", { workspaceId: "w", action: "list" })).toMatchObject({ kind: "list", datasets: [{ datasetId: id(1), name: "Items" }] });
+  expect(refusals).toBe(1);
+  expect(transferStatus(id(1))?.state).toBe("ready");
+  controller.abort();
+});
+
+it("reads a stopped move's automations and buttons from this computer, without trying the move again while the server is away", async () => {
+  let refusals = 0;
+  const { collection, setGrant, data, moved, controller, transferStatus } = await collectionOnThisComputer({
+    async relay() { refusals++; throw Error("The server stopped answering."); } });
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
+  expect(refusals).toBe(1);
+
+  // The automations panel asks whether the server holds the Collection. Its move didn't finish, so this computer still does.
+  await expect(moved(id(1))).resolves.toBeNull();
+  // The buttons describe the Collection from this computer.
+  await expect(data(moved).describe(id(1))).resolves.toMatchObject({ datasetId: id(1), name: "Items" });
   expect(refusals).toBe(1);
   expect(transferStatus(id(1))?.state).toBe("ready");
   controller.abort();

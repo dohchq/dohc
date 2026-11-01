@@ -84,6 +84,17 @@ export async function finishedTransfer(input: {
   return finished as FinishedTransfer;
 }
 
+/**
+ * A Collection's transfer record as a background read goes by it, as the
+ * Collections list does: the record once its move finished, or null while
+ * this computer still keeps the Collection's records. It never waits for an
+ * unfinished move or resumes a stopped one. It waits only while a finished
+ * move removes its archive.
+ */
+export function movedTransfer(input: Parameters<typeof finishedTransfer>[0]): Promise<FinishedTransfer | null> {
+  return input.local.transferStatus(input.datasetId)?.state === "imported" ? finishedTransfer(input) : Promise.resolve(null);
+}
+
 // Settles with the work, or rejects when the signal aborts. Aborting stops only the wait, not the work.
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();

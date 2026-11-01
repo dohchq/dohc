@@ -397,7 +397,8 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
         const localPage = await local.list({ after, limit, includeArchived: true });
         for (let index = 0; index < localPage.datasets.length; index++) {
           // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
-          // Listing never waits for a move or resumes a stopped one, so a stop can't fail the whole list.
+          // Listing never waits for an unfinished move or resumes a stopped one, so a stop can't fail the whole list.
+          // A finished move's dataset can still wait briefly while the move removes its archive.
           const row = localPage.datasets[index]!, authority = route.marker(row.datasetId)?.state === "imported" ? await target(row.datasetId) : local;
           after = row.datasetId;
           if (authority !== local && authority.deletionStatus && (await authority.deletionStatus({ datasetId: row.datasetId })).deleted) continue;
