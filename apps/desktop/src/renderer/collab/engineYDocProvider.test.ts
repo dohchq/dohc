@@ -1242,13 +1242,16 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("does not keep the old head for a replacement that records another source and came without one", async () => {
+  it.each([
+    ["records another source", "b".repeat(64)],
+    ["records the same source", undefined],
+  ])("does not keep the old head for a replacement that %s and came without one", async (_, source) => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
-    winner.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
+    if (source) winner.getMap("meta").set("dohcMarkdownSourceSha256", source);
     const replacing = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
     });

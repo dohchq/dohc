@@ -696,11 +696,11 @@ export async function bindEngineYDoc(
         replacement.destroy();
         return;
       }
-      // The replacement's head comes with it. Without one, the old head still
-      // pairs with it only if it records the same source.
+      // The replacement's head comes with it. Without one, the head stays
+      // unknown until main reads the pair again.
       let replacementHead: typeof head = input.head
         ? { sha256: input.head.sha256, committed: input.head.committed === true }
-        : sameWitness(sourceWitness(retired), sourceWitness(replacement)) ? head : { sha256: undefined, committed: false };
+        : { sha256: undefined, committed: false };
       for (const delivery of bufferedUpdates) {
         replacementHead = install(replacement, replacementHead, delivery);
       }
