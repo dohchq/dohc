@@ -48,7 +48,7 @@ import {
   liveFolderTitle,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
-import { waitForPathMoments } from "./waitForPathMoments";
+import { waitForCapturedContents, waitForPathMoments } from "./waitForPathMoments";
 import { createRecordByHand, desktopRecordEditContext } from "./desktopRecordEdits";
 import { onWorkspaceCaptureSettled } from "./captureActivityBridge";
 import { createSuiteTestScratchSync, createTestScratch } from "./testTemp";
@@ -260,7 +260,7 @@ async function writeAndCapture(
   await mkdir(dirname(absolute), { recursive: true });
   await writeFile(absolute, contents);
   daemon.capture.observeFileEvents([{ path, operation: "update" }]);
-  await waitForPathMoments(daemon.capture, path, before + 1);
+  await waitForCapturedContents(daemon.capture, path, contents, before + 1);
 }
 
 async function openIndependentPlaintextLineage(
@@ -2216,20 +2216,20 @@ it.skipIf(engine.missing)(
       const conflict = conflictPage.conflicts.find((entry) => entry.path === path);
       expect(conflict).toBeDefined();
       expect(conflict?.current.text).toBe("edit from A\n");
-      expect(conflict?.incoming.text).toBe("edit from B\n");
+      expect(conflict?.incoming.text, "the conflict's incoming text on A").toBe("edit from B\n");
       expect(await readFile(join(rootA, path), "utf8")).toBe("edit from A\n");
 
       await daemonA.capture.resolveConflict(conflict!.id, {
         kind: "apply-incoming",
       });
-      expect(await readFile(join(rootA, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootA, path), "utf8"), "A's file after it applies B's edit").toBe("edit from B\n");
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
       await daemonB.capture.runRelaySync((materializePage) =>
         daemonB!.relay.pull(materializePage),
       );
-      expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootB, path), "utf8"), "B's file after it pulls the resolution").toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 
       await daemonB.close();
@@ -2238,7 +2238,7 @@ it.skipIf(engine.missing)(
         rootPath: rootB,
         relay: { baseUrl: relay.baseUrl, token },
       });
-      expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
+      expect(await readFile(join(rootB, path), "utf8"), "B's file after its daemon reopens").toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
     } finally {
       await Promise.allSettled([daemonB?.close(), daemonA?.close()]);

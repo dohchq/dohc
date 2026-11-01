@@ -10,8 +10,8 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, type PathLike } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -4479,6 +4479,7 @@ describe("createDefaultDiskWriter symlink containment", () => {
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "a", "b", "c.md"), "nested\n");
     expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
+    expect(await readdir(join(root, "a", "b"))).toEqual(["c.md"]);
   });
 
   it("writes into a directory whose NAME starts with '..'", async () => {
@@ -4583,6 +4584,85 @@ describe("createDefaultDiskWriter symlink containment", () => {
       createDefaultDiskWriter(root).deletePath(join(root, "notes", "page.md")),
     ).rejects.toThrow(/could not read the workspace folder/);
     expect(existsSync(root)).toBe(false);
+  });
+});
+
+describe("createDefaultDiskWriter replaces a file whole", () => {
+  const actualFs = () => vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  const restoreFs = () => {
+    for (const mocked of [open, rename, writeFile]) vi.mocked(mocked).mockRestore();
+  };
+
+  it("keeps the old bytes and leaves no temp file when a write fails partway", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes.md", "old");
+    const fs = await actualFs();
+    const diskFull = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    // Every write stops after two bytes, as a full disk leaves it.
+    vi.mocked(writeFile).mockImplementation(async (file, data) => {
+      await fs.writeFile(file, String(data).slice(0, 2));
+      throw diskFull;
+    });
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await fs.open(...args);
+      handle.writeFile = async (data) => {
+        await handle.write(String(data).slice(0, 2));
+        throw diskFull;
+      };
+      return handle;
+    });
+    try {
+      await expect(
+        createDefaultDiskWriter(root).writeTextFile(join(root, "notes.md"), "new contents\n"),
+      ).rejects.toBe(diskFull);
+    } finally {
+      restoreFs();
+    }
+    expect(await readFile(join(root, "notes.md"), "utf8")).toBe("old");
+    expect(await readdir(root)).toEqual(["notes.md"]);
+  });
+
+  it("flushes a .dohc-write- sibling before it renames the sibling over the file", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes.md", "old");
+    const fs = await actualFs();
+    const events: string[] = [];
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await fs.open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        events.push(`sync ${basename(String(args[0]))}`);
+        await sync();
+      };
+      return handle;
+    });
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      events.push(`rename ${basename(String(from))} to ${basename(String(to))}`);
+      await fs.rename(from, to);
+    });
+    try {
+      await createDefaultDiskWriter(root).writeTextFile(join(root, "notes.md"), "new\n");
+    } finally {
+      restoreFs();
+    }
+    const temporary = events[0]?.slice("sync ".length);
+    expect(temporary).toMatch(/^\.dohc-write-.+\.tmp$/);
+    expect(events).toEqual([
+      `sync ${temporary}`,
+      `rename ${temporary} to notes.md`,
+      ...(process.platform === "win32" ? [] : [`sync ${basename(root)}`]),
+    ]);
+    expect(await readFile(join(root, "notes.md"), "utf8")).toBe("new\n");
+    expect(await readdir(root)).toEqual(["notes.md"]);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps the replaced file's permission bits", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "run.sh", "old");
+    await chmod(join(root, "run.sh"), 0o754);
+    await createDefaultDiskWriter(root).writeBinaryFile(join(root, "run.sh"), new Uint8Array([1, 2]));
+    expect((await stat(join(root, "run.sh"))).mode & 0o777).toBe(0o754);
+    expect(await readFile(join(root, "run.sh"))).toEqual(Buffer.from([1, 2]));
   });
 });
 
