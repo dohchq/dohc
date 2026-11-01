@@ -1220,6 +1220,21 @@ pub(crate) fn self_bound_log(
     Ok(())
 }
 
+/// Fold the log once a committed append brings it to the default threshold.
+/// The fold runs in its own transaction, so a failure leaves the committed
+/// append and its result intact. The engine logs the failure, and the next
+/// append that reaches the threshold tries again.
+pub fn compact_after_commit(
+    store: &mut EngineStore,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) {
+    if let Err(error) = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms) {
+        eprintln!("engine: Y.Doc update committed; compaction will retry: {error}");
+    }
+}
+
 // Below `threshold` (or nothing pending) means compaction cannot fire.
 // Shared by `maybe_compact`'s cheap pre-check and its authoritative check so
 // the two can never drift apart.
