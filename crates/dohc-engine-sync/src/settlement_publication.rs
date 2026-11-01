@@ -279,7 +279,9 @@ pub fn rollback_waits_for_publication_in_tx(
         )
         .map_err(corrupt)?;
     let payloads = unsent
-        .query_map(params![workspace_id, moment_id], |row| row.get::<_, String>(0))
+        .query_map(params![workspace_id, moment_id], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(corrupt)?;
     for payload in payloads {
         let payload: Value = serde_json::from_str(&payload.map_err(corrupt)?).map_err(corrupt)?;
