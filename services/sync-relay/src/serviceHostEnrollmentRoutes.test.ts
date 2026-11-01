@@ -3,7 +3,7 @@ import {EventEmitter} from "node:events";
 import type {ServerResponse} from "node:http";
 import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {afterEach, expect, it, vi} from "vitest";
-import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation, scope} from "./liveTickets.test-helper";
 import {readServiceActivationRetirement, type RetirableServiceActivation} from "./storage/serviceActivationRetirement";
 import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
@@ -412,6 +412,22 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: when the owner's restore ends a note's last Edit grant, the owner
+// keeps live editing once the restore resumed. The host keeps the note
+// enrolled when it lets the retired activation go, and once the owner's next
+// activation completes, the owner's desktop finds the note ready at the
+// restored generation.
+it("reports a restored note ready to its owner after the restore ended its last Edit grant", async () => {
+  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  f.host.ready.mockReturnValue(true);
+  retainServiceActivation(f.raw, namespace, true);
+  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  expect(f.release(binding.objectId)).toBeNull();
+  retainSuccessorActivation(f.raw, true);
+  expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
+    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace, shareId: scope.shareId}}]);
 });
 
 it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {
