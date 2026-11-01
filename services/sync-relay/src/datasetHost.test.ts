@@ -484,6 +484,9 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
     attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
     stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
     usage: workspaceUsageBytes(target.storage, "w"),
+    // A usage row left for the Collection refuses creating it on this relay.
+    usageRows: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
+      .get(scope.workspaceId, scope.datasetId)!.n),
   });
   // The relay stops inside the final install transaction. Records, checkpoints, and the attachment are
   // durable and charged, the transaction rolls back, and the stopped storage cannot run the import's cleanup.
@@ -496,7 +499,7 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
   stop.mockRestore();
   const interrupted = leftover();
   expect(stopped.db.prepare("SELECT phase FROM dohc_dataset_imports").get()).toMatchObject({phase: "staging"});
-  expect(interrupted).toMatchObject({imports: 1, attachments: 1});
+  expect(interrupted).toMatchObject({imports: 1, attachments: 1, usageRows: 1});
   expect(interrupted.stages).toBeGreaterThan(0);
   expect(interrupted.usage).toBeGreaterThan(usageBefore);
 
@@ -505,7 +508,7 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
   await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
     targetCursor: {revision: moved.sourceCursor.revision + 1}});
   // Startup released the stopped import's quota, attachment, and checkpoints before the retry.
-  expect(restarted).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore});
+  expect(restarted).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore, usageRows: 0});
   expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
   expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256, fileId: moved.fileId}))
     .toMatchObject({bytesBase64: receiptBytes});
