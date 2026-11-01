@@ -1850,6 +1850,14 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       access: "entry",
     });
   }
+  // Each target has one temp name, and the chain writes one file at a time.
+  // A temp left by a stopped write can hold a secret's plaintext, so the next
+  // write or delete of that target removes it. The name is lowercased, so a
+  // case-variant spelling on a case-insensitive disk finds the same temp.
+  function temporaryFor(target: string): string {
+    const name = createHash("sha256").update(basename(target).toLowerCase()).digest("hex").slice(0, 16);
+    return join(dirname(target), `.dohc-write-${name}.tmp`);
+  }
   // Text and bytes take the same four checks in the same order, so they take
   // one path through them. FileHandle.writeFile defaults a string to UTF-8
   // and ignores the encoding for a Uint8Array, so one call serves both. Two
@@ -1870,7 +1878,13 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedDir(dir);
     const replaced = await assertLeafNotSymlink(target);
     await atomicReplaceFile(target, async (temporary) => {
-      const handle = await open(temporary, "wx", replaced?.isFile() ? 0o600 : 0o666);
+      const mode = replaced?.isFile() ? 0o600 : 0o666;
+      const handle = await open(temporary, "wx", mode).catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+        // A stopped write left it. Remove it rather than write through it.
+        await rm(temporary, { force: true });
+        return open(temporary, "wx", mode);
+      });
       try {
         if (replaced?.isFile()) await keepPermissions(handle, replaced);
         await handle.writeFile(data);
@@ -1880,7 +1894,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
         throw error;
       }
       await handle.close();
-    }, { temporary: join(dir, `.dohc-write-${process.pid}-${randomUUID()}.tmp`), syncDirectory: true });
+    }, { temporary: temporaryFor(target), syncDirectory: true });
   }
   return {
     writeTextFile: writeEngineFile,
@@ -1895,6 +1909,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });
+      await rm(temporaryFor(target), { force: true });
     },
   };
 }
