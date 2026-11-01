@@ -631,10 +631,19 @@ export function AboutFileChatsOff(props: {
   );
 }
 
-function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string {
+// The rows shown, with "+" while more may come. With none shown yet, no count:
+// while the index builds, a page can hold only files not yet read in.
+function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string | undefined {
+  const shown = links.rows.length + (chats?.rows.length ?? 0);
   const more = links.next !== null || links.gathering > 0 || (chats !== null && (chats.next !== null || chats.gathering > 0));
-  return `${links.rows.length + (chats?.rows.length ?? 0)}${more ? "+" : ""}`;
+  if (shown === 0) return more ? undefined : "0";
+  return `${shown}${more ? "+" : ""}`;
 }
+
+// Show more reads a list's next page, though not while the list gathers with
+// no rows: its pages then hold only files not yet read in, and the gathering
+// reads the list again from the start.
+const pagesOn = <Row,>(list: PagedRows<Row>) => list.next !== null && (list.rows.length > 0 || list.gathering === 0);
 
 // A link as its reader sees it: a wikilink's alias or target, a Markdown
 // link's label, without the brackets.
@@ -820,7 +829,7 @@ export function AboutLinksView(props: {
   const linkRows = links?.status === "ready" ? links : null;
   const chatRows = chats?.status === "ready" ? chats : null;
   const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
-  const empty = count === "0" && linkRows !== null && linkRows.gathering === 0 && (chatRows?.gathering ?? 0) === 0;
+  const empty = count === "0";
   const ownToggle = useRef<HTMLButtonElement>(null);
   const toggleRef = props.toggleRef ?? ownToggle;
   const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, linkKey, toggleRef, '[data-testid="about-link"]');
@@ -840,7 +849,7 @@ export function AboutLinksView(props: {
         <>
           {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? <AboutGathering testId="about-links-gathering" /> : null}
           {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
-          {links.next !== null ? (
+          {pagesOn(links) ? (
             <AboutMore testId="about-links-more" watch={links.rows}
               onMore={(focused) => {
                 if (focused) focusAddedLink();
@@ -861,7 +870,7 @@ export function AboutLinksView(props: {
       ) : (
         <>
           {chats.rows.length > 0 ? <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} /> : null}
-          {chats.next !== null ? (
+          {pagesOn(chats) ? (
             <AboutMore testId="about-chat-links-more" watch={chats.rows}
               onMore={(focused) => {
                 if (focused) focusAddedChat();
