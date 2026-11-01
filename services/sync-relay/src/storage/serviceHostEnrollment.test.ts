@@ -2,10 +2,11 @@ import {afterEach, expect, it} from "vitest";
 import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
-import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
+import {LATEST_RESTORE, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES, ServiceHostRetirementConflict,
   type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
-import {fenceAccount, initializeAccountDeletion} from "./accountDeletion";
+import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "./accountDeletion";
+import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./liveJournalHistory";
 import {revokeShareGrantInTransaction} from "./shares";
 import type {StorageContext} from "./context";
 
@@ -633,9 +634,15 @@ it("retires the activation when deleting a collaborator's account ends the last 
   expect(f.owner()).toBe("refused");
 });
 
+// The relay's live-editing history, which the relay attaches as it starts.
+const withHistory = <T extends SyncRelayStorage>(storage: T): T => {
+  attachLiveJournalHistory(storage as unknown as StorageContext, createLiveJournalHistoryAuthority({namespace: key.namespace, reconciled: true}));
+  return storage;
+};
 // The fixture document after the owner's restore that kept its live session through its own revocation.
 async function kept() {
   const f = await activated(), restore = keptByOwnerRestore(f.raw, key.namespace);
+  withHistory(f.storage);
   const enrolled = () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)!;
   const enabled = (owner?: {userId: string; shareId: string}, restoring = false) =>
     serviceHostDocumentEnabled(f.storage as StorageContext, binding, owner, restoring);
@@ -647,7 +654,7 @@ async function kept() {
     .run(restore.activationId);
   // The same answers from the same store after a restart.
   const afterRestart = () => {
-    const reopened = openSyncRelayStorage(f.path, f.config);
+    const reopened = withHistory(openSyncRelayStorage(f.path, f.config));
     try {return {covered: covered(reopened), owner: serviceHostDocumentEnabled(reopened as StorageContext, binding, asOwner)};} finally {reopened.close();}
   };
   return {...f, restore, enrolled, enabled, asOwner, covered, retireKept, afterRestart};
@@ -699,6 +706,11 @@ it.each([
   ["a declined restore", (f: Kept) => f.restore.update(`phase='declined',new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,
     terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL,declined_at_ms=35`)],
   ["a restore that kept nothing", (f: Kept) => f.restore.update("intent_json=json_remove(intent_json,'$.keptRun')")],
+  ["a later restore the owner declined before its fence", (f: Kept) => f.raw.exec(`INSERT INTO sync_relay_live_restore_operations(operation_id,
+    relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,old_fence,
+    revoked_generation,invalidated_at_ms,declined_at_ms,accounted_bytes) SELECT 'restore-2',relay_database_namespace,'restore',workspace_id,main_version_id,
+    object_id,lineage_claim_id,json_remove(intent_json,'$.keptRun'),basis_json,'declined',8,6,40,41,1 FROM sync_relay_live_restore_operations
+    WHERE operation_id='restore'`)],
   ["a restore that kept an earlier run", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.runToken',9)")],
   ["a restore that kept another share", (f: Kept) => f.restore.update("intent_json=json_set(intent_json,'$.keptRun.shareId','another-share')")],
   ["a later restore generation", (f: Kept) => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=9")],
@@ -716,6 +728,18 @@ it.each([
   expect(f.release()).toMatchObject({enabled: false, retired: true});
 });
 
+// Proves: finding a note's latest restore reads only that note's restores,
+// each step through an index of the restore table and in its order.
+it("finds a note's latest restore through an index", async () => {
+  const f = await fixture();
+  for (const sql of Object.values(LATEST_RESTORE)) {
+    const parameters = Array.from(sql.matchAll(/\?/g), () => "x");
+    const plan = f.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters).map(row => String(row.detail));
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatch(/^SEARCH sync_relay_live_restore_operations USING (COVERING )?INDEX \S+ \(.*object_id=\?/);
+  }
+});
+
 // Proves: no other document inherits the continuation: not another object
 // at the restored path, and not a sibling the same share covered.
 it("keeps only the restored note live, not a replacement or sibling", async () => {
@@ -725,20 +749,40 @@ it("keeps only the restored note live, not a replacement or sibling", async () =
   }
 });
 
+// A live sibling note under the same folder share, enrolled and with its own
+// activation, as the fixture's note has.
+function activatedSibling(f: Awaited<ReturnType<typeof activated>>) {
+  const lineageClaimId = "c".repeat(64), activationId = `ordinary-activation-${"c".repeat(64)}`, path = "docs/b.md";
+  f.seed(scope.workspaceId, "sibling", path, "sibling-share");
+  const copy = (table: string, where: string, from: string, changes: Record<string, string>) => {
+    const columns = f.raw.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => String(row.name));
+    f.raw.prepare(`INSERT INTO ${table}(${columns}) SELECT ${columns.map(column => column in changes ? "?" : column)} FROM ${table} WHERE ${where}=?`)
+      .run(...columns.filter(column => column in changes).map(column => changes[column]!), from);
+  };
+  copy("sync_relay_live_documents", "object_id", binding.objectId,
+    {object_id: "sibling", lineage_claim_id: lineageClaimId, baseline_digest: lineageClaimId, current_path: path});
+  copy("sync_relay_service_activations", "activation_id", `ordinary-activation-${"a".repeat(64)}`, {activation_id: activationId, object_id: "sibling",
+    lineage_claim_id: lineageClaimId, binding_json: JSON.stringify({...binding, objectId: "sibling", lineageClaimId, currentPath: path})});
+  f.enroll({path});
+  return {relayDatabaseNamespace: key.namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "sibling", lineageClaimId, path,
+    restoreFenceGeneration: 7, acceptedThrough: 0};
+}
+
 // Proves: the restore's revocation keeps only the exact activation it names.
-// The run of every other note it leaves without Edit access ends, here a
-// sibling under the same folder share, and naming another activation keeps
-// nothing: that note's retirement opens as on any revocation.
+// Every other note it leaves without Edit access ends its run and retires at
+// its recorded boundary, here a live sibling under the same folder share, and
+// naming another activation keeps nothing: that note retires as on any
+// revocation.
 it.each([["its own activation", true], ["another activation", false]] as const)("keeps a note through the restore's revocation only when it names %s",
   async (_case, own) => {
-    const f = await activated();
-    f.seed(scope.workspaceId, "sibling", "docs/b.md", "sibling-share");
-    f.enroll({path: "docs/b.md"});
+    const f = await activated(), sibling = activatedSibling(f);
     const run = (path: string) => f.storage.readServiceHostEnrollment(scope.workspaceId, path)!.runToken;
     expect(revokeKeeping(f, own ? `ordinary-activation-${"a".repeat(64)}` : "another-activation")).toEqual({ok: true, keeps: own ? 1 : 0});
     expect(f.retirement()).toEqual(own ? null : recorded(30));
     expect(run(binding.currentPath)).toBe(own ? 10 : 30);
-    expect(run("docs/b.md")).toBe(30);
+    expect(readServiceActivationRetirement(f.storage as StorageContext, {workspaceId: scope.workspaceId, objectId: "sibling"}))
+      .toEqual({...sibling, requestedAtMs: 30});
+    expect(run(sibling.path)).toBe(30);
   });
 
 // Proves the hard rule: when a retirement is already open, the restore's
@@ -813,7 +857,9 @@ it.each([
     initializeAccountDeletion(f.storage as StorageContext, "fence-key");
     f.share("again", "again-edit");
     expect(f.storage.revokeShareGrant({shareId: "again", grantId: "again-edit", revokedAtMs: 50}).ok).toBe(true);
-    fenceAccount(f.storage as StorageContext, "fence-key", "reader-2", "reader-2@dohc.test");
+    const {manifest} = fenceAccount(f.storage as StorageContext, "fence-key", "reader-2", "reader-2@dohc.test");
+    purgeAccountRows(f.storage as StorageContext, "reader-2", "reader-2@dohc.test", manifest!);
+    expect(f.storage.getShareGrant("again-edit")).toBeNull();
   }],
 ] as const)("ends the owner's continuation when %s", async (_case, endedAtMs, end) => {
   const f = await kept();

@@ -415,22 +415,22 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       WHERE workspace_id=? AND object_id=? AND retired=0`).get(intent.document.workspaceId, intent.document.objectId) : undefined;
     const keptRun: KeptServiceRun | null = enrollment && typeof activationId === "string" ? {runToken: Number(enrollment.created_at_ms),
       ownerUserId: String(enrollment.owner_user_id), shareId: String(enrollment.share_id), activationId} : null;
-    const keptIntentJson = keptRun ? JSON.stringify({...intent, [KEPT_RUN]: keptRun}) : intentJson;
     const marker = {kept: false};
-    // Fund the final cutoff metadata and a Decline's evidence before invalidation so neither can run out of quota.
-    const maximum = maximumFenceEvidence(intent, initialBasis);
-    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), keptIntentJson, basisJson, JSON.stringify(maximum.receipt),JSON.stringify(maximum.applied),JSON.stringify(maximum.nativeReceipt), "authority-invalidated",
-      intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])) +
-      cancellationReservation(intent, initialBasis);
-    assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
     const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
       revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds },
       keptRun ? {...intent.document, activationId: keptRun.activationId, kept: () => { marker.kept = true; }} : undefined);
     if (!revoked.ok) refuse();
+    const storedIntentJson = keptRun && marker.kept ? JSON.stringify({...intent, [KEPT_RUN]: keptRun}) : intentJson;
+    // Fund the final cutoff metadata and a Decline's evidence in the same transaction as the invalidation, so neither can run out of quota.
+    const maximum = maximumFenceEvidence(intent, initialBasis);
+    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), storedIntentJson, basisJson, JSON.stringify(maximum.receipt),JSON.stringify(maximum.applied),JSON.stringify(maximum.nativeReceipt), "authority-invalidated",
+      intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])) +
+      cancellationReservation(intent, initialBasis);
+    assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
     storage.db.prepare(`INSERT INTO ${table}(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,
       old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)
       VALUES (?,?,?,?,?,?,?,?,?,'authority-invalidated',?,NULL,NULL,?,?,NULL,?)`)
-      .run(intent.operationId, namespace,previousOperationId,...key(intent.document), marker.kept ? keptIntentJson : intentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
+      .run(intent.operationId, namespace,previousOperationId,...key(intent.document), storedIntentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, intent.document.workspaceId);
     return read(storage, intent.operationId, intent.document.workspaceId)!;
   });

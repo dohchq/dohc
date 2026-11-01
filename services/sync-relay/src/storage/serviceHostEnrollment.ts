@@ -8,6 +8,7 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE} from "./liveRestoreOperationSchema";
+import {attachedLiveJournalHistoryNamespace} from "./liveJournalHistory";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, retirableServiceActivation, serviceActivationRetirementOpen,
@@ -591,16 +592,35 @@ function keptByRestore(storage: StorageContext, enrollment: CoveredEnrollment, r
     WHERE e.workspace_id=? AND e.object_id=? AND e.path=? AND e.owner_user_id=? AND e.share_id=? AND w.owner_user_id=e.owner_user_id
       AND w.replication_epoch=e.replication_epoch AND w.stream_identity=e.stream_identity`).get(workspaceId, objectId, path, ownerUserId, shareId);
   if (!run) return false;
-  const restore = storage.db.prepare(`SELECT o.phase,o.new_fence,json_extract(o.intent_json,'$.${KEPT_RUN}') AS kept,d.restore_fence_generation AS fence
-    FROM (SELECT phase,new_fence,intent_json,lineage_claim_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
-      ORDER BY rowid DESC LIMIT 1) o
-    JOIN sync_relay_live_documents d ON d.workspace_id=? AND d.main_version_id='main' AND d.object_id=? AND d.lineage_claim_id=o.lineage_claim_id
-      AND d.lineage_state='current' AND d.current_path=?`).get(workspaceId, objectId, workspaceId, objectId, path);
-  if (!restore || typeof restore.kept !== "string" || restore.phase === "declined" ||
-    (restore.phase === "resumed" ? restore.new_fence !== restore.fence : resumed) ||
+  const restore = latestRestore(storage, workspaceId, objectId);
+  if (!restore || typeof restore.kept !== "string" || restore.phase === "declined") return false;
+  const document = storage.db.prepare(`SELECT restore_fence_generation AS fence FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main'
+    AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND current_path=?`).get(workspaceId, objectId, restore.lineage_claim_id, path);
+  if (!document || (restore.phase === "resumed" ? restore.new_fence !== document.fence : resumed) ||
     storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== objectId) return false;
   const kept: Partial<KeptServiceRun> = JSON.parse(restore.kept);
   return kept.runToken === Number(run.created_at_ms) && kept.ownerUserId === ownerUserId && kept.shareId === shareId;
+}
+const RESTORE_ROW = `SELECT phase,new_fence,lineage_claim_id,json_extract(intent_json,'$.${KEPT_RUN}') AS kept FROM ${LIVE_RESTORE_OPERATIONS}`;
+/** The statements that find a document's latest restore, each along an index of the restore table. */
+export const LATEST_RESTORE = {
+  // A document has at most one unfinished restore, and no other can begin after it.
+  unfinished: `${RESTORE_ROW} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${UNFINISHED_RESTORE}`,
+  // Each fence is one past the one before, so the highest is the latest fenced restore.
+  fenced: `${RESTORE_ROW} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND new_fence IS NOT NULL
+    ORDER BY new_fence DESC LIMIT 1`,
+  // A restore that ended before its fence began at the generation an earlier fence left.
+  endedUnfencedSince: `SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=?
+    AND new_fence IS NULL AND old_fence>=? LIMIT 1`,
+} as const;
+/** The document's latest restore in the attached history, or undefined when it has none or a later restore ended before its fence. */
+function latestRestore(storage: StorageContext, workspaceId: string, objectId: string) {
+  const unfinished = storage.db.prepare(LATEST_RESTORE.unfinished).get(workspaceId, objectId);
+  if (unfinished) return unfinished;
+  const namespace = attachedLiveJournalHistoryNamespace(storage);
+  if (namespace === undefined) return undefined;
+  const fenced = storage.db.prepare(LATEST_RESTORE.fenced).get(namespace, workspaceId, objectId);
+  return fenced && !storage.db.prepare(LATEST_RESTORE.endedUnfencedSince).get(namespace, workspaceId, objectId, fenced.new_fence) ? fenced : undefined;
 }
 /** Whether the host keeps a document the owner's restore kept live, from its revocation on. It admits no edit before the restore resumed. */
 export const serviceHostOwnerRetains = (storage: StorageContext, enrollment: CoveredEnrollment) => keptByRestore(storage, enrollment, false);
