@@ -20,19 +20,20 @@ vi.mock("./FileInspector", () => ({
   FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
 }));
 // The app's real view hook, so each open and close reaches the bridge as it does from the app's tab. The button
-// stands in for the page's toolbar.
+// stands in for the page's toolbar. A static site under sites/ shows its preview in an iframe instead.
 vi.mock("./SitePreviewPage", async () => {
   const { AppViewBody, useAppView } = await import("./AppView");
   return {
     SitePreviewPage: (props: { workspaceId: string; siteRoot: string; visible?: boolean; focused?: boolean }) => {
+      const isStatic = props.siteRoot.startsWith("sites/");
       const view = useAppView({
-        workspaceId: props.workspaceId, appRoot: props.siteRoot, enabled: true,
+        workspaceId: props.workspaceId, appRoot: props.siteRoot, enabled: !isStatic,
         visible: props.visible ?? true, focused: props.focused ?? false, approvals: 0, holdFocus: false,
       });
       return (
         <div data-testid="site-preview-page" data-root={props.siteRoot}>
           <button type="button">Reload app</button>
-          <AppViewBody view={view} onReview={() => undefined} />
+          {isStatic ? <iframe data-testid="site-preview-frame" title="Notes site" /> : <AppViewBody view={view} onReview={() => undefined} />}
         </div>
       );
     },
@@ -233,9 +234,10 @@ describe("an app's page when its tab moves", () => {
 });
 
 // Tab as the browser runs it: keydown, then, unless a handler prevented it, focus moves on from wherever it is now.
-// jsdom has no guest page, so the walk stands in for one: Tab onto a webview enters its guest, the guest's keys
-// never reach dohc, and leaving the guest goes on from the webview element in document order.
-const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), webview';
+// jsdom has no guest page, so the walk stands in for one: Tab onto a webview or a preview iframe enters its guest,
+// the guest's keys never reach dohc, and leaving the guest goes on from the frame element in document order.
+const FRAME = "webview, iframe";
+const TABBABLE = `a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), ${FRAME}`;
 const tabbables = () => [...document.querySelectorAll<HTMLElement>(TABBABLE)]
   .filter((element) => !element.closest("[data-app-group-id].hidden, [hidden], [inert]"));
 function keyboard() {
@@ -250,7 +252,7 @@ function keyboard() {
     const order = tabbables();
     const next = order[(order.indexOf(focused()) + (shiftKey ? order.length - 1 : 1)) % order.length]!;
     guest = null;
-    if (next.localName === "webview") guest = next;
+    if (next.matches(FRAME)) guest = next;
     else act(() => next.focus());
     return focused();
   };
@@ -259,7 +261,7 @@ function keyboard() {
 function where(element: HTMLElement): string {
   if (!element.closest("main")) return "outside";
   const page = element.closest<HTMLElement>("[data-app-group-id]");
-  if (page) return `${element.localName === "webview" ? "guest" : "app"} ${page.dataset.appGroupId}`;
+  if (page) return `${element.matches(FRAME) ? "guest" : "app"} ${page.dataset.appGroupId}`;
   const group = element.closest<HTMLElement>("[data-editor-group-id]");
   if (group) return `group ${group.dataset.editorGroupId}`;
   return element.getAttribute("role") === "separator" ? "separator" : "main";
@@ -305,6 +307,16 @@ describe("Tab order with an app beside another group", () => {
       "group left", "app left", "guest left", "separator", "group middle",
       "separator", "group right", "app right", "guest right", "outside",
     ]);
+  });
+
+  it("goes through a static site's preview before the next group, both ways", async () => {
+    await renderSplit([
+      { id: "left", tabs: [siteTabPath("sites/notes")], activeTab: siteTabPath("sites/notes"), size: 0.5 },
+      { id: "right", tabs: ["notes.txt"], activeTab: "notes.txt", size: 0.5 },
+    ], []);
+    await waitFor(() => expect(document.querySelector('[data-root="sites/notes"] [data-testid="site-preview-frame"]')).not.toBeNull());
+    const { regions } = walk("left");
+    expect(regions).toEqual(["group left", "app left", "guest left", "separator", "group right", "outside"]);
   });
 
   it("adds no stop to the order with one group", async () => {
