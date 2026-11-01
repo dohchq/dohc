@@ -75,8 +75,13 @@ export function runDocumentProjection(
     case "read-settled":
       return settledDocumentMarkdown(request.markdown);
     case "edit":
-      if (request.refuseLossy !== undefined && (request.headSha256 === undefined || isLossyDocumentState(request.state, request.headSha256))) {
-        throw new Error(lossyNoteRefusal(request.refuseLossy));
+      // While the head is unknown, only a source the note records that keeps
+      // its meaning shows the edit is safe. Otherwise the head decides, so
+      // the caller tries again once it arrives.
+      if (request.refuseLossy !== undefined && isLossyDocumentState(request.state, request.headSha256 ?? null)) {
+        throw new Error(request.headSha256 === undefined
+          ? `dohc is still checking ${request.refuseLossy} for parts it can't show, so nothing changed. Try again in a moment.`
+          : lossyNoteRefusal(request.refuseLossy));
       }
       return documentEditUpdate(request.state, request.edit, {
         keepBlocks: request.keepBlocks,
