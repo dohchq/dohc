@@ -10,8 +10,9 @@ function fixture() {
   const remote = { list: vi.fn(), invoke: vi.fn(async () => ({ result: "shared", revision: 5, replayed: false })), describe: vi.fn(async () => ({ datasetId: remoteId, name: "Shared" })),
     approvedArtifacts: vi.fn(), upload: vi.fn(), file: vi.fn() } as unknown as OwnerDatasetData;
   const status = vi.fn(async (datasetId: string) => datasetId === remoteId ? marker : null);
+  const recorded = vi.fn((datasetId: string): DatasetTransferStatus | null => datasetId === remoteId ? marker : null);
   const connect = vi.fn(async () => remote);
-  return { local, remote, status, connect, data: createDatasetAuthorityRouter(local, { status, remote: connect }) };
+  return { local, remote, status, recorded, connect, data: createDatasetAuthorityRouter(local, { status, marker: recorded, remote: connect }) };
 }
 
 it("uses one durable dataset route for discovery, owner operations, files and approved rules", async () => {
@@ -46,6 +47,12 @@ it("refuses unconfirmed transfers without contacting either writable authority",
   const f = fixture(); f.status.mockResolvedValue({ ...marker, state: "ready", receipt: null });
   await expect(f.data.invoke({ datasetId: remoteId, revision: 1, revisionSha256: "a".repeat(64), operationId: localId, input: {}, idempotencyKey: "retry" })).rejects.toThrow(/transferring/);
   expect(f.local.invoke).not.toHaveBeenCalled(); expect(f.remote.invoke).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled();
+});
+
+it("lists a Collection whose move hasn't finished from this computer, without waiting for the move or resuming it", async () => {
+  const f = fixture(); f.recorded.mockReturnValue({ ...marker, state: "ready", receipt: null });
+  expect(await f.data.list({ limit: 10 })).toEqual({ datasets: [{ datasetId: localId, name: "Local" }, { datasetId: remoteId, name: "Old local copy" }], nextCursor: null });
+  expect(f.status).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled();
 });
 
 it("does not read a stale local copy when shared authority is offline", async () => {

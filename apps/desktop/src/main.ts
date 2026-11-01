@@ -1724,6 +1724,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     const { local } = authority;
     const data = createDatasetAuthorityRouter(local, {
       status: id => finishedTransferOf(workspace, local, id, signal),
+      marker: id => local.transferStatus(id),
       remote: async targetOrigin => {
         const remote = await remoteForWorkspace(workspace);
         operation.assertCurrent();
@@ -6486,6 +6487,7 @@ function registerIpcHandlers(): void {
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
         remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
           status: async id => { current(); return finishedTransferOf(workspace, local, id, signal); },
+          marker: id => local.transferStatus(id),
           remote: async targetOrigin => {
             const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
             if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
@@ -6753,6 +6755,7 @@ function registerIpcHandlers(): void {
       const { local } = authority;
       return createDatasetAuthorityRouter(local, {
         status: datasetId => { signal.throwIfAborted(); return finishedTransferOf(workspace, local, datasetId, signal); },
+        marker: datasetId => local.transferStatus(datasetId),
         remote: async (targetOrigin, datasetId) => {
           const remote = await remoteForWorkspace(workspace);
           signal.throwIfAborted();

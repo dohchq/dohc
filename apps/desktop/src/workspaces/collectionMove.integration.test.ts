@@ -97,7 +97,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
       return work({ workspace, signal: controller.signal, assertCurrent() {} });
     },
     hostForWorkspace: async () => local,
-    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: finished,
+    dataForWorkspace: async () => createDatasetAuthorityRouter(local, { status: finished, marker: datasetId => local.transferStatus(datasetId),
       async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } }),
     collectionPlace: async (_workspace, datasetId) => collectionPlace({ transfer: await finished(datasetId), relayUrl: "https://relay.test",
       automations: async () => ({ automations: 0, scheduledAutomations: 0 }), runs: async () => { throw Error("Nothing asks without automations."); } }),
@@ -219,5 +219,20 @@ it("leaves a stopped move alone until a person tries it again, so the reads a ch
   down = false;
   await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
   expect(transferStatus(id(1))?.state).toBe("imported");
+  controller.abort();
+});
+
+it("lists a Collection whose move stopped from this computer, without trying the move again while the server is away", async () => {
+  let refusals = 0;
+  const { collection, setGrant, controller, transferStatus } = await collectionOnThisComputer({
+    async relay() { refusals++; throw Error("The server stopped answering."); } });
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
+  expect(transferStatus(id(1))).toMatchObject({ state: "ready", targetOrigin: "https://relay.test", receipt: null });
+  expect(refusals).toBe(1);
+
+  // The shell reads its Collections again after the access dialog has said the move stopped. The list has nothing to report.
+  expect(await collection("window", { workspaceId: "w", action: "list" })).toMatchObject({ kind: "list", datasets: [{ datasetId: id(1), name: "Items" }] });
+  expect(refusals).toBe(1);
+  expect(transferStatus(id(1))?.state).toBe("ready");
   controller.abort();
 });
