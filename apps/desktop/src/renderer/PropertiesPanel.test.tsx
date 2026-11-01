@@ -155,6 +155,28 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it("keeps a remotely added property when an edit lands before the rows refresh", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody\n");
+    // Edit after the panel reads the new source, before its effect refreshes
+    // the rows the person was editing. No timer or scheduler race is needed.
+    function EditsOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property status value"), { target: { value: "ready" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<><PropertiesPanel ydoc={doc} /></>);
+
+      act(() => {
+        setFrontmatterValue(doc, "priority", "high");
+        rerender(<><PropertiesPanel ydoc={doc} /><EditsOnCommit /></>);
+      });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "ready", priority: "high" });
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
