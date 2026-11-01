@@ -312,7 +312,9 @@ test("a prepared runtime skips the rebuild and retains fixture drift", () => {
 test("the caps and the scratch root reach every cargo child", () => {
   const stub = stubToolchain();
   try {
-    const run = runGate(stub);
+    // Inherited thread caps that differ change the evidence line; the split
+    // case has its own test below.
+    const run = runGate(stub, { RUST_TEST_THREADS: undefined, NEXTEST_TEST_THREADS: undefined });
 
     // What the child actually received, not what the gate printed about
     // itself. DOHC_TEST_SCRATCH_ROOT is the one the scratch-leak row depends
