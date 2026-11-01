@@ -148,7 +148,9 @@ impl ActorHandle {
                 }
                 let same_lineage = same_claim && projection.is_some_and(|p| p.source_state_vector_sha256 == hex_sha256(&base.encode_state_vector()));
                 let same_disk = match probe_projection_target(&root, &snapshot.path, ProjectionTargetKind::Plaintext) {
-                    ProjectionTargetState::Text { sha256 } => input.expected_disk_sha256.as_deref() == Some(sha256.as_str()),
+                    // dohc's own settlement of the base's text is not an outside change.
+                    ProjectionTargetState::Text { sha256 } => input.expected_disk_sha256.as_deref() == Some(sha256.as_str()) ||
+                        (same_lineage && projection.is_some_and(|p| sha256 == hex_sha256(p.content.as_bytes()))),
                     ProjectionTargetState::Absent => input.expected_disk_sha256.is_none(),
                     _ => false,
                 };
