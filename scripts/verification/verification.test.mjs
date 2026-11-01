@@ -739,7 +739,7 @@ test("source fingerprints follow the host's environment key casing", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build`, () => {
+for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build and ignores build parallelism`, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
   try {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
@@ -753,10 +753,12 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
       const root=process.argv[1];
       const kind=process.argv[2];
       const settings={
-        engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
+        engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_RUSTFLAGS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
         desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_DESKTOP_DIST'],
+        // Build parallelism changes neither build's output.
+        neither:['CARGO_BUILD_JOBS'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];
