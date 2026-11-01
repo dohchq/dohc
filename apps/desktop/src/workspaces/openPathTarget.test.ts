@@ -154,6 +154,25 @@ describe("resolveOpenPathTarget on a Linux folder that ignores capitals", () => 
     expect(resolveOnLinux("/home/sam/NOTES/plans/q3.md", { manifests: ["/home/sam/Notes"], knowsInodes: false }))
       .toEqual({ kind: "folder", rootPath: "/home/sam/NOTES", hasManifest: true, file: "plans/q3.md" });
   });
+
+  it("does not route through a workspace folder reached under another name, as through a bind mount", () => {
+    // /view/notes is /data/Notes mounted again, and a mount inside either one
+    // could put another a.md at docs/a.md.
+    const mounted = caseFoldDisk({ "/data/Notes/docs/a.md": "file", "/view/notes/docs/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/data/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
+    });
+    const data = { workspaceId: "ws-data", rootPath: "/data/Notes" };
+    expect(resolveOpenPathTarget("/view/notes/docs/a.md", {
+      workspaces: [data], home: linuxHome, platform: "linux",
+      fs: {
+        realPath: mounted.realPath,
+        kindOf: mounted.kindOf,
+        hasManifest: () => false,
+        folderIdentity: (path) => folderIdentitySync(path, mounted.stat),
+      },
+    })).toEqual({ kind: "folder", rootPath: "/view/notes/docs", hasManifest: false, file: "a.md" });
+  });
 });
 
 function opener(entries: Record<string, "file" | "folder">, manifests: string[] = []) {

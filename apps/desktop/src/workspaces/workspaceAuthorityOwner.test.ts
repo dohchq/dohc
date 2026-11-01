@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { caseFoldDisk } from "../testing/caseFoldDisk";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
-import { folderIdentitySync } from "./workspaceRootIdentity";
+import { folderIdentitySync, type FolderIdentity } from "./workspaceRootIdentity";
 
 interface Workspace {
   workspaceId: string;
@@ -1212,6 +1212,9 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
   }, { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") });
 
   function linuxOwner(knowsInodes = true) {
+    // What the disk answers for a folder's identity. A test can change it to
+    // a stat that starts or stops working, or to a folder replaced in place.
+    const probe = { knows: knowsInodes, replacedBy: null as FolderIdentity | null };
     const registry = new Map<string, Workspace>();
     const owner = createWorkspaceAuthorityOwner({
       findWorkspace: (workspaceId) => registry.get(workspaceId) ?? null,
@@ -1220,13 +1223,13 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
         if (real === null) throw new Error(`ENOENT: ${rootPath}`);
         return real;
       },
-      rootIdentity: (rootPath) => knowsInodes ? folderIdentitySync(rootPath, disk.stat) : null,
+      rootIdentity: (rootPath) => probe.replacedBy ?? (probe.knows ? folderIdentitySync(rootPath, disk.stat) : null),
       createState: () => ({}),
     });
     const add = (workspaceId: string, rootPath: string) => {
       registry.set(workspaceId, { workspaceId, rootPath, label: workspaceId });
     };
-    return { owner, registry, add };
+    return { owner, registry, add, probe };
   }
 
   it("gives two spellings of one folder one owner", async () => {
@@ -1298,6 +1301,56 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
     owner.acquire("lower").release();
     expect(() => owner.acquire("again")).toThrow("This folder is already attached as workspace upper.");
     upper.release();
+    await owner.close();
+  });
+
+  it("keeps a block when the disk starts or stops giving the folder's identity", async () => {
+    for (const knownAtReservation of [false, true]) {
+      const { owner, add, probe } = linuxOwner(knownAtReservation);
+      const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/srv/Notes" });
+      probe.knows = !knownAtReservation;
+      expect(() => owner.reserveBinding({ workspaceId: "second", rootPath: "/srv/Notes" }))
+        .toThrow("This folder is blocked by failed cleanup for workspace first.");
+      let finishCleanup!: () => void;
+      const finish = new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      });
+      const releasing = owner.releaseReservation(reservation, () => finish);
+      add("second", "/srv/Notes");
+      expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
+      finishCleanup();
+      await releasing;
+      owner.acquire("second").release();
+      await owner.close();
+    }
+  });
+
+  it("refuses another workspace on a folder replaced at the same path while the old owner drains", async () => {
+    const { owner, registry, add, probe } = linuxOwner();
+    add("first", "/srv/Notes");
+    const lease = owner.acquire("first");
+    const invalidating = owner.invalidate("first");
+    registry.delete("first");
+    probe.replacedBy = { dev: 1n, ino: 999n };
+    add("second", "/srv/Notes");
+    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
+    lease.release();
+    await invalidating;
+    owner.acquire("second").release();
+    await owner.close();
+  });
+
+  it("keys a reserved folder by the identity the disk gives when it registers", async () => {
+    const { owner, add, probe } = linuxOwner(false);
+    const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/home/sam/Notes" });
+    probe.knows = true;
+    const workspace = { workspaceId: "first", rootPath: "/home/sam/Notes", label: "first" };
+    owner.registerReservedBinding(reservation, workspace, {
+      persist: () => add("first", "/home/sam/Notes"),
+      rollback: () => undefined,
+    });
+    add("second", "/home/sam/notes");
+    expect(() => owner.acquire("second")).toThrow("This folder is already attached as workspace first.");
     await owner.close();
   });
 });

@@ -1,6 +1,7 @@
 import { statSync, type BigIntStats } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { sameFsEntry, type FsEntryIdentity } from "@dohc/workspace-core";
 import { isInside } from "../security/pathContainment";
 
@@ -74,37 +75,46 @@ function samePath(left: string, right: string): boolean {
   return isInside(left, right) && isInside(right, left);
 }
 
-function identityMatches<Entry>(
+// The roots spelled like `at` in other capitals. Only a stat can say
+// whether one of them is the folder at `at`.
+function capitalAliases<Entry>(
   roots: readonly RootCandidate<Entry>[],
-  identities: readonly (FolderIdentity | null)[],
-  identity: FolderIdentity | null,
-  anchor: string,
-): RootMatch<Entry>[] {
-  if (identity === null) return [];
-  return roots.flatMap((root, index) =>
-    sameFolder(identities[index] ?? null, identity) ? [{ entry: root.entry, root: root.path, anchor }] : []);
+  keys: readonly string[],
+  at: string,
+): RootCandidate<Entry>[] {
+  const key = pathCollisionKey(at);
+  return roots.filter((_, index) => keys[index] === key);
+}
+
+// Two roots that are one folder match nothing.
+function soleMatch<Entry>(matches: readonly RootCandidate<Entry>[], anchor: string): RootMatch<Entry> | null {
+  const [match] = matches;
+  return matches.length === 1 && match ? { entry: match.entry, root: match.path, anchor } : null;
 }
 
 /**
  * The deepest folder on `path`, itself included, that is one of `roots`:
- * spelled the same, or else the same folder on disk. `path` is absolute with
- * links resolved. Two roots that are one folder, neither spelled as the path,
- * match nothing. Unless the path itself is spelled as a root, a call stats
- * each root once and each folder on the path until one matches.
+ * spelled the same, or else spelled the same in other capitals and the same
+ * folder on disk. `path` is absolute with links resolved. A root reached
+ * under another name, as through a bind mount, does not match, because a
+ * mount inside either one can put another file at the same place below it.
+ * A call stats only a folder on the path that differs from a root in capitals
+ * alone, and that root.
  */
 export function deepestRootSync<Entry>(
   path: string,
   roots: readonly RootCandidate<Entry>[],
   identify: (path: string) => FolderIdentity | null = (at) => folderIdentitySync(at),
 ): RootMatch<Entry> | null {
-  let identities: (FolderIdentity | null)[] | null = null;
+  const keys = roots.map((root) => pathCollisionKey(root.path));
   for (let at = path; ; at = dirname(at)) {
     const spelled = roots.find((root) => samePath(root.path, at));
     if (spelled) return { entry: spelled.entry, root: spelled.path, anchor: at };
-    identities ??= roots.map((root) => identify(root.path));
-    if (identities.some((identity) => identity !== null)) {
-      const matches = identityMatches(roots, identities, identify(at), at);
-      if (matches.length > 0) return matches.length === 1 ? matches[0] : null;
+    const aliases = capitalAliases(roots, keys, at);
+    const identity = aliases.length > 0 ? identify(at) : null;
+    if (identity !== null) {
+      const matches = aliases.filter((root) => sameFolder(identify(root.path), identity));
+      if (matches.length > 0) return soleMatch(matches, at);
     }
     if (dirname(at) === at) return null;
   }
@@ -116,14 +126,16 @@ export async function deepestRoot<Entry>(
   roots: readonly RootCandidate<Entry>[],
   identify: (path: string) => Promise<FolderIdentity | null> = (at) => folderIdentity(at),
 ): Promise<RootMatch<Entry> | null> {
-  let identities: (FolderIdentity | null)[] | null = null;
+  const keys = roots.map((root) => pathCollisionKey(root.path));
   for (let at = path; ; at = dirname(at)) {
     const spelled = roots.find((root) => samePath(root.path, at));
     if (spelled) return { entry: spelled.entry, root: spelled.path, anchor: at };
-    identities ??= await Promise.all(roots.map((root) => identify(root.path)));
-    if (identities.some((identity) => identity !== null)) {
-      const matches = identityMatches(roots, identities, await identify(at), at);
-      if (matches.length > 0) return matches.length === 1 ? matches[0] : null;
+    const aliases = capitalAliases(roots, keys, at);
+    const identity = aliases.length > 0 ? await identify(at) : null;
+    if (identity !== null) {
+      const known = await Promise.all(aliases.map((root) => identify(root.path)));
+      const matches = aliases.filter((_, index) => sameFolder(known[index] ?? null, identity));
+      if (matches.length > 0) return soleMatch(matches, at);
     }
     if (dirname(at) === at) return null;
   }
@@ -137,8 +149,8 @@ export function onMatchedRoot(match: Pick<RootMatch<unknown>, "root" | "anchor">
 }
 
 /**
- * `path` spelled under `root` when `root` is one of its folders on disk, or
- * null. Both have links resolved. A path already spelled inside `root`
+ * `path` spelled under `root` when one of its folders is `root` in the same
+ * or other capitals, as deepestRoot finds it, or null. Both have links resolved. A path already spelled inside `root`
  * returns unchanged without a stat.
  */
 export async function pathUnderRoot(

@@ -1316,6 +1316,29 @@ describe("CLI socket server", () => {
     expect(listed).toHaveLength(2);
   });
 
+  it("rejects a cwd in the workspace folder reached under another name, as through a bind mount", async () => {
+    // A mount inside either name could put another file at the same place
+    // below it, so the workspace is found only under its own name or capitals.
+    const stored = await realpath(workspaceRoot);
+    const spelled = join(dirname(stored), `${basename(stored)}-mounted`);
+    folderAlias.current = { spelled, stored };
+    try {
+      await expect(rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "moments",
+        args: { cwd: spelled, actor: "human", path: "tracked.md" },
+      })).resolves.toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: false,
+        error: "dohc: not inside a dohc workspace",
+      });
+    } finally {
+      folderAlias.current = null;
+    }
+    expect(calls.openWorkspace).toBe(0);
+  });
+
   it("returns MCP-shaped history and chats with engine ids that post and reply accept", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });

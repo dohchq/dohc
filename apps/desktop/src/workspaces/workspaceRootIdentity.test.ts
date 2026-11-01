@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+
+// These are Linux folders, so the module and the containment helper it uses
+// run on node:path's posix rules on any host.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
 import { caseFoldDisk } from "../testing/caseFoldDisk";
 import {
   deepestRoot,
@@ -95,12 +102,31 @@ describe("deepestRootSync", () => {
 
   it("keeps roots whose stat numbers only differ past Number's safe range apart", () => {
     const big = 2n ** 53n;
-    const wide = caseFoldDisk({ "/home/sam/Notes/a.md": "file", "/home/sam/Other/a.md": "file" }, {
-      foldsCase: () => true,
-      identities: { "/home/sam/Notes": { dev: big, ino: big }, "/home/sam/Other": { dev: big, ino: big + 1n } },
+    const wide = caseFoldDisk({ "/srv/Notes/a.md": "file", "/srv/notes/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/srv/Notes": { dev: big, ino: big }, "/srv/notes": { dev: big, ino: big + 1n } },
     });
-    expect(deepestRootSync("/home/sam/OTHER", roots("/home/sam/Notes"), (path) => folderIdentitySync(path, wide.stat)))
+    expect(deepestRootSync("/srv/notes", roots("/srv/Notes"), (path) => folderIdentitySync(path, wide.stat)))
       .toBeNull();
+  });
+
+  it("does not match a root reached under another name, as through a bind mount", () => {
+    // /view/notes is /data/Notes mounted again. A mount inside either one can
+    // put another file at the same place below it.
+    const mounted = caseFoldDisk({ "/data/Notes/docs/a.md": "file", "/view/notes/docs/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/data/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
+    });
+    const probe = vi.fn((path: string) => folderIdentitySync(path, mounted.stat));
+    expect(deepestRootSync("/view/notes/docs/a.md", roots("/data/Notes"), probe)).toBeNull();
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("stats nothing for a path spelled under its root", () => {
+    const probe = vi.fn(identify);
+    expect(deepestRootSync("/home/sam/Notes/Trip/day-1.md", roots("/home/sam/Notes", "/srv/Notes"), probe))
+      .toMatchObject({ entry: "/home/sam/Notes", anchor: "/home/sam/Notes" });
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("matches nothing when two registered roots are one folder and neither is spelled as the path", () => {
@@ -127,6 +153,12 @@ describe("pathUnderRoot", () => {
     await expect(pathUnderRoot("/home/sam/Notes", "/home/sam", identifyAsync)).resolves.toBeNull();
     await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/NOTES-old/a.md", identifyAsync)).resolves.toBeNull();
     await expect(pathUnderRoot("/srv/Notes", "/srv/notes/a.md", identifyAsync)).resolves.toBeNull();
+    const mounted = caseFoldDisk({ "/data/Notes/docs/a.md": "file", "/view/notes/docs/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/data/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
+    });
+    await expect(pathUnderRoot("/data/Notes", "/view/notes/docs", async (path) => folderIdentitySync(path, mounted.stat)))
+      .resolves.toBeNull();
   });
 
   it("agrees with deepestRootSync", async () => {
