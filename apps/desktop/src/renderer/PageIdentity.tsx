@@ -1,6 +1,10 @@
 import { useFocusReturn } from "./ui/focusReturn";
 import { isComposingKey } from "./ui/keys";
-import { frontmatterEditsRefused, markdownFrontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
+import {
+  FRONTMATTER_SOURCE_META_KEY,
+  frontmatterEditsRefused,
+  markdownFrontmatterEditsRefused,
+} from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { announceOverlayOpen } from "./overlayStack";
@@ -218,16 +222,34 @@ export function PageIdentity(props: PageIdentityProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
   const opening = (props.opening ?? false) && !props.readOnly;
-  const readOnly = (props.readOnly ?? false) || opening;
   const [ydocRevision, setYdocRevision] = useState(0);
 
   useEffect(() => {
     if (!ydoc) return;
     const map = ydoc.getMap(FRONTMATTER_FIELD);
+    const meta = ydoc.getMap("meta");
     const update = () => setYdocRevision((revision) => revision + 1);
+    // The block's text decides whether it is locked.
+    const updateSource = (event: Y.YMapEvent<unknown>) => {
+      if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY)) update();
+    };
     map.observe(update);
-    return () => map.unobserve(update);
+    meta.observe(updateSource);
+    return () => {
+      map.unobserve(update);
+      meta.unobserve(updateSource);
+    };
   }, [ydoc]);
+
+  // A block dohc can't split shows its title and icon read-only. The
+  // properties row below says why.
+  const locked = useMemo(
+    () => (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body)),
+    // ydocRevision re-reads the document after a shared write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [body, ydoc, ydocRevision],
+  );
+  const readOnly = (props.readOnly ?? false) || opening || locked;
 
   const meta = useMemo(() => {
     if (ydoc) return mapToObject(ydoc.getMap(FRONTMATTER_FIELD));
