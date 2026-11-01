@@ -1192,6 +1192,17 @@ describe("owner app publication", () => {
       expect(reportError).not.toHaveBeenCalled();
     });
 
+    it("asks only for sync before publishing an unsynced app that reaches no Collection, since it can't open on this device", async () => {
+      const answers = local();
+      api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
+      api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? { ...checked, declaresCollection: false } : answers(request));
+      renderLocal();
+      await openLocal();
+      expect(await screen.findByText("Sync this workspace to publish on a share link.")).toBeTruthy();
+      expect(screen.queryByText(/Opening on this device does not need sync/)).toBeNull();
+      expect(actions("prepareLocal")).toEqual([]);
+    });
+
     it("ignores an approvals answer that arrives after the workspace changed", async () => {
       const list = deferred<OwnerAppPublicationResult>();
       const answers = local();
