@@ -932,6 +932,47 @@ fn record_file_edit_from_an_older_head_keeps_unsettled_edits_in_the_current_side
     assert!(history_holds(&b, &latest) >= 1, "History keeps B's edit");
 }
 
+/// Typing added after the conflict opened is on neither side. Choosing A's
+/// file keeps it as a recovery copy naming its typist, after a restart too.
+#[test]
+fn typing_after_a_record_conflict_opens_outlives_the_resolution() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let draft = projected(&doc);
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&flown))]);
+    b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_100);
+    let later = projected(&doc);
+    assert_eq!(recovered(&b, &later), 0);
+
+    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
+    assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
+    assert_eq!(recovered(&b, &later), 1, "B's later typing outlives the choice");
+
+    drop(b);
+    let b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    assert_eq!(head_text(&b, RECORD), Some(flown));
+    assert_eq!(recovered(&b, &later), 1);
+    let authors: String = b
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT m.author_json FROM moments m WHERE m.workspace_id='ws' \
+                   AND m.object_id<>?1 AND m.after_blob_sha256=?2",
+                params![RECORD, sha(&later)],
+                |row| row.get(0),
+            )
+        })
+        .expect("the recovery copy's authors");
+    assert!(authors.contains("typist"), "{authors}");
+}
+
 /// One conflict per object. A file that continues the conflict's incoming
 /// side updates it. A file from another branch waits for the resolution.
 #[test]

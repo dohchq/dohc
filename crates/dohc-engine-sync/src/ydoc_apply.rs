@@ -3925,13 +3925,12 @@ pub(crate) struct LineageFoldAuthor<'a> {
 /// Why a fold folds. The cause decides whether the rewrite is journaled and
 /// whether unsettled text the fold would discard is kept.
 pub(crate) enum LineageFoldCause {
-    /// A locally-originated file mutation over a closed lineage. Its rewrite
-    /// is journaled, and text the lineage held but no artifact ever
-    /// recorded becomes a recovered sibling file credited to these authors.
+    /// A locally-originated file mutation or conflict resolution over a
+    /// closed lineage. Its rewrite is journaled, and text the lineage held
+    /// but no artifact ever recorded becomes a recovered sibling file
+    /// credited to these authors. A resolution's reviewed sides are already
+    /// in History, so only typing added after the review opened is kept.
     LocalMutation { unsettled_authors: Option<String> },
-    /// A reviewed conflict resolution. Both sides were shown; the chosen
-    /// text is journaled and nothing else is kept.
-    Resolution,
     /// A replicated conflict parent. The parent is the journaled operation,
     /// so the receiver's rewrite is not.
     ConflictParent,
@@ -4248,11 +4247,11 @@ fn disposable_seed_in_tx(
 /// durable here — one update that rewrites the lineage's projection to the
 /// chosen bytes, journaled when the workspace replicates — in the same
 /// transaction that closes the row, so the next inbound delta merges with
-/// the choice instead of silently reversing it.
+/// the choice instead of silently reversing it. Typing neither reviewed
+/// side holds leaves as a recovered sibling first, credited to its authors.
 ///
-/// A non-Y.Doc object, an unclaimed lineage (local-only cache; the file is
-/// canonical and reseeds it), and a projection that already equals the
-/// choice are all no-ops.
+/// A non-Y.Doc object, a lineage without content, and a projection that
+/// already equals the choice are all no-ops.
 pub fn fold_resolution_into_ydoc_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -4289,6 +4288,10 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
+    // Read before the supersede drops a reserved settle attempt's authors.
+    let unsettled_authors = dohc_engine_collab::author_coverage::reserved_in(tx, &complete.key)
+        .map_err(map_collab_hard_error)?
+        .moment_json();
     dohc_engine_collab::author_coverage::supersede_in(tx, &complete.key, now_ms)
         .map_err(map_collab_hard_error)?;
     fold_complete_ydoc_lineage_in_tx(
@@ -4298,7 +4301,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         chosen_text,
         LineageFoldAuthor::default(),
         now_ms,
-        LineageFoldCause::Resolution,
+        LineageFoldCause::LocalMutation { unsettled_authors },
     )
     .map(|_| ())
 }
@@ -4397,7 +4400,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             && !projection.content.is_empty()
             && !projection_held_in_tx(tx, key, &projection.content)?
         {
-            crate::ydoc_recovery::recover_unsettled_local_in_tx(
+            recovered_sibling = crate::ydoc_recovery::recover_unsettled_local_in_tx(
                 tx,
                 key,
                 marker.lineage_claim_id.as_deref(),
@@ -4405,8 +4408,8 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
                 &projection.content,
                 unsettled_authors.as_deref(),
                 now_ms,
-            )?;
-            recovered_sibling = true;
+            )?
+            .is_some();
         }
         let (mut update, source_bound) = match reader_delta.map_or_else(
             || doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text),
