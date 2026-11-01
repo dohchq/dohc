@@ -30,6 +30,6 @@ it("refuses a match across marks before changing the document", () => {
 it.each(["**bold** plain", "**bold** plain **tail**"])("keeps replacement text unformatted after a bold run: %s", source => {
   const doc = markdownToYDoc(source);
   replaceLiveText(getDohcYDocBodyFragment(doc), " plain", " replacement");
-  expect(yDocToMarkdown(doc)).toBe(source.replace(" plain", " replacement"));
+  expect(yDocToMarkdown(doc)).toBe(`${source.replace(" plain", " replacement")}\n`);
   doc.destroy();
 });

@@ -6196,7 +6196,7 @@ describe("no-edit settle skip", () => {
           try {
             const code = session.doc.getXmlFragment("body").get(0) as Y.XmlElement;
             expect(code.getAttribute("language")).toBe("js");
-            expect(ydocProjection.yDocToMarkdown(session.doc)).toBe(source.trimEnd());
+            expect(ydocProjection.yDocToMarkdown(session.doc)).toBe(source);
             expect(session.doc.getMap("meta").has("dohcMarkdownSource")).toBe(false);
             expect(engine.recordedUpdates).toHaveLength(1);
           } finally {

@@ -2124,9 +2124,9 @@ describe('Y.Doc markdown import/export', () => {
     }
 
     expect(yDocToMarkdown(markdownToYDoc(String.raw`\\&#35;`)))
-      .toBe(String.raw`\\#`)
+      .toBe(String.raw`\\#` + '\n')
     expect(yDocToMarkdown(markdownToYDoc(String.raw`\\&amp;#35;`)))
-      .toBe(String.raw`\\&amp;#35;`)
+      .toBe(String.raw`\\&amp;#35;` + '\n')
   })
 
   it('matches the locked parser numeric-reference digit limits', () => {

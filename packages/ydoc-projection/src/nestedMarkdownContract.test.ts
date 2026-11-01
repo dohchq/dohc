@@ -120,7 +120,7 @@ it.each(corpus.cases.filter(item => !item.refuse && !item.rereadCanonical))('fix
   try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
 })
 
-it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {
+it.each(['- Mr. Smith arrived.\n', '- I. Overview\n', '- a. child\n'])('accepts projected item prose unchanged: %s', source => {
   const doc = markdownToYDoc(source, { reading: 'projection' })
   try { expect(yDocToMarkdown(doc)).toBe(source) } finally { doc.destroy() }
 })

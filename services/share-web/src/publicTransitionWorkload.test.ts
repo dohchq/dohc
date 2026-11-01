@@ -36,7 +36,7 @@ function prepare(root: string) {
     const doc = markdownToYDoc("Hello"), interrupted = new Y.Doc({gc: false}), restored = new Y.Doc({gc: false});
     try {
       const checkpoint = Y.encodeStateAsUpdate(doc);
-      const baseline = {...projection(`${name}-baseline`, "Hello"), checkpoint: pin(`${name}-baseline.bin`, checkpoint)};
+      const baseline = {...projection(`${name}-baseline`, "Hello\n"), checkpoint: pin(`${name}-baseline.bin`, checkpoint)};
       const updates = [append(doc, `${name}-first`, " first"), append(doc, `${name}-second`, " second")];
       const selected: Case = {baseline, updates};
       if (name !== "view") {

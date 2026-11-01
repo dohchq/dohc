@@ -19,7 +19,7 @@ const desktopFoldSources = [
   '- parent\n\n  | h |\n  | --- |\n  | v |\n\n  - child',
   '- parent\n\n  # heading\n\n  - child',
   '- a\n  ---',
-].map(body => `---\nstatus: todo\n---\n${body}`)
+].map(body => `---\nstatus: todo\n---\n${body}\n`)
 it('replays desktop seeds used by native frontmatter-only folds', () => {
   const path = new URL('../../../tools/rust-engine-program/nested1b-desktop-folds.json', import.meta.url)
   if (process.env.DOHC_EXPORT_DESKTOP_FOLDS) {

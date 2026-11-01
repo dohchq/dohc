@@ -133,8 +133,8 @@ async function fixture() {
   await claimWorkspace(h,deleted,workspace); await claimWorkspace(h,"other",otherWorkspace);
   storage.claimWorkspaceIdentity({workspaceId:workspace,replicationEpoch:"epoch",streamIdentity:"stream"});
   for (const [owner, ws] of [[deleted,workspace],["other",otherWorkspace]]) {
-    await putBlob(h,owner!,ws!,"original");
-    await appendLog(h,owner!,ws!,[moment("docs/file.md","original",{originSeq:0,payload:{payloadAfterContentKind:"text",payloadAfterByteLength:8}})],ws===workspace?{replicationEpoch:"epoch",streamIdentity:"stream"}:{});
+    await putBlob(h,owner!,ws!,"original\n");
+    await appendLog(h,owner!,ws!,[moment("docs/file.md","original\n",{originSeq:0,payload:{payloadAfterContentKind:"text",payloadAfterByteLength:9}})],ws===workspace?{replicationEpoch:"epoch",streamIdentity:"stream"}:{});
   }
   const ownedShare = await createShare(h,deleted,workspace,{paths:["docs"],recipientUserId:"other",access:"edit"});
   const receivedShare = await createShare(h,"other",otherWorkspace,{paths:["docs","registrations"],recipientUserId:deleted,access:"edit"});
@@ -148,7 +148,7 @@ async function fixture() {
   expect(presenceRead.status).toBe(200);
   const proposedBytes=Buffer.from("Proposed work"),proposedHash=createHash("sha256").update(proposedBytes).digest("hex");
   expect((await h(request("other","/sync/shares/"+ownedShare+"/blobs/"+proposedHash,{method:"PUT",body:proposedBytes}))).status).toBe(200);
-  const proposed=await h(request("other","/sync/shares/"+ownedShare+"/proposals",jsonBody({submitId:"owned-proposal",ops:[{basedOnPath:"docs/file.md",basedOnBlobSha256:createHash("sha256").update("original").digest("hex"),operation:"write",afterPath:"docs/file.md",afterBlobSha256:proposedHash,afterContentKind:"text",afterByteLength:proposedBytes.byteLength,recordedAtMs:2000}]})));
+  const proposed=await h(request("other","/sync/shares/"+ownedShare+"/proposals",jsonBody({submitId:"owned-proposal",ops:[{basedOnPath:"docs/file.md",basedOnBlobSha256:createHash("sha256").update("original\n").digest("hex"),operation:"write",afterPath:"docs/file.md",afterBlobSha256:proposedHash,afterContentKind:"text",afterByteLength:proposedBytes.byteLength,recordedAtMs:2000}]})));
   expect(proposed.status,await proposed.clone().text()).toBe(200);
   storage.enrollServiceHostDocument({workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
   const serviceKey={key:Buffer.alloc(32,1),namespace:deployment.history.namespace};
