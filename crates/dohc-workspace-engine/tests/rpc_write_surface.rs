@@ -4624,7 +4624,7 @@ async fn rollback_waits_for_sync_to_send_a_save_with_a_settlement_proof() {
     assert_eq!(error.code, ErrorCode::Overloaded);
     assert_eq!(
         error.message,
-        "Sync has not finished sending this change. Retry the rollback after sync completes."
+        "Sync hasn't sent this change yet. Turn sync on and let it finish, then roll the change back."
     );
     assert_eq!(
         call(
