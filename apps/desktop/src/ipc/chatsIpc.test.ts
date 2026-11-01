@@ -683,6 +683,23 @@ describe("targeted file resolution", () => {
    expect(JSON.stringify(feed)).not.toContain("authorActorKey");
  });
 
+ it("names your agent's run in its post's token, in the message list and the feed opening", async () => {
+   const h = fixture();
+   const row = {
+     ...h.message, author: { kind: "agent" as const, displayName: "Codex" }, authorAgentId: "codex", origin: "cli" as const,
+     authorActorKey: '{"kind":"agent","ownerKey":{"kind":"installation","installationId":"local-owner"},"claimedName":"Codex"}',
+   };
+   h.storeMethods.listMessages.mockResolvedValueOnce([row]);
+   h.storeMethods.listChannelThreads.mockResolvedValueOnce([{
+     thread: { ...h.thread, channelId: "channel" }, messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+     openingMessage: { ...row, bodySnippet: row.body, reactions: [] },
+   }]);
+   const listed = await h.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
+   const feed = await h.invoke(chatOperations.listChannelThreads.channel, { workspaceId: "workspace", channelId: "channel" }) as { threads: { openingMessage: { presentation: ChatMessageRecord["presentation"] } }[] };
+   expect(listed.messages[0]!.presentation).toMatchObject({ self: true, agentId: "codex" });
+   expect(feed.threads[0]!.openingMessage.presentation).toEqual(listed.messages[0]!.presentation);
+ });
+
 it("keeps two unknown authors distinct in a received share view", async () => {
   const h = fixture("view");
   const alice = { ...h.message, author: { kind: "human" as const, displayName: "Alice" }, authorUserId: "alice" };

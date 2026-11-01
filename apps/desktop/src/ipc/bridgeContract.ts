@@ -1669,6 +1669,8 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
+  // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
+  agentId: z.string().min(1).max(64).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({
