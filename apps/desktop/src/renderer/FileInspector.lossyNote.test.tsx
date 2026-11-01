@@ -123,6 +123,19 @@ describe("a lossy note", () => {
     expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
   });
 
+  it("offers no Edit anyway in a received share, whose session drops the consent", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: sha(LOSSY) }]);
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" receivedShare />);
+
+    const notice = await screen.findByTestId("lossy-note-notice");
+    expect(notice.textContent).toContain("dohc can't edit this note yet without changing parts it can't show.");
+    expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
+    await user.click(screen.getByTestId("lossy-note-open-externally"));
+    expect(bridge.openFileExternally).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: "a.md" });
+    expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
+  });
+
   it("opens the file in the system's app", async () => {
     const bridge = bridgeFor([{ text: LOSSY, contentHash: "a".repeat(64) }]);
     const user = userEvent.setup();
