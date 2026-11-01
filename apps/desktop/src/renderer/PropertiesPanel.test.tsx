@@ -202,6 +202,33 @@ describe("PropertiesPanel", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("keeps a property rename and its focus when the next letter lands before the rows read an outside change", () => {
+    const onChange = vi.fn();
+    const panel = (body: string) => <PropertiesPanel body={body} onChange={onChange} />;
+    // Type after the panel reads the changed note, before its effect refreshes
+    // the rows. The note doesn't come back with the save yet.
+    function TypesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "ownx" } });
+      }, []);
+      return null;
+    }
+    const { rerender } = render(<>{panel("---\nstatus: draft\nowner: Sam\n---\n\nBody\n")}</>);
+    const name = screen.getByLabelText("Property 1 name");
+    name.focus();
+    // A prefix of owner waits instead of saving.
+    fireEvent.change(name, { target: { value: "own" } });
+
+    act(() => {
+      rerender(<>{panel("---\nstatus: draft\nowner: Ada\n---\n\nBody\n")}<TypesOnCommit /></>);
+    });
+
+    expect(parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta).toEqual({ ownx: "draft", owner: "Ada" });
+    expect(screen.getByLabelText("Property 1 name")).toBe(name);
+    expect(name).toHaveProperty("value", "ownx");
+    expect(document.activeElement).toBe(name);
+  });
+
   it("keeps a new property's value when another device adds the same name", () => {
     const doc = markdownToYDoc("---\nowner: Sam\n---\n\nBody\n");
     try {

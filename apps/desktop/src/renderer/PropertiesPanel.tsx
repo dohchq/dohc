@@ -297,9 +297,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     editableEntries(sourceEntries).map(newRow),
   );
   // The file as this panel last wrote it, until the parent passes another
-  // body. The rows hold what they wrote, so the next save starts from it.
-  const [written, setWritten] = useState<{ from: string; to: string } | null>(null);
-  if (written && written.from !== body) setWritten(null);
+  // body. The rows hold what they wrote, so the next save starts from it, and
+  // so does a refresh of the rows that lands after that save.
+  const written = useRef<{ from: string; to: string } | null>(null);
 
   useEffect(() => {
     if (!ydoc) return;
@@ -333,9 +333,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   useEffect(() => {
     // This can apply after the person's next keystroke has changed the
-    // document, so a live document's rows read the document as it is now.
+    // document, so the rows read the document as it is now: a live document,
+    // or the file as this panel last wrote it.
+    if (written.current?.from !== body) written.current = null;
     setEntries((shown) =>
-      withRead(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), shown),
+      withRead(editableEntries(ydoc ? liveEntries(ydoc) : fileEntries()), shown),
     );
     setEditRefused(false);
   }, [sourceEntries, ydoc]);
@@ -347,8 +349,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const readOnly = props.readOnly ?? false;
   const refused = locked || opening || readOnly;
 
+  function fileText(): string | null {
+    return written.current?.from === body ? written.current.to : null;
+  }
   function fileEntries(): FrontmatterEntry[] {
-    return written ? frontmatterEntries(written.to) : sourceEntries;
+    const file = fileText();
+    return file === null ? sourceEntries : frontmatterEntries(file);
   }
 
   function commit(next: Row[]) {
@@ -358,9 +364,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       if (values.size > 0 || remove.length > 0) {
         if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
         else {
-          const to = applyFrontmatter(written?.to ?? body, changedProperties(fileEntries(), values, remove), renamed);
+          const to = applyFrontmatter(fileText() ?? body, changedProperties(fileEntries(), values, remove), renamed);
           props.onChange?.(to);
-          setWritten({ from: body, to });
+          written.current = { from: body, to };
         }
       }
     } catch {
