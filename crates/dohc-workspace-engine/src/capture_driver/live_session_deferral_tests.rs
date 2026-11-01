@@ -1189,6 +1189,25 @@ async fn an_over_cap_settled_file_is_retired_once_deleted() {
     harness.close();
 }
 
+// dohc#2360. A release offers plaintext records only. A secret tip's retire
+// does not wait for a version switch to place its file.
+#[test]
+fn a_release_offers_no_secret_tips() {
+    use dohc_engine_domain::{CaptureManifestSeedEntry, SECRET_SEED_SENTINEL_SHA};
+    let entry = |path: &str, sha256: &str| CaptureManifestSeedEntry {
+        path: path.to_owned(),
+        size: 1,
+        sha256: sha256.to_owned(),
+    };
+    assert_eq!(
+        release_offer_paths(vec![
+            entry("notes/plain.md", "abc"),
+            entry("keys.secret", SECRET_SEED_SENTINEL_SHA),
+        ]),
+        ["notes/plain.md"]
+    );
+}
+
 /// The status of the version switch's write job for `path`.
 fn switch_write_status(db: &Path, path: &str) -> String {
     rusqlite::Connection::open(db)

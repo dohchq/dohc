@@ -3811,10 +3811,21 @@ async fn offer_unrecorded_after_release(
             .capture_manifest_seed(workspace_id.to_owned(), version_id)
             .await
     {
-        let paths = seed.into_iter().map(|entry| entry.path).collect();
-        let _ = files.offer_retire_candidates(paths).await;
+        let _ = files
+            .offer_retire_candidates(release_offer_paths(seed))
+            .await;
     }
     true
+}
+
+/// The seed paths a release offers as retire candidates. Secret tips stay out:
+/// no document session settles them, and their retire does not wait for a
+/// version switch to place the file.
+fn release_offer_paths(seed: Vec<dohc_engine_domain::CaptureManifestSeedEntry>) -> Vec<String> {
+    seed.into_iter()
+        .filter(|entry| entry.sha256 != dohc_engine_domain::SECRET_SEED_SENTINEL_SHA)
+        .map(|entry| entry.path)
+        .collect()
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op
