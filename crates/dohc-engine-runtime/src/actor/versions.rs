@@ -378,12 +378,13 @@ fn keep_folder_writes_the_switch_clears(
             .spec
             .job_id
             .starts_with("version-switch-secret-mat_");
+        // A held file lets a plaintext write wait only when it is that exact
+        // entry. Any hold that replay would match keeps a secret write out.
         let cleared = |inner: &str| {
-            let held = holds.entries().any(|(held, _)| held == inner);
             if secret {
-                !held && deleted.contains(inner)
+                !holds.blocks(inner) && deleted.contains(inner)
             } else {
-                held || deleted.contains(inner)
+                holds.entries().any(|(held, _)| held == inner) || deleted.contains(inner)
             }
         };
         super::materialization::folder_tree_clears(store, root_dir, path, &cleared, false)
