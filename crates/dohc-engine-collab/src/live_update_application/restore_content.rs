@@ -275,6 +275,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let outcome = store.write_with(faults, |tx| {
@@ -647,10 +648,22 @@ fn origin(
             Ok((hex_sha256(&budget.json(&bootstrap)?), sequence))
         }
         RestoreDeliveryOrigin::Owner { id } => {
-            let saved: (String,String,i64,String) = conn.query_row(
-                "SELECT evidence_digest,binding_json,local_ydoc_sequence,host_coordinate_json FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
-                params![held.namespace,id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
+            // The activation the restore recorded, even one released since.
+            let recorded = owner_activations::activation_by_id(conn, &held.namespace, id)?
+                .filter(|activation| {
+                    activation.key.workspace_id == b.workspace_id
+                        && activation.key.version_id == b.main_version_id
+                        && activation.key.object_id == b.object_id
+                        && activation.lineage_claim_id == b.lineage_claim_id
+                })
+                .ok_or(ApplicationError::Conflict)?;
+            let adopted = recorded.adoption.ok_or(ApplicationError::Conflict)?;
+            let saved = (
+                adopted.evidence_digest,
+                recorded.binding_json,
+                adopted.local_ydoc_sequence,
+                recorded.host_coordinate_json,
+            );
             let binding: LiveObjectBinding =
                 serde_json::from_str(&saved.1).map_err(|_| ApplicationError::Corrupt)?;
             let host: ApplicationHostCoordinate =

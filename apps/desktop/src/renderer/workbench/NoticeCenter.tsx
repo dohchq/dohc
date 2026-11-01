@@ -28,6 +28,7 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  busy?: boolean;
 };
 
 export type Notice = {
@@ -78,6 +79,7 @@ export interface WorkspaceErrorNotice {
   filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
+  retryBusy?: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
   additionalActionLabels?: string[];
@@ -423,12 +425,12 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
-  // The server's copy misses an edit made while live editing was off, and
-  // nothing the owner does in dohc fixes that yet, so nothing offers a Resume.
+  // The server's copy is missing an owner edit. Resume in Live documents
+  // retries it, as it does for a refused document.
   if (reason === "live-edit-unadmitted") {
     return {
-      title: "Live editing can't resume",
-      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      title: "Live editing stopped",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -623,8 +625,10 @@ export function WorkspaceErrorToast(props: {
         <button
           type="button"
           data-testid="workspace-shell-error-retry"
+          disabled={error.retryBusy}
+          aria-busy={error.retryBusy || undefined}
           onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
         >
           Try again
         </button>
@@ -739,6 +743,7 @@ export function LocalNoticeRow(props: {
                     key={action.label}
                     type="button"
                     disabled={action.disabled}
+                    aria-busy={action.busy || undefined}
                     onClick={() => props.onAction(action)}
                     className={ROW_ACTION_CLASS}
                   >
@@ -1201,6 +1206,8 @@ export function NoticeCenter(props: {
             ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
+                disabled: error.retryBusy,
+                busy: error.retryBusy,
               }]
             : []),
         ],

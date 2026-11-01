@@ -231,6 +231,7 @@ fn native_tail_record_at_depth(
     depth: u32,
 ) -> owner_outbox::OwnerOutboxEntry {
     let key = f.key.clone();
+    let path = f.binding.current_path.clone();
     let attribution = dohc_engine_domain::ChangeAttribution {
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
         on_behalf_of: local_person.map(str::to_owned),
@@ -255,9 +256,10 @@ fn native_tail_record_at_depth(
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,
-                "owner.md",
+                &path,
                 outcome.seq,
                 &update,
+                &Default::default(),
                 now,
             )
         },
@@ -267,8 +269,8 @@ fn native_tail_record_at_depth(
         .store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1",
-                [f.binding.restore_fence_generation],
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1 AND current_path=?2",
+                rusqlite::params![f.binding.restore_fence_generation, f.binding.current_path],
                 |r| r.get(0),
             )
         })
@@ -1075,6 +1077,7 @@ fn native_restore_append_identity_survives_retries_restart_and_acknowledgement()
                         "owner.md",
                         1,
                         &entry.update,
+                        &Default::default(),
                         now,
                     )
                 })
@@ -1196,6 +1199,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                 "owner.md",
                 native_sequence,
                 &entry.update,
+                &Default::default(),
                 99,
             )
         })
@@ -1267,6 +1271,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                     "owner.md",
                     outcome.seq,
                     &update,
+                    &Default::default(),
                     11,
                 )
             },
@@ -1955,7 +1960,7 @@ fn a_recovery_copy_rebuilds_the_accepted_state_once_its_document_unloaded() {
     ));
     refuse_seed(&mut f, &outbox);
     // Nothing read the frozen queue before its idle document unloaded.
-    f._owner.unregister(&mut f.store, "object").unwrap();
+    f._owner.unregister(&mut f.store, "object", Some("adoption")).unwrap();
     let available: i64 = f
         .store
         .read_with(|conn| conn.query_row("SELECT available FROM live_device_application_bindings", [], |r| r.get(0)))
@@ -2402,6 +2407,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
                 "owner.md",
                 outcome.seq,
                 &original,
+                &Default::default(),
                 11,
             )?;
             Ok::<_, crate::CollabError>(outcome)
@@ -2835,7 +2841,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     let mut selectors = vec!["owner.md".into()];
     selectors.extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
     selectors.sort();
-    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
+    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors, |_, _| {});
     f.adopt().unwrap();
     mark("fixture");
     let mut terminal = None;

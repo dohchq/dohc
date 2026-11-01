@@ -112,7 +112,7 @@ fn capture_imported(
         &mut f.store,
         "namespace",
         &f.key,
-        "owner.md",
+        &f.binding.current_path,
         max_bytes,
         &NoFaults,
         None,
@@ -171,6 +171,40 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
     )
     .unwrap();
     assert!(ack.adoption_replayed);
+}
+
+/// Opus's round 3a note: a registration that serves no activation outlives
+/// Phase A, and after a reconnect one could adopt the retired activation,
+/// committing an adoption whose answer is withheld. The replacement owner
+/// keeps the retired set, and adoption refuses before writing anything.
+#[test]
+fn a_retired_activation_never_adopts_after_a_reconnect() {
+    let mut f = imported_fixture();
+    f.cut.adoption_id = capture_imported(&mut f, 1_000_000).unwrap().activation_id;
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    f._owner.retire_activation(
+        &mut WriterDocCache::new(),
+        "namespace",
+        &coordinate,
+        &f.key,
+        &f.cut.adoption_id,
+    );
+    let mut reconnected =
+        ApplicationOwner::with_retired("workspace".into(), f._owner.retired_activations())
+            .unwrap();
+    f.handle = reconnected
+        .register(&mut f.store, "namespace".into(), coordinate, f.binding.clone())
+        .unwrap();
+    assert_eq!(f.handle.activation_id(), None, "it serves no activation");
+    let before = f.counts();
+    assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
+    assert_eq!(f.counts(), before);
+    assert_eq!(f.store.table_row_count("live_owner_activations").unwrap(), 0);
 }
 
 #[test]
@@ -891,13 +925,17 @@ fn release_is_not_blocked_by_an_adoption_in_another_lineage_or_namespace() {
         f.cut.adoption_id = captured.activation_id.clone();
         f.adopt().unwrap();
         f.store.write_with(&NoFaults, |tx| {
-            if other_lineage {
-                let lineage = dohc_engine_storage::put_binary_blob(tx, &[0, 0])?;
-                tx.execute("UPDATE live_owner_adoptions SET lineage_claim_id=?1,
-                    binding_json=json_set(binding_json,'$.lineageClaimId',?1)", [&lineage])
-            } else {
-                tx.execute("UPDATE live_owner_adoptions SET relay_database_namespace='other-namespace'", [])
-            }.map_err(write_sql)
+            tx.execute_batch("PRAGMA defer_foreign_keys=ON").map_err(write_sql)?;
+            for table in ["live_owner_adoptions", "live_owner_activations"] {
+                if other_lineage {
+                    let lineage = dohc_engine_storage::put_binary_blob(tx, &[0, 0])?;
+                    tx.execute(&format!("UPDATE {table} SET lineage_claim_id=?1,
+                        binding_json=json_set(binding_json,'$.lineageClaimId',?1)"), [&lineage])
+                } else {
+                    tx.execute(&format!("UPDATE {table} SET relay_database_namespace='other-namespace'"), [])
+                }.map_err(write_sql)?;
+            }
+            Ok::<_, ApplicationError>(())
         }).unwrap();
         release_imported_owner_activation(
             &mut f.store,

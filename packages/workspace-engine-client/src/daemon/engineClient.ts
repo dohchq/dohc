@@ -130,6 +130,18 @@ export interface LiveApplicationBootstrap {
   readonly baselineBytes: Uint8Array;
 }
 
+/** The accepted prefix a release kept: its endpoint in the lineage's accepted history. */
+export interface RetainedPrefixBody {
+  readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  readonly eventCount: number;
+  readonly historyEvidenceDigest: string;
+}
+
+/** The released prefix a successor adopts, after its predecessor, the released chain tail. */
+export interface RetainedPrefix extends RetainedPrefixBody {
+  readonly predecessorActivationId: string;
+}
+
 /** Trusted main-process evidence acquired from the authenticated relay journal. */
 export interface LiveOwnerAdoptionCut {
   readonly relayDatabaseNamespace: string;
@@ -141,6 +153,8 @@ export interface LiveOwnerAdoptionCut {
   readonly baselineRegisteredAtMs: number;
   readonly expectedLocalSequence: number;
   readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  /** A successor's prefix, with no events after it; null for a lineage's first adoption. */
+  readonly retainedPrefix: RetainedPrefix | null;
   readonly baselineBytes: Uint8Array;
   readonly events: readonly AdmittedLiveUpdate[];
 }
@@ -1041,7 +1055,9 @@ export class EngineClient implements EngineTransport {
   private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly abandonedRequestIds = new Set<number>();
-  private readonly abandonedBlobStreamIds = new Set<number>();
+  // The wire ID of the abandoned request each dropped stream belongs to, until
+  // the stream's FIN or the request's own answer, which is its last frame.
+  private readonly abandonedBlobStreams = new Map<number, number>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
   private readyResolve!: (client: EngineClient) => void;
@@ -1270,6 +1286,12 @@ export class EngineClient implements EngineTransport {
       this.pending.delete(wireId);
       if (pending && transmitted) this.abandonedRequestIds.add(wireId);
       if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      // Its streams' later frames are dropped, so their buffers leave the budget now.
+      for (const [streamId, stream] of this.blobStreams) {
+        if (stream.start.requestId !== wireId) continue;
+        this.releaseBlobStream(streamId, stream);
+        this.abandonedBlobStreams.set(streamId, wireId);
+      }
       pending?.reject(error);
       unsent?.abort(error);
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
@@ -1724,7 +1746,7 @@ export class EngineClient implements EngineTransport {
         for (const [streamId, stream] of this.blobStreams) {
           if (stream.start.requestId !== restoreOutput.wireId) continue;
           this.releaseBlobStream(streamId, stream);
-          this.abandonedBlobStreamIds.add(streamId);
+          this.abandonedBlobStreams.set(streamId, restoreOutput.wireId);
         }
       }
       this.liveUploadBytes -= charge;
@@ -2093,7 +2115,7 @@ export class EngineClient implements EngineTransport {
     // and a reuse simply starts a fresh stream bound to its own known request.
     if (
       this.blobStreams.has(start.streamId) ||
-      this.abandonedBlobStreamIds.has(start.streamId)
+      this.abandonedBlobStreams.has(start.streamId)
     ) {
       throw new BlobStreamError(
         "duplicate-blob-stream",
@@ -2121,7 +2143,7 @@ export class EngineClient implements EngineTransport {
       );
     }
     if (this.abandonedRequestIds.has(start.requestId)) {
-      this.abandonedBlobStreamIds.add(start.streamId);
+      this.abandonedBlobStreams.set(start.streamId, start.requestId);
       return;
     }
     if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
@@ -2188,8 +2210,8 @@ export class EngineClient implements EngineTransport {
   }
 
   private receiveBlobChunk(frame: Extract<Frame, { kind: "blobChunk" }>): void {
-    if (this.abandonedBlobStreamIds.has(frame.streamId)) {
-      if (frame.fin) this.abandonedBlobStreamIds.delete(frame.streamId);
+    if (this.abandonedBlobStreams.has(frame.streamId)) {
+      if (frame.fin) this.abandonedBlobStreams.delete(frame.streamId);
       return;
     }
     const stream = this.blobStreams.get(frame.streamId);
@@ -2294,7 +2316,7 @@ export class EngineClient implements EngineTransport {
   private resolveResponse(response: Response): void {
     const pending = this.pending.get(response.id);
     if (!pending) {
-      if (this.abandonedRequestIds.delete(response.id)) return;
+      if (this.forgetAbandoned(response.id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received response for unknown request ${response.id}.`,
@@ -2327,7 +2349,7 @@ export class EngineClient implements EngineTransport {
     }
     const pending = this.pending.get(id);
     if (!pending) {
-      if (this.abandonedRequestIds.delete(id)) return;
+      if (this.forgetAbandoned(id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received error for unknown request ${id}.`,
@@ -2342,6 +2364,15 @@ export class EngineClient implements EngineTransport {
       this.releaseBlobStream(streamId, stream);
     }
     pending.reject(new EngineRequestError(pending.callerId, wireError));
+  }
+
+  /** Whether `id` was abandoned. Its answer ends it, and its streams with it. */
+  private forgetAbandoned(id: number): boolean {
+    if (!this.abandonedRequestIds.delete(id)) return false;
+    for (const [streamId, requestId] of this.abandonedBlobStreams) {
+      if (requestId === id) this.abandonedBlobStreams.delete(streamId);
+    }
+    return true;
   }
 
   private releaseBlobStream(streamId: number, stream: PendingBlob): void {
@@ -2451,7 +2482,7 @@ export class EngineClient implements EngineTransport {
     }
     this.pending.clear();
     this.abandonedRequestIds.clear();
-    this.abandonedBlobStreamIds.clear();
+    this.abandonedBlobStreams.clear();
     this.blobStreams.clear();
     this.bufferedBlobBytes = 0;
     this.bufferedBlobChunks = 0;

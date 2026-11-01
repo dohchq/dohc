@@ -1,7 +1,7 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
-import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import { hasServiceActivation, readServiceActivation, serviceActivationSeed, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
@@ -14,7 +14,8 @@ import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVe
 import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
-import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
+import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource, RetainedPrefix, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -66,7 +67,7 @@ import {
   verifyJournalRow,
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
-import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
+import { adoptLiveDeliveryPrefix, bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
@@ -255,6 +256,25 @@ function ownerCutDigest(capture: OwnerCutCapture): string {
     events: events.map(event => ({ metadata: event.metadata,digest: digest(event.updateBytes) })) })));
 }
 
+/**
+ * The evidence native adoption hashes for `cut` (adoption.rs `validate_cut`).
+ * A successor's prefix is the tenth element, only when present, so a first
+ * adoption's evidence keeps its nine.
+ */
+export function ownerAdoptionCutEvidenceDigest(binding: LiveObjectBinding, cut: LiveOwnerAdoptionCut): string {
+  const evidence: unknown[] = [binding, cut.relayDatabaseNamespace, cut.sourceMomentId, cut.sourceDigest, cut.sourceByteLength,
+    cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
+    cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))];
+  const prefix = cut.retainedPrefix;
+  if (prefix) {
+    const terminal = prefix.terminalReceipt;
+    evidence.push({terminalReceipt: terminal && {deliveryId: terminal.deliveryId, updateDigest: terminal.updateDigest,
+      journalCursor: terminal.journalCursor, acceptingHostEpoch: terminal.acceptingHostEpoch},
+    eventCount: prefix.eventCount, historyEvidenceDigest: prefix.historyEvidenceDigest, predecessorActivationId: prefix.predecessorActivationId});
+  }
+  return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+}
+
 /** Internal storage consumer. Authentication and namespace provisioning belong to its caller. */
 export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
@@ -294,6 +314,17 @@ export class LiveCommittedDeliveryStore {
       source.content_kind === "text" && source.blob_sha256 === authority.projectedDigest && source.byte_length === authority.projectedLength);
     return {sourceMomentId: parseLiveUpdateIdentifier(source.moment_id,"source moment ID"), sourceDigest: authority.projectedDigest,
       sourceByteLength: authority.projectedLength, activation: null};
+  }
+  // A successor's retained prefix: the boundary its retired predecessor released, or none when that chain never adopted.
+  #retainedPrefix(source: NativeOwnerActivationSource | undefined): RetainedPrefix | null {
+    const predecessorActivationId = source?.predecessorActivationId;
+    if (predecessorActivationId === undefined) return null;
+    const row = this.#storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(this.#history.namespace, predecessorActivationId);
+    integrity(row);
+    const boundary = JSON.parse(String(row.retired_boundary_json)) as RetainedPrefixBody | null;
+    return boundary && {terminalReceipt: boundary.terminalReceipt, eventCount: boundary.eventCount,
+      historyEvidenceDigest: boundary.historyEvidenceDigest, predecessorActivationId};
   }
   // The owner row's adoption against the live document row: its baseline, its
   // source and its original binding. Live authority is the caller's to check.
@@ -428,6 +459,18 @@ export class LiveCommittedDeliveryStore {
     const row = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,row); verifyJournalRow(row);
     return row.admitted;
   }
+  /**
+   * Whether the journal admitted a seed for the pending service activation
+   * this delivery adopted for. It reads only relay rows.
+   */
+  hasPendingActivationSeed(capture: OwnerDeliveryCapture): boolean {
+    const {document} = this.#ownerDelivery(capture), {adoptionId} = this.ownerDeliveryProgress(capture);
+    return this.#storage.readTx(() => {
+      const row = readServiceActivation(this.#storage,document);
+      return serviceActivationState(row) === "pending" && row!.activation_id === adoptionId && row!.relay_database_namespace === this.#history.namespace &&
+        serviceActivationSeed(this.#storage,row!) !== null;
+    });
+  }
   acknowledgeOwnerDeliveryApplication(capture: OwnerDeliveryCapture,value: unknown): void {
     this.#acknowledgeOwnerApplication(capture,value);
   }
@@ -493,33 +536,41 @@ export class LiveCommittedDeliveryStore {
     const requestedCursor = input.throughCursor === undefined ? undefined : authorityInteger(input.throughCursor);
     const captured = this.#storage.readTx(() => {
       this.#standing(host);
-      const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
-      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
       const result = liveJournalCut(this.#storage, document);
       if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
       const authority = result.cut.authorityHistory.find(row => row.current)!;
       const authorized = input.actor ? currentLiveDocumentBinding(this.#storage,{document,actor: input.actor},this.activation) : undefined;
       if (authorized && (authorized.kind !== "current" || !isDeepStrictEqual(authorized.host,host))) throw new Error("Owner standing changed.");
-      const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
       const source = this.#ownerSource(document,adoptionId,authority);
+      // Without an actor, as when a retirement recovers an adoption whose ACK was lost, a service activation keeps the binding it was granted.
+      const binding = authorized?.kind === "current" ? authorized.binding : source.activation?.binding ?? authority.binding;
       integrity(!source.activation || source.activation.source.nativeHeadSequence === sequence);
+      const prefix = this.#retainedPrefix(source.activation?.source);
       const events: AdmittedLiveUpdate[] = [];
       let bytes = authority.baselineBytes.byteLength;
-      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
-        const row = decodeJournalRow(this.#storage.db, raw);
-        assertJournalCheckpointPosition(this.#storage.db, row);
-        verifyJournalRow(row);
-        bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
-        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
-        events.push(row.admitted);
+      if (prefix) {
+        // A successor adopts at its predecessor's released boundary; ordinary delivery then brings what the journal accepted after it.
+        // Before adoption the engine reports no cursor of its own.
+        integrity(requestedCursor === undefined || requestedCursor === 0 || requestedCursor === (prefix.terminalReceipt?.journalCursor ?? 0));
+      } else {
+        const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
+        if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
+        for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
+          const row = decodeJournalRow(this.#storage.db, raw);
+          assertJournalCheckpointPosition(this.#storage.db, row);
+          verifyJournalRow(row);
+          bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+          if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
+          events.push(row.admitted);
+        }
+        integrity((events.at(-1)?.metadata.accepted.receipt.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
       }
-      const terminal = events.at(-1)?.metadata.accepted.receipt ?? null;
-      integrity((terminal?.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
+      const terminal = prefix ? prefix.terminalReceipt : events.at(-1)?.metadata.accepted.receipt ?? null;
       const cut: LiveOwnerAdoptionCut = { relayDatabaseNamespace: this.#history.namespace, adoptionId,
         sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
         sourceByteLength: source.sourceByteLength, baselineMomentRelaySequence: authority.baselineSequence,
         baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
-        terminalReceipt: terminal, baselineBytes: new Uint8Array(authority.baselineBytes), events };
+        terminalReceipt: terminal, retainedPrefix: prefix, baselineBytes: new Uint8Array(authority.baselineBytes), events };
       const { events: _events, baselineBytes: _baseline, ...header } = cut;
       if (bytes + Buffer.byteLength(JSON.stringify({ ...header, eventCount: events.length })) + 8 > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
       return { journal: result.cut, authority: structuredClone(authority), binding: structuredClone(binding), source: { ...source }, cut };
@@ -555,16 +606,15 @@ export class LiveCommittedDeliveryStore {
     const { host,document,activation } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
     integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
-    const { baselineBytes: _baseline,events: _events,...header } = cut;
-    const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
-      cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
-      cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))])).digest("hex");
+    // The evidence digest binds a successor's prefix, so the origin keeps only its count and history.
+    const { baselineBytes: _baseline,events: _events,retainedPrefix: prefix,...header } = cut;
+    const cutEvidenceDigest = ownerAdoptionCutEvidenceDigest(capture.binding, cut);
     // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
     const originEvidenceDigest = activation === null ? cutEvidenceDigest
       : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
-    const originEventCount = cut.events.length;
-    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata),
-      initialAcceptedHistoryDigest(this.#history.namespace, document));
+    const originEventCount = prefix ? prefix.eventCount : cut.events.length;
+    const originHistoryEvidenceDigest = prefix ? prefix.historyEvidenceDigest : cut.events.reduce((previous, event, index) =>
+      nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata), initialAcceptedHistoryDigest(this.#history.namespace, document));
     const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex"),
       originEvidenceDigest, originEventCount, originHistoryEvidenceDigest,originalBinding:structuredClone(capture.binding) });
     this.#storage.tx(() => {
@@ -579,10 +629,16 @@ export class LiveCommittedDeliveryStore {
       integrity(!this.#storage.db.prepare(`SELECT 1 FROM ${BOOTSTRAPS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`).get(this.#history.namespace,...documentParams(document),host.hostId));
       const previous = this.#ownerRow(host,document);
       if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      // A service activation adopts on one host, once: it retires only there.
+      if (activation && this.#storage.db.prepare(`SELECT 1 FROM ${OWNERS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id<>?
+          AND json_extract(origin_json,'$.adoptionId')=? LIMIT 1`).get(this.#history.namespace,...documentParams(document),host.hostId,cut.adoptionId)) {
+        throw new Error("Service activation adopted on another host.");
+      }
       const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
       const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,0,charge,true);
+      if (prefix) adoptLiveDeliveryPrefix(this.#storage,document,host.hostId,cursor);
       for (const event of cut.events) {
         consumeLiveDeliveryReservation(this.#storage,document,host.hostId,event.metadata.accepted.receipt.journalCursor,1,true);
         this.#refundOwner(document.workspaceId,1);
@@ -773,6 +829,14 @@ export class LiveCommittedDeliveryStore {
           return;
         }
         if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
+        // A retired owner adoption on this host consumed the lineage's adoption reservation and covers what it applied.
+        if (this.#storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNER_HISTORY} WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...documentParams(document),host.hostId)) {
+          throw new Error("Committed delivery follows a retired owner adoption.");
+        }
+        // A service activation's lineage is delivered only through its owner adoption, and is funded only for that.
+        if (hasServiceActivation(this.#storage, document)) {
+          throw new Error("Committed delivery cannot bootstrap a service activation's lineage.");
+        }
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,

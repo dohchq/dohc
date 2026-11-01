@@ -5,7 +5,7 @@ import {type PutBlobInput, putBlobInTransaction} from "./blobs";
 // The blobs a workspace's service host proved it holds by uploading them. A
 // hosted write may name these whether or not any row it can read does. Proof
 // lives as long as the blob it names, so the workspace quota bounds both, and
-// ends early when the workspace stops being hosted.
+// ends early when the workspace stops being hosted and nothing in it settles.
 export const SERVICE_HOST_UPLOADS = "sync_relay_service_host_uploads";
 const MIGRATION = "service-host-uploads-v1";
 const SQL = `CREATE TABLE ${SERVICE_HOST_UPLOADS} (

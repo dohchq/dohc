@@ -349,11 +349,13 @@ impl LiveApplicationIngress {
     }
 
     fn adoption_reservation(&self, bytes: usize) -> Option<usize> {
-        // Charge raw upload, typed evidence, JSON parsing, and actor scratch together.
-        bytes
+        // Charge raw upload, typed evidence, JSON parsing, and actor scratch
+        // together, and at least a successor's reconstruction of its prefix.
+        let adoption = bytes
             .checked_mul(32)?
             .checked_add(self.config.application_working_reserve_bytes)?
-            .checked_add(MAX_CHUNK_BYTES * 2)
+            .checked_add(MAX_CHUNK_BYTES * 2)?;
+        Some(adoption.max(self.config.reconstruction().reservation_bytes()?))
     }
     pub(crate) fn settlement_admission(
         &self,
@@ -866,7 +868,12 @@ impl LiveApplicationIngress {
             } => LiveApplicationOperation::AdoptOwner {
                 registration_id,
                 session_id,
-                cut: adoption::decode(&upload.bytes, max_events, outbox_limits)?,
+                cut: adoption::decode(
+                    &upload.bytes,
+                    max_events,
+                    outbox_limits,
+                    self.config.reconstruction(),
+                )?,
                 max_bytes,
                 max_events,
             },

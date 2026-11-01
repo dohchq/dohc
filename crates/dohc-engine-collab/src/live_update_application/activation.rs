@@ -28,6 +28,10 @@ pub struct ImportedOwnerSource {
     pub native_head_sequence: i64,
     pub full_state_digest: String,
     pub full_state_byte_length: usize,
+    /// The released chain tail this capture follows. Absent, the descriptor
+    /// and so the activation ID are those of a capture that follows none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_activation_id: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -89,16 +93,18 @@ pub fn release_imported_owner_activation(
     session: Option<(&DocKey, &str)>,
     faults: &dyn FaultInjector,
 ) -> Result<(), ApplicationError> {
+    // A source stays while its own activation, even a released one, records it.
     let outcome = store.write_with(faults, |tx| {
         let removed: Option<String> = tx
             .query_row(
                 "DELETE FROM ydoc_owner_activation_sources AS a WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3
              AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
-             AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted
-                 WHERE adopted.workspace_id=a.workspace_id AND adopted.main_version_id=a.version_id
-                 AND adopted.object_id=a.object_id AND adopted.lineage_claim_id=a.lineage_claim_id
-                 AND adopted.relay_database_namespace=a.relay_database_namespace) RETURNING full_state_digest",
+             AND NOT EXISTS(SELECT 1 FROM live_owner_activations recorded
+                 WHERE recorded.workspace_id=a.workspace_id AND recorded.main_version_id=a.version_id
+                 AND recorded.object_id=a.object_id AND recorded.lineage_claim_id=a.lineage_claim_id
+                 AND recorded.relay_database_namespace=a.relay_database_namespace
+                 AND recorded.activation_id=a.activation_id) RETURNING full_state_digest",
                 params![
                     activation_id,
                     namespace,
@@ -135,6 +141,204 @@ pub fn release_imported_owner_activation(
         TxnOutcome::Committed(()) => Ok(()),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
+}
+
+/// The one difference a capture accepts between the file and the local
+/// Y.Doc: the file a released chain settled at its boundary B, while the
+/// Y.Doc also holds the Carried deliveries that chain left unapplied. The
+/// exact released tail keeps B and nothing applied since. Its settlement at
+/// B proves the file is accepted state at B. The chain's Carried updates,
+/// each resolved and validated, replay onto that state to exactly the local
+/// Y.Doc, with no missing dependency. The proof and the replay share one
+/// `max_bytes` budget; a note the reader built proves its file by
+/// `resolver`. A successor `activation_id` that already adopted proves its
+/// source again at the boundary its adoption recorded, whatever settled
+/// after it. Anything else refuses.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn settled_at_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    path: &str,
+    lineage: &str,
+    activation_id: Option<&str>,
+    local: &Ydoc,
+    source: (&str, &str, i64),
+    max_bytes: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
+) -> Result<(), ApplicationError> {
+    use super::settled_base::Settlement;
+    let unexplained = super::settled_base::unexplained;
+    let adopted = adopted_boundary(conn, namespace, key, lineage, activation_id)?;
+    let (tail, settlement) = match adopted {
+        Some((tail, cursor)) => (tail, Settlement::At(cursor)),
+        None => {
+            let (tail, cursor) = released_boundary(conn, namespace, key, lineage)?;
+            (tail, Settlement::LatestAt(cursor))
+        }
+    };
+    let mut budget = super::restore_content::Budget {
+        remaining: max_bytes,
+    };
+    let (state, _) = super::settled_base::settled_base(
+        conn,
+        namespace,
+        key,
+        path,
+        lineage,
+        source,
+        settlement,
+        &mut budget,
+        resolver,
+    )?;
+    for inherited in
+        super::retirement::inherited_entries(conn, namespace, key, lineage, Some(&tail))?
+    {
+        let digest = &inherited.entry.update_digest;
+        // A Carried update whose bytes are gone leaves a dependency missing.
+        let length: i64 = conn
+            .query_row(
+                "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1",
+                [digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(read_sql)?
+            .ok_or(ApplicationError::Conflict)?;
+        let length = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
+        if length > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
+        }
+        budget.charge(length)?;
+        let bytes = get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)?;
+        if hex_sha256(&bytes) != *digest {
+            return Err(ApplicationError::Corrupt);
+        }
+        state.apply(&bytes)?;
+    }
+    // A missing dependency leaves the Y.Doc unexplained by what this store
+    // holds; any other difference is unexplained by the chain.
+    if state.has_missing_updates() {
+        return Err(ApplicationError::Conflict);
+    }
+    if !crate::replay_parity::structurally_equal_v2(&state, local)? {
+        return Err(unexplained());
+    }
+    Ok(())
+}
+
+/// The journal cursor a boundary's accepted history ends at.
+fn through(boundary: &RetainedPrefixBody) -> i64 {
+    boundary
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |receipt| receipt.journal_cursor)
+}
+
+/// The exact released tail a first adoption follows, and where the boundary
+/// it kept ends: no activation holds the lineage, and its accepted history
+/// still ends at that boundary.
+fn released_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage: &str,
+) -> Result<(String, i64), ApplicationError> {
+    let unexplained = super::settled_base::unexplained;
+    if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
+        return Err(unexplained());
+    }
+    let Some(tail) = owner_activations::released_chain_tail(conn, namespace, key, lineage)? else {
+        return Err(unexplained());
+    };
+    let Some(boundary) = super::retirement::released_tail(conn, namespace, &tail)?.0 else {
+        return Err(unexplained());
+    };
+    if super::retirement::accepted_endpoint(conn, namespace, key, lineage)? != boundary {
+        return Err(unexplained());
+    }
+    Ok((tail, through(&boundary)))
+}
+
+/// The released tail an adopted successor `activation_id` follows, and where
+/// the boundary its adoption recorded ends, as that tail's release kept it.
+/// None for any other activation, or none named.
+fn adopted_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage: &str,
+    activation_id: Option<&str>,
+) -> Result<Option<(String, i64)>, ApplicationError> {
+    let Some(activation) = activation_id else {
+        return Ok(None);
+    };
+    let recorded: Option<(String, String)> = conn
+        .query_row(
+            "SELECT predecessor_activation_id,boundary_json FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND workspace_id=?3
+               AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6
+               AND predecessor_activation_id IS NOT NULL AND boundary_json IS NOT NULL",
+            params![
+                namespace,
+                activation,
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((tail, boundary)) = recorded else {
+        return Ok(None);
+    };
+    let prefix: RetainedPrefix =
+        serde_json::from_str(&boundary).map_err(|_| ApplicationError::Corrupt)?;
+    let (released, _) = super::retirement::released_tail(conn, namespace, &tail)?;
+    let boundary = prefix.body();
+    if prefix.predecessor_activation_id != tail || released.as_ref() != Some(&boundary) {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Some((tail, through(&boundary))))
+}
+
+/// [`settled_at_boundary`] for a note the reader built, once the reader could
+/// not prove its file shows the whole local Y.Doc. Where no released boundary
+/// explains the difference, the reader's refusal stands.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reader_settled_at_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    path: &str,
+    lineage: &str,
+    activation_id: Option<&str>,
+    local: &Ydoc,
+    source: (&str, &str, i64),
+    max_bytes: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
+) -> Result<(), ApplicationError> {
+    settled_at_boundary(
+        conn,
+        namespace,
+        key,
+        path,
+        lineage,
+        activation_id,
+        local,
+        source,
+        max_bytes,
+        resolver,
+    )
+    .map_err(|error| {
+        if super::settled_base::is_unexplained(&error) {
+            CollabError::MarkdownReaderUnavailable.into()
+        } else {
+            error
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -207,39 +411,61 @@ pub fn capture_imported_owner_activation(
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
+        // A reader-built file the reader cannot prove, as one settled at a
+        // released boundary before the Y.Doc's Carried edits, has no text.
         let text = if reader_source {
             let authority = serde_json::to_string(&(&namespace, &epoch, &stream))
                 .map_err(|_| ApplicationError::Corrupt)?;
-            crate::reader_snapshot::resolve(tx, key, &local, &projection,
+            match crate::reader_snapshot::resolve(tx, key, &local, &projection,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
-                }, resolver)?
-        } else { local
+                }, resolver) {
+                Ok(text) => Some(text),
+                Err(CollabError::MarkdownReaderUnavailable) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else { Some(local
             .settled_markdown_source(&projection, || {
                 text::read(tx, &source_digest)
                     .optional()
                     .map_err(read_sql)
             })?
-            .unwrap_or(projection) };
-        if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
-            return Err(invalid("ordinary activation source does not match imported document"));
+            .unwrap_or(projection)) };
+        let file = (moment.as_str(), source_digest.as_str(), source_length);
+        match text {
+            None => reader_settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?,
+            Some(text) if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest => {
+                settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?;
+            }
+            Some(_) => {}
         }
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
         if !reader_source {
             original_doc.validate_public_baseline(&baseline_bytes)?;
         }
+        // A retirement still settling this document leaves no tail to follow yet.
+        if super::retirement::retiring(tx, key)? { return Err(ApplicationError::Conflict); }
+        let predecessor_activation_id = owner_activations::capture_predecessor(tx, namespace, key, &lineage)?;
         let source = ImportedOwnerSource {version: 1, reader_source, relay_database_namespace: namespace.to_owned(),
             workspace_id: key.workspace_id.clone(), main_version_id: key.version_id.clone(), object_id: key.object_id.clone(),
             lineage_claim_id: lineage, current_path: path.to_owned(), replication_epoch: epoch, stream_identity: stream,
             committed_cursor: cursor, base_origin_id, base_origin_seq, base_relay_seq, source_moment_id: moment,
             source_digest, source_byte_length: source_length, native_head_sequence: marker.head_update_seq,
-            full_state_digest: hex_sha256(&full_state), full_state_byte_length: full_state.len()};
+            full_state_digest: hex_sha256(&full_state), full_state_byte_length: full_state.len(), predecessor_activation_id};
         let descriptor = serde_json::to_string(&source).map_err(|_| ApplicationError::Corrupt)?;
         if descriptor.len() > max_bytes.saturating_sub(baseline_bytes.len()).saturating_sub(full_state.len()) {
             return Err(ApplicationError::ConfiguredByteBudgetExceeded);
         }
         let activation_id = format!("ordinary-activation-{}",hex_sha256(descriptor.as_bytes()));
+        super::retirement::require_not_retiring(tx, namespace, &activation_id)?;
+        // Another activation holds the lineage, so this capture could never
+        // adopt. Retained, nothing would release it, and it would keep its
+        // document from parking.
+        if owner_activations::current_activation(tx, None, key, &source.lineage_claim_id)?
+            .is_some_and(|(current, _)| current.namespace != namespace || current.activation_id != activation_id) {
+            return Err(ApplicationError::Conflict);
+        }
         let retained = dohc_engine_storage::put_binary_blob(tx, &full_state)?;
         if retained != source.full_state_digest { return Err(ApplicationError::Corrupt); }
         tx.execute("INSERT INTO ydoc_owner_activation_sources(activation_id,relay_database_namespace,workspace_id,version_id,object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json)
@@ -304,23 +530,30 @@ pub fn resume_imported_owner_activation(
         let binding=LiveObjectBinding {workspace_id:key.workspace_id.clone(),main_version_id:key.version_id.clone(),
             object_id:key.object_id.clone(),lineage_claim_id:source.lineage_claim_id.clone(),current_path:path.to_owned(),
             selector_paths:vec![path.to_owned()],restore_fence_generation:1};
-        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding,resolver)?
+        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding,resolver,max_bytes)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }
-        let adopted:Option<(String,String,i64,String,String,i64)>=conn.query_row(
-            "SELECT relay_database_namespace,adoption_id,local_ydoc_sequence,source_moment_id,source_digest,source_byte_length
-             FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-            params![key.workspace_id,key.version_id,key.object_id,source.lineage_claim_id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+        // A released or retiring activation never resumes, even while its bytes still match.
+        if owner_activations::activation_by_id(conn,namespace,activation_id)?.is_some_and(|recorded|recorded.released) {
+            return Err(ApplicationError::Conflict);
+        }
+        super::retirement::require_not_retiring(conn,namespace,activation_id)?;
+        let adopted=owner_activations::current_activation(conn,None,key,&source.lineage_claim_id)?
+            .map(|(activation,adopted)|(activation.namespace,activation.activation_id,adopted.local_ydoc_sequence,
+                activation.source_moment_id,activation.source_digest,activation.source_byte_length));
         if let Some((saved_namespace,id,sequence,moment,digest,length))=adopted {
             if saved_namespace!=namespace || id!=activation_id || sequence!=source.native_head_sequence
                 || marker.head_update_seq<sequence || moment!=source.source_moment_id
                 || digest!=source.source_digest || length!=source.source_byte_length { return Err(ApplicationError::Conflict); }
         } else {
-            if marker.head_update_seq!=source.native_head_sequence { return Err(ApplicationError::Conflict); }
+            // A capture taken now would follow the same activation.
+            if marker.head_update_seq!=source.native_head_sequence || source.predecessor_activation_id
+                !=owner_activations::capture_predecessor(conn,namespace,key,&source.lineage_claim_id)? {
+                return Err(ApplicationError::Conflict);
+            }
             adoption::require_local_replay_budget(conn,key,max_bytes)?;
             let local=durable::load_doc_in(conn,key)?;
             if local.has_missing_updates() || !matches_imported_state(conn, &local, &source, max_bytes)? {

@@ -44,12 +44,44 @@ pub use activation::{
     resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
 };
 mod adoption;
+pub mod owner_activations;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+mod released_protection;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use released_protection::{
+    binding_decodes_on_this_thread, lineage_protection_checks_on_this_thread,
+    on_released_tail_reader, released_head_loads_on_this_thread,
+    released_tail_commitments_on_this_thread, released_tail_scans,
+    released_tail_scans_on_this_thread,
+};
+pub use released_protection::{
+    inspect_held, lineage_protection, protection, store_identity, Charged, ContributionArtifact,
+    ContributionLocator, HeldInspection, HeldProofAdmission, HeldProofError, HeldProofJob,
+    HeldProofLimit, HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, IncomingCoordinate,
+    LineageCoordinates, LineageProtection, PendingValidation, Preservation, PreservationFinding,
+    PreservationReason, PreservationStatus, PreservedState, ProofReader, ProofStage, ProofStop,
+    ProtectedTail, ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding,
+    ReleasedTails, RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
+    UnprovenCommitment, Validation, ValidationError, Work, HELD_PROOF_CLOSE_BOUND,
+    HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
+};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;
+mod retirement;
+pub use retirement::{
+    begin_retirement, prepare_retirement, reconcile_activation, release_activation,
+    CarriedDelivery, JournalEvidence, PreparationKey, PreparationPending, Reconciliation, Release,
+    ReleasePending, RetainedPrefix, RetainedPrefixBody, RetirementKey, RetirementPreparations,
+    RetirementScope, RetirementTarget,
+};
+mod settled_base;
+pub use settled_base::{
+    released_capture, ReleasedCapture, SettledBaseEvidence, RELEASED_CAPTURE_PROOF_BYTES,
+};
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
@@ -70,7 +102,8 @@ pub use restore_fence::{
 };
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
-    with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,
+    with_retirement_settlement, with_settlement, LiveSettlementAudit,
+    LiveSettlementPublicationState, LiveSettlementResult,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +134,9 @@ pub enum ApplicationError {
     ConfiguredByteBudgetExceeded,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
+    /// A read stopped because nobody waits for it any more.
+    #[error("the read was cancelled")]
+    Cancelled,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
     /// An accepted update still waits on a missing dependency, so the restore
@@ -921,6 +957,16 @@ pub enum ApplicationPending {
     /// terminal that materializes releases the interval, after which the same
     /// delivery applies.
     SettlementRequired,
+    /// An earlier delivery applies first: the released chain left an earlier
+    /// Carried delivery unapplied, or the current native service activation's
+    /// adoption seed has no receipt yet. Until it has one, only the seed's own
+    /// delivery and the released chain's rows through F apply. While a
+    /// released chain has no adopted successor, nothing applies.
+    DeliveryPending,
+    /// As [`DeliveryPending`](Self::DeliveryPending), but the seed's outbox is
+    /// quarantined, so delivery never retries it. The activation stays held
+    /// until recovery or retirement.
+    SeedQuarantined,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
@@ -939,6 +985,8 @@ struct Registration {
     namespace: String,
     coordinate: ApplicationHostCoordinate,
     binding: LiveObjectBinding,
+    /// The activation its binding row names; a read-only view leaves it unset.
+    activation_id: Option<String>,
     live: bool,
 }
 
@@ -960,6 +1008,7 @@ pub fn initialize_adopted_history_for_test(
             connection_id: "test-connection".into(),
         },
         binding: binding.clone(),
+        activation_id: None,
         live: true,
     };
     accepted_history::initialize(tx, &held, &baseline)
@@ -969,20 +1018,74 @@ pub fn initialize_adopted_history_for_test(
 pub struct ApplicationOwner {
     workspace_id: String,
     current: Vec<Arc<Mutex<Registration>>>,
+    retired: RetiredActivations,
+}
+
+/// The activations a retirement tore down under one owner. None registers
+/// again under it, and output tagged with one is no longer current.
+#[derive(Clone, Default)]
+pub struct RetiredActivations(Arc<Mutex<std::collections::HashSet<String>>>);
+
+impl RetiredActivations {
+    pub fn contains(&self, activation_id: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(activation_id)
+    }
+    /// Run `action` unless `activation_id` is retired, holding the set
+    /// throughout, so a retirement lands wholly before the check or after
+    /// the action. Returns false, running nothing, for a retired one.
+    pub fn unless_retired(&self, activation_id: &str, action: impl FnOnce() -> bool) -> bool {
+        let retired = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        !retired.contains(activation_id) && action()
+    }
+    /// Whether an [`unless_retired`](Self::unless_retired) action holds the set now.
+    #[cfg(feature = "test-support")]
+    pub fn fenced(&self) -> bool {
+        matches!(self.0.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
 }
 /// A captured lifetime. Replacement invalidates every clone of the old handle.
 #[derive(Clone)]
 pub struct ApplicationHandle {
     registration: Arc<Mutex<Registration>>,
+    /// Its owner's retired activations; none of them adopts through it.
+    retired: RetiredActivations,
+}
+
+impl ApplicationHandle {
+    /// The activation this registration serves: the one it resolved when it
+    /// registered, or the one its adoption made.
+    pub fn activation_id(&self) -> Option<String> {
+        self.registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .activation_id
+            .clone()
+    }
 }
 
 impl ApplicationOwner {
     pub fn new(workspace_id: String) -> Result<Self, ApplicationError> {
+        Self::with_retired(workspace_id, RetiredActivations::default())
+    }
+    /// An owner that shares `retired` with the owners it replaces, so a
+    /// retirement outlasts a host reconnect.
+    pub fn with_retired(
+        workspace_id: String,
+        retired: RetiredActivations,
+    ) -> Result<Self, ApplicationError> {
         identifier(&workspace_id, 512)?;
         Ok(Self {
             workspace_id,
             current: Vec::new(),
+            retired,
         })
+    }
+    /// The activations this owner retired, shared with its transport's output guards.
+    pub fn retired_activations(&self) -> RetiredActivations {
+        self.retired.clone()
     }
     pub fn register(
         &mut self,
@@ -990,6 +1093,28 @@ impl ApplicationOwner {
         namespace: String,
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
+    ) -> Result<ApplicationHandle, ApplicationError> {
+        self.register_with(store, namespace, coordinate, binding, None)
+    }
+    /// Register a session host for one activation. The binding row names it,
+    /// and a mismatch refuses before any existing registration is retired.
+    pub fn register_activation(
+        &mut self,
+        store: &mut EngineStore,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: String,
+    ) -> Result<ApplicationHandle, ApplicationError> {
+        self.register_with(store, namespace, coordinate, binding, Some(activation_id))
+    }
+    fn register_with(
+        &mut self,
+        store: &mut EngineStore,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
     ) -> Result<ApplicationHandle, ApplicationError> {
         if namespace.is_empty() {
             return Err(invalid("relay namespace is empty"));
@@ -1001,9 +1126,22 @@ impl ApplicationOwner {
             &binding.main_version_id,
             &binding.object_id,
         )?;
-        store.read_with(|conn| {
-            restore_fence::require_registration(conn, &key, &namespace, &binding)
+        let requested = activation_id;
+        let activation_id = store.read_with(|conn| {
+            restore_fence::require_registration(conn, &key, &namespace, &binding)?;
+            owner_activations::registration_activation(
+                conn,
+                &namespace,
+                &binding,
+                requested.as_deref(),
+            )
         })?;
+        if activation_id
+            .as_deref()
+            .is_some_and(|id| self.retired.contains(id))
+        {
+            return Err(ApplicationError::Conflict);
+        }
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
                 r.namespace != namespace || r.coordinate != coordinate
@@ -1029,6 +1167,7 @@ impl ApplicationOwner {
             namespace,
             coordinate,
             binding,
+            activation_id,
             live: true,
         };
         let outcome = store.write_with(&NoFaults, |tx| {
@@ -1040,6 +1179,15 @@ impl ApplicationOwner {
                 &registration.namespace,
                 &registration.binding,
             )?;
+            if owner_activations::registration_activation(
+                tx,
+                &registration.namespace,
+                &registration.binding,
+                requested.as_deref(),
+            )? != registration.activation_id
+            {
+                return Err(ApplicationError::Conflict);
+            }
             keep_left_recovery_checkpoints(tx, &registration)?;
             install_binding(tx, &registration)
         })?;
@@ -1048,7 +1196,10 @@ impl ApplicationOwner {
         }
         let registration = Arc::new(Mutex::new(registration));
         self.current.push(registration.clone());
-        Ok(ApplicationHandle { registration })
+        Ok(ApplicationHandle {
+            registration,
+            retired: self.retired.clone(),
+        })
     }
     /// Retire every registration, on a reconnect or a close. A hosted replica
     /// retires them in memory only, as [`release`](Self::release) does: a
@@ -1077,12 +1228,37 @@ impl ApplicationOwner {
         self.current.clear();
         Ok(())
     }
-    /// Release one document's registration. Its durable application state stays.
+    /// Refuse an unload naming `activation_id` while a registration of the
+    /// document serves another activation, or any while one serves an
+    /// activation and the unload names none.
+    pub fn require_unload_activation(
+        &self,
+        object_id: &str,
+        activation_id: Option<&str>,
+    ) -> Result<(), ApplicationError> {
+        for current in &self.current {
+            let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
+            if held.binding.object_id == object_id
+                && held
+                    .activation_id
+                    .as_deref()
+                    .is_some_and(|tagged| Some(tagged) != activation_id)
+            {
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        Ok(())
+    }
+    /// Release one document's registration, once
+    /// [`require_unload_activation`](Self::require_unload_activation) allowed
+    /// it. Its durable application state stays.
     pub fn unregister(
         &mut self,
         store: &mut EngineStore,
         object_id: &str,
+        activation_id: Option<&str>,
     ) -> Result<(), ApplicationError> {
+        self.require_unload_activation(object_id, activation_id)?;
         let mut found = None;
         for (index, current) in self.current.iter().enumerate() {
             let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
@@ -1096,6 +1272,36 @@ impl ApplicationOwner {
             self.current.remove(index);
         }
         Ok(())
+    }
+    /// Phase A of a retirement: no registration serves `activation_id` under
+    /// this owner again. Only this host's registrations tagged with it retire,
+    /// in memory; their binding rows stay. The document's cache entry goes
+    /// without a close, settlement, or materialization.
+    pub fn retire_activation(
+        &mut self,
+        cache: &mut WriterDocCache,
+        namespace: &str,
+        coordinate: &ApplicationHostCoordinate,
+        key: &DocKey,
+        activation_id: &str,
+    ) {
+        self.retired
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(activation_id.to_owned());
+        self.current.retain(|current| {
+            let mut held = current.lock().unwrap_or_else(PoisonError::into_inner);
+            let retired = held.namespace == namespace
+                && held.coordinate == *coordinate
+                && held.activation_id.as_deref() == Some(activation_id);
+            if retired {
+                held.live = false;
+            }
+            !retired
+        });
+        cache.remove(key);
+        cache.unpin(key);
     }
     /// Retire one document's registration in memory only. Its handles stop
     /// applying and settling, and its binding row stays available, so the
@@ -1144,33 +1350,86 @@ macro_rules! frozen_at_refused_seed {
     };
 }
 
-/// The settlement clause reads only the binding's current lineage: a restore
-/// replaces the lineage, and the replaced one never settles again. `?3` counts
-/// deferred updates. A refused queue waits for its owner, not for delivery,
-/// unless the owner's Try again granted its head an attempt. A lineage frozen
-/// at a refused adoption seed waits for nothing to settle.
-const UNLOAD_PENDING: &str = concat!("SELECT
+/// `?3` counts deferred updates. A refused queue waits for its owner, not for
+/// delivery, unless the owner's Try again granted its head an attempt.
+const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0
-                AND (state<>'quarantined' OR retry_delivery_id IS NOT NULL)),
-    EXISTS(SELECT 1 FROM live_device_update_applications a
-        JOIN live_device_application_bindings b
-            ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
-            AND b.main_version_id=a.main_version_id AND b.object_id=a.object_id
-            AND b.lineage_claim_id=a.lineage_claim_id
-        WHERE a.workspace_id=?1 AND a.object_id=?2 AND a.journal_cursor>max(
-            COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
-                WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
-                AND s.main_version_id=a.main_version_id AND s.object_id=a.object_id
-                AND s.lineage_claim_id=a.lineage_claim_id),0),
-            COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
-                WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
-                AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
-                AND o.lineage_claim_id=a.lineage_claim_id),0))
-            AND NOT ", frozen_at_refused_seed!("b.restore_fence_generation"), ")");
+                AND (state<>'quarantined' OR retry_delivery_id IS NOT NULL))";
+
+/// Whether the lineage `(?1..?5)` applied an update, through cursor `?6` when
+/// given, past both its last settlement and its owner boundary: the cut of
+/// its current activation, or else the furthest cut any of its activations
+/// adopted. Updates through an adoption's cut settled before it.
+const SETTLEMENT_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM live_device_update_applications a
+    WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3
+      AND a.object_id=?4 AND a.lineage_claim_id=?5 AND (?6 IS NULL OR a.journal_cursor<=?6)
+      AND a.journal_cursor>max(
+        COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
+            WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3
+              AND s.object_id=?4 AND s.lineage_claim_id=?5),0),
+        COALESCE((SELECT o.terminal_cursor FROM live_owner_activations o WHERE o.released_at_ms IS NULL
+              AND o.relay_database_namespace=?1 AND o.workspace_id=?2 AND o.main_version_id=?3
+              AND o.object_id=?4 AND o.lineage_claim_id=?5),
+            (SELECT max(o.terminal_cursor) FROM live_owner_activations o
+              WHERE o.relay_database_namespace=?1 AND o.workspace_id=?2 AND o.main_version_id=?3
+                AND o.object_id=?4 AND o.lineage_claim_id=?5),0)))";
+
+/// The one settlement-pending predicate: reconciliation, unload and parking
+/// all ask it of one lineage. A lineage frozen at a refused adoption seed
+/// still reports its unsettled work here; only unload and parking stop
+/// waiting for it.
+pub(crate) fn settlement_pending(
+    conn: &Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    through: Option<i64>,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        SETTLEMENT_PENDING,
+        params![
+            namespace,
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            lineage_claim_id,
+            through
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
+
+/// Whether the lineage `(?1..?4)` at restore generation `?5` is frozen at a
+/// refused adoption seed. Nothing applied on it since can settle, so unload
+/// and parking need not wait for its settlement.
+fn lineage_frozen_at_refused_seed(
+    conn: &Connection,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    restore_fence_generation: i64,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        concat!(
+            "SELECT EXISTS(SELECT 1 FROM (SELECT ?1 AS workspace_id,?2 AS main_version_id,?3 AS object_id,?4 AS lineage_claim_id) a WHERE ",
+            frozen_at_refused_seed!("?5"),
+            ")"
+        ),
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            lineage_claim_id,
+            restore_fence_generation
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
 
 /// Whether the document's current lineage, at its current binding's restore
 /// generation, is frozen at a refused adoption seed. Its head then holds work
@@ -1220,22 +1479,48 @@ fn pending(
     object_id: &str,
     deferred: bool,
 ) -> Result<Option<UnloadPending>, ApplicationError> {
-    let (restore, delivery, settlement): (bool, bool, bool) = conn
+    let (restore, delivery): (bool, bool) = conn
         .query_row(
             UNLOAD_PENDING,
             params![workspace_id, object_id, deferred],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_sql)?;
-    Ok(if restore {
-        Some(UnloadPending::Restore)
-    } else if delivery {
-        Some(UnloadPending::Delivery)
-    } else if settlement {
-        Some(UnloadPending::Settlement)
-    } else {
-        None
-    })
+    if restore {
+        return Ok(Some(UnloadPending::Restore));
+    }
+    if delivery {
+        return Ok(Some(UnloadPending::Delivery));
+    }
+    // Only each binding's current lineage: a restore replaces the lineage,
+    // and the replaced one never settles again. A lineage frozen at a refused
+    // adoption seed waits for nothing to settle.
+    let mut bindings = conn
+        .prepare(
+            "SELECT relay_database_namespace,main_version_id,lineage_claim_id,restore_fence_generation
+             FROM live_device_application_bindings WHERE workspace_id=?1 AND object_id=?2",
+        )
+        .map_err(read_sql)?;
+    let rows = bindings
+        .query_map(params![workspace_id, object_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(read_sql)?;
+    for row in rows {
+        let (namespace, version, lineage, generation) = row.map_err(read_sql)?;
+        let key = DocKey::new(workspace_id, version, object_id)?;
+        if settlement_pending(conn, &namespace, &key, &lineage, None)?
+            && !lineage_frozen_at_refused_seed(conn, &key, &lineage, generation)?
+        {
+            return Ok(Some(UnloadPending::Settlement));
+        }
+    }
+    Ok(None)
 }
 
 fn invalidate_registration(
@@ -1247,8 +1532,8 @@ fn invalidate_registration(
     let c = &held.coordinate;
     let b = &held.binding;
     let outcome = store.write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE live_device_application_bindings SET available=0 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND host_id=?5 AND host_epoch=?6 AND instance_id=?7 AND connection_id=?8",
-                params![held.namespace, held.workspace_id, b.main_version_id, b.object_id, c.host_id, c.host_epoch, c.instance_id, c.connection_id]).map_err(write_sql)?;
+            tx.execute("UPDATE live_device_application_bindings SET available=0 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND host_id=?5 AND host_epoch=?6 AND instance_id=?7 AND connection_id=?8 AND activation_id IS ?9",
+                params![held.namespace, held.workspace_id, b.main_version_id, b.object_id, c.host_id, c.host_epoch, c.instance_id, c.connection_id, held.activation_id]).map_err(write_sql)?;
             Ok::<_, ApplicationError>(())
         })?;
     if matches!(outcome, TxnOutcome::Committed(())) {
@@ -1301,6 +1586,25 @@ pub fn validate_application_binding(
     store.read_with(|conn| require_binding_workspace(conn, workspace_id, binding))
 }
 
+/// Refuse an activation this binding's registration cannot serve, or one
+/// `retired` holds, before retiring an existing registration. Without a
+/// name, the registration would serve the current activation.
+pub fn validate_registration_activation(
+    store: &EngineStore,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    activation_id: Option<&str>,
+    retired: &RetiredActivations,
+) -> Result<(), ApplicationError> {
+    let serves = store.read_with(|conn| {
+        owner_activations::registration_activation(conn, namespace, binding, activation_id)
+    })?;
+    if serves.is_some_and(|id| retired.contains(&id)) {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
 fn require_binding_workspace(
     tx: &Connection,
     workspace_id: &str,
@@ -1349,8 +1653,8 @@ fn keep_left_recovery_checkpoints(
 fn install_binding(tx: &Transaction<'_>, r: &Registration) -> Result<(), ApplicationError> {
     let b = &r.binding;
     let c = &r.coordinate;
-    tx.execute("INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1) ON CONFLICT(relay_database_namespace,workspace_id,main_version_id,object_id) DO UPDATE SET lineage_claim_id=excluded.lineage_claim_id,current_path=excluded.current_path,selector_paths_json=excluded.selector_paths_json,restore_fence_generation=excluded.restore_fence_generation,host_id=excluded.host_id,host_epoch=excluded.host_epoch,instance_id=excluded.instance_id,connection_id=excluded.connection_id,available=1",
-        params![r.namespace,r.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,c.host_id,c.host_epoch,c.instance_id,c.connection_id]).map_err(write_sql)?;
+    tx.execute("INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available,activation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1,?13) ON CONFLICT(relay_database_namespace,workspace_id,main_version_id,object_id) DO UPDATE SET lineage_claim_id=excluded.lineage_claim_id,current_path=excluded.current_path,selector_paths_json=excluded.selector_paths_json,restore_fence_generation=excluded.restore_fence_generation,host_id=excluded.host_id,host_epoch=excluded.host_epoch,instance_id=excluded.instance_id,connection_id=excluded.connection_id,available=1,activation_id=excluded.activation_id",
+        params![r.namespace,r.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,c.host_id,c.host_epoch,c.instance_id,c.connection_id,r.activation_id]).map_err(write_sql)?;
     Ok(())
 }
 
@@ -1503,6 +1807,62 @@ pub fn apply_committed_with_settlement_limit(
                     Vec::new(),
                 ));
             }
+            let receipt = &event.metadata.accepted.receipt;
+            let suffix =
+                retirement::retained_suffix(tx, &held.namespace, &key, &b.lineage_claim_id)?;
+            // A released chain whose successor has not adopted: anything
+            // applied now would move accepted history past the boundary the
+            // successor adopts, so every delivery waits for that adoption.
+            if suffix.is_some()
+                && owner_activations::current_activation(
+                    tx,
+                    Some(&held.namespace),
+                    &key,
+                    &b.lineage_claim_id,
+                )?
+                .is_none()
+            {
+                return Ok(ApplicationResult::Pending(
+                    ApplicationPending::DeliveryPending,
+                ));
+            }
+            match seed_hold(tx, &held.namespace, b)? {
+                // Retirement proved the seed never delivered, which stays
+                // true only while nothing applies after the cut.
+                Some(SeedHold::Abandoned) => {
+                    return Ok(ApplicationResult::Pending(
+                        ApplicationPending::ApplicabilityUnavailable,
+                    ));
+                }
+                // The released chain's journal rows through F precede the
+                // successor's seed, so they drain while it waits.
+                Some(SeedHold::Pending {
+                    delivery,
+                    digest,
+                    quarantined,
+                }) if (delivery != receipt.delivery_id || digest != receipt.update_digest)
+                    && suffix
+                        .as_ref()
+                        .is_none_or(|suffix| receipt.journal_cursor > suffix.through) =>
+                {
+                    return Ok(ApplicationResult::Pending(if quarantined {
+                        ApplicationPending::SeedQuarantined
+                    } else {
+                        ApplicationPending::DeliveryPending
+                    }));
+                }
+                _ => {}
+            }
+            // Nothing overtakes the earliest Carried delivery still unapplied,
+            // the seed included, whether or not its receipt is saved.
+            if suffix
+                .and_then(|suffix| suffix.earliest_carried)
+                .is_some_and(|earliest| receipt.journal_cursor > earliest)
+            {
+                return Ok(ApplicationResult::Pending(
+                    ApplicationPending::DeliveryPending,
+                ));
+            }
             check_provenance(tx, &held.namespace, &event)?;
             if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
                 event.metadata.accepted.receipt.journal_cursor
@@ -1563,13 +1923,13 @@ pub fn apply_committed_with_settlement_limit(
                 if owed_audits.iter().any(|retry| retry.namespace == held.namespace
                     && retry.binding.lineage_claim_id == b.lineage_claim_id
                     && retry.binding.restore_fence_generation == b.restore_fence_generation) {
-                    let count: i64 = tx.query_row("SELECT COUNT(*) FROM live_device_update_applications a \
+                    let count: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM live_device_update_applications a \
                         WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 \
                         AND a.object_id=?4 AND a.lineage_claim_id=?5 AND a.journal_cursor>COALESCE(\
                           (SELECT MAX(terminal_cursor) FROM live_device_settlements WHERE relay_database_namespace=?1 \
                            AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),\
-                          (SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 \
-                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),0)",
+                          (SELECT terminal_cursor FROM {} WHERE relay_database_namespace=?1 \
+                           AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),0)", owner_activations::CURRENT_ACTIVATIONS),
                         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0)).map_err(read_sql)?;
                     if usize::try_from(count).map_err(|_| ApplicationError::Corrupt)? >= max {
                         return Ok(ApplicationResult::Pending(ApplicationPending::SettlementRequired));
@@ -1766,14 +2126,77 @@ struct OwnDraft {
     declaration: Option<AgentDeclaration>,
 }
 
+/// What the current activation's adoption seed holds back.
+enum SeedHold {
+    /// The relay's receipt for it is outstanding. Only its own delivery, and
+    /// its released chain's retained suffix, apply.
+    Pending {
+        delivery: String,
+        digest: String,
+        quarantined: bool,
+    },
+    /// Retirement abandoned it. Nothing applies.
+    Abandoned,
+}
+
+/// Only a native service activation, which keeps its imported source,
+/// delivers its seed before applying it; a device host applies its seed first.
+fn seed_hold(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+) -> Result<Option<SeedHold>, ApplicationError> {
+    let found: Option<(String, String, bool, bool)> = conn.query_row(
+        &format!(
+            "SELECT e.delivery_id,e.update_digest,e.pending,o.state='quarantined' FROM owner_ydoc_outbox_entries e
+             JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+             JOIN {} v ON v.relay_database_namespace=?1 AND v.workspace_id=o.workspace_id
+               AND v.main_version_id=o.main_version_id AND v.object_id=o.object_id
+               AND v.lineage_claim_id=o.lineage_claim_id
+             JOIN ydoc_owner_activation_sources s ON s.activation_id=v.activation_id
+               AND s.relay_database_namespace=?1 AND s.workspace_id=o.workspace_id
+               AND s.version_id=o.main_version_id AND s.object_id=o.object_id
+               AND s.lineage_claim_id=o.lineage_claim_id
+             WHERE o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 AND o.lineage_claim_id=?5
+               AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+               AND json_extract(e.native_source_json,'$.adoptionId')=v.activation_id
+               AND (e.pending=1 OR (e.terminal_reason=?6 AND e.accepted_receipt_json IS NULL
+                 AND e.update_blob_digest IS NULL AND e.terminal_blob_digest IS NULL))",
+            owner_activations::CURRENT_ACTIVATIONS
+        ),
+        params![
+            namespace,
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.lineage_claim_id,
+            crate::owner_outbox::ACTIVATION_RELEASED
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .optional()
+    .map_err(read_sql)?;
+    Ok(found.map(|(delivery, digest, pending, quarantined)| {
+        if pending {
+            SeedHold::Pending {
+                delivery,
+                digest,
+                quarantined,
+            }
+        } else {
+            SeedHold::Abandoned
+        }
+    }))
+}
+
 fn own_draft(
     tx: &Transaction<'_>,
     key: &DocKey,
     receipt: &LiveUpdateReceipt,
 ) -> Result<Option<OwnDraft>, ApplicationError> {
-    let entry: Option<(String, Option<String>)> = tx
+    let entry: Option<(String, Option<String>, Option<String>)> = tx
         .query_row(
-            "SELECT e.native_source_json,e.agent_declaration_json FROM owner_ydoc_outbox_entries e \
+            "SELECT e.native_source_json,e.agent_declaration_json,e.accepted_receipt_json FROM owner_ydoc_outbox_entries e \
              JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
              WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
                AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
@@ -1785,13 +2208,24 @@ fn own_draft(
                 key.version_id,
                 key.object_id
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some((source, declaration)) = entry else {
+    let Some((source, declaration, saved)) = entry else {
         return Ok(None);
     };
+    // An acknowledged entry keeps the receipt the relay gave it; only that
+    // acceptance applies as this entry.
+    if let Some(saved) = saved {
+        let saved: crate::owner_outbox::OwnerDeliveryReceipt =
+            serde_json::from_str(&saved).map_err(|_| ApplicationError::Corrupt)?;
+        if saved.journal_cursor != receipt.journal_cursor
+            || saved.accepting_host_epoch != receipt.accepting_host_epoch
+        {
+            return Err(ApplicationError::Conflict);
+        }
+    }
     let source: crate::owner_outbox::OwnerOutboxNativeSource =
         serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
     Ok(Some(OwnDraft {

@@ -3003,6 +3003,7 @@ async fn unload(f: &Fixture) -> Option<UnloadPending> {
     f.owner
         .unload(
             f.binding.object_id.clone(),
+            f.handle.activation_id(),
             vec![dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap()],
             f.root.path().to_owned(),
             40,

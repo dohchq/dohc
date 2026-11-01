@@ -55,22 +55,33 @@ impl ActorHandle {
         workspace_id: String,
         leases: dohc_engine_collab::LeaseRegistry,
     ) -> Result<(), RuntimeError> {
-        let result = self
-            .run(move |store, cache| {
-                dohc_engine_sync::drain_open_document_artifacts(
-                    store,
-                    cache,
-                    &workspace_id,
-                    &leases,
-                    &NoFaults,
-                )?;
-                Ok(())
-            })
-            .await;
-        if super::pending_reader_preparation(&result).is_some() {
-            Ok(())
-        } else {
-            result
+        // A recovery that waits for released-tail validation has ended its
+        // transactions, so the actor is free while the store's worker
+        // validates; the recovery then runs again.
+        loop {
+            let (workspace_id, leases) = (workspace_id.clone(), leases.clone());
+            let result = self
+                .run(move |store, cache| {
+                    Ok(dohc_engine_sync::drain_open_document_artifacts(
+                        store,
+                        cache,
+                        &workspace_id,
+                        &leases,
+                        &NoFaults,
+                    )?
+                    .waiting)
+                })
+                .await;
+            if super::pending_reader_preparation(&result).is_some() {
+                return Ok(());
+            }
+            let Some(pending) = result? else {
+                return Ok(());
+            };
+            pending
+                .validate()
+                .await
+                .map_err(super::relay::validation_failed)?;
         }
     }
 

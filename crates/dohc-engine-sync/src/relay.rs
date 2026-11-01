@@ -58,6 +58,9 @@ pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
     /// Ops the scoped feed refused one at a time. Only a hosted push has any.
     pub hosted_refusals: Vec<HostedPushRefusal>,
+    /// Copies of retained work another device had already published. Only
+    /// the owner's log names any.
+    pub redundant_recoveries: Vec<crate::RedundantRecovery>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -159,6 +162,11 @@ pub struct HostedPassOutcome {
     /// holds each. None of them can be edited live until a later pass
     /// settles it ready.
     pub held: BTreeMap<String, crate::HostedHold>,
+    /// The path its scope names each held document at, by object id.
+    pub held_paths: BTreeMap<String, String>,
+    /// The held documents this pass moved from ready: ready in the replica
+    /// it fetched, held now. What it read bounds them.
+    pub newly_held: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,6 +782,76 @@ pub struct RelaySyncClient<T> {
     /// took yet. A pass that fails after an apply committed leaves them here:
     /// its retry finds the message stored and claims nothing again.
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
+    continuation: PullContinuation,
+}
+
+/// A pull pass that stopped for released-tail validation
+/// ([`RelayError::ValidationPending`]), kept for the request that ran it.
+/// That request's next run applies the rest of what the pass fetched, from
+/// the row that waited, with every count, change and fact the pass had
+/// gathered: a fresh pass would skip the rows already applied and report
+/// none of it. A new request starts empty.
+#[derive(Clone, Default)]
+pub struct PullContinuation(std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>);
+
+struct SuspendedPull {
+    workspace_id: String,
+    fetched: Fetched,
+    progress: ApplyProgress,
+}
+
+enum Fetched {
+    Ordinary(Box<OrdinaryFetch>),
+    Hosted(Box<HostedFetch>),
+}
+
+/// What an ordinary pass fetched and read before it applied.
+struct OrdinaryFetch {
+    identity: crate::SyncIdentity,
+    queued: Vec<ReplicationEnvelope>,
+    ordered: Vec<ReplicationEnvelope>,
+    cursor: i64,
+    fetched: usize,
+    has_more: bool,
+    bootstrap_complete: bool,
+    /// The token [`crate::cursor::begin_ordinary_pull`] gave this pass; only
+    /// its own terminal cursor finishes the pull.
+    pull_token: String,
+}
+
+/// What a hosted pass fetched and read before it applied.
+struct HostedFetch {
+    replica: crate::HostedReplicaState,
+    identity: crate::SyncIdentity,
+    backfill: Option<(String, i64)>,
+    reads: BTreeMap<String, (i64, bool)>,
+    has_more: bool,
+    fetched: usize,
+    cursor: i64,
+    queued: Vec<ReplicationEnvelope>,
+    ordered: Vec<ReplicationEnvelope>,
+}
+
+impl PullContinuation {
+    fn take(&self, workspace_id: &str) -> Option<(Fetched, ApplyProgress)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|suspended| suspended.workspace_id == workspace_id)
+            .map(|suspended| (suspended.fetched, suspended.progress))
+    }
+
+    fn keep(&self, workspace_id: &str, fetched: Fetched, progress: ApplyProgress) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SuspendedPull {
+            workspace_id: workspace_id.to_owned(),
+            fetched,
+            progress,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -928,10 +1006,17 @@ struct PendingDeferredRelayRepair {
 
 impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn new(transport: T) -> Self {
+        Self::resuming(transport, PullContinuation::default())
+    }
+
+    /// A client for one run of a request, resuming the pull pass
+    /// `continuation` kept from that request's earlier run.
+    pub fn resuming(transport: T, continuation: PullContinuation) -> Self {
         Self {
             transport,
             pending_preparation: std::sync::Mutex::new(None),
             automation_claims: std::sync::Mutex::new(Vec::new()),
+            continuation,
         }
     }
 
@@ -1745,6 +1830,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if crashes(faults, FaultPoint::SyncAfterPushBeforeCursorPersist) {
                         return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                     }
+                    if !response.redundant_recoveries.is_empty()
+                        && let TxnOutcome::Crashed { .. } =
+                            crate::ydoc_recovery::record_redundant_publication(
+                                store,
+                                workspace_id,
+                                &response.redundant_recoveries,
+                                faults,
+                            )
+                            .map_err(local)?
+                    {
+                        return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                    }
                     match crate::cursor::write_pushed_seq_with_refusals(
                         store,
                         workspace_id,
@@ -1887,6 +1984,139 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
+        let (fetch, progress) = match self.continuation.take(workspace_id) {
+            Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
+            _ => self.fetch_ordinary(store, workspace_id, faults)?,
+        };
+        let pass = match self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &fetch.identity,
+            &fetch.queued,
+            &fetch.ordered,
+            progress,
+            None,
+            faults,
+            leases,
+        )? {
+            Applying::Done(pass) => *pass,
+            Applying::Suspended(pending, progress) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Ordinary(fetch), *progress);
+                return Err(RelayError::ValidationPending(pending));
+            }
+        };
+        let OrdinaryFetch {
+            identity,
+            ordered,
+            cursor,
+            fetched,
+            has_more,
+            bootstrap_complete,
+            pull_token,
+            ..
+        } = *fetch;
+        let AppliedPass {
+            applied,
+            refused,
+            skipped,
+            conflicts_opened,
+            changed_paths,
+            refusals,
+            mut sharing_declined,
+            record_facts,
+            settlement_report_id,
+            has_more: settled_more,
+            stopped: _,
+            // Only a hosted pass has documents that are not ready, or holds
+            // one for released retained work.
+            redelivered: _,
+            released: _,
+            drain_holds: _,
+        } = pass;
+        let has_more = has_more || settled_more;
+
+        let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
+        for op in &ordered {
+            if op.origin_id != identity.origin_id {
+                pulled_foreign_max
+                    .entry(op.origin_id.clone())
+                    .and_modify(|seq| *seq = (*seq).max(op.origin_seq))
+                    .or_insert(op.origin_seq);
+            }
+        }
+        for (origin_id, max_seq) in pulled_foreign_max {
+            if max_seq > read_pushed_seq(store, workspace_id, &origin_id).map_err(local)? {
+                match write_pushed_seq(
+                    store,
+                    workspace_id,
+                    &origin_id,
+                    max_seq,
+                    faults,
+                    leases,
+                    now_ms,
+                )
+                .map_err(local)?
+                {
+                    TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
+                    TxnOutcome::Crashed { .. } => {
+                        return Err(RelayError::Local("injected-crash".to_owned()));
+                    }
+                }
+            }
+        }
+
+        let pending_cursor = RelayCursor {
+            cursor,
+            bootstrap_complete: bootstrap_complete
+                || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
+            replication_epoch: identity.replication_epoch,
+            stream_identity: identity.stream_identity,
+            settlement_report_id,
+            ordinary_pull: Some(crate::OrdinaryPullCompletion {
+                token: pull_token,
+                terminal: !has_more,
+            }),
+        };
+        if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
+            return Ok(SyncPassOutcome::CrashedAfterApply {
+                applied,
+                refused,
+                skipped,
+                conflicts_opened,
+                pending_cursor,
+                changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
+                refusals,
+                sharing_declined,
+                record_facts,
+            });
+        }
+        Ok(SyncPassOutcome::Complete {
+            owner_admission_pending: Vec::new(),
+            pushed: 0,
+            fetched,
+            has_more,
+            applied,
+            refused,
+            skipped,
+            conflicts_opened,
+            pending_cursor: Some(pending_cursor),
+            changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
+            refusals,
+            sharing_declined,
+            record_facts,
+        })
+    }
+
+    /// What an ordinary pass fetches and reads before it applies, and where
+    /// its apply starts.
+    fn fetch_ordinary(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(Box<OrdinaryFetch>, ApplyProgress), RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -1978,104 +2208,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
-        let AppliedPass {
-            applied,
-            refused,
-            skipped,
-            conflicts_opened,
-            changed_paths,
-            refusals,
-            mut sharing_declined,
-            record_facts,
-            settlement_report_id,
-            has_more: settled_more,
-            stopped: _,
-            // Only a hosted pass has documents that are not ready.
-            redelivered: _,
-        } = self.apply_pulled(
-            store,
-            cache,
-            workspace_id,
-            &identity,
-            &queued,
-            &ordered,
-            durable_origins,
-            Holding::ByOrigin,
-            faults,
-            leases,
-        )?;
-        let has_more = has_more || settled_more;
-
-        let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
-        for op in &ordered {
-            if op.origin_id != identity.origin_id {
-                pulled_foreign_max
-                    .entry(op.origin_id.clone())
-                    .and_modify(|seq| *seq = (*seq).max(op.origin_seq))
-                    .or_insert(op.origin_seq);
-            }
-        }
-        for (origin_id, max_seq) in pulled_foreign_max {
-            if max_seq > read_pushed_seq(store, workspace_id, &origin_id).map_err(local)? {
-                match write_pushed_seq(
-                    store,
-                    workspace_id,
-                    &origin_id,
-                    max_seq,
-                    faults,
-                    leases,
-                    now_ms,
-                )
-                .map_err(local)?
-                {
-                    TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
-                    TxnOutcome::Crashed { .. } => {
-                        return Err(RelayError::Local("injected-crash".to_owned()));
-                    }
-                }
-            }
-        }
-
-        let pending_cursor = RelayCursor {
-            cursor,
-            bootstrap_complete: bootstrap_complete
-                || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
-            replication_epoch: identity.replication_epoch,
-            stream_identity: identity.stream_identity,
-            settlement_report_id,
-            ordinary_pull: Some(crate::OrdinaryPullCompletion {
-                token: pull_token,
-                terminal: !has_more,
+        let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
+        Ok((
+            Box::new(OrdinaryFetch {
+                identity,
+                queued,
+                ordered,
+                cursor,
+                fetched,
+                has_more,
+                bootstrap_complete,
+                pull_token,
             }),
-        };
-        if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
-            return Ok(SyncPassOutcome::CrashedAfterApply {
-                applied,
-                refused,
-                skipped,
-                conflicts_opened,
-                pending_cursor,
-                changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
-                refusals,
-                sharing_declined,
-                record_facts,
-            });
-        }
-        Ok(SyncPassOutcome::Complete {
-            owner_admission_pending: Vec::new(),
-            pushed: 0,
-            fetched,
-            has_more,
-            applied,
-            refused,
-            skipped,
-            conflicts_opened,
-            pending_cursor: Some(pending_cursor),
-            changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
-            refusals,
-            sharing_declined,
-            record_facts,
-        })
+            progress,
+        ))
     }
 
     /// Confirm the relay holds nothing of this hosted replica's own origin
@@ -2118,15 +2264,95 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// cursor, so a row that could not apply before is tried again. A
     /// response under a new scope applies nothing; the pass adopts the scope
     /// and returns no cursor. The returned cursor stays pending until the
-    /// caller materializes the pass and commits it.
+    /// caller materializes the pass and commits it. `relay_namespace` is the
+    /// feed's, as the host's trusted configuration names it: a hosted pass
+    /// never runs without one.
     pub fn pull_hosted_workspace(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
         workspace_id: &str,
+        relay_namespace: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
+        let (fetch, progress) = match self.continuation.take(workspace_id) {
+            Some((Fetched::Hosted(fetch), progress)) => (fetch, progress),
+            _ => match self.fetch_hosted(store, workspace_id, faults)? {
+                Some(fetched) => fetched,
+                // A pass under a new scope adopts it and applies nothing.
+                None => {
+                    return Ok(HostedPassOutcome {
+                        has_more: true,
+                        ..HostedPassOutcome::default()
+                    });
+                }
+            },
+        };
+        let pass = match self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &fetch.identity,
+            &fetch.queued,
+            &fetch.ordered,
+            progress,
+            Some(relay_namespace),
+            faults,
+            leases,
+        )? {
+            Applying::Done(pass) => *pass,
+            Applying::Suspended(pending, progress) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Hosted(fetch), *progress);
+                return Err(RelayError::ValidationPending(pending));
+            }
+        };
+        let HostedFetch {
+            replica,
+            backfill,
+            mut reads,
+            has_more,
+            fetched,
+            cursor,
+            ..
+        } = *fetch;
+        // A ready document that stopped at a conflict child whose parent the
+        // feed withholds, at a move onto another spelling of a path another
+        // document holds, or at work past the retention limit, is held from
+        // there and reads its own rows.
+        for (object_id, op) in &pass.stopped {
+            if replica
+                .documents
+                .get(object_id)
+                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
+            {
+                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
+                reads.insert(object_id.clone(), (at, true));
+            }
+        }
+        self.settle_hosted_reads(
+            store,
+            workspace_id,
+            &replica,
+            backfill.is_some(),
+            reads,
+            has_more,
+            fetched,
+            cursor,
+            pass,
+        )
+    }
+
+    /// What a hosted pass fetches and reads before it applies, and where its
+    /// apply starts; `None` once a response under a new scope was adopted
+    /// instead.
+    fn fetch_hosted(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<Option<(Box<HostedFetch>, ApplyProgress)>, RelayError> {
         let replica = crate::read_hosted_replica(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::HostedRefusal(
@@ -2153,10 +2379,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .map(|(object_id, _)| object_id.clone())
             .collect();
         let backfilled = backfill.as_ref().map(|(object_id, _)| object_id.as_str());
-        let adopted = || HostedPassOutcome {
-            has_more: true,
-            ..HostedPassOutcome::default()
-        };
         let mut ops = Vec::new();
         let mut cursor = backfill
             .as_ref()
@@ -2181,7 +2403,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             else {
                 // What earlier pages fetched under the old scope is dropped
                 // too: it cannot commit.
-                return Ok(adopted());
+                return Ok(None);
             };
             fetched = fetched
                 .checked_add(response.ops.len())
@@ -2226,7 +2448,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
             )?
             else {
-                return Ok(adopted());
+                return Ok(None);
             };
             fetched = fetched
                 .checked_add(response.ops.len())
@@ -2273,40 +2495,57 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let mut pass = self.apply_pulled(
-            store,
-            cache,
-            workspace_id,
-            &identity,
-            &queued,
-            &ops,
-            durable,
-            Holding::ByDocument { behind, unready },
-            faults,
-            leases,
-        )?;
-        // A ready document that stopped at a conflict child whose parent the
-        // feed withholds, at a move onto another spelling of a path another
-        // document holds, or at work past the retention limit, is held from
-        // there and reads its own rows.
-        for (object_id, op) in &pass.stopped {
-            if replica
-                .documents
-                .get(object_id)
-                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
-            {
-                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
-                reads.insert(object_id.clone(), (at, true));
-            }
-        }
+        let progress =
+            Self::begin_apply(ops.len(), durable, Holding::ByDocument { behind, unready });
+        Ok(Some((
+            Box::new(HostedFetch {
+                replica,
+                identity,
+                backfill,
+                reads,
+                has_more,
+                fetched,
+                cursor,
+                queued,
+                ordered: ops,
+            }),
+            progress,
+        )))
+    }
+
+    /// Settle each document a hosted pass read: where its read stops, what
+    /// holds it, and the heads a pass whose commit can make it ready writes.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_hosted_reads(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        replica: &crate::HostedReplicaState,
+        backfilled: bool,
+        reads: BTreeMap<String, (i64, bool)>,
+        has_more: bool,
+        fetched: usize,
+        cursor: i64,
+        mut pass: AppliedPass,
+    ) -> Result<HostedPassOutcome, RelayError> {
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
         let redelivered = std::mem::take(&mut pass.redelivered);
-        let (reads, held, unparks, standing, heads) = store
+        let (reads, held, held_paths, newly_held, unparks, standing, heads) = store
             .read_with(|conn| {
                 // What holds each path, read once for every document.
                 let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
+                let mut held_paths = BTreeMap::new();
+                let mut newly_held = BTreeSet::new();
+                // Each held document's path, and whether this pass moved it
+                // from ready, kept as it is held.
+                let mut hold_at = |object_id: &String, document: &crate::HostedDocumentState| {
+                    held_paths.insert(object_id.clone(), document.path.clone());
+                    if document.status == crate::HostedDocumentStatus::Ready {
+                        newly_held.insert(object_id.clone());
+                    }
+                };
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
                 // comes back on the next pass.
@@ -2333,23 +2572,48 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(
-                                &mut occupancy,
-                                &object_id,
-                                op,
-                            )?),
+                            stopped: Some(match pass.released.get(&object_id) {
+                                Some(((origin_id, origin_seq), binding))
+                                    if (origin_id, *origin_seq)
+                                        == (&op.origin_id, op.origin_seq) =>
+                                {
+                                    crate::HostedHold::ReleasedLineageUnsettled {
+                                        binding: binding.clone(),
+                                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                                        binding_stale: false,
+                                    }
+                                }
+                                // A frozen drain hold stopped the read before
+                                // this op; the hold stays what it was.
+                                _ => match pass.drain_holds.get(&object_id) {
+                                    Some(hold) => hold.clone(),
+                                    None => {
+                                        crate::hosted::stopped_hold(&mut occupancy, &object_id, op)?
+                                    }
+                                },
+                            }),
                             complete: false,
                             heads_written: false,
                         },
-                        None => crate::HostedRead {
-                            cursor,
-                            stopped: None,
-                            complete: !more,
-                            heads_written: false,
-                        },
+                        // Its queued work a drain held stops it where its read is.
+                        None => {
+                            let held = pass.drain_holds.get(&object_id).cloned();
+                            crate::HostedRead {
+                                cursor,
+                                complete: !more && held.is_none(),
+                                stopped: held,
+                                heads_written: false,
+                            }
+                        }
                     };
                     match read.hold(&mut occupancy, &object_id)? {
                         Some(hold) => {
+                            let Some(document) = replica.documents.get(&object_id) else {
+                                return Err(crate::error::local_corruption(
+                                    "a hosted read has no document",
+                                ));
+                            };
+                            hold_at(&object_id, document);
                             held.insert(object_id.clone(), hold);
                         }
                         None if read.complete => {
@@ -2365,17 +2629,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     settled.insert(object_id, read);
                 }
                 // A ready document that a refusal of this pass held is held
-                // too. It reads its own rows from the next pass.
+                // too. It reads its own rows from the next pass. One the
+                // pass did not read that is held for released retained work
+                // still is, so every pass names each such hold.
                 for (object_id, document) in &replica.documents {
-                    if document.status == crate::HostedDocumentStatus::Ready
-                        && !settled.contains_key(object_id)
+                    if settled.contains_key(object_id) {
+                        continue;
+                    }
+                    let released = matches!(
+                        document.status,
+                        crate::HostedDocumentStatus::Held(
+                            crate::HostedHold::ReleasedLineageUnsettled { .. }
+                        )
+                    );
+                    if (released || document.status == crate::HostedDocumentStatus::Ready)
                         && let Some(hold) =
                             crate::hosted::recorded_hold(conn, workspace_id, object_id)?
                     {
+                        hold_at(object_id, document);
                         held.insert(object_id.clone(), hold);
                     }
                 }
-                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
+                Ok::<_, SyncError>((
+                    settled, held, held_paths, newly_held, unparks, standing, heads,
+                ))
             })
             .map_err(local)?;
         for change in standing {
@@ -2391,7 +2668,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let more = has_more
             || pass.has_more
             || unparks
-            || backfill.is_some()
+            || backfilled
             || reads
                 .values()
                 .any(|read| read.stopped.is_none() && !read.complete);
@@ -2405,7 +2682,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             pending_cursor: Some(crate::HostedCursor {
                 scope_generation: replica.scope_generation,
                 cursor_commits: replica.cursor_commits,
-                main_cursor: backfill.is_none().then_some(cursor),
+                main_cursor: (!backfilled).then_some(cursor),
                 reads,
                 settlement_report_id: pass.settlement_report_id,
             }),
@@ -2414,27 +2691,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
             held,
+            held_paths,
+            newly_held,
         })
     }
 
     /// Commit a hosted pass's cursor after its work materialized. Commits
     /// nothing when the scope moved or another pass committed since its
-    /// fetch.
+    /// fetch, or a released-lineage hold's binding went stale.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
+        tails: &dohc_engine_collab::live_update_application::ReleasedTails,
         faults: &dyn FaultInjector,
     ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
-        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
-            |error| match error {
+        crate::commit_hosted_cursor(store, workspace_id, cursor, tails, faults).map_err(|error| {
+            match error {
                 SyncError::InvalidInput {
                     reason: reason @ crate::hosted::NOT_A_HOSTED_REPLICA,
                 } => RelayError::HostedRefusal(reason),
                 error => local(error),
-            },
-        )
+            }
+        })
     }
 
     /// One page of the hosted feed under the stored scope: `workspace.init`
@@ -2507,10 +2787,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(Some(response))
     }
 
-    /// Apply a pass's ops in order and settle what they left pending. An op
-    /// that cannot apply yet holds the ops behind it; when a round makes no
-    /// progress, work held for a durable reason is retained so the cursor can
-    /// move past it, and any other hold fails the pass.
+    /// Where a pass's apply starts: open documents' artifacts still to
+    /// recover, and its `ops` ordered ops all still to apply.
+    fn begin_apply(ops: usize, durable: BTreeSet<String>, holding: Holding) -> ApplyProgress {
+        ApplyProgress {
+            pass: AppliedPass::default(),
+            recovering: true,
+            completed: Vec::new(),
+            round: (0..ops).collect(),
+            next: 0,
+            still_retryable: Vec::new(),
+            retryable_refusals: Vec::new(),
+            first: true,
+            made_progress: false,
+            held: holding.held_at_round(&durable),
+            durable,
+            holding,
+            rounds_done: false,
+            settlements: Default::default(),
+            archived_protected: Vec::new(),
+        }
+    }
+
+    /// Apply a pass's ops in order from where `progress` stands and settle
+    /// what they left pending. An op that cannot apply yet holds the ops
+    /// behind it; when a round makes no progress, work held for a durable
+    /// reason is retained so the cursor can move past it, and any other hold
+    /// fails the pass. An op that waits for released-tail validation stops
+    /// the pass with nothing of it applied, keeping the progress to go on
+    /// from, as does a ready owner settlement once the settlements before it
+    /// commit. `relay_namespace` names the feed, when the pull's trusted
+    /// configuration names one.
     #[allow(clippy::too_many_arguments)]
     fn apply_pulled(
         &self,
@@ -2520,161 +2827,210 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         queued: &[ReplicationEnvelope],
         ordered: &[ReplicationEnvelope],
-        mut durable: BTreeSet<String>,
-        mut holding: Holding,
+        mut progress: ApplyProgress,
+        relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
-    ) -> Result<AppliedPass, RelayError> {
-        let mut pass = AppliedPass::default();
-        let mut completed = Vec::new();
-        let recovered =
-            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
+    ) -> Result<Applying, RelayError> {
+        let p = &mut progress;
+        // Recovery that waits for validation leaves every drain's rows
+        // queued and runs again after it, reporting them then. The rows one
+        // that completes removes leave drain reports, so a later wait loses
+        // none of what they committed.
+        while p.recovering {
+            let recovered =
+                crate::moment_apply::open_artifacts::drain_open_document_artifacts_durably(
+                    store,
+                    cache,
+                    workspace_id,
+                    leases,
+                    faults,
+                )
                 .map_err(|error| self.local(error))?;
-        for change in recovered.changes {
-            insert_changed_path(&mut pass.changed_paths, change);
-        }
-        pass.record_facts.extend(recovered.record_facts);
-        pass.refusals.extend(recovered.refusals);
-        pass.sharing_declined.extend(recovered.sharing_declined);
-        pass.conflicts_opened += recovered.conflicts_opened;
-        let mut round = ordered.iter().collect::<Vec<_>>();
-        let mut first = true;
-        loop {
-            let mut held = match &holding {
-                Holding::ByOrigin => durable.clone(),
-                Holding::ByDocument { .. } => BTreeSet::new(),
-            };
-            let mut still_retryable = Vec::new();
-            let mut retryable_refusals = Vec::new();
-            let mut made_progress = false;
-            for op in round {
-                let key = holding.key(op);
-                if let (Holding::ByDocument { behind, .. }, Some(key)) = (&holding, &key) {
-                    let omitted = behind
-                        .get(key)
-                        .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
-                    if omitted || held.contains(key) {
-                        still_retryable.push(op);
-                        continue;
-                    }
-                }
-                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                        .map_err(|error| self.local(error))?;
-                }
-                let routed = match holding.held_before_routing(store, op)? {
-                    Some(reason) => Err(SyncError::RetryableState { reason }),
-                    None => crate::router::apply_replication_envelope_in_batch(
-                        store, cache, op, faults, leases, true,
-                    ),
-                };
-                match routed {
-                    Err(SyncError::RetryableState { reason }) => {
-                        retryable_refusals.push((op, reason));
-                        if let Some(key) = key {
-                            if retained_while_held(op, reason) {
-                                durable.insert(key.clone());
-                            }
-                            held.insert(key);
-                        }
-                        still_retryable.push(op);
-                    }
-                    Err(SyncError::SequenceGap)
-                        if matches!(holding, Holding::ByOrigin) && held.contains(&op.origin_id) =>
-                    {
-                        still_retryable.push(op);
-                    }
-                    Err(error) => return Err(self.local(error)),
-                    Ok(outcome) => {
-                        made_progress = true;
-                        completed.push(op);
-                        accumulate_pull_outcome(
-                            store,
-                            op,
-                            holding.unready(op),
-                            outcome,
-                            &mut pass.applied,
-                            &mut pass.refused,
-                            &mut pass.skipped,
-                            &mut pass.conflicts_opened,
-                            &mut pass.changed_paths,
-                            &mut pass.redelivered,
-                            &mut pass.refusals,
-                            &mut pass.sharing_declined,
-                            &mut pass.record_facts,
-                            |claims| self.keep_automation_claims(claims),
-                        )?;
-                    }
-                }
+            for change in recovered.changes {
+                insert_changed_path(&mut p.pass.changed_paths, change);
             }
-            if still_retryable.is_empty() {
+            p.pass.record_facts.extend(recovered.record_facts);
+            for refusal in recovered.refusals {
+                push_refusal_once(&mut p.pass.refusals, refusal);
+            }
+            for declined in recovered.sharing_declined {
+                push_sharing_declined_once(&mut p.pass.sharing_declined, declined);
+            }
+            p.pass.conflicts_opened += recovered.conflicts_opened;
+            p.pass.replace_drain_holds(recovered.holds);
+            match recovered.waiting {
+                Some(pending) => return Ok(Applying::Suspended(pending, Box::new(progress))),
+                None => p.recovering = false,
+            }
+        }
+        while !p.rounds_done {
+            while let Some(&index) = p.round.get(p.next) {
+                match self.apply_one(
+                    store,
+                    cache,
+                    workspace_id,
+                    &ordered[index],
+                    index,
+                    p,
+                    relay_namespace,
+                    faults,
+                    leases,
+                ) {
+                    Err(RelayError::ValidationPending(pending)) => {
+                        return Ok(Applying::Suspended(pending, Box::new(progress)));
+                    }
+                    applied => applied?,
+                }
+                p.next += 1;
+            }
+            if p.still_retryable.is_empty() {
+                p.rounds_done = true;
                 break;
             }
-            if !first && !made_progress {
+            if !p.first && !p.made_progress {
                 // Nothing left in the pass can free these, so a ready
                 // document whose op can wait indefinitely stops here.
-                for (op, reason) in &retryable_refusals {
-                    holding.stop_where_it_can_wait(op, reason);
+                for &(index, reason) in &p.retryable_refusals {
+                    p.holding.stop_where_it_can_wait(&ordered[index], reason);
                 }
                 // A document that is not ready retains nothing: its read
                 // stops at its first op still to apply, in relay order.
-                let (stopped, retained): (Vec<_>, Vec<_>) = still_retryable
+                let (stopped, retained): (Vec<_>, Vec<_>) = std::mem::take(&mut p.still_retryable)
                     .into_iter()
-                    .partition(|op| holding.unready(op).is_some());
+                    .map(|index| &ordered[index])
+                    .partition(|op| p.holding.unready(op).is_some());
                 for op in stopped {
-                    if let Some(object_id) = holding.unready(op) {
-                        pass.stopped
+                    if let Some(object_id) = p.holding.unready(op) {
+                        p.pass
+                            .stopped
                             .entry(object_id.to_owned())
                             .or_insert_with(|| op.clone());
                     }
                 }
-                if retained
-                    .iter()
-                    .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
-                {
-                    return Err(retryable_refusal(retryable_refusals.into_iter().filter(
-                        |(op, _)| {
-                            holding.unready(op).is_none()
-                                && !holding.key(op).is_some_and(|key| durable.contains(&key))
-                        },
-                    )));
+                if retained.iter().any(|op| {
+                    !p.holding
+                        .key(op)
+                        .is_some_and(|key| p.durable.contains(&key))
+                }) {
+                    return Err(retryable_refusal(
+                        p.retryable_refusals
+                            .iter()
+                            .map(|&(index, reason)| (&ordered[index], reason))
+                            .filter(|(op, _)| {
+                                p.holding.unready(op).is_none()
+                                    && !p
+                                        .holding
+                                        .key(op)
+                                        .is_some_and(|key| p.durable.contains(&key))
+                            }),
+                    ));
                 }
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                let unretained = crate::deferred::retain(store, identity, &retained, faults)?;
+                let unretained =
+                    crate::deferred::retain(store, identity, relay_namespace, &retained, faults)?;
                 for op in retained {
                     if let Some(object_id) = crate::hosted::hosted_document(op)
                         .filter(|object_id| unretained.contains(*object_id))
                     {
-                        pass.stopped
+                        p.pass
+                            .stopped
                             .entry(object_id.to_owned())
                             .or_insert_with(|| op.clone());
                     }
                 }
+                p.rounds_done = true;
                 break;
             }
-            first = false;
-            round = still_retryable;
+            p.first = false;
+            p.round = std::mem::take(&mut p.still_retryable);
+            p.retryable_refusals.clear();
+            p.next = 0;
+            p.made_progress = false;
+            p.held = p.holding.held_at_round(&p.durable);
         }
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+        // The inactive drain's refusals reach the pass as pending refusals,
+        // and the facts of rows it removes that applied to a head before
+        // their lineage was archived reach it as drain reports. A document whose
+        // archived lineage released tails protect holds for it. Each lineage
+        // is decided again here, and a hold the pass reported for one it
+        // frees is cleared.
+        let archived = match crate::ydoc_apply::drain_inactive_ydoc_updates(
+            store,
+            crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
+            &cache.released_tails(store),
+            &mut Vec::new(),
+            crate::ydoc_apply::DrainReporting::Durable,
+            faults,
+        ) {
+            Ok(drained) => {
+                p.pass.clear_freed(&drained.cleared);
+                drained.holds
+            }
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(Applying::Suspended(pending, Box::new(progress)));
+            }
+            Err(error) => return Err(self.local(error)),
+        };
+        p.pass.replace_drain_holds(
+            archived
+                .iter()
+                .map(|(object_id, hold)| (object_id.clone(), Some(hold.clone())))
+                .collect(),
+        );
+        // Each pass decides again for queued work a drain held, so its
+        // document frees once that work no longer needs holding. What those
+        // drains commit is the pass's, once: when one waits, each keeps its
+        // rows queued for the next attempt to report, and the rows they
+        // remove leave drain reports.
+        if matches!(p.holding, Holding::ByDocument { .. }) {
+            let released = crate::ydoc_apply::drain_released_holds(
+                store,
+                cache,
+                workspace_id,
+                &archived,
+                faults,
+                leases,
+            )
             .map_err(|error| self.local(error))?;
-        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+            p.pass.replace_drain_holds(released.holds);
+            for change in released.changes {
+                insert_changed_path(&mut p.pass.changed_paths, change);
+            }
+            for refusal in released.refusals {
+                push_refusal_once(&mut p.pass.refusals, refusal);
+            }
+            if let Some(pending) = released.waiting {
+                return Ok(Applying::Suspended(pending, Box::new(progress)));
+            }
+        }
+        let drained = crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
+            &cache.released_tails(store),
+            &mut p.settlements,
             faults,
             leases,
-        ) {
-            Ok(settlements) => settlements,
-            Err(error) => {
-                // A fault can report failure after the transaction commits.
-                cache.clear();
-                return Err(local(error));
-            }
-        };
-        if settlements.report_id.is_some() {
+        );
+        // A fault can report failure after the transaction commits.
+        if drained.is_err() || p.settlements.report_id.is_some() {
             cache.clear();
         }
+        match drained {
+            Ok(()) => {}
+            // The settlements before the one that waits committed into the
+            // report the pass goes on with.
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(Applying::Suspended(pending, Box::new(progress)));
+            }
+            Err(error) => return Err(local(error)),
+        }
+        let completed: Vec<&ReplicationEnvelope> =
+            p.completed.iter().map(|&index| &ordered[index]).collect();
+        let mut pass = std::mem::take(&mut p.pass);
+        let mut settlements = std::mem::take(&mut p.settlements);
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
@@ -2688,6 +3044,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             insert_changed_path(&mut pass.changed_paths, change);
         }
         pass.record_facts.extend(settlements.record_facts);
+        // What this pass's drains, and any abandoned pass's, removed from the
+        // queue reaches the pass here, under the same token.
+        let drained =
+            crate::drain_report::claim(store, workspace_id, &mut settlements.report_id, faults)
+                .map_err(local)?;
+        pass.record_facts.extend(drained.record_facts);
+        for change in drained.extras.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        for declined in drained.extras.sharing_declined {
+            push_sharing_declined_once(&mut pass.sharing_declined, declined);
+        }
+        pass.conflicts_opened = pass
+            .conflicts_opened
+            .checked_add(drained.extras.conflicts_opened)
+            .ok_or(RelayError::InvalidResponse)?;
+        // A refusal a later projection's notice clearing removed from the
+        // pending refusals still reaches the pass, once with them.
+        for refusal in drained.extras.refusals {
+            push_refusal_once(&mut pass.refusals, refusal);
+        }
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
         // pending sidecar under a unique local report token and return it here.
@@ -2700,7 +3077,182 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             push_refusal_once(&mut pass.refusals, refusal);
         }
         pass.settlement_report_id = settlements.report_id;
-        Ok(pass)
+        Ok(Applying::Done(Box::new(pass)))
+    }
+
+    /// Apply the ordered op at `index` within the round `p` stands in. One
+    /// that waits for released-tail validation applies nothing and changes
+    /// nothing of `p`.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_one(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        op: &ReplicationEnvelope,
+        index: usize,
+        p: &mut ApplyProgress,
+        relay_namespace: Option<&str>,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<(), RelayError> {
+        let key = p.holding.key(op);
+        if let (Holding::ByDocument { behind, .. }, Some(key)) = (&p.holding, &key) {
+            let omitted = behind
+                .get(key)
+                .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
+            if omitted || p.held.contains(key) {
+                p.still_retryable.push(index);
+                return Ok(());
+            }
+        }
+        // Archived work queued before the op applies first, except of a
+        // lineage an earlier op's drain found protected. A hold it leaves
+        // stands in its document's row, which the pass reads when it settles
+        // that document, and one the pass reported for a lineage it frees
+        // is cleared.
+        if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+            let drained = crate::ydoc_apply::drain_inactive_ydoc_updates(
+                store,
+                crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
+                &cache.released_tails(store),
+                &mut p.archived_protected,
+                crate::ydoc_apply::DrainReporting::Durable,
+                faults,
+            )
+            .map_err(|error| self.local(error))?;
+            p.pass.clear_freed(&drained.cleared);
+        }
+        // Retained work replays under the feed it arrived on.
+        let recorded = match &p.holding {
+            Holding::ByDocument { .. } => crate::deferred::retained_namespace(store, op)?,
+            Holding::ByOrigin => None,
+        };
+        let relay_namespace = recorded.as_ref().map_or(relay_namespace, Option::as_deref);
+        // A frozen drain hold stops its document's read before the next op
+        // it has not retained, which stays in the feed. Nothing reruns the
+        // drain for it. One of an archived lineage freezes only that lineage:
+        // ingress stops each of its updates, and the head's ops route on.
+        // r1c-2: a dependency-drain hold still routes later ops, which queue
+        // behind it unbounded until its bounded retention lands.
+        let frozen = match (&p.holding, crate::hosted::hosted_document(op)) {
+            (Holding::ByDocument { .. }, Some(object_id)) if recorded.is_none() => store
+                .read_with(|conn| -> Result<Option<crate::HostedHold>, SyncError> {
+                    let hold = crate::hosted::queued_released_hold(conn, workspace_id, object_id)?;
+                    let Some(crate::HostedHold::ReleasedLineageUnsettled {
+                        binding,
+                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                        ..
+                    }) = &hold
+                    else {
+                        return Ok(None);
+                    };
+                    if crate::ydoc_apply::names_archived_lineage(conn, binding)? {
+                        return Ok(None);
+                    }
+                    Ok(hold)
+                })
+                .map_err(local)?
+                .map(|hold| (object_id.to_owned(), hold)),
+            _ => None,
+        };
+        let routed = if let Some((object_id, hold)) = frozen {
+            p.pass.drain_holds.insert(object_id, hold);
+            Err(SyncError::RetryableState {
+                reason: crate::hosted::RELEASED_LINEAGE_UNSETTLED,
+            })
+        } else {
+            match p.holding.held_before_routing(store, op)? {
+                Some(reason) => Err(SyncError::RetryableState { reason }),
+                None => crate::router::apply_replication_envelope_in_batch(
+                    store,
+                    cache,
+                    op,
+                    faults,
+                    leases,
+                    true,
+                    relay_namespace,
+                ),
+            }
+        };
+        let held_for = match routed {
+            // Its transaction rolled back; it routes again once its
+            // validation completes.
+            Err(SyncError::ValidationPending(pending)) => {
+                return Err(RelayError::ValidationPending(pending));
+            }
+            // The read that stops at `op` holds its document with this
+            // binding.
+            Err(SyncError::ReleasedLineageUnsettled(binding)) => {
+                if let Some(object_id) = crate::hosted::hosted_document(op) {
+                    p.pass.released.insert(
+                        object_id.to_owned(),
+                        ((op.origin_id.clone(), op.origin_seq), binding),
+                    );
+                }
+                Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED)
+            }
+            // A hosted pull no configured host names a feed for cannot
+            // queue what it must; it fails rather than stop at this op on
+            // every pass.
+            Err(SyncError::RetryableState {
+                reason: reason @ crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED,
+            }) => return Err(RelayError::Local(reason.to_owned())),
+            Err(SyncError::RetryableState { reason }) => Err(reason),
+            routed => Ok(routed),
+        };
+        // A later attempt at the coordinate that answers otherwise leaves
+        // no binding for a stop there to take.
+        if !matches!(held_for, Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED))
+            && let Some(object_id) = crate::hosted::hosted_document(op)
+            && p.pass
+                .released
+                .get(object_id)
+                .is_some_and(|(coordinate, _)| {
+                    (coordinate.0.as_str(), coordinate.1) == (op.origin_id.as_str(), op.origin_seq)
+                })
+        {
+            p.pass.released.remove(object_id);
+        }
+        match held_for {
+            Err(reason) => {
+                p.retryable_refusals.push((index, reason));
+                if let Some(key) = key {
+                    if retained_while_held(op, reason) {
+                        p.durable.insert(key.clone());
+                    }
+                    p.held.insert(key);
+                }
+                p.still_retryable.push(index);
+            }
+            Ok(Err(SyncError::SequenceGap))
+                if matches!(p.holding, Holding::ByOrigin) && p.held.contains(&op.origin_id) =>
+            {
+                p.still_retryable.push(index);
+            }
+            Ok(Err(error)) => return Err(self.local(error)),
+            Ok(Ok(outcome)) => {
+                p.made_progress = true;
+                p.completed.push(index);
+                accumulate_pull_outcome(
+                    store,
+                    op,
+                    p.holding.unready(op),
+                    outcome,
+                    &mut p.pass.applied,
+                    &mut p.pass.refused,
+                    &mut p.pass.skipped,
+                    &mut p.pass.conflicts_opened,
+                    &mut p.pass.changed_paths,
+                    &mut p.pass.redelivered,
+                    &mut p.pass.refusals,
+                    &mut p.pass.sharing_declined,
+                    &mut p.pass.record_facts,
+                    |claims| self.keep_automation_claims(claims),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn commit_pull_cursor(
@@ -4656,6 +5208,15 @@ impl Holding {
             .map_err(local)
     }
 
+    /// What each round starts out holding: an origin with durable work, or
+    /// nothing for a hosted replica.
+    fn held_at_round(&self, durable: &BTreeSet<String>) -> BTreeSet<String> {
+        match self {
+            Self::ByOrigin => durable.clone(),
+            Self::ByDocument { .. } => BTreeSet::new(),
+        }
+    }
+
     /// The document of `op`, when it is a hosted document that is not ready.
     fn unready<'a>(&self, op: &'a ReplicationEnvelope) -> Option<&'a str> {
         let Self::ByDocument { unready, .. } = self else {
@@ -4665,14 +5226,21 @@ impl Holding {
     }
 
     /// Stop a ready hosted document at `op` when it can wait indefinitely:
-    /// the feed withholds its conflict parent, or it would move onto another
-    /// spelling of a path another document holds. The document is held there,
-    /// naming why, and retains nothing, as one that is not ready.
+    /// the feed withholds its conflict parent, it would move onto another
+    /// spelling of a path another document holds, its released lineage is
+    /// unsettled, or its lineage does not project its resulting head yet. The
+    /// document is held there, naming why, and retains nothing, as one that
+    /// is not ready.
+    // MERGE-REVIEW: main stops these only after a round without progress;
+    // the released-lineage and resulting-head reasons now wait for that too.
     fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
                 reason,
-                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::PATH_HELD_IN_SCOPE
+                crate::hosted::CONFLICT_PARENT_WITHHELD
+                    | crate::hosted::PATH_HELD_IN_SCOPE
+                    | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                    | "ydoc-resulting-head-pending"
             )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {
@@ -4702,6 +5270,86 @@ struct AppliedPass {
     /// conflict parent, or whose work would pass the retention limit, whose
     /// ops did not all apply, with the first that did not.
     stopped: BTreeMap<String, ReplicationEnvelope>,
+    /// Each document an op held for released retained work, with that op's
+    /// coordinate and the binding the hold names.
+    released: BTreeMap<String, ReleasedStop>,
+    /// Each document whose queued work the pass's drain held for released
+    /// retained work, with that hold.
+    drain_holds: BTreeMap<String, crate::HostedHold>,
+}
+
+impl AppliedPass {
+    /// Take what a drain decided for each document it examined: the hold it
+    /// left, or none, which clears the hold an earlier drain of the pass
+    /// reported. A document it did not examine keeps its entry.
+    fn replace_drain_holds(&mut self, examined: BTreeMap<String, Option<crate::HostedHold>>) {
+        for (object_id, hold) in examined {
+            match hold {
+                Some(hold) => self.drain_holds.insert(object_id, hold),
+                None => self.drain_holds.remove(&object_id),
+            };
+        }
+    }
+
+    /// Clear each hold an earlier drain reported that names an archived
+    /// lineage `cleared` says a later one took every queued row of, by
+    /// object id. A hold of another lineage stands.
+    fn clear_freed(&mut self, cleared: &BTreeMap<String, BTreeSet<String>>) {
+        self.drain_holds.retain(|object_id, hold| {
+            !matches!(
+                hold,
+                crate::HostedHold::ReleasedLineageUnsettled { binding, .. }
+                    if cleared
+                        .get(object_id)
+                        .is_some_and(|lineages| lineages.contains(&binding.lineage_claim_id))
+            )
+        });
+    }
+}
+
+type ReleasedStop = (
+    (String, i64),
+    Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
+);
+
+/// Where a pass's apply stands. Ops are named by their index in the pass's
+/// ordered ops.
+struct ApplyProgress {
+    pass: AppliedPass,
+    /// Open documents' artifacts are still to recover into the pass.
+    recovering: bool,
+    completed: Vec<usize>,
+    /// The round being applied, and how far into it.
+    round: Vec<usize>,
+    next: usize,
+    /// What the round held for the next one.
+    still_retryable: Vec<usize>,
+    /// Why each op the round held could not apply.
+    retryable_refusals: Vec<(usize, &'static str)>,
+    first: bool,
+    made_progress: bool,
+    held: BTreeSet<String>,
+    durable: BTreeSet<String>,
+    holding: Holding,
+    /// Every round ran; only settling what the ops left pending remains.
+    rounds_done: bool,
+    /// The owner settlements the pass reports so far.
+    settlements: crate::moment_apply::pending::PendingSettlementReport,
+    /// The archived lineages, as `[version, object, lineage]`, that the
+    /// inactive drains before its ops found released tails protect. Those
+    /// drains pass over them; the end of the pass decides them again.
+    archived_protected: Vec<[String; 3]>,
+}
+
+/// What applying a pass came to.
+enum Applying {
+    Done(Box<AppliedPass>),
+    /// An op or owner settlement waits for released-tail validation; nothing
+    /// of it applied.
+    Suspended(
+        Box<dohc_engine_collab::live_update_application::PendingValidation>,
+        Box<ApplyProgress>,
+    ),
 }
 
 /// The documents a scope names, each once, with its path.
@@ -4806,6 +5454,11 @@ fn validate_push_response(
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
     crate::hosted::validate_push_refusals(response, batch, hosted)?;
+    crate::ydoc_recovery::validate_redundant_recoveries(
+        &response.redundant_recoveries,
+        batch,
+        hosted,
+    )?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -4834,6 +5487,7 @@ pub(crate) fn validate_share_push_response(
     if push.accepted != batch_len
         || push.inserted.checked_add(push.skipped) != Some(push.accepted)
         || !push.hosted_refusals.is_empty()
+        || !push.redundant_recoveries.is_empty()
     {
         return Err(RelayError::InvalidResponse);
     }
@@ -4843,6 +5497,7 @@ pub(crate) fn validate_share_push_response(
 pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
         || !response.hosted_refusals.is_empty()
+        || !response.redundant_recoveries.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
@@ -6623,13 +7278,14 @@ fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Resu
 // the same way, so a relay operation refused for contention reaches the wire
 // as the retryable class no matter which taxonomy it came through.
 fn local(error: SyncError) -> RelayError {
-    if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
-        return RelayError::StoreBusy;
+    match error {
+        SyncError::Storage(StorageError::FileLocked) => RelayError::StoreBusy,
+        SyncError::ValidationPending(pending) => RelayError::ValidationPending(pending),
+        error if matches!(error.original(), SyncError::RetryableState { .. }) => {
+            RelayError::Local(format!("{}: {error}", error.code()))
+        }
+        error => RelayError::Local(error.code().to_owned()),
     }
-    if matches!(error, SyncError::RetryableState { .. }) {
-        return RelayError::Local(format!("{}: {error}", error.code()));
-    }
-    RelayError::Local(error.code().to_owned())
 }
 
 fn retryable_refusal<'a>(

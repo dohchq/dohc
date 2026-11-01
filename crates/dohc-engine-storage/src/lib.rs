@@ -63,7 +63,7 @@ pub use blob::{
     get_binary_blob, has_binary_blob, hex, hex_sha256, put_binary_blob, put_binary_blob_verified,
     put_binary_blob_with_sha,
 };
-pub use checkpoint::CheckpointWait;
+pub use checkpoint::{CheckpointWait, HeldReader, WalPressure};
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};

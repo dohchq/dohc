@@ -198,7 +198,17 @@ pub(super) fn applied_tip(
     let b = &held.binding;
     let origin = match &input.origin {
         RestoreDeliveryOrigin::Bootstrap { id } => {
-            if adoption::read_origin(conn, held)?.is_some() {
+            // A lineage an owner adopted never restores from a bootstrap,
+            // even once its activation is released.
+            let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+            if owner_activations::lineage_origin_id(
+                conn,
+                Some(&held.namespace),
+                &key,
+                &b.lineage_claim_id,
+            )?
+            .is_some()
+            {
                 return Err(ApplicationError::Conflict);
             }
             let (bootstrap, binding, coordinate, sequence) =
@@ -212,13 +222,18 @@ pub(super) fn applied_tip(
         }
         RestoreDeliveryOrigin::Owner { id } => {
             let origin = adoption::read_origin(conn, held)?.ok_or(ApplicationError::Conflict)?;
-            let (saved_id, host): (String, String) = conn.query_row(
-                "SELECT adoption_id,host_coordinate_json FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-                params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-                |r| Ok((r.get(0)?,r.get(1)?)),
-            ).map_err(read_sql)?;
+            let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+            let (current, _) = owner_activations::current_activation(
+                conn,
+                Some(&held.namespace),
+                &key,
+                &b.lineage_claim_id,
+            )?
+            .ok_or(ApplicationError::Corrupt)?;
+            let saved_id = current.activation_id;
             let host: ApplicationHostCoordinate =
-                serde_json::from_str(&host).map_err(|_| ApplicationError::Corrupt)?;
+                serde_json::from_str(&current.host_coordinate_json)
+                    .map_err(|_| ApplicationError::Corrupt)?;
             host.validate()?;
             if saved_id != *id || host.host_id != input.host_id {
                 return Err(ApplicationError::Conflict);
@@ -307,6 +322,7 @@ impl ApplicationOwner {
             namespace: input.relay_database_namespace.clone(),
             coordinate,
             binding: b.clone(),
+            activation_id: None,
             live: true,
         };
         let selected = store.read_with(|conn| {
@@ -366,6 +382,11 @@ impl ApplicationOwner {
             let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
             require_hosted_ready(tx, &key)?;
             require_registration(tx,&key,&held.namespace,b)?;
+            // A restore moves the generation a retirement's key names, so a
+            // retiring activation keeps it waiting until its release.
+            if retirement::retiring(tx, &key)? {
+                return Err(ApplicationError::Conflict);
+            }
             let previous=restore_resume::generation(tx,&held)?.map(|receipt|receipt.operation_id);
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
                 binding == *b && available && (coordinate == held.coordinate

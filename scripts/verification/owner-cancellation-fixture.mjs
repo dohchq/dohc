@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // The owner implementations are copied unchanged. External build, Git, Docker,
 // YAML, and doctor boundaries use offline adapters; no service or build starts.
@@ -8,7 +9,8 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "queue.mjs", "queue-supervisor.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs", "flaky.mjs"]) {
+  copyFlakyFixture(root, sourceRoot);
+  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "queue.mjs", "queue-supervisor.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }

@@ -126,7 +126,8 @@ it.each([7, undefined])("answers DELETE with a retryable restore-in-progress con
     history: f.history,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: ownerUserId}),
     host: {ready: () => false, reconcile() {}, unavailable: false, blocked: () => undefined, holdReason: () => undefined, unblock: () => false, diverged: () => false,
-      keptEdits: {page: () => Promise.reject(new Error("unexpected")), retry: async () => "unavailable" as const, copied: async () => {}}}});
+      keptEdits: {page: () => Promise.reject(new Error("unexpected")), retry: async () => "unavailable" as const, copied: async () => {}},
+      stop: async <T>(_document: unknown, fence: () => T) => fence()}});
   const response = await handle(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {
     method: "DELETE", headers: {authorization: "Bearer owner", "content-type": "application/json"},
     body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration}),

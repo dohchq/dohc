@@ -140,7 +140,7 @@ it("finishes owner handoff before a response can release the next queued native 
     f.owner.finishHandoff.mockImplementationOnce(async () => {entered.resolve(); await release.promise;});
     const adoption = f.peer.sendLiveOwnerAdoption({...f.next(), sessionId: "9"}, {
       relayDatabaseNamespace: "namespace", adoptionId: "adoption", sourceMomentId: "source", sourceDigest: "b".repeat(64), sourceByteLength: 0,
-      baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null,
+      baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, retainedPrefix: null,
       baselineBytes: Uint8Array.of(0, 0), events: [],
     }, {maxBytes: 1_000_000, maxEvents: 10});
     const read = f.peer.readNextLiveApplied(f.next(), origin, 1_000_000);

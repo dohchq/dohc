@@ -1,4 +1,4 @@
-import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
+import {nativeSettlementId, prepareHostedSettlements, settlementRecordDigest} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 import {parseRestoreAdmission, verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
@@ -2200,16 +2200,19 @@ function restorePublication(f: Awaited<ReturnType<typeof admittedRestoreFixture>
     f.storage.putBlob({workspaceId: document.workspaceId, sha256, content, createdAtMs: 1});
   const prior = previous === 0 ? null : f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(previous)!;
   const namespace = String(row.relay_database_namespace), key = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
-  const record = {settlementId: `hosted-${id}`, relayDatabaseNamespace: namespace, binding, previousCursor: previous, terminalCursor: terminal,
-    acceptedEventCount: Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0),
+  const acceptedEventCount = Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0);
+  const record = {settlementId: "", relayDatabaseNamespace: namespace, binding,
+    hostCoordinate: {hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"}, previousCursor: previous, terminalCursor: terminal,
+    previousYdocSequence: 0, localYdocSequence: 1, applicationCount: acceptedEventCount, nativeIntervalDigest: hash(Buffer.from(`native-interval-${id}`)), acceptedEventCount,
     acceptedIntervalDigest: jsonHash(["live-settlement-accepted-interval-v1", key,
       [Number(prior?.accepted_event_count ?? 0), previous, prior?.accepted_evidence_digest ?? initialAcceptedHistoryDigest(namespace, document)],
       [Number(row.accepted_event_count), terminal, row.accepted_evidence_digest]]),
-    momentId: id, markdownDigest, acceptedStateBlobSha256: stateDigest};
+    momentId: id, markdownDigest, sourceStateVectorDigest: hash(Buffer.from(`state-vector-${id}`)), acceptedStateBlobSha256: stateDigest, recordedAtMs: 1, restoreOperationId: null};
+  record.settlementId = nativeSettlementId(record);
   const payload = {momentId: id, objectId: document.objectId, versionId: "main", path: binding.currentPath, operation: "write",
     payloadBeforePath: binding.currentPath, payloadAfterPath: binding.currentPath, payloadBeforeContentKind: "text", payloadAfterContentKind: "text",
     payloadBeforeBlobSha256: before, payloadAfterBlobSha256: markdownDigest, payloadAfterByteLength: markdown.byteLength, recordedAtMs: 1,
-    settlementReference: {formatVersion: 1, recordDigest: hash(Buffer.from(stableJsonStringify(record))), record}};
+    settlementReference: {formatVersion: 1, recordDigest: settlementRecordDigest(record), record}};
   return {record, payload, markdownDigest, op: {originSeq, opKind: "moment.append", payloadJson: stableJsonStringify(payload), recordedAtMs: 1}};
 }
 
