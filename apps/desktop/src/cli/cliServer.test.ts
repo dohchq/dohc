@@ -5853,4 +5853,26 @@ describe("resolveCliWorkspace", () => {
       await rm(scratch, { recursive: true, force: true });
     }
   });
+
+  it("does not find a workspace through a second folder entry in other capitals, as a mount of its folder is", async (ctx) => {
+    const scratch = await realpath(await createTestScratch("dohc-cli-mounted-"));
+    try {
+      const notes: CliRegistryWorkspace = { workspaceId: "ws-notes", rootPath: join(scratch, "Notes") };
+      await mkdir(join(notes.rootPath, "docs"), { recursive: true });
+      const mounted = join(scratch, "notes");
+      const second = await mkdir(mounted).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      });
+      // A disk that ignores capitals has only one folder here.
+      if (!second) ctx.skip();
+      // notes is Notes on disk, but the scratch folder lists both names, and a
+      // mount inside one of them may be missing in the other.
+      folderAlias.current = { spelled: mounted, stored: notes.rootPath };
+      await expect(resolveCliWorkspace(join(mounted, "docs"), [notes])).resolves.toBeNull();
+    } finally {
+      folderAlias.current = null;
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
 });

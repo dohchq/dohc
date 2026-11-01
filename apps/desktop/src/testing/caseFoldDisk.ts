@@ -7,6 +7,8 @@ export interface CaseFoldDisk {
   // Linux realpath: the path as given, capitals and all, when it exists.
   realPath(path: string): string | null;
   kindOf(path: string): "file" | "folder" | null;
+  // The names a folder lists, in the capitals they were made with.
+  names(path: string): string[] | null;
   // A bigint stat, one per stored entry whatever spelling reaches it.
   stat(path: string): FolderStat;
 }
@@ -32,15 +34,17 @@ export function caseFoldDisk(
   }
   const inodes = new Map([...kinds.keys()].map((path, index) => [path, BigInt(index + 1)]));
 
+  const namesIn = (folder: string) => [...kinds.keys()]
+    .filter((candidate) => candidate !== "/" && posix.dirname(candidate) === folder)
+    .map((candidate) => posix.basename(candidate));
+
   function stored(path: string): string | null {
     const spelled = path.replaceAll("\\", "/");
     if (!spelled.startsWith("/")) return null;
     let at = "/";
     for (const name of spelled.split("/").filter(Boolean)) {
       if (kinds.get(at) !== "folder") return null;
-      const names = [...kinds.keys()]
-        .filter((candidate) => candidate !== "/" && posix.dirname(candidate) === at)
-        .map((candidate) => posix.basename(candidate));
+      const names = namesIn(at);
       const found = names.includes(name)
         ? name
         : options.foldsCase(at) ? names.find((candidate) => candidate.toLowerCase() === name.toLowerCase()) : undefined;
@@ -53,6 +57,10 @@ export function caseFoldDisk(
   return {
     stored,
     realPath: (path) => stored(path) === null ? null : posix.normalize(path.replaceAll("\\", "/")).replace(/(.)\/$/u, "$1"),
+    names: (path) => {
+      const at = stored(path);
+      return at !== null && kinds.get(at) === "folder" ? namesIn(at) : null;
+    },
     kindOf: (path) => {
       const at = stored(path);
       return at === null ? null : kinds.get(at) ?? null;

@@ -22,6 +22,8 @@ function disk(
     kindOf: (path) => entries[path] ?? null,
     hasManifest: (folder) => manifests.includes(folder),
     folderIdentity: (path) => entries[path] === "folder" ? { dev: 1n, ino: inodes.get(path) ?? 0n } : null,
+    // realPath answers with stored names, so routing never lists a folder.
+    folderNames: () => null,
   };
 }
 
@@ -34,6 +36,7 @@ function linuxDisk(entries: Record<string, "file" | "folder">, manifests: string
     kindOf: disk.kindOf,
     hasManifest: (folder) => manifests.some((manifest) => disk.stored(manifest) === disk.stored(folder)),
     folderIdentity: (path) => knowsInodes ? folderIdentitySync(path, disk.stat) : null,
+    folderNames: disk.names,
   };
 }
 
@@ -170,6 +173,7 @@ describe("resolveOpenPathTarget on a Linux folder that ignores capitals", () => 
         kindOf: mounted.kindOf,
         hasManifest: () => false,
         folderIdentity: (path) => folderIdentitySync(path, mounted.stat),
+        folderNames: mounted.names,
       },
     })).toEqual({ kind: "folder", rootPath: "/view/notes/docs", hasManifest: false, file: "a.md" });
   });

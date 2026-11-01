@@ -1305,23 +1305,39 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
   });
 
   it("keeps a block when the disk starts or stops giving the folder's identity", async () => {
+    const blocked = "This folder is blocked by failed cleanup for workspace first.";
     for (const knownAtReservation of [false, true]) {
-      const { owner, add, probe } = linuxOwner(knownAtReservation);
-      const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/srv/Notes" });
-      probe.knows = !knownAtReservation;
-      expect(() => owner.reserveBinding({ workspaceId: "second", rootPath: "/srv/Notes" }))
-        .toThrow("This folder is blocked by failed cleanup for workspace first.");
-      let finishCleanup!: () => void;
-      const finish = new Promise<void>((resolve) => {
-        finishCleanup = resolve;
-      });
-      const releasing = owner.releaseReservation(reservation, () => finish);
-      add("second", "/srv/Notes");
-      expect(() => owner.acquire("second")).toThrow("This folder is blocked by failed cleanup for workspace first.");
-      finishCleanup();
-      await releasing;
-      owner.acquire("second").release();
-      await owner.close();
+      for (const cleanupFails of [false, true]) {
+        const { owner, add, probe } = linuxOwner(knownAtReservation);
+        const reservation = owner.reserveBinding({ workspaceId: "first", rootPath: "/srv/Notes" });
+        probe.knows = !knownAtReservation;
+        expect(() => owner.reserveBinding({ workspaceId: "second", rootPath: "/srv/Notes" })).toThrow(blocked);
+        let cleanupStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          cleanupStarted = resolve;
+        });
+        let finishCleanup!: () => void;
+        const finish = new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        });
+        const releasing = owner.releaseReservation(reservation, async () => {
+          cleanupStarted();
+          await finish;
+          if (cleanupFails) throw new Error("cleanup failed");
+        });
+        await started;
+        add("second", "/srv/Notes");
+        expect(() => owner.acquire("second")).toThrow(blocked);
+        finishCleanup();
+        if (cleanupFails) {
+          await expect(releasing).rejects.toThrow("cleanup failed");
+          expect(() => owner.acquire("second")).toThrow(blocked);
+          continue;
+        }
+        await releasing;
+        owner.acquire("second").release();
+        await owner.close();
+      }
     }
   });
 

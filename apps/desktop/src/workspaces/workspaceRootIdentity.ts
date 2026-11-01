@@ -1,6 +1,6 @@
-import { statSync, type BigIntStats } from "node:fs";
-import { stat } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { readdirSync, statSync, type BigIntStats } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { dirname, join, normalize, parse, relative, sep } from "node:path";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { sameFsEntry, type FsEntryIdentity } from "@dohc/workspace-core";
 import { isInside } from "../security/pathContainment";
@@ -75,9 +75,26 @@ function samePath(left: string, right: string): boolean {
   return isInside(left, right) && isInside(right, left);
 }
 
-// The roots spelled like `at` in other capitals. Only a stat can say
-// whether one of them is the folder at `at`.
-function capitalAliases<Entry>(
+/** The names a folder lists, or null when it cannot be read. */
+export function folderNamesSync(path: string): string[] | null {
+  try {
+    return readdirSync(path);
+  } catch {
+    return null;
+  }
+}
+
+export async function folderNames(path: string): Promise<string[] | null> {
+  try {
+    return await readdir(path);
+  } catch {
+    return null;
+  }
+}
+
+// The roots `at` may be another spelling of: the same names up to capitals,
+// Unicode form and trailing dots or spaces. Only the disk can say if one is.
+function respelledRoots<Entry>(
   roots: readonly RootCandidate<Entry>[],
   keys: readonly string[],
   at: string,
@@ -86,56 +103,92 @@ function capitalAliases<Entry>(
   return roots.filter((_, index) => keys[index] === key);
 }
 
-// Two roots that are one folder match nothing.
-function soleMatch<Entry>(matches: readonly RootCandidate<Entry>[], anchor: string): RootMatch<Entry> | null {
-  const [match] = matches;
-  return matches.length === 1 && match ? { entry: match.entry, root: match.path, anchor } : null;
+interface Respelling {
+  // The folder that holds the name, in the anchor's spelling.
+  folder: string;
+  names: readonly [string, string];
+}
+
+// Each name the anchor spells another way than the root, or null when the
+// two paths do not line up name by name.
+function respellings(anchor: string, root: string): Respelling[] | null {
+  const from = normalize(anchor);
+  const to = normalize(root);
+  const top = parse(from).root;
+  if (parse(to).root !== top) return null;
+  const fromNames = from.slice(top.length).split(sep).filter(Boolean);
+  const toNames = to.slice(top.length).split(sep).filter(Boolean);
+  if (fromNames.length !== toNames.length) return null;
+  return fromNames.flatMap((name, index) => {
+    const other = toNames[index] ?? name;
+    return name === other ? [] : [{ folder: join(top, ...fromNames.slice(0, index)), names: [name, other] as const }];
+  });
+}
+
+// A folder that ignores capitals lists one of two spellings of a name. A
+// folder that tells them apart lists both when one is a mount of the other.
+function listsOneOf(listed: readonly string[] | null, names: readonly [string, string]): boolean {
+  return listed !== null && !(listed.includes(names[0]) && listed.includes(names[1]));
 }
 
 /**
  * The deepest folder on `path`, itself included, that is one of `roots`:
- * spelled the same, or else spelled the same in other capitals and the same
- * folder on disk. `path` is absolute with links resolved. A root reached
- * under another name, as through a bind mount, does not match, because a
- * mount inside either one can put another file at the same place below it.
- * A call stats only a folder on the path that differs from a root in capitals
- * alone, and that root.
+ * spelled the same, or else another spelling of the root's own name that the
+ * disk folds onto it. `path` is absolute with links resolved. Another
+ * spelling counts only when it is the same folder on disk and each folder
+ * holding a respelled name lists at most one of the two spellings. So a root
+ * reached through a mount does not match, because a mount inside either one
+ * can put another file at the same place below it. Two roots that are both
+ * other spellings of one folder match nothing. A call reads the disk only
+ * where a folder on the path is a root spelled in other capitals or Unicode
+ * forms.
  */
 export function deepestRootSync<Entry>(
   path: string,
   roots: readonly RootCandidate<Entry>[],
   identify: (path: string) => FolderIdentity | null = (at) => folderIdentitySync(at),
+  list: (path: string) => readonly string[] | null = folderNamesSync,
 ): RootMatch<Entry> | null {
   const keys = roots.map((root) => pathCollisionKey(root.path));
   for (let at = path; ; at = dirname(at)) {
     const spelled = roots.find((root) => samePath(root.path, at));
     if (spelled) return { entry: spelled.entry, root: spelled.path, anchor: at };
-    const aliases = capitalAliases(roots, keys, at);
-    const identity = aliases.length > 0 ? identify(at) : null;
+    const respelled = respelledRoots(roots, keys, at);
+    const identity = respelled.length > 0 ? identify(at) : null;
     if (identity !== null) {
-      const matches = aliases.filter((root) => sameFolder(identify(root.path), identity));
-      if (matches.length > 0) return soleMatch(matches, at);
+      const [match, ...others] = respelled.filter((root) => sameFolder(identify(root.path), identity));
+      if (others.length > 0) return null;
+      const names = match ? respellings(at, match.path) : null;
+      if (match && names?.every(({ folder, names: pair }) => listsOneOf(list(folder), pair))) {
+        return { entry: match.entry, root: match.path, anchor: at };
+      }
     }
     if (dirname(at) === at) return null;
   }
 }
 
-/** deepestRootSync with an asynchronous probe. */
+/** deepestRootSync with asynchronous probes. */
 export async function deepestRoot<Entry>(
   path: string,
   roots: readonly RootCandidate<Entry>[],
   identify: (path: string) => Promise<FolderIdentity | null> = (at) => folderIdentity(at),
+  list: (path: string) => Promise<readonly string[] | null> = folderNames,
 ): Promise<RootMatch<Entry> | null> {
   const keys = roots.map((root) => pathCollisionKey(root.path));
   for (let at = path; ; at = dirname(at)) {
     const spelled = roots.find((root) => samePath(root.path, at));
     if (spelled) return { entry: spelled.entry, root: spelled.path, anchor: at };
-    const aliases = capitalAliases(roots, keys, at);
-    const identity = aliases.length > 0 ? await identify(at) : null;
+    const respelled = respelledRoots(roots, keys, at);
+    const identity = respelled.length > 0 ? await identify(at) : null;
     if (identity !== null) {
-      const known = await Promise.all(aliases.map((root) => identify(root.path)));
-      const matches = aliases.filter((_, index) => sameFolder(known[index] ?? null, identity));
-      if (matches.length > 0) return soleMatch(matches, at);
+      const known = await Promise.all(respelled.map((root) => identify(root.path)));
+      const [match, ...others] = respelled.filter((_, index) => sameFolder(known[index] ?? null, identity));
+      if (others.length > 0) return null;
+      const names = match ? respellings(at, match.path) : null;
+      const listed = names ? await Promise.all(names.map(({ folder }) => list(folder))) : [];
+      if (match && names?.every(({ names: pair }, index) => listsOneOf(listed[index] ?? null, pair))) {
+        return { entry: match.entry, root: match.path, anchor: at };
+      }
     }
     if (dirname(at) === at) return null;
   }
@@ -149,16 +202,17 @@ export function onMatchedRoot(match: Pick<RootMatch<unknown>, "root" | "anchor">
 }
 
 /**
- * `path` spelled under `root` when one of its folders is `root` in the same
- * or other capitals, as deepestRoot finds it, or null. Both have links resolved. A path already spelled inside `root`
+ * `path` spelled under `root` when one of its folders is `root`, as
+ * deepestRoot finds it, or null. Both have links resolved. A path already spelled inside `root`
  * returns unchanged without a stat.
  */
 export async function pathUnderRoot(
   root: string,
   path: string,
   identify?: (path: string) => Promise<FolderIdentity | null>,
+  list?: (path: string) => Promise<readonly string[] | null>,
 ): Promise<string | null> {
   if (isInside(root, path)) return path;
-  const match = await deepestRoot(path, [{ entry: root, path: root }], identify);
+  const match = await deepestRoot(path, [{ entry: root, path: root }], identify, list);
   return match === null ? null : onMatchedRoot(match, path);
 }

@@ -129,7 +129,7 @@ import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
 import { createOpenPathFailures } from "./window/openPathFailures";
 import { createWorkspaceFileOpens } from "./window/workspaceFileOpens";
 import { confirmOpenPathWorkspace, createOpenPathOpener } from "./workspaces/openPathTarget";
-import { folderIdentitySync } from "./workspaces/workspaceRootIdentity";
+import { folderIdentitySync, folderNamesSync } from "./workspaces/workspaceRootIdentity";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, refreshAccessObservations } from "./access/accessOwner";
@@ -6057,6 +6057,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     },
     hasManifest: (folder) => existsSync(join(folder, ".dohc", "manifest.json")),
     folderIdentity: (path) => folderIdentitySync(path),
+    folderNames: (path) => folderNamesSync(path),
   },
   confirm: (folder, window) => {
     const parent = window ?? liveWorkspaceWindow();

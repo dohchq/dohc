@@ -28,6 +28,7 @@ const disk = caseFoldDisk({
   "/srv/notes/a.md": "file",
 }, { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") });
 const identify = (path: string) => folderIdentitySync(path, disk.stat);
+const list = disk.names;
 const roots = (...paths: string[]) => paths.map((path) => ({ entry: path, path }));
 
 describe("a folder's identity", () => {
@@ -72,28 +73,28 @@ describe("a folder's identity", () => {
 
 describe("deepestRootSync", () => {
   it("finds a root through other capitals and keeps the path's own spelling as the anchor", () => {
-    expect(deepestRootSync("/home/sam/NOTES/plans", roots("/home/sam/Notes"), identify))
+    expect(deepestRootSync("/home/sam/NOTES/plans", roots("/home/sam/Notes"), identify, list))
       .toEqual({ entry: "/home/sam/Notes", root: "/home/sam/Notes", anchor: "/home/sam/NOTES" });
-    expect(deepestRootSync("/HOME/sam/notes", roots("/home/sam/Notes"), identify)).toBeNull();
-    expect(deepestRootSync("/home/SAM/notes", roots("/home/sam/Notes"), identify))
+    expect(deepestRootSync("/HOME/sam/notes", roots("/home/sam/Notes"), identify, list)).toBeNull();
+    expect(deepestRootSync("/home/SAM/notes", roots("/home/sam/Notes"), identify, list))
       .toMatchObject({ entry: "/home/sam/Notes", anchor: "/home/SAM/notes" });
   });
 
   it("picks the deepest root, even when only the outer one is spelled as the path", () => {
-    expect(deepestRootSync("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identify))
+    expect(deepestRootSync("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identify, list))
       .toMatchObject({ entry: "/home/sam/Notes/Trip", anchor: "/home/sam/Notes/TRIP" });
   });
 
   it("refuses a sibling whose name starts like the root, and another folder spelled with other capitals", () => {
-    expect(deepestRootSync("/home/sam/notes-old", roots("/home/sam/Notes"), identify)).toBeNull();
-    expect(deepestRootSync("/srv/notes", roots("/srv/Notes"), identify)).toBeNull();
+    expect(deepestRootSync("/home/sam/notes-old", roots("/home/sam/Notes"), identify, list)).toBeNull();
+    expect(deepestRootSync("/srv/notes", roots("/srv/Notes"), identify, list)).toBeNull();
   });
 
   it("matches nothing through a folder whose identity is unknown", () => {
     const unknown = caseFoldDisk({ "/home/sam/Notes/a.md": "file" }, {
       foldsCase: () => true, identities: { "/home/sam/Notes": { dev: 1n, ino: 0n } },
     });
-    expect(deepestRootSync("/home/sam/NOTES", roots("/home/sam/Notes"), (path) => folderIdentitySync(path, unknown.stat)))
+    expect(deepestRootSync("/home/sam/NOTES", roots("/home/sam/Notes"), (path) => folderIdentitySync(path, unknown.stat), unknown.names))
       .toBeNull();
     // Spelling still matches as it always has.
     expect(deepestRootSync("/home/sam/Notes", roots("/home/sam/Notes"), () => null))
@@ -106,7 +107,7 @@ describe("deepestRootSync", () => {
       foldsCase: () => false,
       identities: { "/srv/Notes": { dev: big, ino: big }, "/srv/notes": { dev: big, ino: big + 1n } },
     });
-    expect(deepestRootSync("/srv/notes", roots("/srv/Notes"), (path) => folderIdentitySync(path, wide.stat)))
+    expect(deepestRootSync("/srv/notes", roots("/srv/Notes"), (path) => folderIdentitySync(path, wide.stat), wide.names))
       .toBeNull();
   });
 
@@ -122,25 +123,53 @@ describe("deepestRootSync", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it("stats nothing for a path spelled under its root", () => {
+  it("does not match a root mounted again under other capitals on a disk that tells capitals apart", () => {
+    // /srv lists both Notes and notes, so they are two entries even though
+    // they are one folder, and a mount inside one may be missing in the other.
+    const mounted = caseFoldDisk({ "/srv/Notes/docs/a.md": "file", "/srv/notes/docs/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/srv/Notes": { dev: 5n, ino: 5n }, "/srv/notes": { dev: 5n, ino: 5n } },
+    });
+    expect(deepestRootSync("/srv/notes/docs", roots("/srv/Notes"), (path) => folderIdentitySync(path, mounted.stat), mounted.names))
+      .toBeNull();
+  });
+
+  it("picks the root the path respells over the same folder registered under another name", () => {
+    const twice = caseFoldDisk({ "/home/sam/Notes/a.md": "file", "/view/notes/a.md": "file" }, {
+      foldsCase: (folder) => folder.startsWith("/home"),
+      identities: { "/home/sam/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
+    });
+    const probe = (path: string) => folderIdentitySync(path, twice.stat);
+    expect(deepestRootSync("/home/sam/NOTES/a.md", roots("/home/sam/Notes", "/view/notes"), probe, twice.names))
+      .toMatchObject({ entry: "/home/sam/Notes", anchor: "/home/sam/NOTES" });
+  });
+
+  it("matches nothing through other capitals when the folder holding the name cannot be read", () => {
+    expect(deepestRootSync("/home/sam/NOTES", roots("/home/sam/Notes"), identify, () => null)).toBeNull();
+  });
+
+  it("reads nothing from the disk for a path spelled under its root", () => {
     const probe = vi.fn(identify);
-    expect(deepestRootSync("/home/sam/Notes/Trip/day-1.md", roots("/home/sam/Notes", "/srv/Notes"), probe))
+    const listing = vi.fn(list);
+    expect(deepestRootSync("/home/sam/Notes/Trip/day-1.md", roots("/home/sam/Notes", "/srv/Notes"), probe, listing))
       .toMatchObject({ entry: "/home/sam/Notes", anchor: "/home/sam/Notes" });
     expect(probe).not.toHaveBeenCalled();
+    expect(listing).not.toHaveBeenCalled();
   });
 
   it("matches nothing when two registered roots are one folder and neither is spelled as the path", () => {
-    expect(deepestRootSync("/home/sam/NOTES", roots("/home/sam/Notes", "/home/sam/notes"), identify)).toBeNull();
+    expect(deepestRootSync("/home/sam/NOTES", roots("/home/sam/Notes", "/home/sam/notes"), identify, list)).toBeNull();
   });
 });
 
 describe("pathUnderRoot", () => {
   const identifyAsync = async (path: string) => identify(path);
+  const listAsync = async (path: string) => list(path);
 
   it("moves a path from other capitals onto the root's spelling, keeping the rest as given", async () => {
-    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/NOTES/plans/q3.md", identifyAsync))
+    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/NOTES/plans/q3.md", identifyAsync, listAsync))
       .resolves.toBe("/home/sam/Notes/plans/q3.md");
-    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/notes", identifyAsync)).resolves.toBe("/home/sam/Notes");
+    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/notes", identifyAsync, listAsync)).resolves.toBe("/home/sam/Notes");
   });
 
   it("returns a path spelled inside the root unchanged, without a stat", async () => {
@@ -150,9 +179,9 @@ describe("pathUnderRoot", () => {
   });
 
   it("refuses a path outside the root, a sibling, and another folder on a disk that tells capitals apart", async () => {
-    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam", identifyAsync)).resolves.toBeNull();
-    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/NOTES-old/a.md", identifyAsync)).resolves.toBeNull();
-    await expect(pathUnderRoot("/srv/Notes", "/srv/notes/a.md", identifyAsync)).resolves.toBeNull();
+    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam", identifyAsync, listAsync)).resolves.toBeNull();
+    await expect(pathUnderRoot("/home/sam/Notes", "/home/sam/NOTES-old/a.md", identifyAsync, listAsync)).resolves.toBeNull();
+    await expect(pathUnderRoot("/srv/Notes", "/srv/notes/a.md", identifyAsync, listAsync)).resolves.toBeNull();
     const mounted = caseFoldDisk({ "/data/Notes/docs/a.md": "file", "/view/notes/docs/a.md": "file" }, {
       foldsCase: () => false,
       identities: { "/data/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
@@ -162,7 +191,7 @@ describe("pathUnderRoot", () => {
   });
 
   it("agrees with deepestRootSync", async () => {
-    await expect(deepestRoot("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identifyAsync))
-      .resolves.toEqual(deepestRootSync("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identify));
+    await expect(deepestRoot("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identifyAsync, listAsync))
+      .resolves.toEqual(deepestRootSync("/home/sam/Notes/TRIP", roots("/home/sam/Notes", "/home/sam/Notes/Trip"), identify, list));
   });
 });
