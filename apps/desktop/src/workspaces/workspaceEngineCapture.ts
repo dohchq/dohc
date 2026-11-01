@@ -95,8 +95,9 @@ import {
   mediaTypeForPath,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { createReadStream, existsSync, type Stats } from "node:fs";
+import { lstat, mkdir, open, readFile, realpath, rm, type FileHandle } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -1766,9 +1767,8 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      a symlinked ancestor outside the workspace;
   //   2. after mkdir, the real parent directory must still resolve inside
   //      the root;
-  //   3. the leaf itself must not be a symlink — writeFile follows symlinks,
-  //      so an unchecked leaf would redirect engine content outside the
-  //      workspace (or clobber an arbitrary user file).
+  //   3. the leaf itself must not be a symlink. The write replaces the leaf,
+  //      so a link there would silently become a plain file.
   async function assertContainedDir(absoluteDir: string): Promise<void> {
     const [realRoot, realDir] = await Promise.all([
       realpath(resolve(rootPath)),
@@ -1798,15 +1798,16 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       candidate = parent;
     }
   }
-  async function assertLeafNotSymlink(absolutePath: string): Promise<void> {
+  async function assertLeafNotSymlink(absolutePath: string): Promise<Stats | undefined> {
     try {
       const info = await lstat(absolutePath);
       if (info.isSymbolicLink()) {
         throw new Error(`Engine refused to write through a symlink: ${absolutePath}`);
       }
+      return info;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") return;
+      if (code === "ENOENT" || code === "ENOTDIR") return undefined;
       throw error;
     }
   }
@@ -1834,9 +1835,12 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     });
   }
   // Text and bytes take the same four checks in the same order, so they take
-  // one path through them. writeFile defaults a string to UTF-8 and ignores
-  // the encoding for a Uint8Array, so one call serves both. Two copies of a
-  // security sequence can drift; one cannot.
+  // one path through them. FileHandle.writeFile defaults a string to UTF-8
+  // and ignores the encoding for a Uint8Array, so one call serves both. Two
+  // copies of a security sequence can drift; one cannot.
+  // The bytes go to a flushed `.dohc-write-` sibling, which capture ignores,
+  // and a rename puts them in place. The target holds its old bytes or the
+  // new ones, never a cut-off file, even if the app stops mid-write.
   async function writeEngineFile(
     absolutePath: string,
     data: string | Uint8Array,
@@ -1848,8 +1852,19 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
-    await assertLeafNotSymlink(target);
-    await writeFile(target, data);
+    const replaced = await assertLeafNotSymlink(target);
+    await atomicReplaceFile(target, async (temporary) => {
+      const handle = await open(temporary, "wx", 0o666);
+      try {
+        if (replaced?.isFile()) await keepPermissions(handle, replaced);
+        await handle.writeFile(data);
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+      await handle.close();
+    }, { temporary: join(dir, `.dohc-write-${process.pid}-${randomUUID()}.tmp`), syncDirectory: true });
   }
   return {
     writeTextFile: writeEngineFile,
@@ -1866,6 +1881,22 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       await rm(target, { force: true });
     },
   };
+}
+
+// The temp takes the permission bits of the file it replaces, as the engine's
+// materializer does (`Replaced::apply_to` in materialize.rs). Group and other
+// bits stay only when the temp has the file's group or the two sets match, so
+// nobody gains access. A failed copy never fails the write.
+async function keepPermissions(handle: FileHandle, replaced: Stats): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    const temp = await handle.stat();
+    const bits = replaced.mode & 0o777;
+    const shared = temp.gid === replaced.gid || ((bits >> 3) & 0o7) === (bits & 0o7);
+    await handle.chmod((shared ? bits : bits & 0o700) | (temp.uid === replaced.uid ? 0 : 0o600));
+  } catch {
+    // The new bytes matter more than the copied mode.
+  }
 }
 
 // A person's own file change reads as a local file edit in History, as their
