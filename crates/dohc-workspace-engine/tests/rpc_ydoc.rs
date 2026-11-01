@@ -6401,7 +6401,11 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n\n\n");
-    write_file(scratch.path(), "notes/unterminated.md", b"No final newline.");
+    write_file(
+        scratch.path(),
+        "notes/unterminated.md",
+        b"No final newline.",
+    );
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
     let service = Arc::new(EngineService::new());
@@ -6526,14 +6530,28 @@ async fn an_old_format_note_without_a_witness_saves_the_current_format_after_an_
         .rewrite_content_to_markdown(ContentKind::Richdoc, old)
         .expect("the old bytes import");
     assert!(!doc.has_markdown_witness());
-    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
-        "expectedLineageClaimId": null, "sessionId": session,
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(seed), "seed": true
-    })).await;
-    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
-        "expectedLineageClaimId": null, "sessionId": session,
-        "updateBase64": richdoc_update(&doc, "Edited.")
-    })).await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null, "sessionId": session,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(seed), "seed": true
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null, "sessionId": session,
+            "updateBase64": richdoc_update(&doc, "Edited.")
+        }),
+    )
+    .await;
     call(
         &transport,
         &handle,

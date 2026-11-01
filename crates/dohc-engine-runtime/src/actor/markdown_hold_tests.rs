@@ -572,7 +572,10 @@ async fn markdown_hold_old_projection_witness_waits_for_consent_then_saves_the_c
                 .unwrap()
                 .doc;
             assert_eq!(saved, doc.project(ContentKind::Richdoc)?.content);
-            assert!(saved.ends_with("Accepted text remains available\n"), "{saved:?}");
+            assert!(
+                saved.ends_with("Accepted text remains available\n"),
+                "{saved:?}"
+            );
             Ok(())
         })
         .await
