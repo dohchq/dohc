@@ -427,7 +427,9 @@ fn claim_takes_only_the_listed_agents_oldest_request() {
             .expect("claim without a request for this agent")
             .is_none()
     );
-    let pending = chats.list_pending_dispatches(WS, None, 10).expect("pending");
+    let pending = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].trigger_message_id, "other-first");
     assert_eq!(pending[0].agent_id, "other");
