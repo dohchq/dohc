@@ -56,19 +56,43 @@ async function readJson(request: IncomingMessage, maxBytes: number, signal: Abor
 export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunchBackend; lifetime: AbortSignal }): Promise<LocalAppLaunchHost> {
   options.lifetime.throwIfAborted();
   const sessions = new Set<() => Promise<void>>();
+  // At most two launches hold a stage until their page loads. Later launches wait for a stage in the order they started.
+  const waiting: { wake(): void; end(reason: unknown): void }[] = [];
   let closed = false, preparing = 0, staged = 0;
-  const close = async () => { closed = true; await Promise.all([...sessions].map(stop => stop())); };
+  const close = async () => {
+    closed = true;
+    for (const waiter of waiting.splice(0)) waiter.end(options.lifetime.reason ?? Error("The local app session ended."));
+    await Promise.all([...sessions].map(stop => stop()));
+  };
   options.lifetime.addEventListener("abort", () => { void close(); }, { once: true });
   const host: LocalAppLaunchHost = {
     close,
     async launch(publicationId, signal) { return (await host.launchSession(publicationId, signal)).url; },
     async launchSession(publicationId, signal, launchOptions) {
       signal.throwIfAborted(); options.lifetime.throwIfAborted();
-      if (closed || sessions.size + preparing >= MAX_SESSIONS || staged >= 2) throw Error("Close another app before opening this one.");
-      preparing++; staged++;
-      let stageReleased = false;
-      const releaseStage = () => { if (!stageReleased) { stageReleased = true; staged--; } };
+      if (closed || sessions.size + preparing >= MAX_SESSIONS) throw Error("Close another app before opening this one.");
+      preparing++;
+      let stageReleased = true;
+      // A released stage passes straight to the next waiting launch, so no new launch can take it first.
+      const releaseStage = () => {
+        if (stageReleased) return;
+        stageReleased = true;
+        const next = waiting.shift();
+        if (next) next.wake(); else staged--;
+      };
       try {
+        if (staged < 2 && !waiting.length) staged++;
+        else await new Promise<void>((resolve, reject) => {
+          const cancel = AbortSignal.any([signal, options.lifetime]);
+          const waiter = {
+            wake() { cancel.removeEventListener("abort", abort); resolve(); },
+            end(reason: unknown) { cancel.removeEventListener("abort", abort); reject(reason); },
+          };
+          const abort = () => { waiting.splice(waiting.indexOf(waiter), 1); waiter.end(cancel.reason); };
+          cancel.addEventListener("abort", abort, { once: true });
+          waiting.push(waiter);
+        });
+        stageReleased = false;
         const { authorityRevision, files } = options.backend.browserPublication(publicationId);
         await options.backend.checkBrowserPublication?.(publicationId, authorityRevision, AbortSignal.any([signal, options.lifetime, AbortSignal.timeout(15_000)]));
         const document = createAppDocument(files, { maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES, maxDocumentBytes: APP_PUBLICATION_MAX_DOCUMENT_BYTES });
