@@ -185,14 +185,14 @@ async fn ordinary_open_rewrite_and_inverse_preserve_typing_labels_and_new_links(
         f.leases
             .is_held(&DocKey::new(&f.ws, "main", "source-0000").unwrap())
     );
-    let body = "typing [[new#part|edited label]] [[./new.md]] [old](old.md) [[new]]";
+    let body = "typing [[new#part|edited label]] [[./new.md]] [old](old.md) [[new]]\n";
     f.type_document("source-0000", body).await;
     f.settle_document("source-0000").await;
     let start = Instant::now();
     let result = f.undo_open_with_busy_retry().await.unwrap();
     let undo_ns = start.elapsed().as_nanos();
     assert!(result.not_restored.is_empty());
-    let expected = "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]";
+    let expected = "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]\n";
     assert_eq!(f.text("source-0000.md").await, expected);
     assert!(
         f.document("source-0000")
@@ -298,7 +298,7 @@ async fn adopted_open_source_stays_untouched_and_adoption_before_undo_refuses() 
         f.adopt("source-0000").await;
         if after {
             assert!(f.undo_open().await.is_err());
-            assert_eq!(f.text("new.md").await, "[[old]]");
+            assert_eq!(f.text("new.md").await, "[[old]]\n");
         } else {
             let result = f.pass("adopted", Arc::new(NoFaults)).await.unwrap();
             assert_eq!(result["documents"], 0);
@@ -592,14 +592,14 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
     drop(lease);
     f.close().await;
     assert!(result.unwrap().not_restored.is_empty());
-    assert_eq!(text, "typing [[old#part|label]] [[./old.md]] [old](old.md)");
+    assert_eq!(text, "typing [[old#part|label]] [[./old.md]] [old](old.md)\n");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_does_not_write_through_another_undos_internal_lease() {
     let f = Fixture::new(1, 1);
-    let before = format!("{BODY} [[other-old]]");
-    let after = format!("{BODY} [[other-new]]");
+    let before = format!("{} [[other-old]]\n", BODY.trim_end());
+    let after = format!("{} [[other-new]]\n", BODY.trim_end());
     f.edit("source-0000", "source-0000.md", &before).await;
     let (ws, body, root) = (f.ws.clone(), after.clone(), f.root.to_path_buf());
     f.actor
@@ -819,9 +819,9 @@ async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled(
         let f = Fixture::new(1, 1);
         let (lease, _) = f.open_document("source-0000").await;
         let body = if relevant {
-            "typing [[old]]"
+            "typing [[old]]\n"
         } else {
-            "typing [[elsewhere]]"
+            "typing [[elsewhere]]\n"
         };
         f.type_document("source-0000", body).await;
         let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();

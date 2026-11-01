@@ -80,7 +80,7 @@ struct Fixture {
     capture: Arc<tokio::sync::Mutex<()>>,
 }
 const OP: &str = "dohc-operation:rename";
-const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
+const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)\n";
 async fn retry_undo<T, F>(ws: &str, mut operation: impl FnMut() -> F) -> Result<T, RuntimeError>
 where
     F: std::future::Future<Output = Result<T, RuntimeError>>,
@@ -144,7 +144,7 @@ impl Fixture {
             .write_with(&NoFaults, |tx| {
                 for i in 0..files {
                     let path = format!("source-{i:04}.md");
-                    let body = if i < sources { BODY } else { "no links" };
+                    let body = if i < sources { BODY } else { "no links\n" };
                     write_text_in_tx(
                         tx,
                         &write(
@@ -159,12 +159,12 @@ impl Fixture {
                 }
                 write_text_in_tx(
                     tx,
-                    &write(&ws, "target", "old.md", "[[old]]", "seed-target"),
+                    &write(&ws, "target", "old.md", "[[old]]\n", "seed-target"),
                 )?;
                 Ok::<_, DomainError>(())
             })
             .unwrap();
-        std::fs::write(root.join("old.md"), "[[old]]").unwrap();
+        std::fs::write(root.join("old.md"), "[[old]]\n").unwrap();
         VersionedTextStore::new(&mut store)
             .rename_text_file(
                 &RenameTextFile {
@@ -361,9 +361,9 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
     );
     assert_eq!(
         f.text("source-0000.md").await,
-        "[[new#part|label]] [[./new.md]] [old](old.md)"
+        "[[new#part|label]] [[./new.md]] [old](old.md)\n"
     );
-    assert_eq!(f.text("new.md").await, "[[old]]", "self link stays");
+    assert_eq!(f.text("new.md").await, "[[old]]\n", "self link stays");
     drop(lease);
     assert_eq!(
         f.pass("rewrite-request", Arc::new(NoFaults)).await.unwrap(),
@@ -602,7 +602,7 @@ async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
     for path in ["source-0000.md", "source-0002.md"] {
         assert_eq!(
             f.text(path).await,
-            "[[new#part|label]] [[./new.md]] [old](old.md)"
+            "[[new#part|label]] [[./new.md]] [old](old.md)\n"
         );
     }
     assert_eq!(f.text("source-0001.md").await, body);
@@ -833,7 +833,7 @@ async fn a_target_edit_refuses_the_whole_undo_without_changes() {
     assert!(
         matches!(error, RuntimeError::Domain(DomainError::UndoRefused { path, reason: "link changed after rename" }) if path=="source-0000.md")
     );
-    assert_eq!(f.text("new.md").await, "[[old]]");
+    assert_eq!(f.text("new.md").await, "[[old]]\n");
     f.close().await;
 }
 
@@ -939,7 +939,7 @@ async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
                     ..
                 }))
             ));
-            assert_eq!(f.text("new.md").await, "[[old]]");
+            assert_eq!(f.text("new.md").await, "[[old]]\n");
         } else {
             std::fs::rename(
                 f.root.join("source-0000.md"),

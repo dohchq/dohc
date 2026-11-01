@@ -25,7 +25,7 @@ async fn fixture() -> OpenFixture {
         .write_with(&NoFaults, |tx| -> Result<(), DomainError> {
             for i in 0..files {
                 let path = format!("source-{i:04}.md");
-                let body = if i < sources { BODY } else { "no links" };
+                let body = if i < sources { BODY } else { "no links\n" };
                 write_text_in_tx(
                     tx,
                     &write(&format!("source-{i:04}"), &path, body, &format!("seed-{i}")),
@@ -203,7 +203,7 @@ async fn open_session_proof(mutate: bool, timing_file: &str) {
     assert!(forward_resync);
     f.edit(
         &sid,
-        "typing [[new#part|edited label]] [[./new.md]] [old](old.md) [[new]]",
+        "typing [[new#part|edited label]] [[./new.md]] [old](old.md) [[new]]\n",
     )
     .await;
     if mutate {
@@ -236,7 +236,7 @@ async fn open_session_proof(mutate: bool, timing_file: &str) {
         .text;
     assert_eq!(
         text,
-        "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]"
+        "typing [[old#part|edited label]] [[./old.md]] [old](old.md) [[new]]\n"
     );
     if !mutate {
         let key = lock(&f.service.sessions).get(&sid).unwrap().key.clone();

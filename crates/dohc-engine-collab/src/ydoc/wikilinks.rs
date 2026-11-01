@@ -106,8 +106,9 @@ impl Ydoc {
 #[cfg(any(test, feature = "test-support"))]
 impl Ydoc {
     /// Build the editor's native inline nodes for single-paragraph fixtures.
+    /// The paragraph's line may end with the file's final newline. The
+    /// document reads as that file, so it keeps no source witness.
     pub fn richdoc_wikilinks_for_test(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
-        assert!(!markdown.contains(['\n', '\r']));
         self.richdoc_wikilinks_after_markdown_for_test("", markdown)
     }
 
@@ -116,11 +117,12 @@ impl Ydoc {
         prefix: &str,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
+        let markdown = markdown.strip_suffix('\n').unwrap_or(markdown);
         assert!(!markdown.contains(['\n', '\r']));
         let source = if prefix.is_empty() {
-            markdown.to_owned()
+            format!("{markdown}\n")
         } else {
-            format!("{prefix}\n\n{markdown}")
+            format!("{prefix}\n\n{markdown}\n")
         };
         self.stage_source_preserving_edit(&source, |staged| {
             if !prefix.is_empty() {

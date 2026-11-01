@@ -15,7 +15,7 @@ use std::time::Instant;
 
 const WS: &str = "rewrite-rpc";
 const OP: &str = "dohc-operation:rpc-rename";
-const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
+const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)\n";
 fn write(object: &str, path: &str, text: &str, moment: &str) -> WriteText {
     WriteText {
         workspace_id: WS.into(),
@@ -354,7 +354,7 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         .write_with(&NoFaults, |tx| -> Result<(), DomainError> {
             for i in 0..files {
                 let path = format!("source-{i:04}.md");
-                let body = if i < sources { BODY } else { "no links" };
+                let body = if i < sources { BODY } else { "no links\n" };
                 write_text_in_tx(
                     tx,
                     &write(&format!("source-{i:04}"), &path, body, &format!("seed-{i}")),
