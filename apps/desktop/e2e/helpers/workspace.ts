@@ -9,6 +9,7 @@ import {
   createTestScratch,
   removeTestScratch,
 } from "../../src/workspaces/testTemp";
+import { waitForPaintedFrames } from "./desktopApp";
 
 export interface TempWorkspace {
   baseDir: string;
@@ -307,6 +308,7 @@ export async function openWorkspaceFromFirstRun(
     );
   }
   if (surface === "first-run") {
+    await waitForPaintedFrames(page);
     await openFolder.click();
   }
   await waitForWorkspaceReady(page);
@@ -324,6 +326,7 @@ export async function showExplorerFiles(page: Page): Promise<void> {
   await expect(page.getByTestId("workspace-workbench")).not.toHaveAttribute("inert");
   const files = page.getByTestId("explorer-mode-files");
   if ((await files.count()) === 0 || (await files.getAttribute("aria-selected")) === "true") return;
+  await waitForPaintedFrames(page);
   await files.click();
   await expect(files).toHaveAttribute("aria-selected", "true");
 }
