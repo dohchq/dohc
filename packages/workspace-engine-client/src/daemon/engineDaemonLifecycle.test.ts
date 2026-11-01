@@ -12,6 +12,7 @@ import {
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
 import { inEngineRun, insideEngineRun } from "./engineRunScope";
+import { driveFakeClockUntil } from "../testing/drivenClock";
 
 // Every cross-machine wait in this file carries this bound. Each
 // relaunch runs the startup smoke against a real temporary directory, so a
@@ -940,9 +941,7 @@ describe("Rust engine daemon lifecycle", () => {
     // therefore restarted forever — the own complaint, for wedges.
     //
     // So this test changes NO production constant. It drives a clock instead.
-    const realSetTimeout = globalThis.setTimeout;
-    vi.useFakeTimers();
-    let now = 0;
+    vi.useFakeTimers({ now: 0 });
     const clients: SelfExitingClient[] = [];
     const terminalFailures: Error[] = [];
     // Driven arrival time of every probe, per generation, for the cadence
@@ -953,13 +952,13 @@ describe("Rust engine daemon lifecycle", () => {
       initialBackoffMs: 0,
       // Ping cadence, expiry, wedge budget, healthy reset, and the rolling
       // window are all left at their production defaults ON PURPOSE.
-      monotonicNowMs: () => now,
-      wallNowMs: () => now,
+      monotonicNowMs: () => Date.now(),
+      wallNowMs: () => Date.now(),
       launch: async (options) => {
         const arrivals: number[] = [];
         probeArrivals.push(arrivals);
         const client = new SelfExitingClient((request) => {
-          if (request.method === "engine.ping") arrivals.push(now);
+          if (request.method === "engine.ping") arrivals.push(Date.now());
           return silentPing(request);
         });
         client.exit = options.onExit;
@@ -973,21 +972,13 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      // Twenty minutes of driven time: twice the crash window, and room for
-      // five 225s wedge cycles.
-      const step = 5_000;
-      for (
-        let elapsed = 0;
-        elapsed < 20 * 60_000 && terminalFailures.length === 0;
-        elapsed += step
-      ) {
-        now += step;
-        await vi.advanceTimersByTimeAsync(step);
-        // Each launch runs the smoke against a real temporary directory. A
-        // driven clock does not move real I/O, so give the event loop a real
-        // turn between steps or the relaunch never completes.
-        await new Promise((resolve) => realSetTimeout(resolve, 0));
-      }
+      // Each launch runs the smoke against a real temporary directory, so the
+      // clock moves only while no file request is in flight. A third
+      // generation means the verdict did not stop the restarts.
+      await driveFakeClockUntil(
+        vi,
+        () => terminalFailures.length > 0 || clients.length > 2,
+      );
 
       expect(terminalFailures.map((error) => error.message)).toEqual([
         "The Rust engine went silent on 2 launches: " +
@@ -1002,19 +993,11 @@ describe("Rust engine daemon lifecycle", () => {
       expect(clients.every((client) => client.closed)).toBe(true);
       // The cadence check pins the wedge budget's SPEED, which the terminal
       // message alone cannot: a slower probe cadence would produce the same
-      // message, minutes later. It must not be an elapsed-driven-time
-      // ceiling: the driven clock advances one step per real event-loop
-      // turn, and the relaunch smoke's real I/O consumes turns, so driven
-      // milliseconds measure machine load — honest runs measured 650s to
-      // 965s of driven time under a 24-process load, overlapping any bound
-      // a tripled interval (830s measured) could fail. Probe
-      // ARRIVAL SPACING inside one wedged generation is load-invariant:
-      // it is pure fake-timer arithmetic, one expiry plus one interval
-      // after the previous probe, 45s + 30s = 75s at the production
-      // constants (the expiry half is already pinned by the message
-      // above). A tripled interval spaces probes 135s apart and fails
-      // here on any box; the tolerance covers only the driven loop's 5s
-      // step quantization.
+      // message, minutes later. Probe ARRIVAL SPACING inside one wedged
+      // generation is pure fake-timer arithmetic, one expiry plus one
+      // interval after the previous probe, 45s + 30s = 75s at the production
+      // constants (the expiry half is already pinned by the message above).
+      // A tripled interval spaces probes 135s apart and fails here.
       const spacings: number[] = [];
       for (const arrivals of probeArrivals) {
         for (let i = 1; i < arrivals.length; i += 1) {
@@ -1024,8 +1007,7 @@ describe("Rust engine daemon lifecycle", () => {
       // Two generations, three probes each: at least four spacings.
       expect(spacings.length).toBeGreaterThanOrEqual(4);
       for (const spacing of spacings) {
-        expect(spacing).toBeGreaterThanOrEqual(75_000);
-        expect(spacing).toBeLessThanOrEqual(80_000);
+        expect(spacing).toBe(75_000);
       }
     } finally {
       vi.useRealTimers();

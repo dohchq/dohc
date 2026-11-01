@@ -15,6 +15,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  driveFakeClockUntil,
   VersionedLoopbackEngine,
   YdocLoopbackEngine,
 } from "@dohc/workspace-engine-client/testing";
@@ -1396,20 +1397,14 @@ it.each([
   await session.close({settle: false});
 });
 
-// A close reads the disk before its first retry, so real I/O gets a turn
-// between steps of the faked retry delays.
-const realSetImmediate = setImmediate;
+// A close reads the disk before its first retry, so the faked retry delays
+// pass only while no file read is in flight.
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
   vi.useFakeTimers();
   try {
     let settled = false;
     const assertion = expect(operation().finally(() => { settled = true; })).rejects.toThrow(message);
-    // 200 steps of 100 ms: twice the 10 s busy budget.
-    for (let step = 0; !settled; step += 1) {
-      if (step === 200) throw new Error("The busy-store operation did not finish within 20 s of faked retry delays.");
-      await new Promise((resolve) => realSetImmediate(resolve));
-      await vi.advanceTimersByTimeAsync(100);
-    }
+    await driveFakeClockUntil(vi, () => settled);
     await assertion;
   } finally { vi.useRealTimers(); }
 }

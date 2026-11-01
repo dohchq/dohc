@@ -9,3 +9,4 @@ export {
 export { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
 export { YdocLoopbackEngine } from "./ydocLoopbackEngine";
 export { encodeFixtureBigInts } from "./fixtureBigInts";
+export { driveFakeClockUntil, type FakeTimerDriver } from "./drivenClock";
