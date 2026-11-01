@@ -649,6 +649,16 @@ fn record_file_edit_meets_a_lossy_note_in_a_conflict_holding_its_exact_source() 
     assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
     assert_eq!(recovered(&b, &draft), 1, "a recovery copy keeps B's typing");
     assert_eq!(
+        count(
+            &b,
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='apollo' \
+               AND settled_update_seq=head_update_seq AND settle_prior_update_seq IS NULL \
+               AND pending_authors_json='[]'"
+        ),
+        1,
+        "the copy consumed its authors, so no later projection credits them again"
+    );
+    assert_eq!(
         count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
         1,
         "History holds A's edit"

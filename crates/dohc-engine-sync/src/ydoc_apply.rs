@@ -5998,6 +5998,13 @@ pub(crate) fn recover_lineage_side_in_tx(
         authors.as_deref(),
         now_ms,
     )?;
+    // The copy names these authors, so neither an unresolved settle attempt
+    // nor a later projection may credit them again. The head holds other
+    // text, so the settled hash stays the file's last settled text.
+    dohc_engine_collab::author_coverage::supersede_in(tx, key, now_ms)
+        .map_err(map_collab_hard_error)?;
+    dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+        .map_err(map_collab_hard_error)?;
     Ok(())
 }
 
