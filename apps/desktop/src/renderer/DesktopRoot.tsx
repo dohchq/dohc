@@ -15,8 +15,8 @@ import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
-import { readError } from "../ipc/errorWords";
-import { REGISTRY_READ_FAILURE_NEXT, REGISTRY_READ_FAILURE_TITLE } from "../workspaces/registryReadFailure";
+import { readError, refusalCode } from "../ipc/errorWords";
+import { REGISTRY_READ_FAILURE_TITLE, registryReadFailureNext } from "../workspaces/registryReadFailure";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { ShellErrorReporter } from "./shell/useShellError";
@@ -64,7 +64,7 @@ export function DesktopRoot() {
   useEffect(() => bindOwnPresentation(bridge()), []);
   const [loaded, setLoaded] = useState(false);
   // What the registry read said, and the error as it arrived for the details.
-  const [loadError, setLoadError] = useState<{ message: string; cause: string | null } | null>(null);
+  const [loadError, setLoadError] = useState<{ message: string; cause: string | null; next: string } | null>(null);
   const [loadDetailsOpen, setLoadDetailsOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -208,6 +208,7 @@ export function DesktopRoot() {
         setLoadError({
           message: words ?? "dohc could not read the file that lists your workspaces.",
           cause: arrived,
+          next: registryReadFailureNext(refusalCode(cause)),
         });
         setLoaded(true);
       });
@@ -296,7 +297,7 @@ export function DesktopRoot() {
           {loadError.message}
         </span>
         <span className="max-w-lg text-xs text-subtle">
-          {REGISTRY_READ_FAILURE_NEXT}
+          {loadError.next}
         </span>
         <button
           type="button"

@@ -451,6 +451,7 @@ export function createRegistryStore(registryFile: string) {
       throw new RegistryReadError(
         `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`,
         registryFile,
+        true,
       );
     }
     if (!Array.isArray(obj.workspaces)) {

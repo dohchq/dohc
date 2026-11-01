@@ -1,7 +1,7 @@
 import {
-  REGISTRY_READ_FAILURE_NEXT,
   REGISTRY_READ_FAILURE_TITLE,
   RegistryReadError,
+  registryReadFailureNext,
 } from "../workspaces/registryReadFailure";
 
 // The native box main shows when startup fails before any window opens.
@@ -9,7 +9,7 @@ export function startupFailureBox(error: unknown): { title: string; content: str
   if (error instanceof RegistryReadError) {
     return {
       title: REGISTRY_READ_FAILURE_TITLE,
-      content: `${REGISTRY_READ_FAILURE_NEXT}\n\nTechnical details\nFile: ${error.registryFile}\nDetail: ${error.message}`,
+      content: `${registryReadFailureNext(error.code)}\n\nTechnical details\nFile: ${error.registryFile}\nDetail: ${error.message}`,
     };
   }
   const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
