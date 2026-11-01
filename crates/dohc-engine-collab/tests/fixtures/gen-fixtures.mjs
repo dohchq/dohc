@@ -172,6 +172,30 @@ function makePlaintext(seed) {
   };
 }
 
+// Plain text keeps its exact bytes: no final line ending is added or removed.
+const PLAINTEXT_EDGE_CASES = [
+  "---\ntitle: looks like frontmatter\n---\nbody",
+  "no final ending",
+  "one final ending\n",
+  "several final endings\n\n\n",
+  "crlf lines\r\nand a final crlf\r\n",
+  "trailing spaces   \n  ",
+];
+
+function makePlaintextEdge(seed, value) {
+  const doc = new Y.Doc();
+  const text = doc.getText("plainText");
+  const updates = [capture(doc, () => text.insert(0, value))];
+  return {
+    seed,
+    contentKind: "plaintext",
+    updates,
+    mergedUpdateB64: b64(Y.mergeUpdates(updates.map((u) => Buffer.from(u, "base64")))),
+    stateVectorB64: b64(Y.encodeStateVector(doc)),
+    expected: { text: text.toString() },
+  };
+}
+
 function paragraphRuns(xmlText) {
   return xmlText.toDelta().map((op) => ({
     text: typeof op.insert === "string" ? op.insert : "",
@@ -817,6 +841,23 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
     ]),
   },
+  // Each rich note ends with exactly one line ending, and a table has one
+  // blank line above it, whatever endings its file had.
+  { name: "empty-document", makeDoc: () => directRichdoc([]) },
+  { name: "final-endings-several", markdown: "Body.\n\n\n\n" },
+  { name: "final-ending-missing", markdown: "Body." },
+  { name: "table-first", markdown: "| a | b |\n| --- | --- |\n| 1 | 2 |\n\nAfter." },
+  { name: "paragraph-before-table", markdown: "Intro.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n" },
+  { name: "adjacent-tables", markdown: "| a |\n| --- |\n| 1 |\n\n| b |\n| --- |\n| 2 |\n" },
+  { name: "annotated-table", markdown: "Intro.\n\n<!-- dohc:table row-heights=1:84 -->\n| a |\n| --- |\n| 1 |\n" },
+  { name: "frontmatter-before-table", markdown: "---\ntitle: Plan\n---\n\n| a |\n| --- |\n| 1 |\n" },
+  { name: "list-table", markdown: "- item\n\n  | a |\n  | --- |\n  | 1 |\n- [ ] task\n\n  | b |\n  | --- |\n  | 2 |\n" },
+  { name: "quote-table", markdown: "> quote\n>\n> | a |\n> | --- |\n> | 1 |\n" },
+  { name: "frontmatter-only-generated", makeDoc: () => directRichdoc([], { title: "Plan" }) },
+  { name: "frontmatter-only-retained", markdown: "---\n# kept comment\ntitle: Plan\n---\n" },
+  { name: "crlf-body", markdown: "# Title\r\n\r\nBody" },
+  { name: "crlf-table", markdown: "Intro.\r\n\r\n| a |\r\n| --- |\r\n| 1 |\r\n" },
+  { name: "crlf-frontmatter-only", markdown: "---\r\ntitle: Plan\r\n---\r\n" },
 ];
 
 function makeRichdocProjection(index, fixture) {
@@ -1044,6 +1085,7 @@ function emit(fx) {
 const SEEDS = 24;
 for (let s = 1; s <= SEEDS; s++) emit(makePlaintext(s));
 for (let s = 1; s <= SEEDS; s++) emit(makeRichdoc(1000 + s));
+PLAINTEXT_EDGE_CASES.forEach((value, index) => emit(makePlaintextEdge(901 + index, value)));
 const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) => {
   try {
     return makeRichdocProjection(index, fixture);
@@ -1083,5 +1125,5 @@ writeFileSync(
   JSON.stringify({ fixtures: manifest }, null, 1),
 );
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${PLAINTEXT_EDGE_CASES.length} plaintext edge + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle)`,
 );
