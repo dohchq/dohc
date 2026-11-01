@@ -169,7 +169,7 @@ export interface AutomationServerOptions {
 
 /** One workspace this server runs, before its executor and press loop exist. */
 interface WorkspaceState {
-  /** Delivers every record's queued updates. False when one had updates it found no outbox for. */
+  /** Delivers every record's queued updates. False when updates still wait, set aside or with no outbox. */
   flushRecordDelivery?(): Promise<boolean>;
   refreshRecord?(path: string): Promise<void>;
   refreshAcceptedRecords?(): Promise<void>;
@@ -645,8 +645,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         let after = null, undelivered: string | null = null;
         const failures: unknown[] = [];
         do {
-          const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
-          // A quarantined draft is listed only while its owner's Try again is pending; the drainer sends only that head.
+          // Every draft, including quarantined ones. The drainer sends a quarantined queue's head only when its owner asked to try again.
+          const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64}, replica.signal);
           for (const draft of page.drafts) if (draft.pendingBytes > 0) {
             try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) undelivered ??= draft.binding.currentPath;}
             catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
@@ -655,7 +655,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         } while (after !== null);
         // Until it is delivered, no sync confirms that a run's changes were sent.
         if (undelivered !== null) options.onError(`deliver automation record "${undelivered}" in workspace "${workspaceId}"`,
-          new Error("The record has updates waiting but no outbox to deliver them from, so the server confirms no run's changes as sent."));
+          new Error("The record has updates the server has not sent, because no outbox holds them or the shared file set them aside. Until they are sent, the server confirms no run's changes as sent."));
         if (failures.length) throw failures[0];
         return undelivered === null;
       })().finally(() => {draining = undefined;});

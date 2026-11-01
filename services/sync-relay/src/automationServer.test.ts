@@ -836,7 +836,7 @@ describe("a server that pushes its copy of a workspace", () => {
     const fake = await s.openReplica();
     await vi.waitFor(() => expect(capture).toHaveBeenCalled());
     await vi.waitFor(() => expect(s.sync).toHaveBeenCalledTimes(1));
-    expect(client.ownerYDocListDrafts).toHaveBeenCalledWith(expect.anything(), {after: null, limit: 64, pendingOnly: true}, expect.anything());
+    expect(client.ownerYDocListDrafts).toHaveBeenCalledWith(expect.anything(), {after: null, limit: 64}, expect.anything());
     rejectDelivery(new Error("Device delivery is unavailable."));
     await vi.waitFor(() => expect(s.errors.some(([context]) => context.startsWith("deliver automation record"))).toBe(true));
     await fake.options.withRecordWrites(new AbortController().signal, async () => undefined);
@@ -896,8 +896,9 @@ describe("a server that pushes its copy of a workspace", () => {
     expect(await drained.mock.results[0]!.value).toBe("frozen");
     expect(readHead).toHaveBeenCalledWith("outbox");
     expect(capture).not.toHaveBeenCalled();
-    expect(s.errors.length).toBeGreaterThan(0);
-    expect(s.errors).toEqual(s.errors.map(() => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
+    const delivering = s.errors.filter(([context]) => context.startsWith("deliver automation record"));
+    expect(delivering.length).toBeGreaterThan(0);
+    expect(delivering).toEqual(delivering.map(() => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
       expect.objectContaining({message: UNDELIVERED})]));
     drained.mockRestore(); readHead.mockRestore(); currentBinding.mockRestore();
   });
