@@ -13,8 +13,9 @@ const fixture = new URL(
 );
 
 it("the daemon source fixture comes from the real captured Markdown seeder", async () => {
-  const markdown = "# Shared\n\nStarting together.\n";
-  const canonical = "# Shared\n\nStarting together.";
+  // A file without its final newline, so the seed keeps a witness of its bytes.
+  const markdown = "# Shared\n\nStarting together.";
+  const canonical = "# Shared\n\nStarting together.\n";
   const engine = new YdocLoopbackEngine();
   engine.seedFile({ workspace: "workspace", versionId: "main", path: "owner.md", content: markdown, contentKind: "richdoc" });
   const adapter = new YdocLiveAdapter(engine);

@@ -2120,7 +2120,7 @@ describe('Y.Doc markdown import/export', () => {
         { type: 'text', text: tail },
       ])
       expect(yDocToMarkdown(doc)).toBe(`${markdown}\n`)
-      expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+      expect(yDocToMarkdown(markdownToYDoc(`${markdown}\n`))).toBe(`${markdown}\n`)
     }
 
     expect(yDocToMarkdown(markdownToYDoc(String.raw`\\&#35;`)))
@@ -2702,9 +2702,9 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it('keeps a workspace-relative image byte-identical through the round-trip', () => {
-    const input = '![alt](assets/pic.png "t")'
+    const input = '![alt](assets/pic.png "t")\n'
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(`${input}\n`)
+    expect(once).toBe(input)
     // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
@@ -2736,9 +2736,9 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it('round-trips a relative image path containing spaces via angle brackets', () => {
-    const input = '![alt](<my folder/pic 1.png>)'
+    const input = '![alt](<my folder/pic 1.png>)\n'
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe(`${input}\n`)
+    expect(once).toBe(input)
     // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
@@ -2805,7 +2805,7 @@ describe('Y.Doc markdown import/export', () => {
           },
         ]),
       ),
-    ).toBe('![backslash]()')
+    ).toBe('![backslash]()\n')
   })
 
   // SHARED CONTRACT TABLE. sanitizeImageSrc lives once, in

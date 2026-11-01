@@ -96,6 +96,7 @@ describe('desktop editor markdown round-trip', () => {
       '```',
       'after',
       '````',
+      '',
     ].join('\n'))
   })
 
@@ -338,12 +339,12 @@ describe('desktop editor markdown round-trip', () => {
     )
 
     expect(output).toBe(
-      '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n',
+      '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n\n',
     )
   })
 
   it('keeps a workspace-relative image byte-identical through the round-trip', () => {
-    const input = '![alt](assets/pic.png "t")'
+    const input = '![alt](assets/pic.png "t")\n'
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
     // And a second pass is stable.
@@ -351,7 +352,7 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('round-trips a relative image path containing spaces via angle brackets', () => {
-    const input = '![alt](<my folder/pic 1.png>)'
+    const input = '![alt](<my folder/pic 1.png>)\n'
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
     // And a second pass is stable.
@@ -400,7 +401,7 @@ describe('desktop editor markdown round-trip', () => {
           },
         ]),
       ),
-    ).toBe('![split]()')
+    ).toBe('![split]()\n')
     // Backslash traversal (a Windows-style `..\secret\pic.png`) stays blocked:
     // backslashes are folded to '/' before the check and a `..` backslash path
     // is never legitimate authored markdown (unlike a forward-slash `../`,
@@ -471,7 +472,7 @@ describe('desktop editor markdown round-trip', () => {
             },
           ]),
         ),
-      ).toBe(markdown)
+      ).toBe(`${markdown}\n`)
     }
   })
 
@@ -506,6 +507,7 @@ describe('desktop editor markdown round-trip', () => {
       '| Metric | Value |',
       '| ------ | ----- |',
       '| apples | 10    |',
+      '',
     ].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(annotated))).toBe(annotated)
   })
@@ -663,7 +665,7 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('round-trips a callout nested inside a list item without dropping it', () => {
-    const input = ['- item', '  > [!note] In list', '  > body'].join('\n')
+    const input = ['- item', '  > [!note] In list', '  > body', ''].join('\n')
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
     const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -691,11 +693,11 @@ describe('desktop editor markdown round-trip', () => {
 
   it('emits a title-only callout without a stray trailing > line', () => {
     expect(yDocToMarkdown(markdownToYDoc('> [!note] Just a title'))).toBe(
-      '> [!note] Just a title',
+      '> [!note] Just a title\n',
     )
-    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]')
+    expect(yDocToMarkdown(markdownToYDoc('> [!tip]'))).toBe('> [!tip]\n')
     expect(yDocToMarkdown(markdownToYDoc('> [!warning]- Folded title'))).toBe(
-      '> [!warning]- Folded title',
+      '> [!warning]- Folded title\n',
     )
   })
 
@@ -707,7 +709,7 @@ describe('desktop editor markdown round-trip', () => {
     // First pass normalizes the lazy line to a `>`-prefixed body line inside the
     // callout (rather than reflowing it into a separate paragraph)...
     expect(once).toBe(
-      ['> [!note] Title', '> first line', '> lazy continuation'].join('\n'),
+      ['> [!note] Title', '> first line', '> lazy continuation', ''].join('\n'),
     )
     // ...and the normalized form is byte-stable thereafter.
     const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -723,7 +725,7 @@ describe('desktop editor markdown round-trip', () => {
         },
       ])
     // The concrete escaped form is unambiguous and reversible.
-    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==')
+    expect(yDocToMarkdown(highlighted('a==b'))).toBe('==a\\=\\=b==\n')
     // A lone `=` adjacent to the closing delimiter must also be escaped, or the
     // mark would close one char early (`==a=` → `==a===`).
     expect(yDocToMarkdown(highlighted('a='))).toBe('==a\\===')
@@ -749,7 +751,7 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('keeps adversarial raw == sequences literal and byte-stable', () => {
-    for (const input of ['==a ==b== c==', 'a ==b==c== d', '==x==y==z==']) {
+    for (const input of ['==a ==b== c==\n', 'a ==b==c== d\n', '==x==y==z==\n']) {
       const once = yDocToMarkdown(markdownToYDoc(input))
       expect(once, `input=${JSON.stringify(input)}`).toBe(input)
       const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -758,13 +760,13 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('round-trips inline $...$ TeX math byte-for-byte', () => {
-    const input = 'Euler: $e^{i\\pi} + 1 = 0$ is neat.'
+    const input = 'Euler: $e^{i\\pi} + 1 = 0$ is neat.\n'
     const once = expectStableMarkdownRoundTrip(input, ['$e^{i\\pi} + 1 = 0$'])
     expect(once).toBe(input)
   })
 
   it('round-trips a single-line $$...$$ block byte-for-byte', () => {
-    const input = '$$E = mc^2$$'
+    const input = '$$E = mc^2$$\n'
     const once = expectStableMarkdownRoundTrip(input, ['$$E = mc^2$$'])
     expect(once).toBe(input)
   })
@@ -775,6 +777,7 @@ describe('desktop editor markdown round-trip', () => {
       '\\sum_{i=0}^n i = \\frac{n(n+1)}{2}',
       'E = mc^2',
       '$$',
+      '',
     ].join('\n')
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
@@ -797,7 +800,7 @@ describe('desktop editor markdown round-trip', () => {
     // `]` and `|` in the label are backslash-escaped so the closing `]]` and the
     // target/label separator aren't matched early.
     const once = yDocToMarkdown(doc)
-    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]')
+    expect(once).toBe('[[notes/plan|Plan \\]\\] Draft \\| v2]]\n')
     // Re-parsing unescapes the label and re-serializing reproduces it verbatim
     // (a truncated re-parse would drop the tail and diverge here).
     const twice = yDocToMarkdown(markdownToYDoc(once))
@@ -805,19 +808,19 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('round-trips an empty $$$$ block', () => {
-    const input = '$$$$'
+    const input = '$$$$\n'
     const once = expectStableMarkdownRoundTrip(input, ['$$$$'])
     expect(once).toBe(input)
   })
 
   it('keeps escaped \\$ literal instead of opening math', () => {
-    const input = 'Price is \\$5 and \\$6 today.'
+    const input = 'Price is \\$5 and \\$6 today.\n'
     const once = expectStableMarkdownRoundTrip(input, ['\\$5', '\\$6'])
     expect(once).toBe(input)
   })
 
   it('does not fire inline math on prose dollar amounts like $5 and $6', () => {
-    const input = 'I have $5 and $6 in my wallet.'
+    const input = 'I have $5 and $6 in my wallet.\n'
     const once = expectStableMarkdownRoundTrip(input, ['$5 and $6'])
     expect(once).toBe(input)
   })
@@ -828,7 +831,7 @@ describe('desktop editor markdown round-trip', () => {
     // shared by every inline atom (image, inlineAtom, wikilink), not a
     // math quirk. Marks adjacent to math round-trip cleanly, which is the case
     // that matters in practice.
-    const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.'
+    const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.\n'
     const once = expectStableMarkdownRoundTrip(input, [
       '**bold**',
       '$x^2$',
@@ -838,7 +841,7 @@ describe('desktop editor markdown round-trip', () => {
   })
 
   it('leaves a mid-paragraph $$x$$ with trailing text literal', () => {
-    const input = 'inline $$x$$ trailing stays literal'
+    const input = 'inline $$x$$ trailing stays literal\n'
     const once = expectStableMarkdownRoundTrip(input, ['$$x$$ trailing'])
     expect(once).toBe(input)
   })
@@ -855,7 +858,7 @@ describe('desktop editor markdown round-trip', () => {
       },
     ])
     const once = yDocToMarkdown(doc)
-    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here')
+    expect(once).toBe('See [[notes/plan|Plan \\]\\] Draft]] here\n')
     const twice = yDocToMarkdown(markdownToYDoc(once))
     expect(twice).toBe(once)
   })
@@ -897,7 +900,7 @@ describe('source view of canonically written frontmatter', () => {
       // A canonical block keeps no text, so the values alone write it.
       expect(doc.getMap('meta').get('dohcFrontmatterSource')).toBeUndefined()
 
-      expect(yDocToMarkdown(doc)).toBe(`${EDGE_FRONTMATTER}Body`)
+      expect(yDocToMarkdown(doc)).toBe(`${EDGE_FRONTMATTER}Body\n`)
       expect(yDocToMarkdown(doc)).toBe(projectYDocToMarkdown(doc))
     } finally {
       doc.destroy()
@@ -938,9 +941,9 @@ describe('source view of canonically written frontmatter', () => {
 // document: the whole task list disappeared on open.
 describe('a list nested inside a task item', () => {
   const CASES = [
-    ['bullet', '- [ ] parent\n  - child one\n  - child two'],
-    ['ordered', '- [x] parent\n  1. first\n  2. second'],
-    ['task', '- [ ] parent\n  - [x] done child\n  - [ ] open child'],
+    ['bullet', '- [ ] parent\n  - child one\n  - child two\n'],
+    ['ordered', '- [x] parent\n  1. first\n  2. second\n'],
+    ['task', '- [ ] parent\n  - [x] done child\n  - [ ] open child\n'],
   ] as const
 
   for (const [kind, markdown] of CASES) {
@@ -1015,7 +1018,7 @@ describe('desktop editor markdown import: indented code fences', () => {
 
   it('normalizes an indented fence to column 0 on export', () => {
     const once = yDocToMarkdown(markdownToYDoc(' ```js\ncode\n ```'))
-    expect(once).toBe('```js\ncode\n```')
+    expect(once).toBe('```js\ncode\n```\n')
   })
 
   // An empty fence has no body. The codeBlock must be built with no content at
@@ -1030,7 +1033,7 @@ describe('desktop editor markdown import: indented code fences', () => {
     expect(codeText(blocks[0])).toBe('')
 
     const once = yDocToMarkdown(markdownToYDoc(input))
-    expect(once).toBe('```js\n\n```')
+    expect(once).toBe('```js\n\n```\n')
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
   })
 
@@ -1055,7 +1058,7 @@ describe('desktop editor markdown import: indented code fences', () => {
   // `>` prefix itself. This is the only case that reaches marked's blockquote
   // tokenizer with a fence inside it.
   it('keeps a fence inside a plain blockquote quoted', () => {
-    const input = ['> ```', '> code', '> ```'].join('\n')
+    const input = ['> ```', '> code', '> ```', ''].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 })

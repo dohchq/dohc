@@ -688,7 +688,8 @@ describe("desktop editor schema parity", () => {
       const projected = projectYDocToMarkdown(doc);
       expect(yDocToMarkdown(doc)).toBe(projected);
       expect(projected.startsWith(EDGE_FRONTMATTER)).toBe(true);
-      expect(serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON())).trimEnd()).toBe(
+      // The file adds only its final newline to the body.
+      expect(`${serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON())).trimEnd()}\n`).toBe(
         projected.slice(EDGE_FRONTMATTER.length),
       );
 

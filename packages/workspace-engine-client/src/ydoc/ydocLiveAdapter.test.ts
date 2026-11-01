@@ -6219,13 +6219,13 @@ describe("no-edit settle skip", () => {
   it.each([
     {
       name: "heading",
-      source: "# Shared\n\nStarting together.\n",
-      canonical: "# Shared\n\nStarting together.",
+      source: "# Shared\n\nStarting together.",
+      canonical: "# Shared\n\nStarting together.\n",
     },
     {
       name: "backtick-bearing code language",
-      source: "~~~lang`tick\ncode\n~~~\n\nStarting together.\n",
-      canonical: "~~~lang`tick\ncode\n~~~\n\nStarting together.",
+      source: "~~~lang`tick\ncode\n~~~\n\nStarting together.",
+      canonical: "~~~lang`tick\ncode\n~~~\n\nStarting together.\n",
     },
   ])("the first richdoc seed carries its exact captured Markdown across the wire ($name)", async ({ source, canonical }) => {
     const engine = new YdocLoopbackEngine();
@@ -6266,7 +6266,7 @@ describe("no-edit settle skip", () => {
       const text = paragraph.get(0) as Y.XmlText;
       text.insert(text.length, " Both desktops see this edit.");
       expect(ydocProjection.yDocToMarkdown(receiver)).toBe(
-        `${canonical} Both desktops see this edit.`,
+        `${canonical.trimEnd()} Both desktops see this edit.\n`,
       );
       expect(meta.get("dohcMarkdownSourceProjectionSha256")).not.toBe(
         createHash("sha256")
