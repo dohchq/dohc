@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
-import { collectionPlace, finishedTransfer, moveCollectionToServer, type FinishedTransfer } from "./collectionMove";
+import { collectionPlace, finishedTransfer, movedTransfer, moveCollectionToServer, type FinishedTransfer } from "./collectionMove";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
 
 const transfer = <State extends DatasetTransferStatus["state"]>(state: State) =>
@@ -30,9 +30,12 @@ function moving(before: DatasetTransferStatus | null, options: { after?: Finishe
     if (options.noSession) throw options.noSession;
     return { credentials: { serverUrl: "https://account.example.test", relayUrl: options.relayUrl ?? "https://sync.example.test", token: "t", userId: "u", email: "u@example.test" }, credentialGeneration: 1 };
   });
-  const finish = (signal = new AbortController().signal) => finishedTransfer({ local, workspaceId: "w", datasetId: "d", server, currentCredentialGeneration: () => 1,
+  const read = (signal: AbortSignal) => ({ local, workspaceId: "w", datasetId: "d", server, currentCredentialGeneration: () => 1,
     relayStream: async () => { throw Error("Nothing streams in this test."); }, signal });
-  return { local, server, finish };
+  const finish = (signal = new AbortController().signal) => finishedTransfer(read(signal));
+  // How a background read goes by the record.
+  const moved = () => movedTransfer(read(new AbortController().signal));
+  return { local, server, finish, moved };
 }
 
 it("reads a Collection's transfer record as it is when no move is unfinished", async () => {
@@ -41,6 +44,20 @@ it("reads a Collection's transfer record as it is when no move is unfinished", a
   const moved = moving(transfer("imported"));
   await expect(moved.finish()).resolves.toMatchObject({ state: "imported" });
   for (const { local, server } of [here, moved]) {
+    expect(server).not.toHaveBeenCalled();
+    expect(local.transferToShared).not.toHaveBeenCalled();
+  }
+});
+
+it("reads a Collection whose move hasn't finished from this computer in the background, without waiting for the move or resuming it", async () => {
+  const stopped = moving(transfer("ready"), { after: transfer("imported") });
+  await expect(stopped.moved()).resolves.toBeNull();
+  // A move that never ends keeps nothing waiting.
+  const running = moving(transfer("ready"), { after: transfer("imported"), inFlight: new Promise(() => undefined) });
+  await expect(running.moved()).resolves.toBeNull();
+  const finished = moving(transfer("imported"));
+  await expect(finished.moved()).resolves.toMatchObject({ state: "imported" });
+  for (const { local, server } of [stopped, running, finished]) {
     expect(server).not.toHaveBeenCalled();
     expect(local.transferToShared).not.toHaveBeenCalled();
   }
