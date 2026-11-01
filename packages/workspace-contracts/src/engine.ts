@@ -849,6 +849,8 @@ export interface ChannelThreadSummary {
     bodySnippet: string;
     automation?: ChatMessageAutomation;
     authorReported?: ChatReportedAgent;
+    // The agent that wrote the message in one of its runs. Provenance only.
+    authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };

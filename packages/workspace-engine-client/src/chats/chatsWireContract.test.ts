@@ -234,6 +234,21 @@ describe("chats result decoder rejection", () => {
     expect(fileMentions?.entries[0]?.message.createdAtMs).toBe(-40);
   });
 
+  it("keeps the agent that wrote a post's opening message", () => {
+    const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+      threads: [{
+        thread: { id: "t", workspaceId: "w", title: "Done", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
+        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+        openingMessage: {
+          id: "m", author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex",
+          createdAtMs: 1, bodySnippet: "Done", reactions: [],
+        },
+      }],
+      nextCursor: null,
+    });
+    expect(summaries.threads[0]?.openingMessage?.authorAgentId).toBe("codex");
+  });
+
   it("reports a wrong-typed nested field path", () => {
     expect(() =>
       decodeChatMessage({

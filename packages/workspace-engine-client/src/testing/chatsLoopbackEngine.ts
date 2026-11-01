@@ -1944,6 +1944,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
                       : opening.body,
                   ...(opening.automation ? { automation: opening.automation } : {}),
                   ...(opening.authorReported ? { authorReported: opening.authorReported } : {}),
+                  ...(opening.authorAgentId ? { authorAgentId: opening.authorAgentId } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }
