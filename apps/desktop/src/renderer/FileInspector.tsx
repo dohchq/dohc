@@ -570,7 +570,8 @@ export const FileInspector = memo(function FileInspector(
     && (boundSource === editAnyway.source || boundSource === undefined);
   const session = useBoundNoteCheck({
     open: lossyOpen,
-    // Edit anyway already accepted what saving does.
+    // Edit anyway already accepted what saving does. Received shares, the only
+    // sessions with a null head, never offer it, so their source changes stay checked.
     doc: checksLossyNote && !editingAnyway ? engine.doc : null,
     headSha256: engine.headSha256,
   });
