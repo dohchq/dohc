@@ -116,7 +116,7 @@ import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { ShellErrorReporter, useShellError, type ShellError } from "./shell/useShellError";
+import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -260,6 +260,7 @@ import {
 } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
+  ChatErrorNotice,
   ChatsInvitation,
   ChatsNav,
 } from "./workbench/ChatsView";
@@ -1096,10 +1097,10 @@ export function DesktopWorkspaceShell(props: {
   );
   // Chats' failures. An archive refused for live editing opens Live documents
   // at the page's row, and the page's archive takes the refusal back. Other
-  // failures can offer an action in place of Try again.
+  // failures can name their own notice and offer an action in place of Try again.
   const reportChatsError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, action?: ShellError["action"]) => {
-      if (!isLivePageOwnedRefusal(cause)) return reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(action ? { action } : {}) });
+    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => {
+      if (!isLivePageOwnedRefusal(cause)) return reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...notice });
       const id = workspaceId, { title, words } = readError(cause);
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
         ...(refusedPage !== undefined ? { identity: archiveRefusalIdentity(id, refusedPage) } : {}),
