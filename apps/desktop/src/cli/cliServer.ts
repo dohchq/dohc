@@ -592,7 +592,7 @@ function rawChatThread(thread: ChatThread) {
 
 function rawChatMessage(
   message: ChatMessage,
-  decision: Awaited<ReturnType<LinkedChatStore["listThreadDecisions"]>>[number] | undefined,
+  decision: ChatStreamItem["decision"],
 ) {
   return {
     id: message.id,
@@ -1198,7 +1198,7 @@ async function buildThreadContent(
     loaded.thread.id,
   );
   const decisionByMessage = new Map(
-    decisions.map((decision) => [decision.messageId, decision.state]),
+    decisions.map((decision) => [decision.messageId, decision]),
   );
   const counts = await threadCounts(context, loaded, allMessages);
   const selected = rootMessage
@@ -1216,7 +1216,7 @@ async function buildThreadContent(
   };
 }
 
-function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved" | undefined): CliShowMessage {
+function cliShowMessage(message: ChatMessage, decision: ChatStreamItem["decision"]): CliShowMessage {
   return {
     id: cliMessageId(message.id),
     author: authorForCli(message),
@@ -1225,7 +1225,11 @@ function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved"
     ...(message.parentMessageId
       ? { parentMessageId: cliMessageId(message.parentMessageId) }
       : {}),
-    ...(decisionState ? { decisionState } : {}),
+    ...(decision ? {
+      decisionState: decision.state,
+      ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
+      ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
+    } : {}),
     attachments: message.attachments.map((attachment) => ({
       ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
@@ -1255,10 +1259,6 @@ async function readGroupStream(
     ...(before ? { before } : {}),
     ...(page.limit ? { limit: page.limit } : {}),
   });
-  // A conversation message's decision comes from its conversation's decisions.
-  const conversations = [...new Set(stream.items.filter((item) => !item.post).map((item) => item.message.threadId))];
-  const decisions = new Map((await Promise.all(conversations.map((threadId) =>
-    context.store.listThreadDecisions(context.workspaceId, threadId)))).flat().map((decision) => [decision.messageId, decision]));
   const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
   const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
   const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
@@ -1270,7 +1270,7 @@ async function readGroupStream(
       position: position(item.position),
       threadId: threadId(item.message.threadId),
       message: item.message,
-      decision: decisions.get(item.message.id),
+      decision: item.decision,
       ...(item.post ? {
         post: {
           replyCount: item.post.replyCount,
@@ -3620,7 +3620,7 @@ async function dispatchWorkspace(
             ...page,
             items: page.items.map(({ message, decision, ...item }) => ({
               ...item,
-              message: cliShowMessage(message, decision?.state),
+              message: cliShowMessage(message, decision),
             })),
           },
         };

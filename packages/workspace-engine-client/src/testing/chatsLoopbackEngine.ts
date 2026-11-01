@@ -1976,10 +1976,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ? all.filter((item) => compareStreamPosition(item.position, before) < 0).length
       : all.length;
     const start = Math.max(0, end - limit);
-    const items = all.slice(start, end).map(({ order: _order, ...item }) =>
-      item.position.lane === "posts"
-        ? { ...item, message: withAgentRequests(state, item.message), post: streamPost(state, item.position.id) }
-        : { ...item, message: withAgentRequests(state, item.message) });
+    const items = all.slice(start, end).map(({ order: _order, ...item }) => {
+      const decision = state.decisions.get(item.message.id);
+      return {
+        ...item,
+        message: withAgentRequests(state, item.message),
+        ...(decision ? { decision } : {}),
+        ...(item.position.lane === "posts" ? { post: streamPost(state, item.position.id) } : {}),
+      };
+    });
     const read = all.filter((item) => {
       const cursor = state.humanReads.get(item.message.threadId) ?? 0;
       return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;

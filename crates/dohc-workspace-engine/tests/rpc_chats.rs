@@ -5862,6 +5862,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             json!({
                 "channelId": "group", "threadId": thread, "messageId": message, "lane": lane,
                 "authorKind": "agent", "authorDisplayName": "Scout", "body": message, "nowMs": at,
+                "needsDecision": message == "p-1" || message == "c-1",
+                "options": if message == "p-1" || message == "c-1" { vec!["Train", "Bus"] } else { vec![] },
             }),
         )
         .await;
@@ -5895,6 +5897,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             .collect()
     };
     assert_eq!(ids(&newest), ["c-2", "p-2"]);
+    assert!(newest["items"][0].get("decision").is_none());
+    assert!(newest["items"][1].get("decision").is_none());
     assert_eq!(
         newest["items"][0]["message"]["agentRequests"],
         json!([
@@ -5917,7 +5921,45 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     )
     .await;
     assert_eq!(ids(&older), ["p-1", "c-1"]);
+    for (index, thread, message, at) in [(0, "post-1", "p-1", 10), (1, "chat", "c-1", 20)] {
+        assert_eq!(
+            older["items"][index]["decision"],
+            json!({
+                "threadId": thread, "messageId": message, "state": "open", "atMs": at,
+                "options": ["Train", "Bus"],
+            })
+        );
+    }
     assert_eq!(older["nextBefore"], Value::Null);
+
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve-stream-root",
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "resolvedByMessageId": "p-1",
+            "chosenOption": "Train", "nowMs": 50,
+        }),
+    )
+    .await;
+    let resolved = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "before": newest["nextBefore"].clone() }),
+    )
+    .await;
+    assert_eq!(
+        resolved["items"][0]["decision"],
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "state": "resolved", "atMs": 50,
+            "options": ["Train", "Bus"], "chosenOption": "Train", "resolvedByMessageId": "p-1",
+        })
+    );
+    assert_eq!(resolved["items"][0]["post"]["openDecisionCount"], json!(0));
 
     let messages = call(
         &transport,

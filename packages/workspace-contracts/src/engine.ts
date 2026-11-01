@@ -886,6 +886,7 @@ interface ChatStreamPost {
 export interface ChatStreamItem {
   position: ChatStreamPosition;
   message: ChatMessage;
+  decision?: Omit<ChatDecisionRecord, "workspaceId">;
   reactions: ChatReaction[];
   // Set for, and only for, a post.
   post?: ChatStreamPost;
