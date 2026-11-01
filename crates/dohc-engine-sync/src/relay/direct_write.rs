@@ -152,6 +152,7 @@ pub fn read_record_creation_statuses(
             )
             .optional().map_err(SyncError::corrupt)
         })?;
+        let returned = creation.is_none();
         let creation = match creation {
             None => read_returned_creation(store, workspace_id, share_id, path, &mut planned)?,
             found => found,
@@ -195,6 +196,11 @@ pub fn read_record_creation_statuses(
             // A refused name may now show another recipient's record. It is
             // never a disposable copy of this creation.
             if current_id != status.original_record_id {
+                continue;
+            }
+            // The relay refused this creation, so a received record with its
+            // ID is someone else's copy, such as the owner's accepted proposal.
+            if returned && status.state == DirectWriteState::Refused {
                 continue;
             }
             status.can_discard &= current_id.is_some();
