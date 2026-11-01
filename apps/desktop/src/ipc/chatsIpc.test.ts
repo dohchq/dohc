@@ -545,7 +545,7 @@ describe("registered channels and personal chat projections", () => {
     const test = fixture();
     test.storeMethods.createChannel.mockRejectedValueOnce(new Error("channel-exists"));
     await expect(test.invoke(chatOperations.createChatChannel.channel, { workspaceId: "workspace", name: "Team" }))
-      .rejects.toThrow("A group with that name already exists.");
+      .rejects.toMatchObject({ name: "GroupNameTakenError", message: "A group with that name already exists." });
     test.storeMethods.createChannel.mockRejectedValueOnce(new Error("invalid-channel-name"));
     await expect(test.invoke(chatOperations.createChatChannel.channel, { workspaceId: "workspace", name: "Team" }))
       .rejects.toThrow("Use 1 to 80 characters, including at least one letter or number.");

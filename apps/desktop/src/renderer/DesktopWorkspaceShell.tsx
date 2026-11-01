@@ -116,7 +116,7 @@ import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, useShellError, type ShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -1095,17 +1095,18 @@ export function DesktopWorkspaceShell(props: {
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Chats' failures. An archive refused for live editing opens Live documents
-  // at the page's row, and the page's archive takes the refusal back.
+  // at the page's row, and the page's archive takes the refusal back. Other
+  // failures can offer an action in place of Try again.
   const reportChatsError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => {
-      if (!isLivePageOwnedRefusal(cause)) return reportFailureMessage(message, cause, retry);
+    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, action?: ShellError["action"]) => {
+      if (!isLivePageOwnedRefusal(cause)) return reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(action ? { action } : {}) });
       const id = workspaceId, { title, words } = readError(cause);
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
         ...(refusedPage !== undefined ? { identity: archiveRefusalIdentity(id, refusedPage) } : {}),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, refusedPage ?? null); } },
         target: { to: "live-documents", ...(refusedPage === undefined ? {} : { reveal: refusedPage }) } });
     },
-    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+    [reportShellFailure, openLiveDocuments, workspaceId],
   );
   const onChatBookmarkArchived = useCallback((path: string) => clearIdentity(archiveRefusalIdentity(workspaceId, path)),
     [clearIdentity, workspaceId]);

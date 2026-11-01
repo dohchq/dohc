@@ -60,6 +60,9 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
+import { nameSlug } from "@dohc/workspace-contracts/names";
+import { isGroupNameTaken } from "../../ipc/errorWords";
+import type { ShellError } from "../shell/useShellError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
 import {
@@ -522,8 +525,9 @@ export function ChatsView(props: {
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // A retry, when given, is the failure's Try again. An archive refused for
-  // live editing also names the bookmark's page.
-  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => void;
+  // live editing also names the bookmark's page. An action, when given,
+  // replaces Try again.
+  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, action?: ShellError["action"]) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
@@ -687,6 +691,7 @@ export function ChatsView(props: {
     message: string;
     error: unknown;
     input: { name: string; type: GroupType; purpose: string };
+    action?: ShellError["action"];
   } | null>(null);
   const resetGroupForm = useCallback(() => {
     unreportedCreateFailure.current = null;
@@ -3505,10 +3510,22 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
         return null;
       } catch (error) {
+        if (token !== liveToken.current) return null;
         // The open dialog says why and keeps the draft. Notices hears of it
         // only if the person closes the dialog without a retry that worked.
         const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
-        if (token === liveToken.current) unreportedCreateFailure.current = { message, error, input };
+        let action: ShellError["action"];
+        if (isGroupNameTaken(error)) {
+          const slug = nameSlug(input.name);
+          // The engine also refuses reserved agent names, which have no group to open.
+          if (slug !== "my-agent" && !slug.startsWith("my-agent-")) {
+            const listing = await bridge().listChatChannels({ workspaceId }).catch(() => null);
+            if (token !== liveToken.current) return null;
+            const existing = listing?.channels.find((channel) => channel.kind === "channel" && channel.slug === slug);
+            if (existing) action = { label: "Open", run: () => openConversation({ level: "channel", channel: existing }), ends: true };
+          }
+        }
+        unreportedCreateFailure.current = { message, error, input, ...(action ? { action } : {}) };
         return message;
       }
     },
@@ -3518,13 +3535,17 @@ export function ChatsView(props: {
     const failure = unreportedCreateFailure.current;
     resetGroupForm();
     if (!failure) return;
+    const report = (next: NonNullable<typeof failure>) => {
+      if (next.action) props.onError(next.message, next.error, undefined, undefined, next.action);
+      else props.onError(next.message, next.error, again);
+    };
     // Try again creates the same group; a failure there reports again.
     const again = () => void createChannel(failure.input).then(() => {
       const next = unreportedCreateFailure.current;
       unreportedCreateFailure.current = null;
-      if (next) props.onError(next.message, next.error, again);
+      if (next) report(next);
     });
-    props.onError(failure.message, failure.error, again);
+    report(failure);
   }, [createChannel, props.onError, resetGroupForm]);
 
   const goBack = useCallback(() => {
