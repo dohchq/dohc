@@ -5,7 +5,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
+import { createLiveBufferBudget } from "@dohc/live-session-contract/live-connection";
+import { createLiveGateway } from "../../../../services/share-web/src/liveGateway";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
+import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHostLiveProfile";
 import { desktopRoot } from "./desktopApp";
 
 export const sharedDatasetViewerOrigin = "https://viewer.example.com";
@@ -49,9 +52,17 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
       response.end(Buffer.from(await result.arrayBuffer()));
     } catch (error) { failures.push(String(error)); response.writeHead(500); response.end(); }
   });
+  // The live editor's socket, built as share-web's main.ts builds it, with a self-hosted server's limits.
+  const limits = selfHostLiveProfile().gateway;
+  const linkGateway = application.linkLive ? createLiveGateway({ bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
+    publicHosts: new Set(["viewer.example.com"]), publicOrigin: sharedDatasetViewerOrigin, path: "/api/live/link", limits,
+    resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute }) : undefined;
+  if (linkGateway) server.on("upgrade", (request, socket, head) => {
+    if (request.url?.startsWith("/api/live/link?")) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
+  });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw Error("No TLS listener.");
-  const closeServer = async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  const closeServer = async () => { linkGateway?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
   try {
     const browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`,
       `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
