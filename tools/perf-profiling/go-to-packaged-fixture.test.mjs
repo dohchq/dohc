@@ -60,7 +60,7 @@ test('the dedicated relay admits seven peer DMs, scoped agent claims and the mou
     assert.ok(mounted.ops.some(op => op.payload.payloadAfterPath === 'mounted.txt'));
   } finally {
     await relay?.stop();
-    const owned = relative(resolve(tmpdir()), resolve(scratch));
+    const owned = relative(await realpath(tmpdir()), resolve(scratch));
     assert.ok(!isAbsolute(owned) && !owned.startsWith('..') && owned.startsWith('dohc-goto-fixture-'));
     await rm(scratch, { recursive: true, force: true });
   }
