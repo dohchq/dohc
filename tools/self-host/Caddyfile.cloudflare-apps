@@ -1,0 +1,16 @@
+import /etc/caddy/Caddyfile.cloudflare
+
+*.{$DOHC_SHARE_WEB_APP_DOMAIN} {
+  tls /etc/caddy/app-tls/cert.pem /etc/caddy/app-tls/key.pem
+  @internal path /internal/*
+  handle @internal {
+    respond 404
+  }
+  handle {
+    reverse_proxy share-web:1790 {
+      header_up X-Forwarded-For {client_ip}
+      header_up X-Forwarded-Host {host}
+      header_up X-Forwarded-Proto https
+    }
+  }
+}
