@@ -261,3 +261,13 @@ export function aggregateByKind(snapshot, appPid) {
   }
   return { completedAtMs: snapshot.completedAtMs, processCount: snapshot.processes.length, kinds };
 }
+
+// A workspace's Explorer opens on Home, which lists Collections but has no tree rows; Files has the
+// tree but no Collections. A step switches to the mode it reads, outside its timings. The choice
+// stays for that workspace.
+export async function showExplorer(page, mode) {
+  const tab = page.getByTestId(`explorer-mode-${mode}`);
+  if (!(await tab.count()) || (await tab.getAttribute('aria-selected')) === 'true') return;
+  await tab.click();
+  await page.waitForFunction(expected => document.querySelector('[data-testid="file-tree"]')?.dataset.mode === expected, mode);
+}
