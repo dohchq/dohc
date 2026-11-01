@@ -1,6 +1,6 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { atomicReplaceFile } from "../atomicReplaceFile";
+import { atomicReplaceFile, retryWhileBusy } from "../atomicReplaceFile";
 import {
   existingLocalStateDir,
   localStateDir,
@@ -25,19 +25,24 @@ const writeQueues = new Map<string, Promise<void>>();
 // can't be read + JSON.parsed wholesale in main before zod ever runs.
 export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 
-// Tolerant read: a missing, corrupt, oversized, or escape-y file is "no saved
-// state", never an error. On Windows, a read the engine's open doesn't hold
-// `.dohc/local` throughout is refused instead, so the renderer saves no
-// defaults over a file it couldn't read. Returns the raw parsed JSON — the
-// IPC handler validates the shape with the WorkspaceUiState zod contract
-// before it reaches the renderer.
+// A missing, corrupt, oversized, or escape-y file is "no saved state". Any
+// other failure to read it rejects, so the renderer saves no defaults over a
+// file it couldn't read. On Windows, a file another program holds for a
+// moment is read again within the rename's retry budget, and each attempt
+// checks the folders and the engine's open again. A read the engine's open
+// doesn't hold `.dohc/local` throughout is refused. Returns the raw parsed
+// JSON — the IPC handler validates the shape with the WorkspaceUiState zod
+// contract before it reaches the renderer.
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
   try {
-    return await (process.platform === "win32"
+    return await retryWhileBusy(async () => process.platform === "win32"
       ? readOwnedLocalState(rootPath, uiStateIn)
       : uiStateIn(await existingLocalStateDir(rootPath)));
   } catch (error) {
     if (error instanceof LocalStateUnavailableError) throw error;
+    // A refused folder and a corrupt file throw without a code.
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (typeof code === "string" && code !== "ENOENT") throw error;
     return null;
   }
 }

@@ -11,15 +11,53 @@ import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import type { WorkspaceUiState } from "../ipc/bridgeContract";
 
 import { createTestScratch } from "./testTemp";
+
+// The next `left` calls of `operation` on ui-state.json fail with `code`, as
+// when another program holds the file. `onFailure` runs after each failure.
+const held = vi.hoisted(() => ({
+  operation: null as "lstat" | "readFile" | null,
+  code: "",
+  left: 0,
+  calls: 0,
+  onFailure: null as (() => void) | null,
+}));
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>(
     "node:fs/promises",
   );
-  return { ...actual, rename: vi.fn(actual.rename) };
+  const holdable = <A extends unknown[], R>(operation: "lstat" | "readFile", real: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      if (held.operation === operation && String(args[0]).endsWith("ui-state.json")) {
+        held.calls += 1;
+        if (held.left > 0) {
+          held.left -= 1;
+          held.onFailure?.();
+          throw Object.assign(new Error(`${held.code}: the file is held`), { code: held.code });
+        }
+      }
+      return real(...args);
+    };
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
+    lstat: holdable("lstat", actual.lstat),
+    readFile: holdable("readFile", actual.readFile),
+  };
 });
+
+function hold(operation: "lstat" | "readFile", code: string, times: number, onFailure: (() => void) | null = null) {
+  Object.assign(held, { operation, code, left: times, calls: 0, onFailure });
+}
+
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+function runOn(value: NodeJS.Platform) {
+  Object.defineProperty(process, "platform", { ...platform, value });
+}
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  Object.defineProperty(process, "platform", platform);
+  Object.assign(held, { operation: null, left: 0, calls: 0, onFailure: null });
 });
 
 const STATE: WorkspaceUiState = {
@@ -124,15 +162,51 @@ describe("ui-state file store", () => {
     renameMock.mockClear();
     renameMock.mockRejectedValueOnce(transient);
 
-    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
-    try {
-      await expect(writeUiStateFile(workspace, STATE)).resolves.toBeUndefined();
-      expect(renameMock).toHaveBeenCalledTimes(2);
-      expect(await readUiStateFile(root)).toEqual(STATE);
-    } finally {
-      Object.defineProperty(process, "platform", descriptor);
-    }
+    runOn("win32");
+    await expect(writeUiStateFile(workspace, STATE)).resolves.toBeUndefined();
+    expect(renameMock).toHaveBeenCalledTimes(2);
+    expect(await readUiStateFile(root)).toEqual(STATE);
+  });
+
+  // A read that answers "no saved state" lets the renderer save its defaults
+  // over the file, so a file dohc couldn't read must reject instead.
+  const heldReads = (["lstat", "readFile"] as const).flatMap((operation) =>
+    (["EBUSY", "EPERM", "EACCES"] as const).map((code) => ({ operation, code })));
+
+  it.each(heldReads)("reads a file whose $operation fails with $code five times on Windows", async ({ operation, code }) => {
+    const workspace = await openedWorkspace();
+    await writeUiStateFile(workspace, STATE);
+    hold(operation, code, 5);
+    runOn("win32");
+    expect(await readUiStateFile(workspace.rootPath)).toEqual(STATE);
+    expect(held.calls).toBe(6);
+  });
+
+  it.each(heldReads)("rejects once $operation has failed with $code six times on Windows", async ({ operation, code }) => {
+    const workspace = await openedWorkspace();
+    await writeUiStateFile(workspace, STATE);
+    hold(operation, code, Number.POSITIVE_INFINITY);
+    runOn("win32");
+    await expect(readUiStateFile(workspace.rootPath)).rejects.toMatchObject({ code });
+    expect(held.calls).toBe(6);
+  });
+
+  it("asks for the engine's open again before it reads a held file again", async () => {
+    const workspace = await openedWorkspace();
+    await writeUiStateFile(workspace, STATE);
+    hold("readFile", "EBUSY", 1, () => engine.close(workspace));
+    runOn("win32");
+    await expect(readUiStateFile(workspace.rootPath)).rejects.toBeInstanceOf(LocalStateUnavailableError);
+    expect(held.calls).toBe(1);
+  });
+
+  it.each(["lstat", "readFile"] as const)("rejects at once when %s fails with EBUSY on other systems", async (operation) => {
+    const workspace = await openedWorkspace();
+    await writeUiStateFile(workspace, STATE);
+    hold(operation, "EBUSY", 1);
+    runOn("linux");
+    await expect(readUiStateFile(workspace.rootPath)).rejects.toMatchObject({ code: "EBUSY" });
+    expect(held.calls).toBe(1);
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {
