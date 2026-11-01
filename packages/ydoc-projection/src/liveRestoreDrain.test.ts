@@ -3096,6 +3096,34 @@ it.each(["renamed", "in place"] as const)("ends the owner's kept live session wh
   } finally {f.close();}
 });
 
+// Proves: a file renamed after a restore resumed with the owner's kept live
+// session ends that session once the host releases the document. The release
+// ends the run and opens the retirement at the restored generation and the
+// restore's own row. The activation retires once the restore's settlement
+// moment is in the log, and no unretired activation is left to refuse a
+// successor.
+it("retires the owner's kept live session when its file is renamed after the restore resumes", async () => {
+  const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
+  try {
+    const retirement = () => readServiceActivationRetirement(f.context, f.document);
+    const runToken = () => f.storage.readServiceHostEnrollmentByObjectId(f.document.workspaceId, f.document.objectId)!.runToken;
+    expect(f.complete().phase).toBe("resumed");
+    const kept = runToken();
+    departFrozenPath(f);
+    expect(retirement()).toBeNull();
+    expect(f.storage.releaseServiceHostEnrollment({workspaceId: f.document.workspaceId, objectId: f.document.objectId, nowMs: 300}))
+      .toMatchObject({retired: true, enabled: false});
+    const {key, boundary} = carriedRetirement(f);
+    expect(retirement()).toMatchObject({...key, path: "docs/a.md", requestedAtMs: 300});
+    expect(runToken()).not.toBe(kept);
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(key.acceptedThrough)!.validation_checkpoint_bytes as Uint8Array;
+    await pushRestoreSettlement(f.storage, restorePublication(f, bytes, key.acceptedThrough, "renamed-after-resume-publication"));
+    expect(f.storage.createServiceActivationStore(f.history).completeRetirement({workspaceId: f.document.workspaceId, key, boundary,
+      host: f.lookup.host, registeredAtMs: 400, nowMs: 400, guard() {}})).toEqual({status: "retired", replayed: false});
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_service_activations WHERE retired_at_ms IS NULL").get()!.n).toBe(0);
+  } finally {f.close();}
+});
+
 // A real identity rotation raises the log floor to the log's tip, past the restore's baseline.
 const rotateIdentity = (f: Pick<ReturnType<typeof fixture>, "write" | "storage">) => {
   f.write(db => db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','rotation-test',0,'test.rotation','{}',300)").run());
