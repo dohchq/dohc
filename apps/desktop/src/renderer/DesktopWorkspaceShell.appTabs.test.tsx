@@ -19,7 +19,8 @@ vi.mock("./workbench/Explorer", () => ({
 vi.mock("./FileInspector", () => ({
   FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
 }));
-// The app's real view hook, so each open and close reaches the bridge as it does from the app's tab.
+// The app's real view hook, so each open and close reaches the bridge as it does from the app's tab. The button
+// stands in for the page's toolbar.
 vi.mock("./SitePreviewPage", async () => {
   const { AppViewBody, useAppView } = await import("./AppView");
   return {
@@ -30,6 +31,7 @@ vi.mock("./SitePreviewPage", async () => {
       });
       return (
         <div data-testid="site-preview-page" data-root={props.siteRoot}>
+          <button type="button">Reload app</button>
           <AppViewBody view={view} onReview={() => undefined} />
         </div>
       );
@@ -227,5 +229,93 @@ describe("an app's page when its tab moves", () => {
 
     await waitFor(() => expect(lifecycle(bridge)).toEqual([`open ${viewId}`, `close ${viewId}`]));
     expect(webviewOf("apps/trip")).toBeNull();
+  });
+});
+
+// Tab as the browser runs it: keydown, then, unless a handler prevented it, focus moves on from wherever it is now.
+// jsdom has no guest page, so the walk stands in for one: Tab onto a webview enters its guest, the guest's keys
+// never reach dohc, and leaving the guest goes on from the webview element in document order.
+const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), webview';
+const tabbables = () => [...document.querySelectorAll<HTMLElement>(TABBABLE)]
+  .filter((element) => !element.closest("[data-app-group-id].hidden, [hidden], [inert]"));
+function keyboard() {
+  let guest: HTMLElement | null = null;
+  let prevented = 0;
+  const focused = () => guest ?? (document.activeElement as HTMLElement);
+  const tab = (shiftKey: boolean) => {
+    if (!guest && !fireEvent.keyDown(focused(), { key: "Tab", shiftKey })) {
+      prevented += 1;
+      return focused();
+    }
+    const order = tabbables();
+    const next = order[(order.indexOf(focused()) + (shiftKey ? order.length - 1 : 1)) % order.length]!;
+    guest = null;
+    if (next.localName === "webview") guest = next;
+    else act(() => next.focus());
+    return focused();
+  };
+  return { tab, prevented: () => prevented };
+}
+function where(element: HTMLElement): string {
+  if (!element.closest("main")) return "outside";
+  const page = element.closest<HTMLElement>("[data-app-group-id]");
+  if (page) return `${element.localName === "webview" ? "guest" : "app"} ${page.dataset.appGroupId}`;
+  const group = element.closest<HTMLElement>("[data-editor-group-id]");
+  if (group) return `group ${group.dataset.editorGroupId}`;
+  return element.getAttribute("role") === "separator" ? "separator" : "main";
+}
+// Tab from the first group's first control until focus leaves the editor area, then Shift+Tab back as many times.
+function walk(groupId: string) {
+  const first = tabbables().find((element) => screen.getByTestId(`editor-group-${groupId}`).contains(element))!;
+  const keys = keyboard();
+  act(() => first.focus());
+  const forward = [first];
+  while (where(forward[forward.length - 1]!) !== "outside" && forward.length < 200) forward.push(keys.tab(false));
+  const backward = [forward[forward.length - 1]!];
+  while (backward.length < forward.length) backward.push(keys.tab(true));
+  // Focus never rests on a stop, reaches each control once, and Shift+Tab retraces Tab exactly.
+  expect(forward.filter((element) => element.matches("[data-app-stop]"))).toEqual([]);
+  expect(new Set(forward).size).toBe(forward.length);
+  expect(backward.map((element) => forward.indexOf(element))).toEqual(forward.map((_, index) => forward.length - 1 - index));
+  return { regions: forward.map(where).filter((region, index, all) => region !== all[index - 1]), forward, keys };
+}
+async function renderSplit(editorGroups: WorkspaceUiState["editorGroups"], appRoots: string[]) {
+  renderShell(appBridge(Promise.resolve({ ...STORED_STATE, editorGroups, activeEditorGroup: editorGroups[0]!.id })));
+  for (const root of appRoots) await openedWebview(root);
+}
+
+describe("Tab order with an app beside another group", () => {
+  it("goes through each group's app before the next group, both ways, in two groups", async () => {
+    await renderSplit([
+      { id: "left", tabs: ["notes.txt", trip], activeTab: trip, size: 0.5 },
+      { id: "right", tabs: ["notes.txt"], activeTab: "notes.txt", size: 0.5 },
+    ], ["apps/trip"]);
+    const { regions } = walk("left");
+    expect(regions).toEqual(["group left", "app left", "guest left", "separator", "group right", "outside"]);
+  });
+
+  it("goes through each group's app before the next group, both ways, in three groups", async () => {
+    await renderSplit([
+      { id: "left", tabs: [trip], activeTab: trip, size: 1 / 3 },
+      { id: "middle", tabs: ["notes.txt"], activeTab: "notes.txt", size: 1 / 3 },
+      { id: "right", tabs: [shop], activeTab: shop, size: 1 / 3 },
+    ], ["apps/trip", "apps/shop"]);
+    const { regions } = walk("left");
+    expect(regions).toEqual([
+      "group left", "app left", "guest left", "separator", "group middle",
+      "separator", "group right", "app right", "guest right", "outside",
+    ]);
+  });
+
+  it("adds no stop to the order with one group", async () => {
+    await renderSplit([{ id: "primary", tabs: ["notes.txt", trip], activeTab: trip, size: 1 }], ["apps/trip"]);
+    const { regions, forward, keys } = walk("primary");
+    expect(regions).toEqual(["group primary", "app primary", "guest primary", "outside"]);
+    // Tab moves as it would with no app routing at all: nothing is prevented, and focus visits the document's
+    // own order with the page's end stop left out.
+    expect(keys.prevented()).toBe(0);
+    const plain = tabbables().filter((element) => !element.matches("[data-app-stop]"));
+    const start = plain.indexOf(forward[0]!);
+    expect(forward.map((element) => plain.indexOf(element))).toEqual(forward.map((_, index) => (start + index) % plain.length));
   });
 });

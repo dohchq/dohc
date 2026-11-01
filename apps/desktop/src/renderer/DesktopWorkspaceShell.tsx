@@ -128,6 +128,7 @@ import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useSavedTabsReread } from "./shell/useSavedTabsReread";
+import { leaveAppPage, routeAppTab } from "./shell/appTabOrder";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -1463,6 +1464,10 @@ export function DesktopWorkspaceShell(props: {
     if (app.kind !== "site" || app.siteRoot === null || !group) return [];
     return [{ path, siteRoot: app.siteRoot, groupId: group.id, groupIndex, shown: group.activeTab === path }];
   });
+  useEffect(() => {
+    window.addEventListener("keydown", routeAppTab);
+    return () => window.removeEventListener("keydown", routeAppTab);
+  }, []);
   const anyTabDirty = dirtyPaths.size > 0;
   const focusedTab = parseTab(focusedTabPath);
   const activeDocumentPath = TAB_KINDS[focusedTab?.kind ?? "removed"].virtual
@@ -6871,6 +6876,7 @@ export function DesktopWorkspaceShell(props: {
                   />
                 </Suspense>
               </ErrorBoundary>
+              <span data-app-stop tabIndex={0} aria-hidden="true" onFocus={leaveAppPage} className="absolute size-0 overflow-hidden" />
             </div>
           ))}
         </main>
