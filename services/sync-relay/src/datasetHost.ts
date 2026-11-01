@@ -213,8 +213,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const attempts = createDatasetAttempts({db: storage.db, transaction,
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
-    createRecoveryInstaller({db: storage.db, transaction, journal});
+    const startupRecovery = createRecoveryInstaller<undefined>({db: storage.db, transaction, journal,
+      account(_context, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+      discardAttachments(_context, input) { return recoveryFiles.discard(input); }});
     if (options.startupExclusive) {
+      // This process holds the deployment writer lock and serves no request yet, so no import is running.
+      await startupRecovery.discardInterrupted(undefined, current);
       let stageCursor: string | undefined;
       do {
         stageCursor = journal.reclaimCheckpointStages({after: stageCursor, authorize: current,
