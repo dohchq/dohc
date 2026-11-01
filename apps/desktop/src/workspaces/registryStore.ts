@@ -455,11 +455,14 @@ export function createRegistryStore(
     }
     const obj = parsed as Record<string, unknown>;
     if (obj.version !== 1) {
-      // A future-version registry must be preserved, never silently wiped.
+      // Preserve a registry from a newer dohc, or one with a broken version, never wipe it.
+      const newer = typeof obj.version === "number" && Number.isInteger(obj.version) && obj.version > 1;
       throw new RegistryReadError(
-        `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`,
+        newer
+          ? `Workspace registry version ${String(obj.version)} is newer than supported (${registryFile}); refusing to overwrite it.`
+          : `Workspace registry has an unexpected version (${registryFile}); refusing to overwrite it.`,
         registryFile,
-        true,
+        newer,
       );
     }
     if (!Array.isArray(obj.workspaces)) {
