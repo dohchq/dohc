@@ -611,10 +611,12 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         }
       };
       /** A set-aside queue recovers only from its record's current binding, in the same lineage and no older restore. */
-      const recoverable = ({currentPath, objectId, lineageClaimId, restoreFenceGeneration}: LiveObjectBinding) => {
-        const current = currentRecord(currentPath);
-        return current !== null && current !== "unavailable" && current.binding.objectId === objectId
-          && current.binding.lineageClaimId === lineageClaimId && current.binding.restoreFenceGeneration >= restoreFenceGeneration;
+      const recoverable = (draft: LiveObjectBinding) => {
+        const current = currentRecord(draft.currentPath);
+        if (current === null || current === "unavailable") return false;
+        const {binding} = current;
+        return binding.workspaceId === draft.workspaceId && binding.mainVersionId === draft.mainVersionId && binding.objectId === draft.objectId
+          && binding.lineageClaimId === draft.lineageClaimId && binding.restoreFenceGeneration >= draft.restoreFenceGeneration;
       };
       const delivery = automationRecordDelivery({replica, namespace: configured.namespace, ownerUserId,
         capture: async (binding, signal) => {
