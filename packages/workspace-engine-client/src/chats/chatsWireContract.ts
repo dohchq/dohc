@@ -770,6 +770,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorReported: Schema.optionalKey(ChatReportedAgentSchema),
+  authorAgentId: Schema.optionalKey(Schema.String),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 }).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
