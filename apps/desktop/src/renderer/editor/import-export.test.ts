@@ -136,6 +136,16 @@ describe('desktop editor markdown round-trip', () => {
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
+  // Copy as Markdown and the source view fall back to this exporter when the
+  // worker fails, so it must give the worker's bytes, line endings included.
+  it('keeps a CRLF note CRLF, as the projection exporter does', () => {
+    const input = ['---', 'status: open', '---', '', '# Body', '', 'body text'].join('\r\n')
+    const doc = markdownToYDoc(input)
+
+    expect(yDocToMarkdown(doc)).toBe(input)
+    expect(yDocToMarkdown(doc)).toBe(projectYDocToMarkdown(doc))
+  })
+
   it('preserves retired document-computation syntax as inert markdown', () => {
     const input = [
       'Retired expressions stay literal: {{formula:SUM(hours)}} and {= 1 + 2}.',
