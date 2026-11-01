@@ -1090,6 +1090,42 @@ mod tests {
     }
 
     #[test]
+    fn rollback_after_sync_stops_works_once_a_resumed_push_sends_the_save() {
+        let (_scratch, _path, mut store) = open_store();
+        let original = proved(source(&mut store));
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",
+                params![original.payload.to_string(), original.origin_id, original.origin_seq]).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        // Stop sync closes the relay configuration and keeps the store's
+        // journal and push position, so nothing pushes the save.
+        start_pushing(&mut store, &original.origin_id);
+        assert!(matches!(
+            roll_back(&mut store, "moment"),
+            Err(DomainError::RollbackWaitsForSync)
+        ));
+
+        crate::cursor::write_pushed_seq(
+            &mut store,
+            "ws",
+            &original.origin_id,
+            original.origin_seq,
+            &NoFaults,
+            &NoLiveLeases,
+            20,
+        )
+        .unwrap();
+        assert!(!roll_back(&mut store, "moment").unwrap());
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .get_moment("ws", "moment")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn delete_rollback_does_not_wait_for_its_push() {
         let (_scratch, _path, mut store) = open_store();
         let original = source(&mut store);

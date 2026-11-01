@@ -620,7 +620,7 @@ fn map_domain(error: &DomainError) -> WireError {
         }
         DomainError::RollbackWaitsForSync => (
             ErrorCode::Overloaded,
-            "Sync has not finished sending this change. Retry the rollback after sync completes.",
+            "Sync hasn't sent this change yet. Turn sync on and let it finish, then roll the change back.",
         ),
         // The caller matches the code prefix and shows the reason.
         DomainError::InvalidInput {
