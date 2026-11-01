@@ -806,7 +806,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
         </div>)}
         <div><h3 className="m-0 text-[13px] font-medium text-ink">Publish on a share link</h3>
-          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? `Sync this workspace to publish on a share link.${linksOnly ? "" : " Opening on this device does not need sync."}` :"Publishing on a link needs a connection to your dohc host. Approval for this device does not."}</p></div>
+          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? `Sync this workspace to publish on a share link.${linksOnly ? "" : " Opening on this device does not need sync."}` : `Publishing on a link needs a connection to your dohc host.${linksOnly ? "" : " Approval for this device does not."}`}</p></div>
         {synced === false ? null : <>
           <label className="text-[13px] text-ink">Share link
             <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
