@@ -307,7 +307,8 @@ export function MarkdownView(props: {
   lossyNote: LossyNoteCheck;
   // The engine holds a change to this note, which Edit anyway saves.
   changeHeld?: boolean;
-  onEditAnyway: () => void;
+  // Absent where saving can't take the consent, as in a received share.
+  onEditAnyway?: () => void;
   // Set while capture holds the note. A held lossy note shows the hold, which
   // Edit anyway would reach only after its warning.
   onRetryHeldCapture?: () => void;
