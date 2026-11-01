@@ -18,7 +18,7 @@ if (process.platform !== "linux" || process.getuid() !== 0) throw new Error(`Run
 const bundle = resolve(values.bundle), output = resolve(values.output);
 const release = JSON.parse(readFileSync(join(bundle, "release.json"), "utf8"));
 if (release.image !== values.image) throw new Error(`The bundle records image ${release.image}, not ${values.image}.`);
-const { secretNames } = await import("./drive.mjs");
+const { redactor, secretNames } = await import("./drive.mjs");
 const { composeArgs, readSettings } = await import(pathToFileURL(join(bundle, "tools/self-host/config.mjs")).href);
 
 const owner = `dohc-rehearsal-${randomUUID().slice(0, 8)}`, work = join(output, owner);
@@ -28,6 +28,7 @@ const publicHost = "drive.rehearsal.test", appDomain = "apps.rehearsal.test";
 const evidence = { revision: release.revision, imageId: release.imageId, owner, commands: [], assertions: [], residual: [] };
 // Command output stays in memory, so a leaked secret never reaches the evidence file.
 const transcript = [];
+let redact = text => text;
 
 function run(command, args, { allowFailure = false, cwd = recipe, env, timeout = 900_000 } = {}) {
   evidence.commands.push([command, ...args].join(" "));
@@ -122,7 +123,7 @@ async function appRoutes() {
   await assert.rejects(appRequest(appDomain));
 }
 function continuity() {
-  return JSON.parse(run("docker", ["run", "--rm", "--network", "none", "--user", "0:0", "--mount", `type=bind,source=${mount},target=/volume,readonly`,
+  return JSON.parse(run("docker", ["run", "--rm", "--network", "none", "--user", "0:0", "--mount", `type=bind,source=${mount},target=/volume`,
     "--entrypoint", "node", values.image, "-e", `const {DatabaseSync}=require('node:sqlite');const fs=require('node:fs');
     const config=JSON.parse(fs.readFileSync('/volume/dohc/continuity/deployment.json','utf8'));
     const db=new DatabaseSync('/volume/dohc/continuity/history/continuity.sqlite',{readOnly:true});
@@ -159,6 +160,7 @@ try {
     DOHC_SNAPSHOT_ALERT_EMAIL: "operator@rehearsal.test", DOHC_SNAPSHOT_HEARTBEAT_URL: `https://heartbeat.rehearsal.invalid/${randomUUID()}` };
   writeEnv(envFile, settings);
   neonEnv.REHEARSAL_POSTGRES_PASSWORD = settings.POSTGRES_PASSWORD;
+  redact = redactor(settings);
 
   await check("check refuses an unmounted volume and passes once the operator mounts it", () => {
     assert.match(drive("check", disk.uuid).output, new RegExp(`Volume ${disk.uuid} is not mounted at ${mount}`));
@@ -232,13 +234,13 @@ try {
   evidence.result = "passed";
 } catch (error) {
   evidence.result = "failed";
-  evidence.error = error.message;
+  evidence.error = redact(error.message);
   process.exitCode = 1;
-  console.error(error.message);
+  console.error(evidence.error);
 } finally {
   // Clean only what this rehearsal created. Record anything that remains.
   const clean = (name, action) => { try { action(); } catch { evidence.residual.push(name); } };
-  clean(`${owner}-neon`, () => neon("down", "--remove-orphans", "--timeout", "0"));
+  if (neonEnv.REHEARSAL_POSTGRES_PASSWORD) clean(`${owner}-neon`, () => neon("down", "--volumes", "--remove-orphans", "--timeout", "0"));
   if (existsSync(envFile)) clean(owner, () => compose(envFile, "down", "--remove-orphans", "--timeout", "0"));
   clean(`${owner} volumes`, () => {
     const names = run("docker", ["volume", "ls", "--quiet", "--filter", `label=com.docker.compose.project=${owner}`]).output.trim().split("\n").filter(Boolean);
