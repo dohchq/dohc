@@ -663,7 +663,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       <header className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3">
         <span className="row-span-2 grid size-9 place-items-center rounded-lg bg-panel-2 text-muted"><AppWindow size={18} aria-hidden /></span>
         <h2 ref={heading} tabIndex={-1} id="app-publication-title" className="m-0 truncate text-base font-semibold text-ink" title={title}>{title}</h2>
-        <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
+        <IconButton aria-label="Close" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
         <div className="col-span-2 col-start-2 mt-1 flex min-w-0 items-center gap-2 text-[12px] text-muted">
           <span className="min-w-0 truncate" title={props.appRoot}>{props.appRoot.split("/").pop() || props.appRoot}</span>
           {paths ? <><span aria-hidden>·</span>
@@ -677,7 +677,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         </ul> : null}
       </header>
       {localView ? <>
-        {!review ? <div aria-hidden className="invisible text-[13px]"><p className="m-0">.</p></div> : approval && !changed ? <StateLine icon={CircleCheck} tone="text-success" text="Approved on this device">
+        {!review ? <div aria-hidden className="invisible text-[13px]"><p className="m-0">.</p></div> : approval && !changed ? <StateLine icon={CircleCheck} tone={approval.active ? "text-success" : "text-muted"} text="Approved on this device">
           {approval.active ? null : <More>Inactive on this device</More>}
         </StateLine> : approval ? <StateLine icon={TriangleAlert} tone="text-warning" text="Its source changed since you approved it.">
           <More>The app runs the approved version until you approve the changes.</More>

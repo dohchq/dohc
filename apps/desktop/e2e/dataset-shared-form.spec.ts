@@ -120,7 +120,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     // The publication list reloads behind the notice, so its loading status can show beside it.
     await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
-    await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+    await publication.getByRole("button", { name: "Close", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!, table = dataset.tables[0]!;
