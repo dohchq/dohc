@@ -131,7 +131,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
   const appEdit = "edit from this machine\n";
   const peerEdit = "edit from the other machine\n";
   const sourceRoot = join(temp.baseDir, "conflict-source");
-  const relayDb = join(temp.baseDir, "conflict-relay.sqlite");
+  const relayDb = join(temp.baseDir, "conflict-relay", "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
   let sourceWorkspace: Awaited<
     ReturnType<typeof openLiveDaemonWorkspace>
@@ -319,7 +319,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId });
     const establishedIdentity: RelayWorkspaceIdentity = {
@@ -536,7 +536,7 @@ test("protected join preserves a failed folder, then restores exact secret and b
   try {
     await mkdir(sourceRoot, { recursive: true });
     relay = await spawnSyncRelay({
-      dbPath: join(temp.baseDir, "protected-relay.sqlite"),
+      dbPath: join(temp.baseDir, "protected-relay", "relay.sqlite"),
     });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
@@ -682,7 +682,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
     // A real relay is the only cloud service. The workspace is not pre-claimed:
     // cloudEnableSync must be the first and sole claimant.
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
 
     // Local-only registry entry (no `remote`): the workspace is not synced yet.
@@ -893,7 +893,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     await writeWorkspaceFiles(temp, [
       { path, contents: "# Plan\n\nLocal draft.\n" },
     ]);
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
@@ -1107,7 +1107,7 @@ test("typing continues after enabling sync claims the open document", async () =
     await writeWorkspaceFiles(temp, [
       { path, contents: "# Plan\n\nLocal draft.\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,

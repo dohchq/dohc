@@ -95,7 +95,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let relay: SyncRelayHandle | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay", "relay.sqlite") });
     const owner = { authorization: `Bearer test:${userId}`, "content-type": "application/json" };
     expect((await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: owner, body: JSON.stringify({ workspaceId }) })).ok).toBe(true);
     const generated = generateDatasetSources(definition);

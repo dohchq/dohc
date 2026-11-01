@@ -167,7 +167,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       { path: "poll/main.ts", contents: 'import "./style.css";\ndocument.body.innerHTML = "<h1>Trip poll</h1>";\n' },
       { path: "poll/style.css", contents: "h1 { color: rgb(4, 5, 6); }\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
     expect(claim.ok).toBe(true);
@@ -285,7 +285,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
       { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\nsteps.push("C");\ndocument.getElementById("order").textContent = steps.join(" ");\n' },
       { path: "reading-list/cover.png", contents: coverPng },
     ]);
-    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
     expect(claim.ok).toBe(true);

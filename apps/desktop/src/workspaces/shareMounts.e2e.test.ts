@@ -136,7 +136,7 @@ describe("share mounts real daemon", () => {
       try {
         await mkdir(join(host, "notes"), { recursive: true });
         await writeFile(hostFile, "# Mine\n\nHost workspace file.\n", "utf8");
-        relay = await spawnSyncRelay({ dbPath: join(base, "relay.sqlite") });
+        relay = await spawnSyncRelay({ dbPath: join(base, "relay", "relay.sqlite") });
         await claimRelayWorkspace({
           baseUrl: relay.baseUrl, token: granterToken, workspaceId: granterWorkspaceId,
         });

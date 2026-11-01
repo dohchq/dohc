@@ -36,7 +36,7 @@ for (const surface of ["standalone", "mount"] as const) {
       const ownerId = `shared-tables-${surface}-${access}`;
       const hostId = `recipient-${surface}-${access}`;
       try {
-        relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+        relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
         await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER, workspaceId: ownerId });
         const peer = new RelayFilePeer({ baseUrl: relay.baseUrl, token: OWNER, workspaceId: ownerId, originId: "owner" });
         await peer.writeTextFiles([

@@ -312,7 +312,7 @@ async function expectTwoDaemonFileSync(input: {
   const rootA = await createTestScratch("dohc-two-daemon-a-");
   const rootB = await createTestScratch("dohc-two-daemon-b-");
   const relayRoot = await createTestScratch("dohc-two-daemon-relay-");
-  const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+  const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
   let daemonA: LiveDaemonCapture | null = null;
   let daemonB: LiveDaemonCapture | null = null;
   let daemonC: LiveDaemonCapture | null = null;
@@ -651,7 +651,7 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-text-keep-delete-a-");
     const rootB = await createTestScratch("dohc-text-keep-delete-b-");
     const relayRoot = await createTestScratch("dohc-text-keep-delete-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
@@ -1291,7 +1291,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
   beforeAll(async () => {
     // Per-test scratch is removed after each case; this store belongs to the suite.
     const relayRoot = createSuiteTestScratchSync("dohc-ordinary-relay-");
-    starting = spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    starting = spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     relayServer = await starting;
   }, 150_000);
 
@@ -1612,7 +1612,7 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-quit-push-a-");
     const rootB = await createTestScratch("dohc-quit-push-b-");
     const relayRoot = await createTestScratch("dohc-quit-push-relay-");
-    const dbPath = join(relayRoot, "relay.sqlite");
+    const dbPath = join(relayRoot, "relay", "relay.sqlite");
     let relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain });
     const port = Number(new URL(relay.baseUrl).port);
     const connection = { baseUrl: relay.baseUrl, token };
@@ -1678,7 +1678,7 @@ it.skipIf(engine.missing)(
     await rm(join(rootB, "probe.md"));
     if (!ignoresCase) context.skip("this disk keeps case apart");
     const relayRoot = await createTestScratch("dohc-case-rename-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     try {
@@ -1727,7 +1727,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
     const rootB = await createTestScratch("dohc-independent-base-b-");
     const rootC = await createTestScratch("dohc-independent-base-c-");
     const relayRoot = await createTestScratch("dohc-independent-base-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     let daemonC: LiveDaemonCapture | null = null;
@@ -1879,7 +1879,7 @@ it.skipIf(engine.missing).each([
     const rootA = await createTestScratch("dohc-text-keep-a-");
     const rootB = await createTestScratch("dohc-text-keep-b-");
     const relayRoot = await createTestScratch("dohc-text-keep-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
@@ -1968,7 +1968,7 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-diverged-seed-a-");
     const rootB = await createTestScratch("dohc-diverged-seed-b-");
     const relayRoot = await createTestScratch("dohc-diverged-seed-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     const editors: OpenEditor[] = [];
@@ -2133,7 +2133,7 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-offline-conflict-a-");
     const rootB = await createTestScratch("dohc-offline-conflict-b-");
     const relayRoot = await createTestScratch("dohc-offline-conflict-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     try {
@@ -2234,7 +2234,7 @@ it.skipIf(engine.missing)(
     const rootB = await createTestScratch("dohc-origin-recovery-b-");
     const relayRoot = await createTestScratch("dohc-origin-recovery-relay-");
     const backupRoot = await createTestScratch("dohc-origin-recovery-backup-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     const relayConnection = { baseUrl: relay.baseUrl, token };
     const engineDb = join(rootA, SECRET_FILE_STORE_RELATIVE_PATH);
     const backupDb = join(backupRoot, "engine.db");
@@ -2337,7 +2337,7 @@ it.skipIf(engine.missing)("keeps a journaled sharing-declined lineage private an
   const workspaceId = "watched-withheld", token = `test:${workspaceId}`;
   const root = await createTestScratch("dohc-watched-withheld-");
   const relayRoot = await createTestScratch("dohc-watched-withheld-relay-");
-  const dbPath = join(relayRoot, "relay.sqlite"), path = "withheld.txt";
+  const dbPath = join(relayRoot, "relay", "relay.sqlite"), path = "withheld.txt";
   const relay = await spawnSyncRelay({dbPath, compiledMain: compiledRelayMain});
   const connection = {baseUrl: relay.baseUrl, token};
   const source = await openLiveDaemonWorkspace({workspaceId, rootPath: root}, {maxRestarts: 0});
@@ -2438,7 +2438,7 @@ it.skipIf(engine.missing)("watched scheduling preserves the exact relay op seque
   const root = await createTestScratch("dohc-watched-ops-");
   const relayRoot = await createTestScratch("dohc-watched-relay-");
   const snapshot = await createTestScratch("dohc-watched-snapshot-");
-  const dbPath = join(relayRoot, "relay.sqlite");
+  const dbPath = join(relayRoot, "relay", "relay.sqlite");
   let relay = await spawnSyncRelay({dbPath, compiledMain: compiledRelayMain});
   let owner: LiveDaemonCapture | null = null;
   let sync: CloudSyncEngine | undefined;
@@ -2532,7 +2532,7 @@ it.skipIf(engine.missing).each([false, true])(
     const rootA = await createTestScratch("dohc-covered-artifact-a-");
     const rootB = await createTestScratch("dohc-covered-artifact-b-");
     const relayRoot = await createTestScratch("dohc-covered-artifact-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     try {
@@ -2597,7 +2597,7 @@ it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
     const rootA = await createTestScratch("dohc-guard-a-");
     const rootB = await createTestScratch("dohc-guard-b-");
     const relayRoot = await createTestScratch("dohc-guard-relay-");
-    const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+    const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain});
     const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
     let a: LiveDaemonCapture | null = null;
     let b: LiveDaemonCapture | null = null;
@@ -2691,7 +2691,7 @@ it.skipIf(engine.missing)(
       const rootA = await createTestScratch("dohc-guard-a-");
       const rootB = await createTestScratch("dohc-guard-b-");
       const relayRoot = await createTestScratch("dohc-guard-relay-");
-      const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain});
+      const relay = await spawnSyncRelay({dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain});
       const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
       let a: LiveDaemonCapture | null = null;
       let b: LiveDaemonCapture | null = null;
@@ -2834,7 +2834,7 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-idle-editor-a-");
     const rootB = await createTestScratch("dohc-idle-editor-b-");
     const relayRoot = await createTestScratch("dohc-idle-editor-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     const relayConnection = { baseUrl: relay.baseUrl, token };
     // Generous against one push, one held read's answer, one pull, and one
     // resync on a loaded machine.
@@ -2946,7 +2946,7 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
   const rootA = await createTestScratch("dohc-drain-owner-");
   const rootB = await createTestScratch("dohc-drain-peer-");
   const relayRoot = await createTestScratch("dohc-drain-relay-");
-  const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+  const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
   const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
   let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
   let capture: WorkspaceEngineCapture | undefined;

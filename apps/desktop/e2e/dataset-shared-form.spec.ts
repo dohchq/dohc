@@ -20,7 +20,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
   let relayDiagnostics: SyncRelayHandle["diagnostics"] | undefined;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     relayDiagnostics = relay.diagnostics;
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
