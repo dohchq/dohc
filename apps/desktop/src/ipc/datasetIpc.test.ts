@@ -12,7 +12,7 @@ import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
@@ -507,14 +507,18 @@ it("returns an unclaimed Collections list refusal as data on every refresh (#301
 });
 
 const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
+const holderRecord = (installId: string, label: string, storeId: string | null) => (root: string) => writeFile(join(root, ".dohc", "collections.json"),
+  JSON.stringify({ version: 1, workspaceId: "workspace", installId, label, storeId }));
 it.each([
-  ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
-    (root: string) => writeFile(join(root, ".dohc", "collections.json"),
-      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"], null],
-  ["no record names a computer for a store already here", unclaimed, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
+  ["another computer keeps them", { kind: "elsewhere", computer: "Laptop",
+    words: "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server." },
+  holderRecord("install-laptop", "Laptop", null), ["collections.json"], null],
+  ["no record names a computer for a store already here", { kind: "unclaimed", words: unclaimed }, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
   // A copy iCloud Drive has not removed from where stores were before .dohc/local.
-  ["no record names a computer for an old copy of a store", unclaimed, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
-] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left, folder) => {
+  ["no record names a computer for an old copy of a store", { kind: "unclaimed", words: unclaimed }, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
+  ["this computer keeps them but their store is not there", { kind: "missing", words: new CollectionsRefusalError({ kind: "missing" }).message },
+    holderRecord("install-here", "Studio", "00000000-0000-4000-8000-0000000000aa"), ["collections.json"], null],
+] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, refusal, arrange, left, folder) => {
   const root = await createTestScratch("dohc-dataset-ipc-holder-");
   await mkdir(join(root, ".dohc"));
   await arrange(root);
@@ -540,9 +544,9 @@ it.each([
   ]) {
     for (const caller of ["window", "cli"]) {
       const answer = f.handler(caller, request);
-      // A list returns the unclaimed refusal (#3016).
-      if (request.action === "list" && words === unclaimed) await expect(answer).resolves.toEqual({ kind: "collections-refused", refusal: { kind: "unclaimed", words } });
-      else await expect(answer, request.action).rejects.toThrow(words);
+      // A list returns its refusal (#3016).
+      if (request.action === "list") await expect(answer).resolves.toEqual({ kind: "collections-refused", refusal });
+      else await expect(answer, request.action).rejects.toThrow(refusal.words);
     }
   }
   expect(await readdir(join(root, ".dohc"))).toEqual(left);
@@ -599,12 +603,23 @@ describe("a computer that doesn't keep the workspace's Collections", () => {
     expect(data.list).not.toHaveBeenCalled();
   });
 
-  it("refuses as before without a server to ask, and never asks one for a received share", async () => {
+  it("refuses without a server to ask, and never asks one for a received share", async () => {
     const f = serverFixture(null);
-    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toBe(refusal);
+    expect(await f.handler("window", { workspaceId: "workspace", action: "list" }))
+      .toEqual({ kind: "collections-refused", refusal: { kind: "elsewhere", words: refusal.message, computer: "Laptop" } });
     expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
     f.workspace.shareView = { shareId: "s" };
     await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toThrow("Open the original workspace to manage this Collection.");
     expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
+  });
+
+  it("returns where the Collections are and the server's error when the server didn't answer a list, and throws any other error", async () => {
+    const list = vi.fn(async (): Promise<{ datasets: []; nextCursor: null }> => { throw new ServerCollectionsUnavailableError(refusal, new TypeError("fetch failed")); });
+    const f = serverFixture({ data: { list } as unknown as OwnerDatasetData, elsewhere });
+    expect(await f.handler("window", { workspaceId: "workspace", action: "list" })).toEqual({ kind: "collections-refused",
+      refusal: { kind: "server-unavailable", words: refusal.message, computer: "Laptop", failure: "TypeError: fetch failed" } });
+    list.mockRejectedValueOnce(new Error("Collection storage is full."));
+    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toThrow("Collection storage is full.");
+    expect(f.localHost).not.toHaveBeenCalled();
   });
 });

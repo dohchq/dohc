@@ -4,7 +4,6 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createRemoteDatasetData, createDatasetAuthorityRouter, createServerCollectionsData, resolveRemoteDatasetRevision, ServerCollectionsUnavailableError } from "./remoteDataset";
 import { CollectionsRefusalError } from "./collectionsHolder";
-import { readServerCollectionsUnavailable } from "../ipc/errorWords";
 import type { OwnerDatasetData } from "./remoteDataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -267,9 +266,9 @@ describe("a workspace's Collections on this computer's server, where another com
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
     const failed = await data.list({}).then(() => null, (error: unknown) => error);
     expect(failed).toBeInstanceOf(ServerCollectionsUnavailableError);
-    expect(readServerCollectionsUnavailable(failed)).toEqual({ elsewhere: f.elsewhere.message, computer: "Laptop", failure: "dohc could not reach the server." });
+    expect(failed).toMatchObject({ elsewhere: f.elsewhere, failure: "dohc could not reach the server." });
     f.relay.mockImplementationOnce(async () => { f.switchCredential(); return { kind: "success", body: { datasets: [description], nextCursor: null } }; });
-    expect(readServerCollectionsUnavailable(await data.list({}).catch((error: unknown) => error))?.failure).toBe("Your server session changed. Try again.");
+    expect(await data.list({}).catch((error: unknown) => error)).toMatchObject({ failure: "Your server session changed. Try again." });
     // Only the list carries where the Collections are.
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
     await expect(f.create().describe(id(1))).rejects.toThrow(/^dohc could not reach the server\.$/);

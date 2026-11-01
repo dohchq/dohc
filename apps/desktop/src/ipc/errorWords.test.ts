@@ -35,7 +35,6 @@ import {
   PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
   readCollectionsRefusal,
-  readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
   versionNameRefusal,
@@ -499,35 +498,32 @@ describe("error words", () => {
     }
     const unclaimed = { kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message } as const;
     expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual(unclaimed);
-    // A list returns this refusal, and a report reads it as the thrown one.
-    expect(readError(collectionsRefusalError(unclaimed))).toEqual(readError(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset")));
-    expect(readCollectionsRefusal(collectionsRefusalError(unclaimed))).toEqual(unclaimed);
+    // A list returns these refusals, and a report reads each as the thrown one.
+    for (const [returned, thrown] of [[unclaimed, new CollectionsRefusalError({ kind: "unclaimed" })],
+      [{ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" }, elsewhere]] as const) {
+      expect(readError(collectionsRefusalError(returned))).toEqual(readError(acrossIpc(thrown, "desktop:dataset")));
+      expect(readCollectionsRefusal(collectionsRefusalError(returned))).toEqual(returned);
+    }
     expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
     // Another error with the same words is not a refusal.
     expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
     expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
   });
 
-  it("carries where the Collections are with a server list that failed, across IPC, apart from why", () => {
+  it("keeps where the Collections are apart from why the server list failed, and reports that list as before", () => {
     const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
     const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
-    const read = readServerCollectionsUnavailable(acrossIpc(failed, "desktop:dataset"));
-    expect(read).toEqual({ elsewhere: elsewhere.message, computer: "Laptop", failure: "TypeError: fetch failed" });
+    expect(failed.elsewhere).toBe(elsewhere);
+    expect(failed.failure).toBe("TypeError: fetch failed");
     // The server's error reads as it would have alone.
     for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
-      const failure = readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, cause), "desktop:dataset"))!.failure;
-      expect(readError(new Error(failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
+      expect(readError(new Error(new ServerCollectionsUnavailableError(elsewhere, cause).failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
     }
-    expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
-      .toEqual({ elsewhere: elsewhere.message, computer: "Laptop", failure: "" });
-    for (const wire of ["", " [computer=%ZZ]"]) {
-      expect(readServerCollectionsUnavailable(`ServerCollectionsUnavailableError [server-collections-unavailable]${wire}: ${elsewhere.message}\nTypeError: fetch failed`))
-        .toEqual({ elsewhere: elsewhere.message, computer: null, failure: "TypeError: fetch failed" });
-    }
-    expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
-    // The same words from another error are not that list.
-    expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();
-    expect(readServerCollectionsUnavailable(acrossIpc(elsewhere, "desktop:dataset"))).toBeNull();
+    expect(new ServerCollectionsUnavailableError(elsewhere, new Error()).failure).toBe("");
+    // A report names no words of its own for that list, and offers nothing to keep.
+    const returned = collectionsRefusalError({ kind: "server-unavailable", words: elsewhere.message, computer: "Laptop", failure: failed.failure });
+    expect(readError(returned)).toMatchObject({ words: null, cause: `ServerCollectionsUnavailableError: ${failed.message}` });
+    expect(readCollectionsRefusal(returned)).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {
