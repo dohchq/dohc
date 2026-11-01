@@ -361,13 +361,18 @@ function buildCliRequest(
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  // A Collections list this computer can't give fails, as it did when main threw the refusal.
+  if (result !== null && "kind" in result && result.kind === "collections-refused") {
+    const { refusal } = result;
+    return refusal.kind === "server-unavailable" ? `${refusal.words} ${refusal.failure}` : refusal.words;
+  }
   if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
