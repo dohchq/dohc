@@ -22,6 +22,7 @@ import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderT
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
+  collectionsRefusalError,
   ERROR_WORDS,
   ipcWireError,
   isChatMentionPageChanged,
@@ -550,9 +551,11 @@ describe("error words", () => {
       expect(readCollectionsRefusal(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]${wire}: ${elsewhere.message}`))
         .toEqual({ kind: "elsewhere", words: elsewhere.message, computer: null });
     }
-    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual({
-      kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message,
-    });
+    const unclaimed = { kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message } as const;
+    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual(unclaimed);
+    // A list returns this refusal, and a report reads it as the thrown one.
+    expect(readError(collectionsRefusalError(unclaimed))).toEqual(readError(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset")));
+    expect(readCollectionsRefusal(collectionsRefusalError(unclaimed))).toEqual(unclaimed);
     expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
     // Another error with the same words is not a refusal.
     expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();

@@ -4,6 +4,7 @@ import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
+import { collectionsRefusalError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
 import { CollectionMoveNote, type CollectionServer } from "./collections/CollectionMoveNote";
 import { ipcErrorMessage } from "./ipcError";
@@ -48,6 +49,7 @@ function DatasetApproval({ capability, workspaceId, reportError, moves = false, 
       do {
         const page = await bridge().dataset({ action: "list", workspaceId, after, includeArchived: true });
         if (!current) return;
+        if (page.kind === "collections-refused") throw collectionsRefusalError(page.refusal);
         if (page.kind !== "list") throw Error("dohc could not find this Collection.");
         const dataset = page.datasets.find(value => value.datasetId === capability.datasetId);
         if (dataset) {
