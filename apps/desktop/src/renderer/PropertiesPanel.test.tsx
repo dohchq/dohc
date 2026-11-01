@@ -140,6 +140,21 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it("keeps focus on the edited property when another device removes a row above it", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nowner: Sam\nstatus: draft\npriority: low\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByLabelText("Property status value"));
+
+      act(() => patchFrontmatter(doc, new Map(), ["owner"]));
+
+      expect(document.activeElement).toBe(screen.getByLabelText("Property status value"));
+      await user.keyboard("!");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "draft!", priority: "low" });
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
