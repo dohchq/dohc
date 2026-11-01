@@ -305,8 +305,8 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
         if (stopped) onChanged();
         if (!stopped || !current(token)) return; operation.current = stopped; onSettled(); await review(token);
       })}>Stop access</DangerButton>}
-      {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
       {declinable && !declining && <SecondaryButton disabled={busy} onClick={() => void perform(token => decline(token))}>Decline restore</SecondaryButton>}
+      {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
       {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => declining ? decline(token)
         : operation.current ? review(token) : operationId === undefined ? load(token) : resume(token, operationId))}>
         {!declining && operation.current?.phase === "authority-invalidated" ? "Review restore" : "Retry"}</PrimaryButton>}
