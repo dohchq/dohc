@@ -521,13 +521,18 @@ export const FileInspector = memo(function FileInspector(
   const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null; headSha256: string | null | undefined } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
+  // Edit anyway covers one save. Once that save commits, the open goes on as
+  // an ordinary checked note in the same editor while the file holds what
+  // this session saved: a head its own save wrote, or the head of the
+  // converted note.
+  const [converted, setConverted] = useState<{ open: string; headSha256: string | null } | null>(null);
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
   // stays closed until a read brings other bytes; the session that then
   // opens is checked in turn.
   const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
   const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
-  const allowed = consented ? "clear" : sessionRefused ? "lossy" : checked.state;
+  const allowed = consented || converted?.open === lossyOpen ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -548,28 +553,40 @@ export const FileInspector = memo(function FileInspector(
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
   const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
     && (!engine.available || engine.headSha256 === editAnyway.headSha256);
-  useEffect(() => {
-    if (consented && !editingAnyway) {
-      setEditAnyway(null);
-      // The shared session has other bytes. Read them before asking again.
-      setStaleConsentRead({ open: lossyOpen, seq: readSeq });
-      refreshAfterConflict();
-    }
-  }, [consented, editingAnyway, lossyOpen, readSeq, refreshAfterConflict]);
+  // This session's own save moved the head off the source the person accepted.
+  const conversionCommitted = consented && !editingAnyway && engine.headCommitted
+    && boundSource === editAnyway.source;
   const session = useBoundNoteCheck({
     open: lossyOpen,
     // Edit anyway already accepted what saving does.
     doc: checksLossyNote && !editingAnyway ? engine.doc : null,
     headSha256: engine.headSha256,
   });
+  const convertedHere = session !== "lossy" && (conversionCommitted || (converted?.open === lossyOpen
+    && (engine.headCommitted || engine.headSha256 === converted.headSha256)));
+  useEffect(() => {
+    if (conversionCommitted) {
+      setEditAnyway(null);
+      setSessionLossy(null);
+      setConverted({ open: lossyOpen, headSha256: engine.headSha256 ?? null });
+    } else if (consented && !editingAnyway) {
+      setEditAnyway(null);
+      // The shared session has other bytes. Read them before asking again.
+      setStaleConsentRead({ open: lossyOpen, seq: readSeq });
+      refreshAfterConflict();
+    } else if (converted !== null && !convertedHere) {
+      setConverted(null);
+    }
+  }, [consented, editingAnyway, conversionCommitted, converted, convertedHere, engine.headSha256, lossyOpen, readSeq, refreshAfterConflict]);
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
   }, [session, lossyOpen, contentHash]);
   // The render a large note's session binds in, before its check starts,
   // waits too, as does a bound session while its own check runs.
   const rereadingConsent = staleConsentRead?.open === lossyOpen && staleConsentRead.seq === readSeq;
+  // A converted note keeps its editor while the engine records its new source.
   const lossyNote = rereadingConsent ? "checking"
-    : editingAnyway ? "clear"
+    : editingAnyway || convertedHere ? "clear"
     : session === "lossy" ? "lossy"
     : session === "checking" || (large && engine.available && !bound && allowed === "clear") ? "checking"
     : allowed;

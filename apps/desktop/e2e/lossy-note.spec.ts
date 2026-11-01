@@ -160,13 +160,21 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await expect(editor).toContainText("Edited anyway.");
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => sha256(temp.rootPath, "readme.md")).not.toBe(outside);
-
-    // History gives back the file from before the edit, byte for byte.
-    await openHistoryView(page);
     await expect.poll(async () => (await readHistoryMoments(page, opened.workspaceId, "readme.md"))?.length ?? 0)
       .toBe(before + 2);
     const moments = (await readHistoryMoments(page, opened.workspaceId, "readme.md"))!;
     const edit = moments.reduce((newest, moment) => moment.momentOrder > newest.momentOrder ? moment : newest);
+
+    // The save that converted the note keeps the editor and its focus, so
+    // typing goes on with no click, and the next save works too.
+    await expect(editor).toBeFocused();
+    await page.keyboard.type(" Typed again.");
+    await expect.poll(() => readFile(join(temp.rootPath, "readme.md"), "utf8")).toContain("Edited anyway. Typed again.");
+    await expect(editor).toBeFocused();
+    await expect(notice).toHaveCount(0);
+
+    // History gives back the file from before the converting edit, byte for byte.
+    await openHistoryView(page);
     await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${edit.id}"]`).click();
     await page.getByTestId("engine-diff-restore-file").click();
     await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
