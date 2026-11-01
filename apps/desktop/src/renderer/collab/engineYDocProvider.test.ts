@@ -1260,6 +1260,31 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("counts each state main installs with a head of its own and each replacement, but not this session's saves", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    expect(binding.pairedInstalls).toBe(2);
+    expect(changes).toHaveBeenCalledTimes(2);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
+    mock.pushRemote(new Uint8Array([0, 0]));
+    expect(binding.pairedInstalls).toBe(2);
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+    expect(binding.pairedInstalls).toBe(3);
+    winner.destroy();
+    await binding.destroy();
+  });
+
   it("reports a failed lineage acknowledgement and keeps the losing doc frozen", async () => {
     const mock = mockTransport(["Losing root."]);
     const failure = new Error("acknowledgement refused");

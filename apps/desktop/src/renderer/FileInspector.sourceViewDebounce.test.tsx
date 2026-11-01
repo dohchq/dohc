@@ -41,6 +41,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     available: true,
     headSha256: sha(INITIAL_MARKDOWN),
     headCommitted: false,
+    pairedInstalls: 0,
     opening: false,
     doc,
     objectId: "object-1",

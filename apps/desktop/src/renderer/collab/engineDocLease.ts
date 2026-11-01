@@ -149,6 +149,8 @@ type EngineDocOpenOutcome =
       // session's own save wrote it. Undefined while the head is unknown.
       headSha256?: string | null;
       headCommitted: boolean;
+      // Counts states main installed other than this session's own saves.
+      pairedInstalls: number;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -548,6 +550,7 @@ function createEngineDocSession(
     objectId: bound.objectId,
     headSha256: bound.headSha256,
     headCommitted: bound.headCommitted,
+    pairedInstalls: bound.pairedInstalls,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -1466,7 +1469,8 @@ function createEngineDocSession(
           bound.onHeadChanged(() => {
             if (disposed) return;
             publish(current => current.outcome?.kind === "bound" && current.outcome.doc === bound.doc
-              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, headCommitted: bound.headCommitted } }
+              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, headCommitted: bound.headCommitted,
+                pairedInstalls: bound.pairedInstalls } }
               : current);
           });
           // An edit is unsaved the instant it happens. Only main's settle

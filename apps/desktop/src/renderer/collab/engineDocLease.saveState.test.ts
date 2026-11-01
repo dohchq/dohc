@@ -284,7 +284,10 @@ it("receives saved state at the resolved path when opened through a case alias",
   }));
   expect(retained.snapshot.saveState.kind).toBe("saved-here");
   harness.emitHead({ sha256: "a".repeat(64), committed: true });
-  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), headCommitted: true });
+  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), headCommitted: true, pairedInstalls: 0 });
+  // A state main reads again with the same head still counts as installed.
+  harness.emitHead({ sha256: "a".repeat(64) });
+  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), headCommitted: false, pairedInstalls: 1 });
 });
 
 it("never flips back to Saved on a timer — only a real settle report clears it", async () => {

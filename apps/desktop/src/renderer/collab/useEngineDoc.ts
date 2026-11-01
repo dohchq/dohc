@@ -54,6 +54,9 @@ export type UseEngineDoc = {
   headSha256?: string | null;
   // Whether this session's own save wrote that head.
   headCommitted: boolean;
+  // Counts the file's states main installed into this open other than its
+  // own saves, including document replacements.
+  pairedInstalls: number;
   // True once the engine session is open and the mirror doc is bound. false
   // permits the local autosave editor only after opening settles without a
   // named refusal outcome.
@@ -341,6 +344,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     available,
     headSha256: outcome?.kind === "bound" ? outcome.headSha256 : undefined,
     headCommitted: outcome?.kind === "bound" && outcome.headCommitted,
+    pairedInstalls: outcome?.kind === "bound" ? outcome.pairedInstalls : 0,
     opening,
     doc,
     objectId,

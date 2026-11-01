@@ -36,6 +36,7 @@ import "./SourceCodeEditor";
 const engineDocState: UseEngineDoc = {
   available: false,
   headCommitted: false,
+  pairedInstalls: 0,
   opening: false,
   doc: null,
   objectId: null,

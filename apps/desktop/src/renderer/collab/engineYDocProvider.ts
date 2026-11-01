@@ -248,8 +248,12 @@ export interface EngineYDocBinding {
   readonly headSha256?: string | null;
   // Whether this session's own save wrote that head.
   readonly headCommitted: boolean;
-  // A delivery changed the head of the current doc. A replacement doc
-  // brings its head with onDocumentReplaced instead.
+  // Counts the file's states main installed other than this session's own
+  // saves: each state with a head that was not a save's, and each replacement.
+  readonly pairedInstalls: number;
+  // A delivery changed the head of the current doc, or installed a state
+  // with its head. A replacement doc brings its head with
+  // onDocumentReplaced instead.
   onHeadChanged(listener: () => void): () => void;
   // The mirror Y.Doc the editor binds to, or null when the doc is not
   // engine-backed (available:false) — the caller stays on the local autosave
@@ -346,6 +350,7 @@ export async function bindEngineYDoc(
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
       headCommitted: false,
+      pairedInstalls: 0,
       onHeadChanged() {
         return () => undefined;
       },
@@ -608,6 +613,7 @@ export async function bindEngineYDoc(
   doc.on("update", onUpdate);
 
   let head: { sha256: string | null | undefined; committed: boolean } = { sha256: opened.headSha256, committed: false };
+  let pairedInstalls = 0;
   const headListeners = new Set<() => void>();
   // Applies an engine update and returns the head its state now pairs with:
   // the one it came with, else the current one unless it changed the source.
@@ -624,7 +630,9 @@ export async function bindEngineYDoc(
     if (destroyed) return;
     if (updateGeneration !== lineageGeneration) return;
     const next = install(doc, head, { update, ...(updateHead ? { head: updateHead } : {}) });
-    if (next.sha256 === head.sha256 && next.committed === head.committed) return;
+    const paired = updateHead !== undefined && updateHead.committed !== true;
+    if (paired) pairedInstalls += 1;
+    else if (next.sha256 === head.sha256 && next.committed === head.committed) return;
     head = next;
     for (const listener of headListeners) listener();
   });
@@ -700,6 +708,7 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       head = replacementHead;
+      pairedInstalls += 1;
       lineageGeneration = input.lineageGeneration;
       artifactAssets = input.artifactAssets;
       localUpdatesRefused = false;
@@ -741,6 +750,9 @@ export async function bindEngineYDoc(
     },
     get headCommitted() {
       return head.committed;
+    },
+    get pairedInstalls() {
+      return pairedInstalls;
     },
     onHeadChanged(listener) {
       headListeners.add(listener);
