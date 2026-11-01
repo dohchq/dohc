@@ -213,12 +213,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const attempts = createDatasetAttempts({db: storage.db, transaction,
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
-    const startupRecovery = createRecoveryInstaller<undefined>({db: storage.db, transaction, journal,
-      account(_context, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
-      discardAttachments(_context, input) { return recoveryFiles.discard(input); }});
+    createRecoveryInstaller({db: storage.db, transaction, journal});
     if (options.startupExclusive) {
-      // This process holds the deployment writer lock and serves no request yet, so no import is running.
-      await startupRecovery.discardInterrupted(undefined, current);
+      // An import the relay left when it stopped blocks every retry. This process holds the
+      // deployment writer lock and has no host to serve requests yet, so no import is running.
+      const stopped = createRecoveryInstaller<undefined>({db: storage.db, transaction, journal,
+        account(_context, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+        discardAttachments(_context, input) { return recoveryFiles.discard(input); }});
+      for (;;) {
+        const row = storage.db.prepare("SELECT import_id,workspace_id,dataset_id FROM dohc_dataset_imports WHERE phase NOT IN ('installed','claimed') LIMIT 1").get();
+        if (!row) break;
+        await stopped.discard(undefined, {workspaceId: String(row.workspace_id), datasetId: String(row.dataset_id), transferId: String(row.import_id), authorize: current});
+      }
       let stageCursor: string | undefined;
       do {
         stageCursor = journal.reclaimCheckpointStages({after: stageCursor, authorize: current,

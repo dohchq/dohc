@@ -15,6 +15,7 @@ import {createDatasetAppRoutes} from "./datasetRoutes";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
+import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -69,7 +70,7 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
     host.bindPublication(owner, {...scope, publicationId: result.publicationId});
     return result.publicationId;
   }
-  return {...base, directory, get host() {return host;}, activate, invoke, publish, addHelper,
+  return {...base, get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
     async reopen() {await host.close(); host = await create();}};
 }
 
@@ -443,4 +444,87 @@ it("records schema checkpoint time through the relay host and retains it after r
   await f.reopen();
   expect(f.host.history(owner,scope).entries).toMatchObject([{recordedAtMs:10}]);
   expect(f.storage.db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=? AND dataset_id=? AND revision=1").get(scope.workspaceId,scope.datasetId)).toMatchObject({recorded_at_ms:10});
+});
+
+const receiptSchemaSql = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
+const receiptSource = `globalThis.operations={
+  submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO people VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},
+  read(ctx){return ctx.db.query('SELECT * FROM people ORDER BY id');},
+  edit(ctx,input){ctx.db.execute('UPDATE people SET name=? WHERE id=?',[input.name,input.id]);return true;}
+};`;
+const receiptDefinition: DatasetDefinition = {...definition, tables: [{...definition.tables[0]!, fields: [...definition.tables[0]!.fields,
+  {fieldId: id(8), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false}]}]};
+const receipts = {revision: describeDatasetRevision({definition: receiptDefinition, revision: 1, schemaSql: receiptSchemaSql, operationSource: receiptSource}),
+  schemaSql: receiptSchemaSql, operationSource: receiptSource};
+const receiptBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64");
+
+/** A fenced Collection with one record and its attachment, saved for a move to the relay. */
+async function movingCollection() {
+  const source = await fixture(false, receipts); await source.activate();
+  const {file} = source.host.ownerUpload(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256,
+    idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png", bytesBase64: receiptBytes});
+  await source.invoke(owner, id(5), {name: "Kept", fileId: file.fileId});
+  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)});
+  const sourceCursor = journal.head(scope, () => {}).cursor;
+  journal.fence({expected: sourceCursor, authorize() {}});
+  const archive = await source.host.exportRecovery(owner, scope), chunks: Uint8Array[] = [];
+  const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
+  try { for await (const bytes of archive.stream()) chunks.push(bytes); } finally { await archive.dispose(); }
+  const body = Buffer.concat(chunks);
+  return {fileId: file.fileId, sourceCursor,
+    importInto: (host: RelayDatasetHost, activate: boolean) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
+      stream: (async function* () { yield body; })()})};
+}
+
+it("finishes a move whose import stopped when the relay stopped, once the relay starts again (#2903)", async () => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const usageBefore = workspaceUsageBytes(target.storage, "w");
+  const leftover = () => ({
+    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
+    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
+    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  });
+  // The relay stops inside the final install transaction. Records, checkpoints, and the attachment are
+  // durable and charged, the transaction rolls back, and the stopped storage cannot run the import's cleanup.
+  const stopped = target.storage, prepare = stopped.db.prepare.bind(stopped.db);
+  const stop = vi.spyOn(stopped.db, "prepare").mockImplementation(sql => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) stopped.invalidate();
+    return prepare(sql);
+  });
+  await expect(moved.importInto(target.host, true)).rejects.toThrow();
+  stop.mockRestore();
+  const interrupted = leftover();
+  expect(stopped.db.prepare("SELECT phase FROM dohc_dataset_imports").get()).toMatchObject({phase: "staging"});
+  expect(interrupted).toMatchObject({imports: 1, attachments: 1});
+  expect(interrupted.stages).toBeGreaterThan(0);
+  expect(interrupted.usage).toBeGreaterThan(usageBefore);
+
+  target.restart(); await target.reopen();
+  const restarted = leftover();
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
+    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  // Startup released the stopped import's quota, attachment, and checkpoints before the retry.
+  expect(restarted).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore});
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
+  expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256, fileId: moved.fileId}))
+    .toMatchObject({bytesBase64: receiptBytes});
+});
+
+it.each([false, true])("keeps an installed or claimed import, its quota, and its attachments across startup (claimed: %s)", async claimed => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  await moved.importInto(target.host, claimed);
+  const kept = () => ({
+    imports: target.storage.db.prepare("SELECT import_id,phase,retained_bytes,head_json FROM dohc_dataset_imports").all(),
+    stages: target.storage.db.prepare("SELECT stage_id,role FROM dohc_dataset_import_checkpoints ORDER BY stage_id").all(),
+    attachments: target.storage.db.prepare("SELECT file_id,storage_bytes FROM sync_relay_dataset_files ORDER BY file_id").all(),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  });
+  const before = kept();
+  expect(before.imports).toMatchObject([{phase: claimed ? "claimed" : "installed"}]);
+  expect(before.stages).toHaveLength(claimed ? 0 : 1);
+  expect(before.attachments).toMatchObject([{file_id: moved.fileId}]);
+  await target.reopen();
+  expect(kept()).toEqual(before);
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({targetCursor: {revision: moved.sourceCursor.revision + 1}});
 });
