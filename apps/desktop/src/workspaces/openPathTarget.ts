@@ -1,13 +1,15 @@
 import { validateUserReadPath, validateWorkspaceRootChoice } from "@dohc/workspace-core";
 import { basename, dirname, isAbsolute, relative, sep } from "node:path";
-import { isInside } from "../security/pathContainment";
+import { deepestRootSync, type FolderIdentity } from "./workspaceRootIdentity";
 
 export interface OpenPathFileSystem {
-  // The path as the file system names it, links resolved and in its on-disk
-  // letter case, or null when nothing is there.
+  // The path with links resolved, or null when nothing is there. Linux can
+  // keep the capitals it was given, even on a folder that ignores them.
   realPath(path: string): string | null;
   kindOf(realPath: string): "file" | "folder" | null;
   hasManifest(folder: string): boolean;
+  // Which folder this is on disk, or null when the disk cannot say.
+  folderIdentity(realPath: string): FolderIdentity | null;
 }
 
 // A folder dohc must register before it opens. `file` is the
@@ -26,9 +28,10 @@ export type OpenPathTarget<Workspace> =
 /**
  * Resolves a path the OS or a launch handed dohc. A registered workspace that
  * holds it wins, then the nearest folder with a dohc manifest, then the folder
- * itself. Paths compare in their canonical form, as the registry compares
- * roots. Returns null when nothing is there to open, and throws when the only
- * folder left is one the folder picker would refuse.
+ * itself. A workspace holds the path when one of the path's folders is its
+ * root on disk, whatever capitals name it, and the deepest such root wins.
+ * Returns null when nothing is there to open, and throws when the only folder
+ * left is one the folder picker would refuse.
  */
 export function resolveOpenPathTarget<Workspace extends { rootPath: string }>(
   path: string,
@@ -51,13 +54,14 @@ export function resolveOpenPathTarget<Workspace extends { rootPath: string }>(
     return validateUserReadPath(file, { platform: deps.platform }).ok ? file : null;
   };
 
-  let registered: { workspace: Workspace; root: string } | null = null;
-  for (const workspace of deps.workspaces) {
+  const roots = deps.workspaces.flatMap((workspace) => {
     const root = deps.fs.realPath(workspace.rootPath);
-    if (root === null || !isInside(root, folder)) continue;
-    if (!registered || root.length > registered.root.length) registered = { workspace, root };
-  }
-  if (registered) return { kind: "workspace", workspace: registered.workspace, file: fileIn(registered.root) };
+    return root === null ? [] : [{ entry: workspace, path: root }];
+  });
+  // The file's place comes from the folder that matched, in the opened path's
+  // capitals, so it holds under the registered root's own spelling.
+  const registered = deepestRootSync(folder, roots, (at) => deps.fs.folderIdentity(at));
+  if (registered) return { kind: "workspace", workspace: registered.entry, file: fileIn(registered.anchor) };
 
   // A manifest at a root dohc cannot use, such as the home folder, is passed over.
   for (let current = folder; ; current = dirname(current)) {

@@ -31,6 +31,8 @@ function resolve(path: string) {
       realPath: (candidate) => canonical.get(candidate.toLowerCase()) ?? null,
       kindOf: (candidate) => entries[candidate] ?? null,
       hasManifest: () => false,
+      // Spelling already matches here, so no folder needs its identity.
+      folderIdentity: () => null,
     },
   });
 }
