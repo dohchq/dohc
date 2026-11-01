@@ -255,8 +255,9 @@ fn refuse_in_tx(
 }
 
 /// Refuse to roll back a save until the relay has answered its push. If the
-/// relay refuses the save's author names, `refuse_in_tx` sends the save again
-/// without them, and it needs the save's moment, which rollback deletes.
+/// relay refuses the save's author names or settlement proof, `refuse_in_tx`
+/// sends the save again without them, and it needs the save's moment, which
+/// rollback deletes.
 pub fn rollback_waits_for_publication_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,

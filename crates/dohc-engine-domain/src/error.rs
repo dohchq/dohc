@@ -100,7 +100,8 @@ pub enum DomainError {
     CheckedDeleteReplicationDependents,
 
     /// The relay has not answered the push of the save to roll back, so it
-    /// may still refuse the save's author names. Retry after sync.
+    /// may still refuse the save's author names or settlement proof. Retry
+    /// after sync.
     #[error("rollback waits for sync to send the change")]
     RollbackWaitsForSync,
 
