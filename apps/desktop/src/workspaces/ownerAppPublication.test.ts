@@ -47,6 +47,16 @@ it.each(["app/index.html", "app/new-file.js", "shared/theme.css"])("refuses a wa
   expect(h.compile).not.toHaveBeenCalled();
 });
 
+it("refuses to approve a folder without app.publish.json on this device, before reading its sources", async () => {
+  const h = harness();
+  h.sources.delete("app/app.publish.json");
+  h.sources.set("app/index.html", "<p>Notes</p>");
+  await expect(prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: [], compile: h.compile }))
+    .rejects.toThrow("Add app.publish.json to app before approving it on this device.");
+  expect(h.capturePaths).toEqual([]);
+  expect(h.compile).not.toHaveBeenCalled();
+});
+
 describe("local app source revision", () => {
   const local = (h: ReturnType<typeof harness>) => ({ adapter: h.adapter, signal: h.controller.signal, assertCurrent() {}, deferredWrites: h.hooks.deferredWrites });
   const app = { workspaceId: "w", appRoot: "app" };
