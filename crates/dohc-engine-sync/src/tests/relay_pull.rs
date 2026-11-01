@@ -1797,7 +1797,10 @@ fn base_repair_held_push_lets_a_fetched_divergent_base_win_and_the_pull_continue
                 )
             })
             .unwrap();
-        assert_eq!(lineage, divergent.payload["lineageClaimId"].as_str().unwrap());
+        assert_eq!(
+            lineage,
+            divergent.payload["lineageClaimId"].as_str().unwrap()
+        );
         assert_eq!(base_repair_state(&engine, "blocked"), (Some(119), 0, 0));
         let unrelated_heads: i64 = engine
             .read_with(|conn| {
