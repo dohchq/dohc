@@ -107,3 +107,17 @@ it("rebuilds derived file data when each ranking input identity changes", () => 
   );
   expect(prepareQuickOpenPaths).toHaveBeenCalledTimes(4);
 });
+
+it("says no file matches a dead query, not that no command does", () => {
+  render(palette());
+  fireEvent.change(screen.getByRole("textbox", { name: "File" }), {
+    target: { value: "zzz" },
+  });
+  expect(screen.getByText('No files match "zzz". Try a shorter search.')).toBeTruthy();
+  expect(screen.queryByText("No matching commands")).toBeNull();
+});
+
+it("says the workspace has no files when quick open opens on an empty one", () => {
+  render(palette({ files: [], recent: [], pinned: [] }));
+  expect(screen.getByText("No files to open")).toBeTruthy();
+});

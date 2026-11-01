@@ -55,6 +55,11 @@ export function QuickOpenPalette(props: {
       toggleShortcut="quick-open"
       placeholder="Go to…"
       ariaLabel="File"
+      emptyText={(query) =>
+        query === ""
+          ? "No files to open"
+          : `No files match "${query}". Try a shorter search.`
+      }
       commands={commands}
       rank={rank}
       onClose={props.onClose}
