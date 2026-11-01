@@ -277,6 +277,83 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
 }
 
 #[test]
+fn a_refused_creation_gives_no_status_to_a_received_record_with_its_id() {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    let path = "shared/docs/packing/One.md";
+    let (_scratch, _db, mut engine) = proposal_fixture(&[text]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "record-one".to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: "create-one".to_owned(),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("record draft");
+    journal_local_moment(
+        &mut engine,
+        &create_moment("create-one", "record-one", path, text),
+        2_000,
+    );
+    let statuses = |store: &EngineStore| {
+        read_record_creation_statuses(store, "ws", SHARE, &[path.to_owned()], &edit_grant())
+            .unwrap()
+    };
+    // The relay refuses the creation. The owner then accepts the same record
+    // as a proposal, so the next pull brings back the owner's object with the
+    // same record ID at the same path.
+    let accepted = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nAccepted as a proposal.\n";
+    let token = format!("share-object:v1:{}", hex_sha256(b"owner-copy"));
+    let sha = hex_sha256(accepted.as_bytes());
+    let relay = PagedShareRelay::new([], [(0, ShareViewResponse {
+        ops: vec![ShareReplicationEnvelope {
+            origin_id: "owner-proposal".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 2_500,
+            payload: json!({ "versionId": "main", "objectId": token, "operation": "write", "path": path,
+                "payloadAfterPath": path, "payloadAfterBlobSha256": sha, "payloadAfterContentKind": "text" }),
+        }], next_cursor: 1, has_more: false,
+    })]).with_view_blobs([(sha.clone(), accepted.as_bytes().to_vec())]);
+    relay
+        .collection_write_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(ShareCollectionWriteResponse::Refused {
+            reason: "records go through proposals".to_owned(),
+        }));
+    let client = RelaySyncClient::new(relay);
+    assert!(matches!(
+        push(&client, &mut engine).writes[0].result,
+        DirectWriteResult::Refused { .. }
+    ));
+    assert_eq!(statuses(&engine)[path].state, DirectWriteState::Refused);
+    client
+        .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
+        .unwrap();
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .object_id,
+        token
+    );
+    assert!(
+        statuses(&engine).is_empty(),
+        "the owner's record is not this refused draft and offers no discard"
+    );
+}
+
+#[test]
 fn a_discarded_record_draft_is_not_sent_when_the_open_plan_retries() {
     let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
     let path = "shared/docs/packing/One.md";
