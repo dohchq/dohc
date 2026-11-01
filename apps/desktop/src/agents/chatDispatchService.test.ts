@@ -801,6 +801,15 @@ async function createAgentThread(
   return { threadId: started.thread.id, messageId: started.message.id };
 }
 
+// The run's PATH is the fixture's CLI bin, so a failed run's words don't
+// depend on whether the host has Node.js.
+async function stubRunnerPath(fixture: Fixture, { node }: { node: boolean }): Promise<void> {
+  const bin = join(fixture.appRoot, "node_modules", ".bin");
+  await mkdir(bin, { recursive: true });
+  if (node) await writeFile(join(bin, "node"), "not executed", { mode: 0o700 });
+  vi.stubEnv("PATH", "");
+}
+
 function messageIds(messages: ChatMessage[]): Array<{ id: string; body: string }> {
   return messages.map((message) => ({ id: message.id, body: message.body }));
 }
@@ -902,10 +911,7 @@ describe("chatDispatchService", () => {
     { nodePresent: false, exitCode: 7, replied: true },
   ])("says Node.js is missing only for a missing runtime and missing reply: %j", async ({ nodePresent, exitCode, replied }) => {
     const fixture = await createFixture();
-    const bin = join(fixture.appRoot, "node_modules", ".bin");
-    await mkdir(bin, { recursive: true });
-    if (nodePresent) await writeFile(join(bin, "node"), "not executed", { mode: 0o700 });
-    vi.stubEnv("PATH", "");
+    await stubRunnerPath(fixture, { node: nodePresent });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
@@ -2425,6 +2431,7 @@ describe("chatDispatchService", () => {
 
   it("reports a nonzero-exit failure notice exactly once", async () => {
     const fixture = await createFixture();
+    await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, {
       body: "Run a failing audit.",
       authorUserId: "user_local",
@@ -3184,6 +3191,7 @@ describe("chatDispatchService", () => {
     { replied: true, words: "Nova stopped before finishing. Its run ended with an error." },
   ])("says why a run didn't finish, with no Try again: %j", async ({ replied, words }) => {
     const fixture = await createFixture();
+    await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
