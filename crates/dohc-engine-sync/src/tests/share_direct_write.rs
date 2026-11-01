@@ -182,7 +182,17 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
             .unwrap()
     };
     assert_eq!(statuses(&engine)[path].state, DirectWriteState::Pending);
-    let relay = PagedShareRelay::new([], []);
+    // The relay takes the creation, but its answer is lost. The next pull
+    // brings the creation back under the relay's object id.
+    let token = format!("share-object:v1:{}", hex_sha256(b"record-one"));
+    let created = hex_sha256(text.as_bytes());
+    let relay = PagedShareRelay::new([], [(0, ShareViewResponse {
+        ops: vec![ShareReplicationEnvelope {
+            origin_id: "owner-relay-write".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 2_500,
+            payload: json!({ "versionId": "main", "objectId": token, "operation": "write", "path": path,
+                "payloadAfterPath": path, "payloadAfterBlobSha256": created, "payloadAfterContentKind": "text" }),
+        }], next_cursor: 1, has_more: false,
+    })]).with_view_blobs([(created, text.as_bytes().to_vec())]);
     relay
         .collection_write_answers
         .lock()
@@ -200,6 +210,23 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
         !statuses(&engine)[path].can_discard,
         "resolve the same submission before offering discard"
     );
+    client
+        .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
+        .unwrap();
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .object_id,
+        token
+    );
+    assert_eq!(
+        statuses(&engine)[path].state,
+        DirectWriteState::Pending,
+        "the creation stays pending until its receipt arrives"
+    );
+    assert!(!statuses(&engine)[path].can_discard);
     push(&client, &mut engine);
     let writes = client.transport().collection_writes.lock().unwrap();
     assert_eq!(writes.len(), 2);
@@ -221,12 +248,12 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
     );
     let repaired = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
     let sha = hex_sha256(repaired.as_bytes());
-    let owner = RelaySyncClient::new(PagedShareRelay::new([], [(0, ShareViewResponse {
+    let owner = RelaySyncClient::new(PagedShareRelay::new([], [(1, ShareViewResponse {
         ops: vec![ShareReplicationEnvelope {
             origin_id: "owner-adoption".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,
             payload: json!({ "versionId": "main", "operation": "write", "path": path,
                 "payloadAfterPath": path, "payloadAfterBlobSha256": sha, "payloadAfterContentKind": "text" }),
-        }], next_cursor: 1, has_more: false,
+        }], next_cursor: 2, has_more: false,
     })]).with_view_blobs([(sha.clone(), repaired.as_bytes().to_vec())]));
     assert_eq!(
         owner
