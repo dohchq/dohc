@@ -1,5 +1,5 @@
 import { mainProcessLogLines } from "./mainProcessCrashText";
-import { test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   _electron as electron,
   type ElectronApplication,
@@ -46,6 +46,51 @@ export const desktopRoot = resolve(helpersDir, "../..");
 const mainEntry = join(desktopRoot, "dist/main/main.js");
 const rendererEntry = join(desktopRoot, "dist/renderer/index.html");
 const electronExecutable = require("electron") as string;
+const launchedApps = new WeakMap<Page, ElectronApplication>();
+
+/** What Electron says about the page's window, for a failure message. */
+async function describeWindow(page: Page): Promise<string> {
+  const app = launchedApps.get(page);
+  if (!app) return "unknown, not launched by launchDesktopApp";
+  const window = await app.browserWindow(page);
+  try {
+    return JSON.stringify(await window.evaluate(window => ({
+      visible: window.isVisible(), minimized: window.isMinimized(), focused: window.isFocused(),
+      bounds: window.getBounds(), crashed: window.webContents.isCrashed(), loading: window.webContents.isLoading(),
+    })));
+  } finally {
+    await window.dispose();
+  }
+}
+
+/**
+ * Waits for the page to paint two frames. Playwright clicks only once the page
+ * paints, and without frames a click waits silently until it times out (#2973).
+ */
+export async function waitForPaintedFrames(page: Page): Promise<void> {
+  const painting = page.evaluate(() => new Promise<PaintCheck>(resolve => {
+    const seen = (painted: boolean) => ({ painted, visibilityState: document.visibilityState, hasFocus: document.hasFocus() });
+    const timer = setTimeout(() => resolve(seen(false)), 5_000);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      clearTimeout(timer);
+      resolve(seen(true));
+    }));
+  }));
+  void painting.catch(() => undefined);
+  // The page answers by itself within 5 s. This limit catches a page that can't answer.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unanswered = new Promise<null>(resolve => { timer = setTimeout(resolve, 7_000, null); });
+  const answer = await Promise.race([painting, unanswered]).finally(() => clearTimeout(timer));
+  if (answer?.painted) return;
+  throw new Error(`The desktop window painted no frame within 5 s, so Playwright can't click in it. Page: ${
+    answer ? JSON.stringify(answer) : "no answer"}. Window: ${await describeWindow(page)}.`);
+}
+
+interface PaintCheck {
+  painted: boolean;
+  visibilityState: DocumentVisibilityState;
+  hasFocus: boolean;
+}
 
 function requireBuiltDesktopApp() {
   const build = assertPrepared();
@@ -199,6 +244,18 @@ export async function launchDesktopApp(input: {
         text: error.message,
       });
     });
+    launchedApps.set(page, app);
+    // Hand the spec its window only once it shows, which dohc does after the
+    // first paint (#2973). The first screen's 20 s wait needs that paint anyway.
+    const window = await app.browserWindow(page);
+    try {
+      await expect.poll(() => window.evaluate(window => window.isVisible()), { timeout: 20_000 }).toBe(true)
+        .catch(async (error: unknown) => {
+          throw new Error(`The desktop window didn't show within 20 s. Window: ${await describeWindow(page)}.`, { cause: error });
+        });
+    } finally {
+      await window.dispose();
+    }
 
     const launchedApp = app;
     const launchedProcess = processHandle;
