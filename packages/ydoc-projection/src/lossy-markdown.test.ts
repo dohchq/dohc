@@ -1,9 +1,15 @@
 import { createHash } from 'node:crypto'
-import { expect, it } from 'vitest'
+import { LIVE_MARKDOWN_MAX_BYTES } from '@dohc/live-session-contract/limits'
+import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
+
+vi.mock('./import-export.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./import-export.js')>()
+  return { ...actual, markdownToYDoc: vi.fn(actual.markdownToYDoc) }
+})
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -133,6 +139,27 @@ it('checks the whole session when its witness records a lossy source, or a proje
   const mismatched = seeded('Title\n=====\n\n* one\n')
   mismatched.getMap('meta').set('dohcMarkdownSource', 'Title\n=====\n\n* two\n')
   expect(witnessKeepsMeaning(mismatched)).toBe(false)
+})
+
+it("checks a note up to the engine's size limit, and holds a larger one without importing it", () => {
+  // A respelled heading keeps its meaning, so only the size can hold it.
+  const respelled = 'Title\n=====\n\n'
+  const atLimit = respelled + 'a'.repeat(LIVE_MARKDOWN_MAX_BYTES - respelled.length)
+  const overLimit = `${atLimit}a`
+  // Fewer characters than the limit, and one byte over it in UTF-8.
+  const multibyte = respelled + 'é'.repeat((LIVE_MARKDOWN_MAX_BYTES + 1 - respelled.length) / 2)
+  expect(multibyte.length).toBeLessThan(LIVE_MARKDOWN_MAX_BYTES)
+  expect(new TextEncoder().encode(multibyte).length).toBe(LIVE_MARKDOWN_MAX_BYTES + 1)
+
+  expect(isLossyMarkdown(atLimit)).toBe(false)
+  expect(witnessKeepsMeaning(seeded(atLimit))).toBe(true)
+  for (const oversized of [overLimit, multibyte]) {
+    const doc = seeded(oversized)
+    vi.mocked(markdownToYDoc).mockClear()
+    expect(isLossyMarkdown(oversized)).toBe(true)
+    expect(witnessKeepsMeaning(doc)).toBe(false)
+    expect(markdownToYDoc).not.toHaveBeenCalled()
+  }
 })
 
 it('names the note when it could not be read to check', () => {

@@ -1,3 +1,4 @@
+import { exceedsLiveMarkdownLimit } from '@dohc/live-session-contract/limits'
 import { digest } from 'lib0/hash/sha256'
 import { Marked } from 'marked'
 import * as Y from 'yjs'
@@ -25,9 +26,10 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  *
  * A note dohc wrote is its own canonical Markdown, apart from the final
  * newline a save drops, so it skips the render. A note the editor cannot
- * import at all is lossy too.
+ * import at all is lossy too, and so is one larger than the engine checks.
  */
 export function isLossyMarkdown(markdown: string): boolean {
+  if (exceedsLiveMarkdownLimit(markdown)) return true
   let canonical: string
   try {
     const doc = markdownToYDoc(markdown)
@@ -89,8 +91,9 @@ export function isLossyDocumentState(state: Uint8Array, headSha256: string | nul
  * Whether a note's witness alone shows it is not a lossy note. Its source
  * keeps its meaning in the projection the witness records, so no document
  * holding that witness, edited or not, can be one. False for a witness
- * that is partial, whose source doesn't match its recorded digest, or whose
- * projection today's import no longer gives.
+ * that is partial, whose source is larger than the engine checks or doesn't
+ * match its recorded digest, or whose projection today's import no longer
+ * gives.
  */
 export function witnessKeepsMeaning(doc: Y.Doc): boolean {
   const meta = doc.getMap('meta')
@@ -103,7 +106,8 @@ export function witnessKeepsMeaning(doc: Y.Doc): boolean {
 
 /** Check the saved source, independently of the document's later edits. */
 export function checkMarkdownWitness(source: unknown, sourceSha: unknown, projectionSha: unknown): boolean {
-  if (typeof source !== 'string' || sourceSha !== sha256(source) || typeof projectionSha !== 'string') return false
+  if (typeof source !== 'string' || exceedsLiveMarkdownLimit(source) || sourceSha !== sha256(source)
+    || typeof projectionSha !== 'string') return false
   let canonical: string
   try {
     const imported = markdownToYDoc(source)
