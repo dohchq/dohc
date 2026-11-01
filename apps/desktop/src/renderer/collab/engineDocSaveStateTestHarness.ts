@@ -46,7 +46,8 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   // The lineage main stamps on each remote update: the open's, then the
   // newest replacement's.
   let currentLineageGeneration = 1;
-  const doc = new Y.Doc();
+  // Main's copy of the document: the open's, then the newest replacement's.
+  let doc = new Y.Doc();
   if (kind === "scene") {
     declareSceneRoots(doc);
     insertElementRevision(doc, {
@@ -167,7 +168,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     },
   };
 
-  // Mutates the SOURCE doc and delivers the resulting incremental update as
+  // Mutates main's copy and delivers the resulting incremental update as
   // a forwarded remote delta: a co-editor's edit, stamped with the lineage
   // main currently serves, as main stamps every remote update.
   function emitRemoteEdit(suffix: string): void {
@@ -224,6 +225,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       replacement.getMap("meta").set("contentKind", "plain-text");
       replacement.getText("plainText").insert(0, text);
     }
+    doc = replacement;
     const event = {
       sessionId: openedSessionId,
       update: Y.encodeStateAsUpdate(replacement),
@@ -314,7 +316,6 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     applied,
     applyAttempts,
     closed,
-    sourceDoc: doc,
     mainText: () => doc.getText("plainText").toString(),
     acknowledgedGenerations,
     sessionId: () => openedSessionId,

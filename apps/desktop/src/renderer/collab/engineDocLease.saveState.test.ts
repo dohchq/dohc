@@ -986,6 +986,39 @@ it("freezes the deleted doc's bytes at the event, immune to a remote edit that l
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
 });
 
+it("keeps remote edits on a winning lineage out of a deleted note's recovery", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+
+  cleanup();
+  retained.release();
+  await disposeEngineDocLeasesForTests();
+  await retained.lease.dispose();
+  drafts = observeDrafts("notes/big.md");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+});
+
+it("applies remote edits on a winning lineage while the note exists", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner+remote");
+});
+
 it("stores a deleted scene as portable Excalidraw JSON", async () => {
   harness = harnessBridge("scene");
   vi.stubGlobal("dohcDesktop", harness.api);
