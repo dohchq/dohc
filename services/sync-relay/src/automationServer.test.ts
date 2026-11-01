@@ -811,6 +811,8 @@ describe("a server whose copies of workspaces fail", () => {
   });
 });
 
+const UNDELIVERED = "The record has updates the server has not sent, because no outbox holds them or the shared file set them aside. Until they are sent, the server confirms no run's changes as sent.";
+
 describe("a server that pushes its copy of a workspace", () => {
   it("flushes pending drafts at startup and still syncs while an owner device is offline", async () => {
     clock = at(8);
@@ -863,14 +865,16 @@ describe("a server that pushes its copy of a workspace", () => {
     expect(capture).toHaveBeenCalled();
     readHead.mockRestore(); currentBinding.mockRestore();
   });
-  it("never captures a quarantined draft its owner has not asked to try again", async () => {
+  it("never captures a quarantined draft its owner has not asked to try again, nor confirms a run's changes sent while it waits", async () => {
     clock = at(8);
     const {storage, h} = await relay();
     const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
       currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
     const draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
     const capture = vi.fn(async () => {throw new Error("Device delivery is unavailable.");});
-    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
+    // The engine lists a quarantined draft as pending only while its owner's Try again waits.
+    const client = {ownerYDocListDrafts: vi.fn(async (_request: unknown, input: {pendingOnly?: boolean}) =>
+      ({drafts: input.pendingOnly ? [] : [draft], next: null}))};
     vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
@@ -880,12 +884,21 @@ describe("a server that pushes its copy of a workspace", () => {
     const currentBinding = vi.mocked(storage.automationRecordBinding);
     const s = await server(storage, h, {client: client as unknown as EngineClient,
       recordDelivery: {namespace: "relay", capture}});
-    await s.openReplica();
-    await vi.waitFor(() => expect(drained).toHaveBeenCalled());
+    const {options} = await s.openReplica();
+    const held = payRunRecord("claim-held");
+    options.beforeEffect!(held, setStatus(0));
+    const syncs = s.sync.mock.calls.length;
+    options.onRunEnded!(held);
+    // Closing waits for the sync that began after the run ended, which leaves it on record.
+    await vi.waitFor(() => expect(s.sync.mock.calls.length).toBeGreaterThan(syncs));
+    await s.run.close();
+    expect(storage.endedAutomationServerRuns({workspaceId: WORKSPACE, incarnation: 1})).toEqual([expect.objectContaining({claimId: "claim-held"})]);
     expect(await drained.mock.results[0]!.value).toBe("frozen");
     expect(readHead).toHaveBeenCalledWith("outbox");
     expect(capture).not.toHaveBeenCalled();
-    expect(s.errors.filter(([context]) => context.startsWith("deliver automation record"))).toEqual([]);
+    expect(s.errors.length).toBeGreaterThan(0);
+    expect(s.errors).toEqual(s.errors.map(() => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
+      expect.objectContaining({message: UNDELIVERED})]));
     drained.mockRestore(); readHead.mockRestore(); currentBinding.mockRestore();
   });
   it("confirms no run's changes sent while a record update it found no outbox for waits", async () => {
@@ -922,7 +935,7 @@ describe("a server that pushes its copy of a workspace", () => {
     const left = client.ownerYDocListDrafts.mock.calls.length - flushes;
     expect(left).toBeGreaterThan(0);
     expect(s.errors).toEqual(Array.from({length: left}, () => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
-      expect.objectContaining({message: "The record has updates waiting but no outbox to deliver them from, so the server confirms no run's changes as sent."})]));
+      expect.objectContaining({message: UNDELIVERED})]));
   });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
