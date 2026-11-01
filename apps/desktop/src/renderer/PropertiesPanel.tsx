@@ -172,18 +172,26 @@ function propertyKey(entry: FrontmatterEntry): string | null {
 // property the rows haven't read yet stays as it is. `saves` holds the key
 // each row saves under. A row given a name another row has keeps the name it
 // was read with, so it never writes over that property.
-function rowChanges(shown: Row[], next: Row[]) {
+function rowChanges(shown: Row[], next: Row[], readNote: () => readonly FrontmatterEntry[]) {
   const saves = next.map((row, index) => {
     const key = propertyKey(row);
     return key !== null && key !== row.sourceKey && nameTaken(index, key, next) ? (row.sourceKey ?? null) : key;
   });
   const values = new Map<string, unknown>();
   const renamed = new Map<string, string>();
+  let note: readonly FrontmatterEntry[] | undefined;
   saves.forEach((key, index) => {
     const row = next[index]!;
     if (key === null) return;
     // A row the person left alone never writes, whatever a later read decoded for it.
-    if (key !== row.sourceKey || row.value !== row.sourceValue) values.set(key, entryValue(row));
+    if (key !== row.sourceKey || row.value !== row.sourceValue) {
+      // A rename that leaves the value as it was read moves the value the note
+      // holds now. Another device can have changed it since the rows read it.
+      const now = key !== row.sourceKey && row.value === row.sourceValue
+        ? (note ??= readNote()).find((entry) => entry.key === row.sourceKey)
+        : undefined;
+      values.set(key, entryValue(now ?? row));
+    }
     if (row.sourceKey !== undefined && key !== row.sourceKey && !saves.includes(row.sourceKey)) {
       renamed.set(row.sourceKey, key);
     }
@@ -359,7 +367,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   function commit(next: Row[]) {
     if (refused) return;
-    const { saves, values, remove, renamed } = rowChanges(entries, next);
+    const { saves, values, remove, renamed } = rowChanges(entries, next, () => (ydoc ? liveEntries(ydoc) : fileEntries()));
     try {
       if (values.size > 0 || remove.length > 0) {
         if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
