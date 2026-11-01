@@ -202,7 +202,7 @@ fn is_os_metadata(normalized: &str) -> bool {
 /// may go with a folder it alone keeps. Volume folders such as `.Trashes` can
 /// hold a person's files, so they never go.
 #[cfg(target_vendor = "apple")]
-pub(crate) fn is_finder_metadata_file(normalized: &str) -> bool {
+pub fn is_finder_metadata_file(normalized: &str) -> bool {
     MACOS_METADATA_FILES.contains(&normalized) || normalized.starts_with(APPLE_DOUBLE_PREFIX)
 }
 

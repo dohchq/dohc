@@ -358,10 +358,12 @@ fn keep_folder_writes_the_switch_clears(
     holds: &PlacementHolds,
     projections: &mut Vec<SwitchProjection>,
 ) {
+    // Exact spelling: on a disk that tells `trip.md` from `TRIP.md`, a delete
+    // of one does not clear the other.
     let deleted: HashSet<String> = projections
         .iter()
         .filter(|projection| projection.operation == MaterializationOperation::Delete)
-        .map(|projection| path_collision_key(&projection.spec.target_path))
+        .map(|projection| projection.spec.target_path.clone())
         .collect();
     projections.retain(|projection| {
         let path = projection.spec.target_path.as_str();
@@ -377,11 +379,11 @@ fn keep_folder_writes_the_switch_clears(
             .job_id
             .starts_with("version-switch-secret-mat_");
         let cleared = |inner: &str| {
-            let held = holds.get(inner).is_some();
+            let held = holds.entries().any(|(held, _)| held == inner);
             if secret {
-                !held && deleted.contains(&path_collision_key(inner))
+                !held && deleted.contains(inner)
             } else {
-                held || deleted.contains(&path_collision_key(inner))
+                held || deleted.contains(inner)
             }
         };
         super::materialization::folder_tree_clears(store, root_dir, path, &cleared, false)

@@ -682,10 +682,26 @@ fn switch_folder_stays(
         && folder_tree_clears(store, root_dir, folder, &|_| false, true))
 }
 
-/// Whether every file in the folder at `rel`, at any depth, is one the OS
-/// writes, such as `.DS_Store`, or a regular file whose path `cleared`
-/// accepts. With `remove`, also remove the folder and the folders inside it,
-/// deepest first, and say whether it is gone.
+/// Whether the folder removal deletes the file named `name` itself.
+#[cfg(target_vendor = "apple")]
+fn removal_deletes(name: &str) -> bool {
+    dohc_engine_files::floor::is_finder_metadata_file(&dohc_engine_files::floor::normalize_segment(
+        name,
+    ))
+}
+
+/// Elsewhere the folder removal deletes only empty folders.
+#[cfg(not(target_vendor = "apple"))]
+fn removal_deletes(_name: &str) -> bool {
+    false
+}
+
+/// Whether every entry in the folder at `rel`, at any depth, is a folder or a
+/// regular file that goes: one whose path `cleared` accepts, or one the
+/// folder removal deletes itself, which is Finder's files such as
+/// `.DS_Store` on macOS and none elsewhere. With `remove`, also remove the
+/// folder and the folders inside it, deepest first, and say whether it is
+/// gone.
 pub(super) fn folder_tree_clears(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -707,8 +723,7 @@ pub(super) fn folder_tree_clears(
         let clears = if kind.is_some_and(|kind| kind.is_dir()) {
             folder_tree_clears(store, root_dir, &path, cleared, remove)
         } else {
-            dohc_engine_files::floor::names_os_metadata(&name)
-                || (kind.is_some_and(|kind| kind.is_file()) && cleared(&path))
+            kind.is_some_and(|kind| kind.is_file()) && (cleared(&path) || removal_deletes(&name))
         };
         if !clears {
             return false;

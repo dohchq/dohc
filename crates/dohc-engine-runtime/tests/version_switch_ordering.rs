@@ -1136,6 +1136,28 @@ async fn an_untracked_file_keeps_its_folder_and_the_file_unwritten() {
     assert_eq!(jobs, 0, "no write of the file waits for the folder");
 }
 
+// Only macOS removes a folder that Finder's files alone keep. Elsewhere such
+// a file keeps the folder like any other.
+#[cfg(not(target_vendor = "apple"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_os_metadata_file_keeps_its_folder_off_macos() {
+    let (scratch, database) =
+        switch_folder_to_file("ws-folder-keeps-metadata", Some(".DS_Store")).await;
+    let plans = scratch.path().join("plans");
+    assert!(plans.is_dir(), "a folder this platform cannot remove stays");
+    assert!(plans.join(".DS_Store").is_file());
+    let connection = Connection::open(&database).expect("sqlite");
+    let jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-*' AND target_path = 'plans'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("switch jobs");
+    assert_eq!(jobs, 0, "no write of the file waits for the folder");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_a_secret_folder_to_a_same_named_secret_places_the_file() {
     let scratch = ScratchDir::new().expect("scratch");
