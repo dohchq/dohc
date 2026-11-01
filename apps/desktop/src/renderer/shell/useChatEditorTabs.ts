@@ -5,6 +5,10 @@ import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
+function isAgentNav(nav: ChatsNav | undefined): boolean {
+  return (nav?.level === "channel" || nav?.level === "thread") && nav.channel.kind === "agent";
+}
+
 type ChatEditor = {
   nav: ChatsNav | undefined;
   drafts: ChatsDrafts | undefined;
@@ -159,5 +163,9 @@ export function useChatEditorTabs(input: {
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
       [path, chatEditorTitle(entry.nav!, input.agents)] as const),
   ), [revision, input.agents, input.workspaceId]);
-  return { get, open, titles };
+  // An agent's chat tab draws the agent's sparkle, as the sidebar does.
+  const glyphs = useMemo(() => new Map(
+    [...store.current.entries].filter(([, entry]) => isAgentNav(entry.nav)).map(([path]) => [path, "agent" as const]),
+  ), [revision, input.workspaceId]);
+  return { get, open, titles, glyphs };
 }

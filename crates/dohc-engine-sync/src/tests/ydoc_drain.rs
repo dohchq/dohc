@@ -1085,6 +1085,965 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
     assert!(idle.record_facts.is_empty());
 }
 
+/// Sol's first and Opus's third findings: a queued update whose bytes a
+/// drain applies and whose path its document no longer has is refused, and
+/// the refusal deleted its row at once, with the record facts its apply
+/// parked there. A drain that then stops before its cleanup, as one that
+/// waits for validation does, lost those facts. The row now leaves only
+/// with the cleanup, so after a stopped drain that its caller abandons, as
+/// a cancelled one, and again after a restart, the drain that removes it
+/// reports its facts and its refusal once, and history holds one row.
+#[test]
+fn an_applied_then_refused_update_reports_its_facts_once_after_its_drain_stopped() {
+    for restart in [false, true] {
+        an_applied_then_refused_update_after_a_stopped_drain(restart);
+    }
+}
+
+fn an_applied_then_refused_update_after_a_stopped_drain(restart: bool) {
+    const RECORD_ID: &str = "rec_dddddddddddddddddddddddddd";
+    const OBJECT_ID: &str = "refused-record-object";
+    const PATH: &str = "tasks/refused.md";
+
+    let (_scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "refused-record-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+        base_snapshot_sha: claim_id,
+    }) = dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    else {
+        panic!("the base is claimed");
+    };
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let update_sha = engine
+        .put_binary_blob(&remote.frontmatter_set("title", "Remote").unwrap())
+        .expect("store remote update");
+    let operation = envelope(
+        "refused-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id, "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            ..
+        })
+    ));
+    // The queued payload names a path its document does not have.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','tasks/elsewhere.md') \
+                 WHERE origin_id='refused-peer'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("name another path");
+    let state = |engine: &EngineStore| -> (i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals \
+                        WHERE origin_id='refused-peer')",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("state")
+    };
+
+    // The drain applies the bytes and refuses the row, then stops before
+    // its cleanup.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    assert_eq!(stopped.record_facts.len(), 1, "{stopped:?}");
+    assert_eq!(stopped.refusals.len(), 1, "{stopped:?}");
+    assert_eq!(
+        state(&engine),
+        (1, 1, 0),
+        "the row keeps its facts, and nothing refused it yet"
+    );
+
+    if restart {
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain after restart");
+    assert_eq!(drained.record_facts, stopped.record_facts);
+    assert_eq!(
+        drained
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_id.as_str(), refusal.origin_seq))
+            .collect::<Vec<_>>(),
+        [("refused-peer", 0)]
+    );
+    assert_eq!(state(&engine), (1, 0, 1));
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
+}
+
+/// Which route consumes a queued row once its lineage is no longer the
+/// head's.
+#[derive(Clone, Copy, Debug)]
+enum OldLineageRoute {
+    /// The document's drain applies it to the archive that keeps its lineage.
+    Archive,
+    /// The document's drain finds no lineage keeps it.
+    Lost,
+    /// The pass's workspace-wide inactive drain applies it to the archive.
+    Inactive,
+    /// An envelope of its lineage that the archive refuses arrives with no
+    /// session live, and that envelope's own inactive drain applies it.
+    Ingress,
+}
+
+/// Sol's second finding: a row a drain applied and kept queued reported its
+/// facts only when a retry reached the head's lineage. Once its lineage was
+/// archived, or lost, the route that consumed it deleted the row and its
+/// facts with it. Each route now carries them, the field-history change
+/// counts once, and the next drain reports nothing. An applied-then-refused
+/// row too, which keeps the refusal its head apply was owed (Sol's third
+/// ruling), and an envelope's own ingress drain, whose refusal does not drop
+/// the facts of the row it also removes (Sol's fourth).
+#[test]
+fn a_lineage_change_before_retry_still_reports_parked_facts_once() {
+    for route in [
+        OldLineageRoute::Archive,
+        OldLineageRoute::Lost,
+        OldLineageRoute::Inactive,
+        OldLineageRoute::Ingress,
+    ] {
+        for refused in [false, true] {
+            parked_facts_after_a_lineage_change(route, refused);
+        }
+    }
+}
+
+fn parked_facts_after_a_lineage_change(route: OldLineageRoute, refused: bool) {
+    const RECORD_ID: &str = "rec_ffffffffffffffffffffffffff";
+    const OBJECT_ID: &str = "lineage-record-object";
+    const PATH: &str = "tasks/lineage.md";
+
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "lineage-record-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let based = |engine: &mut EngineStore| {
+        let local = dohc_engine_collab::Ydoc::wire();
+        local
+            .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+            .expect("seed rich document");
+        let base = local.encode_full_state();
+        let TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+            base_snapshot_sha: claim_id,
+        }) = dohc_engine_collab::claim_base(
+            engine,
+            &key,
+            dohc_engine_collab::ContentKind::Richdoc,
+            &base,
+            &NoFaults,
+            1_500,
+        )
+        .expect("claim replicated base")
+        else {
+            panic!("{route:?}: the base is claimed");
+        };
+        (base, claim_id)
+    };
+    let (base, claim_id) = based(&mut engine);
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let update_sha = engine
+        .put_binary_blob(&remote.frontmatter_set("title", "Remote").unwrap())
+        .expect("store remote update");
+    let mut operation = envelope(
+        "lineage-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id, "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    operation.relay_seq = Some(20);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue the update");
+    if refused {
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','tasks/elsewhere.md') \
+                     WHERE origin_id='lineage-peer'",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("name another path");
+    }
+    let history = |engine: &EngineStore| -> (i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("history")
+    };
+
+    // The drain applies the update and stops before its cleanup, as one
+    // that then waits does.
+    let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    assert_eq!(stopped.record_facts.len(), 1, "{route:?}: {stopped:?}");
+    assert_eq!(
+        history(&engine),
+        (1, 1),
+        "{route:?}: the row keeps its facts"
+    );
+
+    // The lineage it applied to is archived and another takes the head. The
+    // archive refuses while the row is queued, so the row is set aside
+    // around the change and comes back as it was.
+    let head = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load head")
+        .expect("head");
+    let vector_sha = dohc_engine_storage::hex_sha256(&head.doc.encode_state_vector());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TEMP TABLE set_aside AS SELECT * FROM ydoc_deferred_updates; \
+                 DELETE FROM ydoc_deferred_updates;",
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_collab::archive_active_lineage_in_tx(
+                tx,
+                &key,
+                &claim_id,
+                &vector_sha,
+                None,
+                1_600,
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("archive the lineage");
+    let (_, successor) = based(&mut engine);
+    assert_ne!(successor, claim_id, "{route:?}");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO ydoc_deferred_updates SELECT * FROM set_aside; DROP TABLE set_aside;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("the row comes back");
+
+    let (reported, refusals) = match route {
+        OldLineageRoute::Archive | OldLineageRoute::Lost => {
+            if matches!(route, OldLineageRoute::Lost) {
+                engine
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute("DELETE FROM ydoc_inactive_lineages", [])
+                            .map_err(SyncError::persist)
+                    })
+                    .expect("no lineage keeps it");
+            }
+            let drained = drain_deferred_ydoc_for_key(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &NoFaults,
+            )
+            .expect("drain the old coordinate");
+            (drained.record_facts, drained.refusals)
+        }
+        // The pass's inactive drain leaves its facts in drain reports.
+        OldLineageRoute::Inactive => {
+            let tails = dohc_engine_collab::live_update_application::ReleasedTails::default()
+                .bound_to(&engine);
+            let inactive = crate::ydoc_apply::drain_inactive_ydoc_updates(
+                &mut engine,
+                crate::ydoc_apply::InactiveScope::Workspace("ws"),
+                &tails,
+                &mut Vec::new(),
+                crate::ydoc_apply::DrainReporting::Durable,
+                &NoFaults,
+            )
+            .expect("inactive drain");
+            assert!(inactive.record_facts.is_empty(), "{route:?}");
+            let claimed = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+                .expect("claim the drain reports");
+            // The report keeps the refusal the drain persisted, as given.
+            assert_eq!(claimed.extras.refusals, inactive.refusals, "{route:?}");
+            (claimed.record_facts, inactive.refusals)
+        }
+        // Sol's fourth ruling: the envelope's refusal decides its own
+        // disposition, and the row its drain also removed still reports
+        // what it parked.
+        OldLineageRoute::Ingress => {
+            let oversized = remote.richdoc_append_paragraph(&"x".repeat(MAX_TEXT_BYTES));
+            let mut incoming = operation.clone();
+            incoming.origin_id = "lineage-ingress".into();
+            incoming.relay_seq = Some(30);
+            incoming.payload["updateBlobSha256"] = json!(
+                engine
+                    .put_binary_blob(&oversized)
+                    .expect("store the oversized update")
+            );
+            let outcome = apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &incoming,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("the envelope's ingress");
+            let ApplyDisposition::Applied(applied) = outcome.primary else {
+                panic!("{route:?}: the envelope's drain reports what it removed");
+            };
+            let (own, others): (Vec<_>, Vec<_>) = outcome
+                .refusals
+                .into_iter()
+                .partition(|refusal| refusal.origin_id == "lineage-ingress");
+            assert_eq!(own.len(), 1, "{route:?}: the envelope's own refusal");
+            (applied.record_facts, others)
+        }
+    };
+    assert_eq!(
+        reported, stopped.record_facts,
+        "{route:?} refused={refused}"
+    );
+    // Sol's third ruling: the refusal its head apply was owed, as it was,
+    // whatever the lineage that takes it now decides, and once.
+    assert_eq!(refusals.len(), usize::from(refused), "{route:?}");
+    assert_eq!(refusals, stopped.refusals, "{route:?} refused={refused}");
+    let pending: Vec<_> = crate::apply::read_pending_refusals(&engine, "ws")
+        .expect("pending refusals")
+        .into_iter()
+        .filter(|refusal| refusal.origin_id == "lineage-peer")
+        .collect();
+    assert_eq!(pending, stopped.refusals, "{route:?} refused={refused}");
+    assert_eq!(history(&engine), (1, 0), "{route:?} refused={refused}");
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(
+        idle.record_facts.is_empty() && idle.refusals.is_empty(),
+        "{route:?}: {idle:?}"
+    );
+}
+
+/// Sol's and Opus's second findings on f939d61f1: a held document's drain
+/// applies a queued Collection field change, then a lower-relay base wins
+/// over its incomplete lineage and archives it with the change still queued
+/// for the drain's cleanup. The document's inactive drain that follows
+/// leaves that row to the cleanup: the change reports once, its history
+/// counts once, and nothing refuses it.
+#[test]
+fn a_held_documents_inactive_drain_leaves_its_consumed_rows_to_their_cleanup() {
+    const RECORD_ID: &str = "rec_gggggggggggggggggggggggggg";
+    const OBJECT_ID: &str = "overlap-record-object";
+    const PATH: &str = "tasks/overlap.md";
+
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "overlap-record-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    // The file holds what the base projects, so the winning base, which
+    // projects the same, finds nothing outside both lineages to recover.
+    let projected = local
+        .project(dohc_engine_collab::ContentKind::Richdoc)
+        .expect("project the base")
+        .content;
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &projected);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let base = local.encode_full_state();
+    let claim_id = dohc_engine_storage::hex_sha256(&base);
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &dohc_engine_collab::BaseRelayCoordinate::new("local", 0, 20).expect("coordinate"),
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim the base at the relay");
+    let delta = |engine: &mut EngineStore, origin: &str, bytes: &[u8], relay_seq: i64| {
+        let sha = engine.put_binary_blob(bytes).expect("store the update");
+        let mut op = envelope(
+            origin,
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": claim_id, "isBaseState": false,
+                "actorOriginId": "remote-author"
+            }),
+        );
+        op.relay_seq = Some(relay_seq);
+        op
+    };
+    // The head waits for a dependency it never received.
+    let dependency = dohc_engine_collab::Ydoc::wire();
+    dependency.apply(&base).expect("dependency sees the base");
+    dependency.richdoc_append_paragraph("Never delivered.");
+    let pending = dependency.richdoc_append_paragraph("Waiting on it.");
+    let pending = delta(&mut engine, "overlap-pending", &pending, 5);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &pending,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply the incomplete update");
+    assert!(
+        dohc_engine_collab::load_persisted(&engine, &key)
+            .expect("load head")
+            .expect("head")
+            .doc
+            .has_pending_dependencies()
+    );
+    // The field change, then a base of another lineage below the head's.
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees the base");
+    let change = delta(
+        &mut engine,
+        "overlap-peer",
+        &remote.frontmatter_set("title", "Remote").unwrap(),
+        12,
+    );
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &change,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue the field change");
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("winning document");
+    let winner_sha = engine
+        .put_binary_blob(&winner.encode_full_state())
+        .expect("store the winning base");
+    let mut winning = envelope(
+        "overlap-winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": winner_sha,
+            "lineageClaimId": winner_sha, "isBaseState": true
+        }),
+    );
+    winning.relay_seq = Some(15);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &winning,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue the winning base");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(&format!(
+                "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms,main_cursor, \
+                   last_outbound_seq) VALUES ('ws',1,0,1,-1); \
+                 INSERT INTO hosted_documents(workspace_id,object_id,path,state,held_reason, \
+                   scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}','held', \
+                   'hosted-backfill-work-waiting',1);"
+            ))
+            .map_err(SyncError::persist)
+        })
+        .expect("hold the document for its queued work");
+    let state = |engine: &EngineStore| -> (i64, i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals \
+                        WHERE origin_id='overlap-peer'), \
+                       (SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE lineage_claim_id=?2)",
+                    params![RECORD_ID, claim_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("state")
+    };
+
+    let released = crate::ydoc_apply::drain_released_holds(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &BTreeMap::new(),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("drain the held document");
+    assert!(released.waiting.is_none() && released.refusals.is_empty());
+    let reported = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+        .expect("claim the drain reports");
+    assert_eq!(
+        reported.record_facts.len(),
+        1,
+        "{:?}",
+        reported.record_facts
+    );
+    assert_eq!(
+        reported.extras.conflicts_opened, 1,
+        "the winning base opened one"
+    );
+    assert_eq!(
+        state(&engine),
+        (1, 0, 0, 1),
+        "one history effect, no refusal, the lineage archived"
+    );
+}
+
+/// A store holding the adopted Collection record `record_id` at `path`, its
+/// document's base claimed, and a peer's title change from `origin` queued
+/// behind a live session: the store's scratch tree and path, the store, the
+/// document and its lineage.
+fn queued_title_change(
+    record_id: &str,
+    object_id: &str,
+    path: &str,
+    origin: &str,
+) -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    dohc_engine_collab::DocKey,
+    String,
+) {
+    let (scratch, store_path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        &format!("{object_id}-schema"),
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {record_id}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, object_id, path, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", path, record_id, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+        base_snapshot_sha: claim_id,
+    }) = dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    else {
+        panic!("the base is claimed");
+    };
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let update_sha = engine
+        .put_binary_blob(&remote.frontmatter_set("title", "Remote").unwrap())
+        .expect("store remote update");
+    let operation = envelope(
+        origin,
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": object_id, "path": path,
+            "contentKind": "richdoc", "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id, "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            ..
+        })
+    ));
+    (scratch, store_path, engine, key, claim_id)
+}
+
+/// Sol's first ruling, window (a): what the end-of-pass drain removes stays
+/// owed to its pass when a later step, the settlement drain, waits and the
+/// request never resumes. The transaction that removes the row writes its
+/// drain report, so an abandoned request, or a restart, leaves it for the
+/// next request to claim, with its file change. A request reports it until a
+/// cursor commit acknowledges it under the token it was claimed with; a
+/// commit under an abandoned request's token acknowledges nothing.
+#[test]
+fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it() {
+    const RECORD_ID: &str = "rec_jjjjjjjjjjjjjjjjjjjjjjjjjj";
+    const OBJECT_ID: &str = "reported-record-object";
+    const PATH: &str = "tasks/reported.md";
+
+    fn commit(engine: &mut EngineStore, token: &str) {
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::cursor::release_settlement_report_in_tx(tx, "ws", token)
+            })
+            .expect("commit the cursor");
+    }
+
+    for restart in [false, true] {
+        let (_scratch, store_path, mut engine, _key, _) =
+            queued_title_change(RECORD_ID, OBJECT_ID, PATH, "reported-peer");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(&format!(
+                    "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch, \
+                       stream_identity,created_at_ms) VALUES ('ws','service-host:ws','epoch','stream',0); \
+                     INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
+                       main_cursor,last_outbound_seq) VALUES ('ws',1,0,1,-1); \
+                     INSERT INTO hosted_documents(workspace_id,object_id,path,state, \
+                       held_reason,scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}', \
+                       'held','hosted-backfill-work-waiting',1);"
+                ))
+                .map_err(SyncError::persist)
+            })
+            .expect("hold the document for its queued work");
+        let state = |engine: &EngineStore| -> (i64, i64, i64) {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                           (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                           (SELECT COUNT(*) FROM ydoc_drain_reports)",
+                        [RECORD_ID],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                })
+                .expect("state")
+        };
+
+        let released = crate::ydoc_apply::drain_released_holds(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &BTreeMap::new(),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("drain the held document");
+        assert!(released.waiting.is_none() && released.refusals.is_empty());
+        assert!(released.changes.is_empty(), "its change is in the report");
+        assert_eq!(
+            state(&engine),
+            (1, 0, 1),
+            "restart={restart}: the row went, its report stays"
+        );
+
+        // The request is abandoned at its settlement drain's wait, or the
+        // store restarts; the next request claims the report.
+        if restart {
+            drop(engine);
+            engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+        }
+        let mut first = None;
+        let claimed = crate::drain_report::claim(&mut engine, "ws", &mut first, &NoFaults)
+            .expect("claim the drain reports");
+        assert_eq!(claimed.record_facts.len(), 1, "{claimed:?}");
+        assert_eq!(
+            claimed
+                .extras
+                .changes
+                .iter()
+                .map(|change| (change.path.as_str(), change.operation))
+                .collect::<Vec<_>>(),
+            [(PATH, "write")],
+            "{claimed:?}"
+        );
+        let first = first.expect("a report token");
+
+        // That request is abandoned before its commit too: the next one
+        // claims the report again under a token of its own, once.
+        let mut second = None;
+        let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
+            .expect("claim again");
+        assert_eq!(again.record_facts, claimed.record_facts);
+        let second = second.expect("a report token");
+        assert_ne!(first, second);
+        let mut owned = Some(second.clone());
+        assert!(
+            crate::drain_report::claim(&mut engine, "ws", &mut owned, &NoFaults)
+                .expect("claim what it owns")
+                .record_facts
+                .is_empty()
+        );
+
+        commit(&mut engine, &first);
+        assert_eq!(
+            state(&engine),
+            (1, 0, 1),
+            "restart={restart}: an abandoned token acknowledges nothing"
+        );
+        commit(&mut engine, &second);
+        assert_eq!(state(&engine), (1, 0, 0), "restart={restart}: acknowledged");
+        assert!(
+            crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+                .expect("claim nothing")
+                .record_facts
+                .is_empty()
+        );
+    }
+}
+
+/// Sol's first and Opus's third findings on f939d61f1: a drain applied a
+/// queued field change and stopped before its cleanup, as one that then
+/// waits does; a device binding then appeared, so the next drain finds the
+/// row a live edit no session admitted. That refusal, its blob and its hold
+/// now wait for the cleanup like any other, so a drain that stops again
+/// keeps the row and the facts parked on it. Whether the request is then
+/// abandoned or the store restarts, the drain that completes reports the
+/// facts and the refusal once.
+#[test]
+fn a_live_refusal_keeps_its_rows_facts_until_its_cleanup() {
+    for restart in [false, true] {
+        a_live_refusal_after_a_stopped_drain(restart);
+    }
+}
+
+fn a_live_refusal_after_a_stopped_drain(restart: bool) {
+    const RECORD_ID: &str = "rec_hhhhhhhhhhhhhhhhhhhhhhhhhh";
+    const OBJECT_ID: &str = "live-refused-record-object";
+    const PATH: &str = "tasks/live-refused.md";
+
+    let (_scratch, store_path, mut engine, key, claim_id) =
+        queued_title_change(RECORD_ID, OBJECT_ID, PATH, "live-peer");
+    let state = |engine: &EngineStore| -> (i64, i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates WHERE record_facts_json IS NOT NULL), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id='live-peer'), \
+                       (SELECT COUNT(*) FROM replication_refused_ydoc_blobs WHERE origin_id='live-peer')",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("state")
+    };
+    let stopped_drain = |engine: &mut EngineStore| {
+        let (stopped, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+            engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults,
+        )
+        .expect("stopped drain");
+        stopped
+    };
+
+    let applied = stopped_drain(&mut engine);
+    assert_eq!(applied.record_facts.len(), 1, "{applied:?}");
+    assert!(applied.refusals.is_empty(), "{applied:?}");
+    assert_eq!(state(&engine), (1, 1, 0, 0), "the row keeps its facts");
+
+    // A device binding of the document appears before the next drain.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_device_application_bindings VALUES \
+                 ('relay','ws','main',?1,?2,?3,'[]',0,'host',1,'instance','connection',1,NULL)",
+                params![OBJECT_ID, claim_id, PATH],
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("bind a device");
+    let refused = stopped_drain(&mut engine);
+    assert_eq!(refused.record_facts, applied.record_facts, "{refused:?}");
+    assert_eq!(
+        refused
+            .refusals
+            .iter()
+            .map(|refusal| (refusal.origin_id.as_str(), refusal.reason.message()))
+            .collect::<Vec<_>>(),
+        [("live-peer", crate::ydoc_apply::LIVE_UNADMITTED_UPDATE)]
+    );
+    assert_eq!(
+        state(&engine),
+        (1, 1, 0, 0),
+        "the row keeps its facts, and nothing refused it yet"
+    );
+
+    if restart {
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
+    assert_eq!(drained.record_facts, applied.record_facts);
+    assert_eq!(drained.refusals, refused.refusals);
+    assert_eq!(state(&engine), (1, 0, 1, 1), "refused once, its blob kept");
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.record_facts.is_empty() && idle.refusals.is_empty());
+}
+
 #[test]
 fn resolution_fold_refuses_while_deferred_updates_are_parked() {
     // Acked-but-parked remote updates were never part of
@@ -2587,7 +3546,10 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE object_id='inactive-refusal' ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", []).unwrap();
             Ok::<_,SyncError>(())
         }).unwrap();
-        let drained = crate::ydoc_apply::drain_deferred_ydoc_for_ended_session(
+        // A drain that waits for its projection decides nothing, its
+        // archived lineage's update included. That update stays queued, and
+        // the drain that applies it to the archive reports its refusal once.
+        let (drained, _cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
             &mut engine,
             &mut Default::default(),
             &key,
@@ -2595,12 +3557,36 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             &NoFaults,
         )
         .unwrap();
-        assert_eq!(
-            drained.refusals.len(),
-            1,
-            "waiting must return committed inactive refusals"
-        );
-        assert_eq!(drained.drained, 0);
+        assert_eq!((drained.refusals.len(), drained.drained), (0, 0));
+        let queued: bool = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE origin_id='late-peer')",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(queued, "the archived lineage's update waits");
+        let tails =
+            dohc_engine_collab::live_update_application::ReleasedTails::default().bound_to(&engine);
+        let inactive = crate::ydoc_apply::drain_inactive_ydoc_updates(
+            &mut engine,
+            crate::ydoc_apply::InactiveScope::Document(&key, &[]),
+            &tails,
+            &mut Vec::new(),
+            crate::ydoc_apply::DrainReporting::Returned,
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(inactive.refusals.len(), 1, "{:?}", inactive.refusals);
+        // Opus's third finding on 6ded1a22a: the drain took the archived
+        // lineage's last queued row and left its document no hold, so a hold
+        // the pass reported for that lineage is cleared in the same pass.
+        let freed = std::collections::BTreeSet::from([old_sha.clone()]);
+        assert_eq!(inactive.cleared.get("inactive-refusal"), Some(&freed));
+        assert_eq!(inactive.cleared.len(), 1);
+        assert!(inactive.holds.is_empty());
         return;
     }
     let drained =
@@ -2615,10 +3601,335 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
 }
 
 #[test]
-fn ydoc_drain_waiting_empty_queue_returns_inactive_refusals() {
+fn ydoc_drain_waiting_empty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 1);
 }
 #[test]
-fn ydoc_drain_waiting_nonempty_queue_returns_inactive_refusals() {
+fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
+}
+
+/// Opus's seventh finding on 3409694c7: a drain report this build cannot
+/// read fails the claim that meets it once, and is gone after it; the
+/// reports beside it stay owed and the next claim reports them.
+#[test]
+fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO ydoc_drain_reports(workspace_id,origin_id,origin_seq,report_json) \
+                   VALUES ('ws','peer',1,'{\"changes\":[{\"versionId\":\"main\",\"path\":\"a.md\", \
+                     \"operation\":\"rename\",\"contentKind\":\"text\"}]}'); \
+                 INSERT INTO ydoc_drain_reports(workspace_id,origin_id,origin_seq,report_json) \
+                   VALUES ('ws','peer',2,'{\"conflictsOpened\":1}');",
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("store the reports");
+    let mut token = None;
+    assert!(matches!(
+        crate::drain_report::claim(&mut engine, "ws", &mut token, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(engine.table_row_count("ydoc_drain_reports").unwrap(), 1);
+    let claimed = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+        .expect("the next claim reports the rest");
+    assert_eq!(claimed.extras.conflicts_opened, 1);
+}
+
+/// The refusals of `origin` in `refusals`, as coordinate and reason.
+fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64, String)> {
+    refusals
+        .iter()
+        .filter(|refusal| refusal.origin_id == origin)
+        .map(|refusal| (refusal.origin_seq, refusal.reason.message().to_owned()))
+        .collect()
+}
+
+/// Sol's first and Opus's second findings on 3409694c7: a queued row whose
+/// content kind the head refuses applies its bytes first, and a later row of
+/// the same lineage projects the head, so the cleanup clears the lineage's
+/// notices, the refusal it just persisted among them. Its drain report keeps
+/// that refusal, so a request abandoned at a later wait, or a restart, still
+/// reports it, once, until a commit acknowledges it.
+#[test]
+fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
+    const RECORD_ID: &str = "rec_kkkkkkkkkkkkkkkkkkkkkkkkkk";
+    const OBJECT_ID: &str = "kind-refused-record-object";
+    const PATH: &str = "tasks/kind-refused.md";
+
+    for restart in [false, true] {
+        let (_scratch, store_path, mut engine, key, claim_id) =
+            queued_title_change(RECORD_ID, OBJECT_ID, PATH, "kind-peer");
+        let base = dohc_engine_collab::load_persisted(&engine, &key)
+            .expect("load head")
+            .expect("head")
+            .doc
+            .encode_full_state();
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote.apply(&base).expect("remote sees the base");
+        let paragraph = engine
+            .put_binary_blob(&remote.richdoc_append_paragraph("Later."))
+            .expect("store the paragraph");
+        let later = envelope(
+            "kind-later",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": paragraph,
+                "lineageClaimId": claim_id, "isBaseState": false,
+                "actorOriginId": "remote-author"
+            }),
+        );
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &later,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("queue the paragraph");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.contentKind','plaintext') \
+                     WHERE origin_id='kind-peer'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute_batch(&format!(
+                    "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch, \
+                       stream_identity,created_at_ms) VALUES ('ws','service-host:ws','epoch','stream',0); \
+                     INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
+                       main_cursor,last_outbound_seq) VALUES ('ws',1,0,1,-1); \
+                     INSERT INTO hosted_documents(workspace_id,object_id,path,state, \
+                       held_reason,scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}', \
+                       'held','hosted-backfill-work-waiting',1);"
+                ))
+                .map_err(SyncError::persist)
+            })
+            .expect("name another content kind, and hold the document");
+        let pending = |engine: &EngineStore| -> i64 {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_pending_refusals \
+                         WHERE origin_id='kind-peer'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("pending refusals")
+        };
+
+        let released = crate::ydoc_apply::drain_released_holds(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &BTreeMap::new(),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("drain the held document");
+        assert!(released.waiting.is_none());
+        let owed = refusals_of(&released.refusals, "kind-peer");
+        assert_eq!(owed.len(), 1, "restart={restart}: {:?}", released.refusals);
+        assert_eq!(
+            pending(&engine),
+            0,
+            "restart={restart}: the projection cleared its notice"
+        );
+
+        // The request is abandoned at a later wait, or the store restarts.
+        if restart {
+            drop(engine);
+            engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+        }
+        let mut first = None;
+        let claimed = crate::drain_report::claim(&mut engine, "ws", &mut first, &NoFaults)
+            .expect("claim the drain reports");
+        assert_eq!(
+            refusals_of(&claimed.extras.refusals, "kind-peer"),
+            owed,
+            "restart={restart}: the report keeps the refusal"
+        );
+        // That request is abandoned too: the next one reports it once more.
+        let mut second = None;
+        let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
+            .expect("claim again");
+        assert_eq!(refusals_of(&again.extras.refusals, "kind-peer"), owed);
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::cursor::release_settlement_report_in_tx(
+                    tx,
+                    "ws",
+                    second.as_deref().expect("a report token"),
+                )
+            })
+            .expect("commit the cursor");
+        assert!(
+            crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+                .expect("claim nothing")
+                .extras
+                .refusals
+                .is_empty(),
+            "restart={restart}: acknowledged"
+        );
+    }
+}
+
+/// Sol's fourth finding on 3409694c7, ruled: a row an earlier drain applied,
+/// owing a refusal for the path it named, keeps that refusal once a device
+/// binds its document, whether that session saw the update or not. The
+/// drain that removes the row reports the original refusal, once; it is not
+/// "never admitted", and the head, which holds those bytes, is neither held
+/// nor made to keep the update's blob for it.
+#[test]
+fn a_live_classification_keeps_the_refusal_its_rows_apply_was_owed() {
+    for echo in [false, true] {
+        for restart in [false, true] {
+            live_classification_over_an_owed_refusal(echo, restart);
+        }
+    }
+}
+
+fn live_classification_over_an_owed_refusal(echo: bool, restart: bool) {
+    const RECORD_ID: &str = "rec_mmmmmmmmmmmmmmmmmmmmmmmmmm";
+    const OBJECT_ID: &str = "owed-live-record-object";
+    const PATH: &str = "tasks/owed-live.md";
+    const ELSEWHERE: &str = "tasks/owed-elsewhere.md";
+
+    let (_scratch, store_path, mut engine, key, claim_id) =
+        queued_title_change(RECORD_ID, OBJECT_ID, PATH, "owed-peer");
+    let (update_sha, update_length): (String, i64) = engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path',?1) \
+                 WHERE origin_id='owed-peer'",
+                [ELSEWHERE],
+            )
+            .map_err(SyncError::persist)?;
+            tx.query_row(
+                "SELECT b.sha256,b.byte_length FROM replication_log r JOIN binary_blobs b \
+                 ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
+                 WHERE r.origin_id='owed-peer'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .map(|outcome| match outcome {
+            TxnOutcome::Committed(update) => update,
+            TxnOutcome::Crashed { .. } => panic!("no fault is injected"),
+        })
+        .expect("name another path");
+    let state = |engine: &EngineStore| -> (i64, i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id='owed-peer'), \
+                       (SELECT COUNT(*) FROM replication_refused_ydoc_blobs WHERE origin_id='owed-peer')",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("state")
+    };
+
+    // The drain applies the update, owing its path refusal, and stops before
+    // its cleanup, as one that then waits does.
+    let (applied, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    let owed = refusals_of(&applied.refusals, "owed-peer");
+    assert_eq!(owed.len(), 1, "echo={echo}: {applied:?}");
+    assert_eq!(
+        state(&engine),
+        (1, 1, 0, 0),
+        "echo={echo}: nothing refused yet"
+    );
+
+    // A device binds the document; with `echo`, its session saw the update.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_device_application_bindings VALUES \
+                 ('relay','ws','main',?1,?2,?3,'[]',0,'host',1,'instance','connection',1,NULL)",
+                params![OBJECT_ID, claim_id, ELSEWHERE],
+            )
+            .map_err(SyncError::persist)?;
+            if echo {
+                tx.execute(
+                    "INSERT INTO live_device_update_applications (relay_database_namespace, \
+                       workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id, \
+                       current_path,selector_paths_json,restore_fence_generation,update_digest, \
+                       update_byte_length,journal_cursor,accepting_host_epoch,principal_kind, \
+                       principal_id,received_at_ms,first_seen_count,local_ydoc_sequence, \
+                       applied_host_id,applied_host_epoch,applied_instance_id, \
+                       applied_connection_id) VALUES \
+                     ('relay','ws','delivery','main',?1,?2,?3,'[]',0,?4,?5,7,1,'owner','owner', \
+                      0,0,1,'host',1,'instance','connection')",
+                    params![OBJECT_ID, claim_id, ELSEWHERE, update_sha, update_length],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_device_application_first_seen VALUES \
+                     ('relay','ws','delivery',0,1,0,1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("bind a device");
+
+    if restart {
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
+    assert_eq!(
+        refusals_of(&drained.refusals, "owed-peer"),
+        owed,
+        "echo={echo} restart={restart}: the original refusal"
+    );
+    assert_eq!(drained.record_facts, applied.record_facts);
+    assert_eq!(
+        state(&engine),
+        (1, 0, 1, 0),
+        "echo={echo} restart={restart}: refused once, no blob kept for a live refusal"
+    );
+    let reason: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='owed-peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("the persisted refusal");
+    assert_eq!(reason, owed[0].1);
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.refusals.is_empty() && idle.record_facts.is_empty());
 }

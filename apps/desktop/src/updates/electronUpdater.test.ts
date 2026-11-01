@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   debInstallFailure,
   publicUpdateState,
@@ -60,6 +63,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterAc
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
   quitForStagedRestart?: () => void;
+  stateDir?: string;
   platform?: NodeJS.Platform;
 } = {}): Promise<AutoUpdateController | null> {
   return startAutoUpdates({
@@ -69,6 +73,7 @@ async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterAc
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
     quitForStagedRestart: options.quitForStagedRestart,
+    stateDir: options.stateDir,
     importUpdater: async () => ({ autoUpdater: updater }),
     platform: options.platform ?? "win32",
   });
@@ -661,6 +666,76 @@ describe("electron updater actions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("electron updater after a quit", () => {
+  function stateDir(): { stateDir: string; path: string } {
+    const folder = mkdtempSync(join(tmpdir(), "dohc-chosen-update-"));
+    onTestFinished(() => rmSync(folder, { recursive: true, force: true }));
+    return { stateDir: folder, path: join(folder, "chosen-update.json") };
+  }
+  const offer = (updater: ReturnType<typeof fakeUpdater>, version: string) => {
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version });
+  };
+
+  it("says a chosen update did not install when dohc opens on the same version, then downloads it again", async () => {
+    const { stateDir: folder, path } = stateDir();
+    const before = fakeUpdater();
+    const first = (await startWith(before, { stateDir: folder, platform: "darwin" }))!;
+    offer(before, "1.2.4");
+    expect(existsSync(path)).toBe(false);
+    first.downloadUpdate();
+    // Quitting now installs it, so the choice is kept from the download on.
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
+
+    // ShipIt gave up after the quit, so dohc opens on 1.2.3 again.
+    const after = fakeUpdater();
+    const second = (await startWith(after, { stateDir: folder, platform: "darwin" }))!;
+    expect(second.publicState()).not.toHaveProperty("failure");
+    offer(after, "1.2.5");
+    const state = second.publicState();
+    expect(state).toMatchObject({
+      status: "available",
+      version: "1.2.5",
+      message: "dohc is still on version 1.2.3.",
+      failure: { step: "download", notInstalled: "1.2.4" },
+    });
+    expect(UpdateStateEvent.parse(state)).toEqual(state);
+    expect(existsSync(path)).toBe(false);
+
+    expect(second.downloadUpdate().state).not.toHaveProperty("failure");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.5", from: "1.2.3" });
+  });
+
+  it("forgets a chosen update once dohc opens on another version, or the feed offers none", async () => {
+    for (const [currentVersion, ending] of [["1.2.4", "launch"], ["1.2.3", "not-available"]] as const) {
+      const { stateDir: folder, path } = stateDir();
+      writeFileSync(path, JSON.stringify({ version: "1.2.4", from: "1.2.3" }));
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater, { stateDir: folder, currentVersion }))!;
+      if (ending === "not-available") {
+        updater.emit("checking-for-update");
+        updater.emit("update-not-available");
+      }
+      expect(existsSync(path)).toBe(false);
+      offer(updater, "1.2.5");
+      expect(controller.publicState()).toMatchObject({ status: "available" });
+      expect(controller.publicState()).not.toHaveProperty("failure");
+    }
+  });
+
+  it("on Linux, where quitting installs nothing, keeps the choice only from Restart to update", async () => {
+    const { stateDir: folder, path } = stateDir();
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater, { stateDir: folder, platform: "linux" }))!;
+    offer(updater, "1.2.4");
+    controller.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(existsSync(path)).toBe(false);
+    await controller.installUpdate();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
   });
 });
 

@@ -11,6 +11,7 @@ import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
+import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
 
 // A file dohc kept while it saved, as its Notices row reads, and the step
 // that moves it to a visible copy.
@@ -61,6 +62,7 @@ export type ShellErrorKind =
   | "file-recovery-unavailable"
   | "kept-files"
   | "retained-copies"
+  | "saved-tabs"
   | "record-history"
   | "record-history-run"
   | "reports"
@@ -97,12 +99,16 @@ export interface ShellError {
   details?: ReadonlyArray<ErrorDetailField>;
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
+  retryBusy?: boolean;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
   action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
+  // The row has no Dismiss: it stays until its action runs or the workspace
+  // closes.
+  noDismiss?: boolean;
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
@@ -587,6 +593,24 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // The saved tabs an open left out: one warning row, updated where it
+  // stands. `toast` files it with a toast; otherwise it updates the row, or
+  // files it quietly. Only Restore tabs ends the row that offers it. Null
+  // takes back the row and its toast.
+  const showSavedTabsNotice = useCallback((notice: SavedTabsNotice | null) => {
+    if (notice === null) {
+      clearKind("saved-tabs");
+      return;
+    }
+    push({
+      tone: "warning",
+      title: SAVED_TABS_TITLE,
+      message: notice.message,
+      retry: null,
+      ...(notice.restore ? { action: { label: "Restore tabs", run: notice.restore, ends: true }, noDismiss: true } : {}),
+      kind: "saved-tabs",
+    }, notice.toast ? false : "quiet");
+  }, [clearKind, push]);
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -883,10 +907,19 @@ export function useShellError(workspaceId: string) {
     });
   }, []);
 
+  const setShellRetryBusy = useCallback((identity: string, busy: boolean): boolean => {
+    if (currentWorkspace.current !== workspaceId) return false;
+    const target = shellErrorsRef.current.find(error => error.identity === identity);
+    if (!target || (busy && target.retryBusy)) return false;
+    if (!!target.retryBusy === busy) return true;
+    shellErrorsRef.current = shellErrorsRef.current.map(error => error === target ? {...error, retryBusy: busy} : error);
+    setShellErrors(current => current.map(error => error.id === target.id ? {...error, retryBusy: busy} : error));
+    return true;
+  }, [workspaceId]);
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     // A retry that could not run leaves every row where it stands.
-    if (target?.retry?.() === false) return;
+    if (target?.retryBusy || target?.retry?.() === false) return;
     // Clearing is what shows the control took: the read is on its way, and
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
@@ -917,6 +950,7 @@ export function useShellError(workspaceId: string) {
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
+    showSavedTabsNotice,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -936,6 +970,7 @@ export function useShellError(workspaceId: string) {
     hideShellError,
     dismissShellError,
     retryShellError,
+    setShellRetryBusy,
     runShellErrorAction,
     privacySettingsAction,
     keepCollectionsHere,

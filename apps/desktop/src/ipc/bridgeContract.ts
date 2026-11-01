@@ -93,6 +93,7 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  EXPLORER_MODES,
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
@@ -1430,7 +1431,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required"]).optional(),
-  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
+  ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
@@ -3474,6 +3475,39 @@ export const SitePreviewReplacedEvent = z.object({
 });
 export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
+export const AppViewId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/);
+const AppViewTarget = { workspaceId: WORKSPACE_ID, viewId: AppViewId };
+export const AppViewRequest = z.discriminatedUnion("action", [
+  z.object({ ...AppViewTarget, action: z.literal("open"), appRoot: z.string().min(1).max(4096), colorScheme: z.enum(["light", "dark"]) }).strict(),
+  z.object({ ...AppViewTarget, action: z.literal("close") }).strict(),
+  z.object({ action: z.literal("colorScheme"), workspaceId: WORKSPACE_ID, colorScheme: z.enum(["light", "dark"]) }).strict(),
+]);
+export type AppViewRequest = z.infer<typeof AppViewRequest>;
+export const AppViewResult = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("opened"), viewId: AppViewId, publicationId: z.string(), url: z.string(), partition: z.string() }).strict(),
+  z.object({ kind: z.literal("unapproved"), viewId: AppViewId }).strict(),
+  z.object({ kind: z.literal("closed"), viewId: AppViewId }).strict(),
+  z.object({ kind: z.literal("colorScheme") }).strict(),
+]);
+export type AppViewResult = z.infer<typeof AppViewResult>;
+export const AppViewEvent = z.discriminatedUnion("kind", [
+  z.object({ viewId: AppViewId, kind: z.literal("approval-ended") }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("session-ended") }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("download-blocked"), filename: z.string() }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("external-link"), url: z.string() }).strict(),
+  z.object({ viewId: AppViewId, kind: z.literal("shortcut"), key: z.string(), code: z.string(),
+    ctrlKey: z.boolean(), shiftKey: z.boolean(), altKey: z.boolean(), metaKey: z.boolean() }).strict(),
+]);
+export type AppViewEvent = z.infer<typeof AppViewEvent>;
+// A window opens, themes and closes apps only in the workspace open in it.
+export const appViewOperations = {
+  appView: {
+    capabilityId: "app.view", channel: "desktop:app-view", payload: AppViewRequest, result: AppViewResult,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "This app does not belong to this window's workspace. Open it from its workspace.",
+  },
+} as const satisfies OperationTable;
+
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
@@ -3519,6 +3553,7 @@ export const WorkspaceActivityEvent = z
     paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
     pathSetChanged: z.boolean().optional(),
     summaryChanged: z.literal(true).optional(),
+    liveDocumentStopped: z.string().min(1).optional(),
   })
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
@@ -3799,7 +3834,7 @@ export type GetRelayReceivedSharePayload = z.infer<
   typeof GetRelayReceivedSharePayload
 >;
 
-export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
+export const GetRelayReceivedShareResult = z.union([
   z
     .object({
       found: z.literal(false),
@@ -3817,6 +3852,14 @@ export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
     .object({
       found: z.literal(true),
       share: RelayShareReceivedRow,
+    })
+    .strict(),
+  // A Group or a direct message. It opens in Chats, where the person joins
+  // it into a workspace of their own, rather than as a share of files.
+  z
+    .object({
+      found: z.literal(true),
+      chats: z.literal(true),
     })
     .strict(),
 ]);
@@ -5768,21 +5811,26 @@ export type ChatDispatchStateForThreadPayload = z.infer<
   typeof ChatDispatchStateForThreadPayload
 >;
 
-export const ChatDispatchStoppedRun = z.object({
+// A run that ended without the agent's reply, for the line under its
+// message. Its notice says the same words.
+export const ChatDispatchFailedRun = z.object({
   runId: OPAQUE_ID,
   triggerMessageId: OPAQUE_ID,
-  ending: z.enum(["restarted", "quit"]),
+  // "Nova didn't reply. Its run ended with an error."
+  words: z.string().min(1).max(1_000),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
 }).strict();
-export type ChatDispatchStoppedRun = z.infer<typeof ChatDispatchStoppedRun>;
+export type ChatDispatchFailedRun = z.infer<typeof ChatDispatchFailedRun>;
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),
+  // The message the live run answers, so its working line sits under it.
+  liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
-  // The conversation's latest run, when dohc's restart or quit stopped it.
-  stoppedRun: ChatDispatchStoppedRun.optional(),
+  // The conversation's run that didn't reply, while it is the one to show.
+  failedRun: ChatDispatchFailedRun.optional(),
 }).strict();
 export type ChatDispatchStateForThreadResult = z.infer<
   typeof ChatDispatchStateForThreadResult
@@ -5907,10 +5955,12 @@ export const UpdateStateEvent = z.object({
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z.string().min(1).max("sudo apt install ''".length + 4 * 4096).optional(),
   // The step that failed, while its state stands; `message` says why. A new
-  // id is a new failure to report.
+  // id is a new failure to report. `notInstalled` is the version of an update
+  // a person chose that dohc opened without.
   failure: z.object({
     step: z.enum(["check", "download", "install"]),
     id: z.number().int().positive(),
+    notInstalled: z.string().min(1).max(200).optional(),
   }).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
@@ -6067,6 +6117,8 @@ export const WorkspaceUiState = z.object({
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
   // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+  // Which view the Explorer shows: Home, or the folder tree.
+  explorerMode: z.enum(EXPLORER_MODES).optional().catch(undefined),
   // Which view each collection tab shows, keyed by the collection folder path.
   collectionViews: z
     .record(PATH_STRING, z.string().min(1).max(4096))
@@ -7287,8 +7339,10 @@ export interface DohcDesktopBridge
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
-    OperationBridge<typeof engineYDocSaveOperations> {
+    OperationBridge<typeof engineYDocSaveOperations>,
+    OperationBridge<typeof appViewOperations> {
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  onAppViewEvent(listener: (event: AppViewEvent) => void): () => void;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: z.input<typeof OwnerRestoreRequest> & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights

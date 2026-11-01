@@ -97,10 +97,6 @@
       "label": "View: Graph"
     },
     {
-      "id": "show-sites",
-      "label": "View: Apps"
-    },
-    {
       "id": "show-history",
       "label": "View: History"
     },

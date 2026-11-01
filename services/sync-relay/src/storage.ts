@@ -5,7 +5,10 @@ import * as replicaHistoryReads from "./replicaHistoryReads";
 import {createReplicaLinkReadService} from "./replicaLinkReadService";
 import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
-import {prepareHostedSettlements} from "./storage/hostedSettlement";
+import {prepareHostedSettlements, prepareSettlementAudits} from "./storage/hostedSettlement";
+import * as serviceActivationPublication from "./storage/serviceActivationPublication";
+import * as serviceActivationRetirementStorage from "./storage/serviceActivationRetirement";
+import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
@@ -399,6 +402,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
   }
+  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string) {
+    return serviceHostEnrollmentStorage.readServiceHostEnrollmentByObjectId(this, workspaceId, objectId);
+  }
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
@@ -423,6 +429,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
+  prepareSettlementAudits(input: { workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean }, signal?: AbortSignal) {
+    return prepareSettlementAudits(this, input, undefined, signal);
+  }
+  admitRetirementPublication(retirement: ServiceActivationRetirement, op: SyncRelayLogInput, batch: serviceActivationPublication.RetirementBatch) {
+    return serviceActivationPublication.admitRetirementPublication(this, retirement, op, batch);
+  }
+  retirementPublicationConfirmed(op: SyncRelayLogInput) {
+    return serviceActivationPublication.retirementPublicationConfirmed(op);
   }
   recordServiceKeptEdits(input: Parameters<typeof serviceKeptEditsStorage.recordServiceKeptEdits>[1]) {
     return serviceKeptEditsStorage.recordServiceKeptEdits(this, input);
@@ -480,6 +495,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
     return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
   }
+  serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
+    return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
+  }
+  serviceRestoreInProgress(document: {workspaceId: string; objectId: string}) {
+    return serviceHostEnrollmentStorage.restoreInProgress(this, document.workspaceId, document.objectId);
+  }
+  serviceRetirementHadRestore(retirement: ServiceActivationRetirement) {
+    return serviceActivationRetirementStorage.retirementHadRestore(this, retirement);
+  }
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: serviceActivationRetirementStorage.RetirableServiceActivation) {
+    return serviceActivationRetirementStorage.readServiceActivationRetirementDecision(this, document, activation);
+  }
+  retirableServiceActivation(document: {workspaceId: string; objectId: string}) {
+    return serviceActivationRetirementStorage.retirableServiceActivation(this, document);
+  }
+  retirementJournalEvidence(retirement: ServiceActivationRetirement, deliveryIds: readonly string[]) {
+    return serviceActivationRetirementStorage.retirementJournalEvidence(this, retirement, deliveryIds);
+  }
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
     const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
@@ -495,11 +528,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readOwnerRestoreStatus(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1]) {
     return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
   }
+  readOwnerUnfinishedRestores(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerUnfinishedRestores>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerUnfinishedRestores(this, input);
+  }
   beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
     return liveRestoreOperationStorage.beginStopRestore(this, input, now);
   }
   advanceStopRestoreFence(input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1], now: number) {
     return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
+  }
+  declineStopRestore(input: Parameters<typeof liveRestoreOperationStorage.declineStopRestore>[1], now: number) {
+    return liveRestoreOperationStorage.declineStopRestore(this, input, now);
   }
   readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
     return liveRestoreOperationStorage.readStopRestore(this, input);
@@ -1010,6 +1049,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
     admit?: (ops: SyncRelayLogInput[]) => void;
+    confirm?: (ops: SyncRelayLogInput[]) => void;
+    classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);
   }

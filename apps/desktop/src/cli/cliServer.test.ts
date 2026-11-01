@@ -3872,6 +3872,68 @@ describe("CLI socket server", () => {
       .rejects.toThrow("--before and --limit page a group's stream");
   });
 
+  it("answers a thread reply in that thread, unless the agent names another message", async () => {
+    if (!store) throw new Error("Store is not available");
+    const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const sam = { kind: "human" as const, displayName: "Sam" };
+    const reply = async (input: { thread: string; runId?: string; to?: string }) => await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(input.thread), attachments: [], needsDecision: false, body: "Done.",
+      ...(input.runId ? { runId: input.runId } : {}), ...(input.to ? { to: input.to } : {}),
+    });
+    const claimFor = async (messageId: string) => {
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      if (claim?.run.triggerMessageId !== messageId) throw new Error(`Expected a run for ${messageId}`);
+      return claim;
+    };
+    const chat = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "Draft the agenda",
+    });
+    const opening = await claimFor(chat.message.id);
+    expect((await reply({ thread: chat.thread.id, runId: opening.run.runId })).parentMessageId).toBeUndefined();
+    await dispatchStore.completeRun({ runId: opening.run.runId, exitCode: 0 });
+
+    const asked = await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: chat.thread.id, parentMessageId: chat.message.id, author: sam, body: "Add a break?",
+    });
+    const claim = await claimFor(asked.id);
+    expect((await reply({ thread: chat.thread.id, runId: claim.run.runId })).parentMessageId).toBe(cliMessageId(chat.message.id));
+    dispatchedRunId = claim.run.runId;
+    expect((await reply({ thread: chat.thread.id })).parentMessageId).toBe(cliMessageId(chat.message.id));
+    expect((await reply({ thread: chat.thread.id, to: asked.id })).parentMessageId).toBe(cliMessageId(asked.id));
+    dispatchedRunId = null;
+    await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
+
+    // A post's comments stay top-level.
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const posted = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts", author: sam, body: "Plan the offsite",
+    });
+    const comment = await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: posted.thread.id, parentMessageId: posted.message.id, author: sam, body: "Which dates?",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: posted.thread.id, triggerMessageId: comment.id, agentId: "default" });
+    const postClaim = await claimFor(comment.id);
+    expect((await reply({ thread: posted.thread.id, runId: postClaim.run.runId })).parentMessageId).toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  it("posts an agent reply to the conversation when its run can't be read, and says so", async () => {
+    if (!store) throw new Error("Store is not available");
+    const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const chat = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: { kind: "human", displayName: "Sam" }, body: "Draft the agenda",
+    });
+    const getRunRecord = vi.spyOn(dispatchStore, "getRunRecord").mockRejectedValueOnce(new Error("store closed"));
+    const replied = await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(chat.thread.id), attachments: [], needsDecision: false, body: "Done.", runId: "run_1",
+    });
+    getRunRecord.mockRestore();
+    expect(replied.parentMessageId).toBeUndefined();
+    expect(errors.map((error) => (error as Error).message)).toEqual([
+      "Could not find the thread for an agent reply, so it posts to the conversation. runId=run_1",
+    ]);
+  });
+
   it("names each agent's chat stream by its own group in the CLI and MCP", async () => {
     if (!store) throw new Error("Store is not available");
     await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });

@@ -142,3 +142,22 @@ it("passes one signal to every run and stops between runs once it aborts", async
   await expect(liveRestoreValidator(run).point(capture, abort.signal)).rejects.toThrow("cancelled");
   expect(signals).toEqual([abort.signal, abort.signal]);
 });
+
+it.each([false, true])("waits for admission capacity with its cancellation signal (cancel=%s)", async cancelled => {
+  const f = engineProposal("reader-to-reader"), abort = new AbortController();
+  const waitForCapacity = vi.fn(async (signal?: AbortSignal) => {
+    expect(signal).toBe(abort.signal);
+    if (cancelled) abort.abort(new Error("cancel admission wait"));
+    signal?.throwIfAborted();
+  });
+  const run = vi.fn<LiveRestoreRun>(async work => runLiveRestoreWork(work, policy));
+  run.mockResolvedValueOnce({kind: "retry", waitForCapacity});
+  const pending = liveRestoreValidator(run).proposal(f.capture, f.bytes, {...f.budget, admission: true}, abort.signal);
+  if (cancelled) {
+    await expect(pending).rejects.toThrow("cancel admission wait");
+    expect(run).toHaveBeenCalledTimes(1);
+  } else {
+    expect((await pending).content).toEqual({...f.expected.validated.content});
+  }
+  expect(waitForCapacity).toHaveBeenCalledTimes(1);
+});

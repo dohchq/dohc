@@ -1,6 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {sha256Hex} from "@dohc/workspace-core/hash";
-import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, preparedStop, retainServiceActivation, scope} from "./liveTickets.test-helper";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -407,6 +407,55 @@ it("settles a moved or replaced document's work without taking back its old loca
   openSyncRelayStorage(f.path, f.config).close();
   expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_log WHERE relay_admission='departed'").get()!.count).toBe(3);
   expect(() => f.raw.prepare("UPDATE sync_relay_log SET relay_admission='elsewhere' WHERE origin_id=?").run(HOST_ORIGIN)).toThrow(/CHECK/);
+});
+
+// Proves: Stop's retirement obligation takes its document out of the host's
+// reads and ordinary writes, and an early Resume does not bring it back. The
+// scope names the obligation, and a sibling stays readable and writable. The
+// retiring document's own write needs its bytes uploaded, and then a proof.
+it("keeps a retiring document out of hosted reads and writes while its sibling stays readable", async () => {
+  const f = await fixture(); f.enroll("docs/b.md");
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const stop = preparedStop(f.storage, {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 20, guard() {}});
+  expect(stop?.acceptedCursor).toBe(0);
+  f.enroll("docs/a.md");
+  expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({enabled: true, retired: false});
+  const current = f.storage.readServiceHostFeedScope(ws)!;
+  expect([[...current.hosted.keys()], [...current.shared.keys()]]).toEqual([["object-b"], ["object-b"]]);
+  expect([...current.settling]).toEqual([[binding.objectId, {relayDatabaseNamespace: namespace, activationId, workspaceId: ws, mainVersionId: "main",
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: "docs/a.md", restoreFenceGeneration: 7, acceptedThrough: 0, requestedAtMs: 20}]]);
+  expect(f.objects(await f.read())).toEqual(["workspace", "object-b"]);
+  const writes = (): Array<[string, Record<string, unknown>]> => [["moment.append", write(binding.objectId, "docs/a.md", A, {momentId: "retiring"})],
+    ["moment.append", write("object-b", "docs/b.md", B, {momentId: "sibling"})]];
+  expect(await (await f.push(writes())).json()).toMatchObject({code: "blob_missing"});
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+  await f.upload(A);
+  expect(await (await f.push(writes())).json())
+    .toMatchObject({inserted: 2, refusals: [{originSeq: 0, reason: "unproved-retirement-output"}]});
+  // With every other document stopped, the scope still names the obligation.
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});
+  const stopped = f.storage.readServiceHostFeedScope(ws)!;
+  expect([stopped.hosted.size, stopped.shared.size, [...stopped.settling.keys()]]).toEqual([0, 0, [binding.objectId]]);
+});
+
+// Proves: Pause takes a document with an activation out of the host's hosted
+// documents and into settling, and Resume leaves it settling while its
+// retirement obligation is open.
+it("moves a paused document with an activation from hosted to settling and keeps it there on Resume", async () => {
+  const f = await fixture();
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const documents = () => {
+    const current = f.storage.readServiceHostFeedScope(ws)!;
+    return {hosted: [...current.hosted.keys()], settling: [...current.settling.keys()]};
+  };
+  expect(documents()).toEqual({hosted: [binding.objectId], settling: []});
+  for (const enabled of [false, true]) {
+    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled, nowMs: 20, guard() {}});
+    expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({ownerStop: enabled ? null : "pause"});
+    expect(documents()).toEqual({hosted: [], settling: [binding.objectId]});
+  }
+  expect(f.storage.readServiceHostFeedScope(ws)!.settling.get(binding.objectId)).toMatchObject({activationId, requestedAtMs: 20});
 });
 
 it("answers a write naming the owner's edits to a revoked document exactly like an absent digest", async () => {
@@ -936,7 +985,7 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   const document = (settlement.payload as {record: {binding: {workspaceId: string; objectId: string; currentPath: string}}}).record.binding;
   const held = new Map([[document.objectId, document.currentPath]]);
   const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held,
-    departed: new Set<string>(), shared: held, token: "token"};
+    departed: new Set<string>(), shared: held, settling: new Map(), token: "token"};
   for (const op of nativeAuthoredSettlement) {
     expect(hostedWriteAllowed(hosted, op.opKind, op.payload), op.opKind).toBe(true);
     const row = {opKind: op.opKind, payloadJson: JSON.stringify(op.payload), recordedAtMs: op.recordedAtMs};

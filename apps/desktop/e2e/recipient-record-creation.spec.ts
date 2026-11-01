@@ -12,7 +12,7 @@ import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials,
-  seedWorkspaceManifest, seedWorkspaceRegistry, writeWorkspaceFiles } from "./helpers/workspace";
+  seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -28,6 +28,7 @@ async function log(relay: SyncRelayHandle): Promise<Op[]> {
   return (JSON.parse(result.body) as { ops: Op[] }).ops;
 }
 async function openCollection(page: Page) {
+  await showExplorerFiles(page);
   for (const path of ["trip", COLLECTION]) {
     const row = page.locator(`[data-testid="tree-row"][data-path="${path}"]`);
     await expect(row).toBeVisible({ timeout: 120_000 });
@@ -64,6 +65,18 @@ async function ownerRecordHistory(page: Page, path: string) {
       .map(moment => api.readEngineMoment({ workspaceId, momentId: moment.id })));
     return details.flatMap(result => result.moment === null ? [] : [result.moment]);
   }, { workspaceId: OWNER_ID, moments });
+}
+// Stop and restore removes a recipient's record only when every version that
+// changed it names the relay-confirmed recipient.
+async function expectOnlyRecipientChanged(page: Page, path: string) {
+  await expect(async () => {
+    const changes = (await ownerRecordHistory(page, path)).filter(moment => moment.beforeText !== moment.afterText);
+    expect(changes.some(moment => moment.afterText?.includes("Status: Ready"))).toBe(true);
+    expect(changes.filter(moment => !moment.authors?.length || !moment.authors.every(author => author.kind === "named"
+      ? author.userId === "e2e-recipient"
+      : author.kind === "human" && author.humanId === "e2e-recipient" && "relayConfirmed" in author && author.relayConfirmed === true)),
+    "versions that don't name the recipient; one with no authors is #2942").toEqual([]);
+  }).toPass({ timeout: 120_000 });
 }
 
 async function withSharedCollection(
@@ -274,6 +287,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     }
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(2);
+    for (const record of created) await expectOnlyRecipientChanged(fixture.owner.page, record.path);
     await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
     const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
     await expect(status).toBeEnabled({ timeout: 120_000 });
@@ -294,6 +308,9 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
       await expect.poll(async () => JSON.stringify(await records(fixture.owner.page)), {timeout: 120_000}).toContain("Owner text KEEP");
       await test.info().attach("owner state after restart before restore", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created[0]!.path), null, 2)});
     }
+    await expectOnlyRecipientChanged(fixture.owner.page, created[1]!.path);
+    await test.info().attach("owner History before restore", { contentType: "application/json",
+      body: JSON.stringify(await Promise.all(created.map(record => readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))), null, 2) });
     // Owner settlement is held by the existing debounce seam. History still
     // attributes the file to the recipient when this destructive action runs.
     const result = await fixture.owner.page.evaluate(async workspaceId =>

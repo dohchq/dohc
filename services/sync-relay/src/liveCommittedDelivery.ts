@@ -12,7 +12,7 @@ import {
 } from "./storage/liveJournalHistory";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import { snapshotHostCoordinate } from "./liveTicketInputs";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations, sameLiveHostDocument} from "./liveHostRegistration";
@@ -215,6 +215,15 @@ export class LiveCommittedDelivery {
     if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
     this.#active.add(key);
     try {return await restore.confirm({store: this.#store, lookup, connection: this.#connection, deliveryKind: "bootstrap", signal}, proposalDigest);}
+    finally {this.#active.delete(key);}
+  }
+
+  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await cancelStopRestore({store: this.#store, lookup, connection: this.#connection, signal});}
     finally {this.#active.delete(key);}
   }
 

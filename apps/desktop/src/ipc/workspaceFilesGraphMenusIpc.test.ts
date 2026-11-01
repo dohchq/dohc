@@ -11,8 +11,7 @@ import { registerOperations } from "./operationTable";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
 import { CHANNELS } from "./channels";
 import * as visibilityReads from "../workspaces/workspaceListingVisibility";
-import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, type WorkspaceListingVisibility } from "./bridgeContract";
-import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
+import type { WorkspaceListingVisibility } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { WorkspaceFileListingCache } from "../workspaces/workspaceFileListingCache";
@@ -248,73 +247,6 @@ describe("registered workspace file handlers", () => {
       workspaceId: "workspace", relativePath: "assets/pixel.png", bytes,
     })).resolves.toBeUndefined();
     expect(await readFile(join(h.workspace.rootPath, "assets/pixel.png"))).toEqual(Buffer.from(bytes));
-  });
-
-  it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
-    const h = await harness();
-    // Rollback deletes what it made, through the workspace trash.
-    await openedLocalState(h.workspace);
-    const root = h.workspace.rootPath;
-    const foreignPath = collision === "root" ? "app/notes.txt"
-      : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
-    const deleted: string[] = [];
-    let injected = false;
-    const inject = async () => {
-      await mkdir(join(root, foreignPath, ".."), { recursive: true });
-      await writeFile(join(root, foreignPath), "agent work");
-      injected = true;
-    };
-    const result = createFirstAppFiles({
-      workspaceId: "workspace", files: [], folders: [],
-      mutations: {
-        createWorkspaceFolder: async (payload) => {
-          if (!injected && (collision === "root" ||
-            collision === "subfolder" && payload.relativePath === "app/scripts")) await inject();
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload));
-        },
-        createWorkspaceFile: async (payload) => {
-          if (!injected && collision === "file") await inject();
-          if (payload.relativePath === "app/package.json") throw new Error("later write failed");
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
-        },
-        deleteWorkspacePath: async (payload) => {
-          deleted.push(payload.relativePath);
-          return DeleteWorkspacePathResult.parse(await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload));
-        },
-      },
-    });
-    await expect(result).rejects.toMatchObject({ code: "EEXIST" });
-    expect(await readFile(join(root, foreignPath), "utf8")).toBe("agent work");
-    expect(deleted).not.toContain(foreignPath);
-    if (collision === "root") expect(deleted).toEqual([]);
-    if (collision === "subfolder") expect(deleted).not.toContain("app/scripts");
-    expect(await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel)).toMatchObject({
-      files: [{ path: foreignPath, kind: "file" }],
-    });
-  });
-
-  it("keeps foreign descendants added to a created folder before rollback", async () => {
-    const h = await harness();
-    // Rollback deletes what it made, through the workspace trash.
-    await openedLocalState(h.workspace);
-    await expect(createFirstAppFiles({
-      workspaceId: "workspace", files: [], folders: [],
-      mutations: {
-        createWorkspaceFolder: async (payload) => CreateWorkspaceFileResult.parse(
-          await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload)),
-        createWorkspaceFile: async (payload) => {
-          if (payload.relativePath === "app/package.json") {
-            await writeFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "agent work");
-            throw new Error("later write failed");
-          }
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
-        },
-        deleteWorkspacePath: async (payload) => DeleteWorkspacePathResult.parse(
-          await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload)),
-      },
-    })).rejects.toThrow("later write failed");
-    expect(await readFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "utf8")).toBe("agent work");
-    expect(await readdir(join(h.workspace.rootPath, "app"))).toEqual(["scripts"]);
   });
 
   it("registers all file, heading, and menu channels with their trust and parser order", async () => {

@@ -853,6 +853,23 @@ fn startup_deadline() {
     finish(&mut reader);
 }
 #[test]
+fn a_slow_start_times_out_and_leaves_the_reader_open() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::with_deadlines(
+        Some(c),
+        Deadlines {
+            startup: Duration::ZERO,
+            ..Deadlines::default()
+        },
+    );
+    // Each request starts the reader again rather than refusing at once.
+    for _ in 0..2 {
+        fail(run(reader.request(request("ok"))), Failure::TimedOut);
+    }
+    assert!(!reader.shared.state.lock().unwrap().closed);
+    finish(&mut reader);
+}
+#[test]
 fn request_deadline() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::with_deadlines(

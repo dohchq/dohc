@@ -182,6 +182,23 @@ export async function closeWorkspaceActivityAndRelay(options: {
   }
 }
 
+// The activity's last file read and saves go through the workspace's engine
+// session, which the rest close, so the activity closes first. Every step
+// runs, then the first failure is thrown.
+export async function closeActivityFirst(
+  closeActivity: () => Promise<unknown>,
+  closeRest: () => readonly Promise<unknown>[],
+): Promise<void> {
+  const results = [
+    ...(await Promise.allSettled([closeActivity()])),
+    ...(await Promise.allSettled(closeRest())),
+  ];
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
+}
+
 export async function settleYDocsAfterFileObservation(
   drains: readonly Promise<unknown>[],
   settleYDocs: () => Promise<void>,

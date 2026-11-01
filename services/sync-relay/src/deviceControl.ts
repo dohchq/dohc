@@ -170,6 +170,10 @@ export function createDeviceControl(options: {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.completeRestore(lookup, proposalDigest, signal);
     },
+    async declineRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
+      if (!currentDelivery) throw new Error("Device delivery is unavailable.");
+      return currentDelivery.declineRestore(lookup, signal);
+    },
     async stopRestore(lookup: StopRestoreLookup, signal?: AbortSignal) {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.stopRestore(lookup, signal);

@@ -8,6 +8,7 @@ import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
@@ -80,7 +81,8 @@ test("a node:test step that failed only in its tests runs once more and records 
   const root = mkdtempSync(join(tmpdir(), "dohc-js-rerun-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  copyFlakyFixture(root);
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   mkdirSync(join(root, "packages/tail"), { recursive: true });
   writeFileSync(join(root, "packages/tail/package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
   // The fake repository step fails in a test the first time and passes the second, or fails both times; a check failure always fails.
@@ -128,7 +130,8 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
   const root = mkdtempSync(join(tmpdir(), "dohc-js-stop-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  copyFlakyFixture(root);
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   for (const name of ["a-fail", "b-sibling", "c-queued"]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
     writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
@@ -213,7 +216,8 @@ function isolatedRetry(t) {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-alone-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs", "test-record-reporter.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  copyFlakyFixture(root);
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs", "test-record-reporter.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   // The repository script's last command tests a and b, and the tree set's tests b; source runs in an earlier command.
   const manifest = JSON.stringify({ scripts: { "test:repo": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs",
     "test:repo:tree": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/b.test.mjs" } });
@@ -566,7 +570,8 @@ test("a narrowed run tests only the affected packages, and records the rest as s
   const root = mkdtempSync(join(tmpdir(), "dohc-js-only-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  copyFlakyFixture(root);
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   for (const name of ["tail", "head"]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
     writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
@@ -601,7 +606,8 @@ test("a full run gives each desktop unit test file a worker of its own, and othe
   const root = mkdtempSync(join(tmpdir(), "dohc-js-isolation-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  copyFlakyFixture(root);
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   for (const [name, scripts] of [["desktop", { test: "unit then scripts", "test:unit": "vitest run" }], ["tail", { test: "vitest run" }]]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
     writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts }));
@@ -663,7 +669,8 @@ for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failu
           test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
         }}));
       }
-      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) {
+      copyFlakyFixture(root);
+      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) {
         put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
       }
       put("scripts/verification/process.mjs", `
@@ -789,7 +796,8 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
     put("package.json", '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}');
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) {
+    copyFlakyFixture(root);
+    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) {
       mkdirSync(join(root, "scripts/verification"), {recursive:true});
       copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
     }

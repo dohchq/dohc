@@ -1222,12 +1222,12 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
     },
-    // A document edited while live editing was off offers no Resume either:
-    // the server's copy misses that edit.
+    // A document whose server copy is missing an owner edit resumes there too:
+    // its Resume tries that edit again.
     {
       reason: "live-edit-unadmitted" as const,
-      title: "Live editing can't resume",
-      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      title: "Live editing stopped",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
     {
       reason: "conflict-parent-withheld" as const,
@@ -1635,8 +1635,9 @@ describe("notice center", () => {
     it("keeps the toast corner and the rail-side panel by default", async () => {
       renderNotices({ workspaceErrors: [shellError] });
 
+      // 12px up, or that far above a chat's message box (toastClearance).
       const toasts = screen.getByTestId("notice-toasts");
-      expect(toasts.className).toContain("bottom-3");
+      expect(toasts.className).toContain("bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)]");
       expect(toasts.className).toContain("right-3");
 
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1651,8 +1652,7 @@ describe("notice center", () => {
       // The toggle owns the bottom-right corner here, so the stack starts
       // above it instead of landing on top of it.
       const toasts = screen.getByTestId("notice-toasts");
-      expect(toasts.className).toContain("bottom-14");
-      expect(toasts.className).not.toContain("bottom-3");
+      expect(toasts.className).toContain("bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))]");
       expect(toasts.className).toContain("right-3");
 
       await userEvent.click(screen.getByTestId("notice-center-toggle"));

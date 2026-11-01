@@ -172,7 +172,7 @@ describe("ChatsView hybrid feed", () => {
     expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Nova · thread");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Nova");
-    expect(screen.getByTestId("chats-channel-agent-mark").className).toContain("text-agent");
+    expect(screen.getByTestId("chats-channel-agent-mark").firstElementChild!.className).toContain("text-agent");
   });
 
   it("shows a known viewer's Like before the write and its listing answer", async () => {

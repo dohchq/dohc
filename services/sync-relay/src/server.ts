@@ -26,6 +26,7 @@ import {
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
+import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
@@ -117,6 +118,8 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The session host's read of what its hosted replicas hold for released retained work.
+  heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   nowMs?: () => number;
@@ -194,6 +197,7 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  heldDocumentHost = () => undefined,
   storage,
   resolveActor,
   nowMs = () => Date.now(),
@@ -721,6 +725,7 @@ export function createSyncRelayHandler({
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
+  const respondToHeldDocuments = createHeldDocumentRoutes({storage, host: heldDocumentHost});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
@@ -873,6 +878,16 @@ export function createSyncRelayHandler({
         }), route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await automationPresses.respondToHost(request, route, actor.userId);
+      }
+      if (route.route === "held-documents") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToHeldDocuments(request, route, actor.userId);
       }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.

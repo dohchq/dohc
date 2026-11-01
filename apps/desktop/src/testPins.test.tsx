@@ -22,7 +22,7 @@ describe("shared desktop pins", () => {
     for (const id of [desktopPins.titlebar, desktopPins.titlebarAboutSidebar, desktopPins.activityBar, desktopPins.aboutRail, desktopPins.sidePanel]) {
       expect(screen.getByTestId(id).getAttribute("data-testid")).toBe(id);
     }
-    for (const view of ["explorer", "chats", "search", "graph", "sites", "history", "sharing", "settings"]) {
+    for (const view of ["explorer", "chats", "search", "graph", "history", "sharing", "settings"]) {
       expect(screen.getByTestId(activityPin(view)).getAttribute("data-testid")).toBe("activity-" + view);
     }
   });

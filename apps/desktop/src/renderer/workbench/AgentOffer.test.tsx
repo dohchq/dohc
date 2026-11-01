@@ -119,9 +119,9 @@ describe("the agent offer", () => {
     const view = render(<Composer dispatch={null} />);
     await pickAgent(user);
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("unknown");
-    view.rerender(<Composer dispatch={{ liveRunId: null, pendingCount: 0, paused: true }} />);
+    view.rerender(<Composer dispatch={{ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: true }} />);
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("paused");
-    view.rerender(<Composer dispatch={{ liveRunId: "run-1", pendingCount: 0, paused: false }} />);
+    view.rerender(<Composer dispatch={{ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 0, paused: false }} />);
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("working");
   });
 

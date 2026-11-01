@@ -56,14 +56,14 @@ function liveDeliveryLabel(
   if (delivery === "active") return "Live editing active";
   // A named reason is a state that stays until someone acts on it; an
   // unnamed one is a connection dohc is still dialling.
-  if (reason === "session-host-refused" || reason === "session-host-diverged") return "Live editing stopped";
+  if (reason === "session-host-refused" || reason === "session-host-diverged" || reason === "live-edit-unadmitted") return "Live editing stopped";
   if (reason === "live-document-without-lineage") return "Live editing can't start";
-  if (reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld") return "Live editing can't resume";
+  if (reason === "conflict-parent-withheld") return "Live editing can't resume";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
 // The sync state names the server as the problem.
-function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
   return syncStatus?.state === "cloud-disconnected" ||
     (syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable");
 }

@@ -459,7 +459,7 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   assert.equal(jobs.build.strategy["max-parallel"], undefined, "platform builds can run in parallel");
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
   // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
-  for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
+  for (const [job, firstRustStep] of [[jobs.preflight, "Prepare desktop and native test engine"], [jobs.build, "Build workspace engine"]]) {
     const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
     assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
     assert.equal(job.steps[toolchain].if, undefined);
@@ -479,13 +479,15 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
     "preflight runs on Linux only for a Linux dispatch");
   for (const job of [jobs["unused-version"], jobs.publish]) assert.equal(job["runs-on"], "ubuntu-24.04");
 
-  // Desktop tests need the built runtime exports and the native engine. The
-  // PR gate's runner runs the package's unit and script tests with its retries.
+  // Desktop tests need the built runtime exports and the PR gate's full
+  // preparation, which stages the Markdown reader beside the native engine.
+  // The PR gate's runner runs the package's unit and script tests with its retries.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);
   const desktopTests = releaseStep(jobs.preflight, "node scripts/verification/js-tests.mjs --prepared --package @dohc/desktop");
-  for (const prepare of ["pnpm --filter @dohc/app-backend-runtime build", "pnpm qa:prepare -- --engine-only"]) {
+  for (const prepare of ["pnpm --filter @dohc/app-backend-runtime build", "pnpm qa:prepare"]) {
     assert.ok(preflightOrder(releaseStep(jobs.preflight, prepare)) < preflightOrder(desktopTests), `desktop tests run after ${prepare}`);
   }
+  assert.equal(releaseStep(jobs.preflight, "pnpm qa:prepare").run, "pnpm qa:prepare", "preflight prepares the desktop, not only the engine");
   assert.equal(desktopTests.env.DOHC_REQUIRE_ENGINE_E2E, "1");
 
   // Draft and published versions must both be refused before packaging.

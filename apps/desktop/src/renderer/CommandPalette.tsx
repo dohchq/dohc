@@ -4,6 +4,7 @@ import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
 import { Overlay } from "./Overlay";
+import { MENU_ACTIVE_OPTION } from "./ui/Menu";
 
 export interface Command {
   id: string;
@@ -141,12 +142,14 @@ export function CommandPalette(props: {
               <li key={command.id} role="option" aria-selected={index === selected}>
                 <button
                   type="button"
+                  data-active={index === selected || undefined}
+                  // A result Tab reaches becomes the selected one, so its fill
+                  // shows focus without a halo, as the arrows' does.
+                  onFocus={() => setSelectedIndex(index)}
                   onClick={() => runCommand(command)}
-                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
+                  className={`flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline-none ${MENU_ACTIVE_OPTION} ${
                     // Keyboard selection stays stronger than hover.
-                    index === selected
-                      ? "bg-selected text-ink"
-                      : "text-muted hover:bg-hover hover:text-ink"
+                    index === selected ? "text-ink" : "text-muted hover:bg-hover hover:text-ink"
                   }`}
                 >
                   {command.label}

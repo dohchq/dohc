@@ -25,7 +25,8 @@ test("@focus-removal a closed tab hands focus to the next tab after a key or a c
       await explorerRow(page, name).click();
       await expect(page.getByTestId(editorTabTestId(name))).toHaveAttribute("aria-selected", "true");
     }
-    const selected = page.getByRole("tab", { selected: true });
+    const strip = page.getByTestId("editor-tabs");
+    const selected = strip.getByRole("tab", { selected: true });
 
     const keyed = page.getByTestId(editorTabTestId("c.md"));
     await keyed.focus();
@@ -41,7 +42,7 @@ test("@focus-removal a closed tab hands focus to the next tab after a key or a c
     await expect(close).toBeFocused();
     await page.mouse.up();
     await expect(clicked).toHaveCount(0);
-    await expect(page.getByRole("tab")).toHaveCount(1);
+    await expect(strip.getByRole("tab")).toHaveCount(1);
     await expect(selected).toBeFocused();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

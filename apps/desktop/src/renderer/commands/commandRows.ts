@@ -55,7 +55,6 @@ export const COMMAND_ROWS = {
   "show-chats": { label: "View: Chats", availability: "localWorkspace" },
   "show-search": { label: "View: Search", availability: "always" },
   "show-graph": { label: "View: Graph", availability: "always" },
-  "show-sites": { label: "View: Apps", availability: "always" },
   "show-history": { label: "View: History", availability: "always" },
   "connect-cloud": { label: "Connect server", availability: "always" },
   "settings": { label: "Settings", availability: "always" },

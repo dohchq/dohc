@@ -6,6 +6,8 @@
     "desktop:add-relay-share-link",
     "desktop:agent-color-changed",
     "desktop:agent-run-state",
+    "desktop:app-view",
+    "desktop:app-view-event",
     "desktop:append-relay-share-discussion",
     "desktop:apply-database-edit",
     "desktop:archive-chat-bookmark",

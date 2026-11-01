@@ -120,19 +120,19 @@ describe("EditorGroupLayout", () => {
     expect(only.className).not.toContain("ring");
   });
 
-  // The window edge and the neighbours cut off a ring painted outside the
+  // The window edge and the neighbours cut off a halo painted outside the
   // group, and the tab strip covers one painted inset on the group itself.
-  it("draws the focus ring on a layer inside the group, in place of the global one", () => {
+  it("draws keyboard focus on a layer inside the group, in place of the global halo", () => {
     renderLayout();
     const classes = screen.getByRole("region", { name: "Editor group 1" }).className.split(" ");
     expect(classes).toEqual(expect.arrayContaining([
       "relative",
       "focus-visible:outline-none",
-      "focus-visible:after:absolute",
-      "focus-visible:after:inset-0",
-      "focus-visible:after:-outline-offset-2",
-      "focus-visible:after:outline-accent",
-      "forced-colors:focus-visible:after:outline-[Highlight]",
+      "keyboard:focus-visible:after:absolute",
+      "keyboard:focus-visible:after:inset-0",
+      "keyboard:focus-visible:after:-outline-offset-1",
+      "keyboard:focus-visible:after:outline-accent",
+      "forced-colors:keyboard:focus-visible:after:outline-[Highlight]",
     ]));
   });
 

@@ -612,8 +612,8 @@ export function buildTableMenu(
 
 // One grip menu per editor instance. It closes by the Menu part's rule
 // (listenForDismiss) and moves by its keys (moveInMenu). Focus stays on the
-// frame and aria-activedescendant names the active row, which draws the
-// accent outline whichever of the keyboard or the pointer moved it there.
+// frame and aria-activedescendant names the active row, which takes the
+// selected fill whichever of the keyboard or the pointer moved it there.
 function openGripMenu(
   runtime: TableControlsRuntime,
   view: EditorView,

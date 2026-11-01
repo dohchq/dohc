@@ -3,6 +3,9 @@ use crate::events::emit_record_events;
 use crate::lock;
 use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
+use crate::rpc::held_documents::HELD_RESPONSE_BYTE_BUDGET;
+use crate::rpc::reads::json_string_encoded_len;
+use crate::rpc::reads::response_encoded_bytes;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::landed_wait_until;
 use crate::rpc::request::now_ms;
@@ -25,6 +28,10 @@ use dohc_engine_sync::SyncPassOutcome;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::btree_map;
+use std::iter::Peekable;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -46,6 +53,9 @@ pub(crate) struct PendingCursor {
     /// itself: they reconcile once this cursor commits, after the page's files
     /// landed, as a capture pass reconciles after it applies what it scanned.
     pub(super) reconcile_collections: bool,
+    /// A hosted pass's `departedAfter`, which its commit lists departed
+    /// documents after too.
+    pub(super) departed_after: Option<String>,
     /// Its place in its handle's `cursors_issued` count for its kind.
     pub(super) issue: u64,
 }
@@ -94,6 +104,20 @@ impl RelayOpenParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RelayWorkspaceParams {
     workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PullHostedParams {
+    workspace_id: String,
+    /// The answer lists the documents the pass holds after this object ID;
+    /// from the first without it.
+    #[serde(default)]
+    held_after: Option<String>,
+    /// The answer and its commit list the departed documents after this
+    /// object ID; from the first without it.
+    #[serde(default)]
+    departed_after: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -322,32 +346,280 @@ fn refusals_json(refusals: Vec<dohc_engine_sync::ReplicationRefusal>) -> Vec<Val
         .collect()
 }
 
-/// A hosted pass, without its cursor: the caller issues that as a token.
-/// `departed` names each document that left the scope and is not gone yet.
-fn hosted_pass_json(pass: HostedPassOutcome, departed: Vec<String>) -> Value {
-    let held = pass
-        .held
-        .iter()
-        .map(|(object_id, hold)| hosted_hold_json(object_id, hold))
-        .collect::<Vec<_>>();
-    json!({
+/// How much of a hosted pull's answer its held list, then its departed list,
+/// take before the rest of the answer fills, so however much else a pass
+/// reports, both lists page on.
+const HELD_PROGRESS_BYTES: usize = 64 * 1024;
+const DEPARTED_PROGRESS_BYTES: usize = 16 * 1024;
+
+fn encoded_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// The leading `values` that keep the answer within `limit` bytes, counted
+/// into `size`, and how many it leaves out.
+fn fit(values: Vec<Value>, size: &mut usize, limit: usize) -> (Vec<Value>, usize) {
+    let total = values.len();
+    let mut listed = Vec::new();
+    for value in values {
+        // A comma separates each entry from the one before it.
+        let next = size
+            .saturating_add(encoded_len(&value))
+            .saturating_add(usize::from(!listed.is_empty()));
+        if next > limit {
+            break;
+        }
+        *size = next;
+        listed.push(value);
+    }
+    let omitted = total.saturating_sub(listed.len());
+    (listed, omitted)
+}
+
+/// Lists held documents from `entries` while each keeps the answer within
+/// `limit` bytes with its ID as `heldThrough`, and the first always. `stop`
+/// keeps what the last one's ID adds past `null`.
+fn list_held(
+    entries: &mut Peekable<btree_map::Range<'_, String, dohc_engine_sync::HostedHold>>,
+    paths: &BTreeMap<String, String>,
+    held: &mut Vec<Value>,
+    size: &mut usize,
+    stop: &mut usize,
+    limit: usize,
+) -> Result<(), WireError> {
+    while let Some(&(object_id, hold)) = entries.peek() {
+        let summary = hosted_hold_json(object_id, hold, paths.get(object_id).map(String::as_str))?;
+        let next = size
+            .saturating_add(encoded_len(&summary))
+            .saturating_add(usize::from(!held.is_empty()));
+        let through = json_string_encoded_len(object_id).saturating_sub("null".len());
+        if !held.is_empty() && next.saturating_add(through) > limit {
+            break;
+        }
+        *size = next;
+        *stop = through;
+        held.push(summary);
+        entries.next();
+    }
+    Ok(())
+}
+
+/// The departed documents after `after`, from the first without it.
+fn departed_from<'a>(
+    departed: &'a [String],
+    after: Option<&str>,
+) -> Peekable<std::slice::Iter<'a, String>> {
+    let start = departed.partition_point(|id| after.is_some_and(|after| id.as_str() <= after));
+    departed[start..].iter().peekable()
+}
+
+/// Lists departed documents from `ids` as [`list_held`] lists held ones.
+fn list_departed(
+    ids: &mut Peekable<std::slice::Iter<'_, String>>,
+    departed: &mut Vec<Value>,
+    size: &mut usize,
+    stop: &mut usize,
+    limit: usize,
+) {
+    while let Some(&object_id) = ids.peek() {
+        let next = size
+            .saturating_add(json_string_encoded_len(object_id))
+            .saturating_add(usize::from(!departed.is_empty()));
+        let through = json_string_encoded_len(object_id).saturating_sub("null".len());
+        if !departed.is_empty() && next.saturating_add(through) > limit {
+            break;
+        }
+        *size = next;
+        *stop = through;
+        departed.push(Value::String(object_id.clone()));
+        ids.next();
+    }
+}
+
+/// A held document as `newlyHeld` names it: only what the relay needs to hold it.
+fn newly_held_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Value {
+    let mut held = json!({"objectId": object_id, "reason": hold.reason()});
+    if let dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { binding, .. } = hold {
+        held["bindingDigest"] = json!(binding.digest());
+    }
+    held
+}
+
+/// A hosted pass answering request `request_id`, with its cursor issued as
+/// `pending_cursor`, in at most `budget` bytes of serialized response. Each
+/// list takes its entries in order while they fit:
+/// - `held` names the documents the pass leaves held after `held_after`, in
+///   object ID order, and the first always, so paging moves on. It fills
+///   [`HELD_PROGRESS_BYTES`] before the other lists and the rest after them.
+///   `heldThrough` is null once the list reaches the last of them, or else
+///   the last one listed, after which the next pull asks. Between
+///   `held_after` and there, a document not listed is not held; past there,
+///   the answer says nothing.
+/// - `departed` pages the same way after `departed_after`, through
+///   `departedThrough`: the documents that left the scope and are not gone
+///   yet. It fills [`DEPARTED_PROGRESS_BYTES`] after the held list's share.
+/// - `newlyHeld` names held documents the pass moved from ready, wherever
+///   they fall. With `newlyHeldOmitted` above zero, some are left out.
+/// - `refusals`, `sharingDeclined` and `changedPaths` report what the engine
+///   keeps itself; each count says how many of them do not fit.
+fn hosted_pass_json(
+    request_id: u64,
+    pass: HostedPassOutcome,
+    departed: Vec<String>,
+    pending_cursor: Value,
+    held_after: Option<&str>,
+    departed_after: Option<&str>,
+    budget: usize,
+) -> Result<Value, WireError> {
+    // Each count is measured at its widest.
+    let mut result = json!({
         "fetched": pass.fetched,
         "hasMore": pass.has_more,
         "applied": pass.applied,
         "refused": pass.refused,
         "skipped": pass.skipped,
         "conflictsOpened": pass.conflicts_opened,
-        "changedPaths": changed_paths_json(&pass.changed_paths),
-        "refusals": refusals_json(pass.refusals),
-        "sharingDeclined": sharing_declined_json(pass.sharing_declined),
-        "held": held,
-        "departed": departed,
-        "pendingCursor": null,
-    })
+        "changedPaths": [],
+        "changedPathsOmitted": u64::MAX,
+        "refusals": [],
+        "refusalsOmitted": u64::MAX,
+        "sharingDeclined": [],
+        "sharingDeclinedOmitted": u64::MAX,
+        "held": [],
+        "heldThrough": null,
+        "newlyHeld": [],
+        "newlyHeldOmitted": u64::MAX,
+        "departed": [],
+        "departedThrough": null,
+        "pendingCursor": pending_cursor,
+    });
+    let mut size = response_encoded_bytes(request_id, &result);
+    let after = held_after.map_or(Bound::Unbounded, Bound::Excluded);
+    let mut entries = pass
+        .held
+        .range::<str, _>((after, Bound::Unbounded))
+        .peekable();
+    let mut held = Vec::new();
+    let mut held_stop = 0;
+    let share = size.saturating_add(HELD_PROGRESS_BYTES).min(budget);
+    list_held(
+        &mut entries,
+        &pass.held_paths,
+        &mut held,
+        &mut size,
+        &mut held_stop,
+        share,
+    )?;
+    let mut ids = departed_from(&departed, departed_after);
+    let mut listed = Vec::new();
+    let mut departed_stop = 0;
+    let share = size
+        .saturating_add(DEPARTED_PROGRESS_BYTES)
+        .min(budget.saturating_sub(held_stop));
+    list_departed(&mut ids, &mut listed, &mut size, &mut departed_stop, share);
+    let room = budget
+        .saturating_sub(held_stop)
+        .saturating_sub(departed_stop);
+    let newly_held = pass
+        .newly_held
+        .iter()
+        .filter_map(|object_id| Some(newly_held_json(object_id, pass.held.get(object_id)?)))
+        .collect();
+    let (newly_held, newly_held_omitted) = fit(newly_held, &mut size, room);
+    let (refusals, refusals_omitted) = fit(refusals_json(pass.refusals), &mut size, room);
+    let (sharing_declined, sharing_declined_omitted) = fit(
+        sharing_declined_json(pass.sharing_declined),
+        &mut size,
+        room,
+    );
+    let (changed_paths, changed_paths_omitted) =
+        fit(changed_paths_json(&pass.changed_paths), &mut size, room);
+    list_held(
+        &mut entries,
+        &pass.held_paths,
+        &mut held,
+        &mut size,
+        &mut held_stop,
+        budget.saturating_sub(departed_stop),
+    )?;
+    list_departed(
+        &mut ids,
+        &mut listed,
+        &mut size,
+        &mut departed_stop,
+        budget.saturating_sub(held_stop),
+    );
+    if entries.peek().is_some() {
+        result["heldThrough"] = held
+            .last()
+            .map_or(Value::Null, |hold| hold["objectId"].clone());
+    }
+    if ids.peek().is_some() {
+        result["departedThrough"] = listed.last().cloned().unwrap_or(Value::Null);
+    }
+    result["held"] = Value::Array(held);
+    result["newlyHeld"] = Value::Array(newly_held);
+    result["newlyHeldOmitted"] = json!(newly_held_omitted);
+    result["departed"] = Value::Array(listed);
+    result["refusals"] = Value::Array(refusals);
+    result["refusalsOmitted"] = json!(refusals_omitted);
+    result["sharingDeclined"] = Value::Array(sharing_declined);
+    result["sharingDeclinedOmitted"] = json!(sharing_declined_omitted);
+    result["changedPaths"] = Value::Array(changed_paths);
+    result["changedPathsOmitted"] = json!(changed_paths_omitted);
+    if response_encoded_bytes(request_id, &result) > budget {
+        return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
+    }
+    Ok(result)
 }
 
-/// A held document, which the relay must not open for live editing.
-fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Value {
+/// A hosted commit in at most `budget` bytes of serialized response, measured
+/// under the widest request ID. `departed` pages as its pass's list does,
+/// after the same `departed_after`, or is null when unread.
+fn hosted_commit_json(
+    commit: dohc_engine_sync::HostedCommit,
+    retirement: Result<bool, dohc_engine_runtime::RuntimeError>,
+    unready: Result<Vec<String>, dohc_engine_runtime::RuntimeError>,
+    departed: Result<Vec<String>, dohc_engine_runtime::RuntimeError>,
+    departed_after: Option<&str>,
+    budget: usize,
+) -> Result<Value, WireError> {
+    let has_more =
+        commit.has_more || matches!(retirement, Ok(true)) || unready.is_err() || departed.is_err();
+    let mut result = json!({
+        "committed": commit.committed,
+        "hasMore": has_more,
+        "retirement": retirement.err().map(map_runtime),
+        "departed": null,
+        "departedThrough": null,
+        "sharingDeclined": [],
+    });
+    let mut size = response_encoded_bytes(u64::MAX, &result);
+    if let Ok(departed) = departed {
+        // Measured as `null`, which is longer than `[]`.
+        let mut ids = departed_from(&departed, departed_after);
+        let mut listed = Vec::new();
+        let mut stop = 0;
+        list_departed(&mut ids, &mut listed, &mut size, &mut stop, budget);
+        if ids.peek().is_some() {
+            result["departedThrough"] = listed.last().cloned().unwrap_or(Value::Null);
+        }
+        result["departed"] = Value::Array(listed);
+    }
+    if response_encoded_bytes(u64::MAX, &result) > budget {
+        return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
+    }
+    Ok(result)
+}
+
+/// A held document, which the relay must not open for live editing. A
+/// released-lineage hold is named by its summary, at `path`, and its binding
+/// only by its digest; one without its path answers an internal error.
+fn hosted_hold_json(
+    object_id: &str,
+    hold: &dohc_engine_sync::HostedHold,
+    path: Option<&str>,
+) -> Result<Value, WireError> {
     use dohc_engine_sync::HostedHold;
     let mut held = json!({"objectId": object_id, "reason": hold.reason()});
     match hold {
@@ -366,8 +638,19 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
             held["scopePath"] = json!(scope_path);
             held["headPath"] = json!(head_path);
         }
+        HostedHold::ReleasedLineageUnsettled {
+            binding,
+            continuation,
+            binding_stale,
+        } => {
+            let path = path.ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+            held["path"] = json!(path);
+            held["bindingDigest"] = json!(binding.digest());
+            held["continuation"] = json!(continuation.as_str());
+            held["bindingStale"] = json!(binding_stale);
+        }
     }
-    held
+    Ok(held)
 }
 
 fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
@@ -537,32 +820,15 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
-        RelayOperationOutcome::HostedPass { pass, departed, .. } => {
-            hosted_pass_json(pass, departed)
+        // Only `sync.pullHosted` answers a pass, and `sync.commitCursor` a
+        // hosted commit, each fit to its budget.
+        RelayOperationOutcome::HostedPass { .. }
+        | RelayOperationOutcome::HostedCursorCommitted { .. } => {
+            return Err(WireError::new(
+                ErrorCode::Internal,
+                "unexpected hosted pass outcome",
+            ));
         }
-        // A pass fetched under a scope that has since moved commits nothing.
-        // A commit that kept a document held for the pass that writes its
-        // files has more to pull, as does one that parked a departed
-        // document: work that waited for its path. Parking that failed is
-        // reported as the error it would have been, beside the commit that
-        // stands. A commit that could not read what it left unready, or what
-        // departed documents remain, has more to pull, whose pass releases or
-        // reports them, or says why it cannot. `departed` is null when unread.
-        RelayOperationOutcome::HostedCursorCommitted {
-            commit,
-            retirement,
-            unready,
-            departed,
-        } => json!({
-            "committed": commit.committed,
-            "hasMore": commit.has_more
-                || matches!(retirement, Ok(true))
-                || unready.is_err()
-                || departed.is_err(),
-            "retirement": retirement.err().map(map_runtime),
-            "departed": departed.ok(),
-            "sharingDeclined": [],
-        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
@@ -699,6 +965,7 @@ impl EngineService {
                     materialization_paths: Vec::new(),
                     materialized: false,
                     reconcile_collections: false,
+                    departed_after: None,
                     issue,
                 },
             );
@@ -1228,6 +1495,7 @@ impl EngineService {
         let consumed =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let reconcile_collections = consumed.reconcile_collections;
+        let departed_after = consumed.departed_after.clone();
         let share_view = matches!(&consumed.cursor, IssuedCursor::ShareView(_));
         let hosted = matches!(&consumed.cursor, IssuedCursor::Hosted(_));
         let operation = match consumed.cursor.clone() {
@@ -1266,9 +1534,36 @@ impl EngineService {
             }
             executed => executed?,
         };
-        // A hosted replica takes no part in enrollment.
+        // A hosted replica takes no part in enrollment. A pass fetched under
+        // a scope that has since moved commits nothing. A commit that kept a
+        // document held for the pass that writes its files has more to pull,
+        // as does one that parked a departed document: work that waited for
+        // its path. Parking that failed is reported as the error it would
+        // have been, beside the commit that stands. A commit that could not
+        // read what it left unready, or what departed documents remain, has
+        // more to pull, whose pass releases or reports them, or says why it
+        // cannot. `departed` is null when unread.
         if hosted {
-            return relay_outcome_json(outcome);
+            let RelayOperationOutcome::HostedCursorCommitted {
+                commit,
+                retirement,
+                unready,
+                departed,
+            } = outcome
+            else {
+                return Err(WireError::new(
+                    ErrorCode::Internal,
+                    "unexpected hosted commit outcome",
+                ));
+            };
+            return hosted_commit_json(
+                commit,
+                retirement,
+                unready,
+                departed,
+                departed_after.as_deref(),
+                HELD_RESPONSE_BYTE_BUDGET,
+            );
         }
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
@@ -1528,21 +1823,48 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
+    /// The namespace of the feed a hosted pull reads: the configured live
+    /// host's, or none, which refuses the pull.
+    fn hosted_feed_namespace(&self) -> Option<String> {
+        #[cfg(feature = "harness")]
+        if let Some(namespace) = &self.hosted_feed_for_harness {
+            return Some(namespace.clone());
+        }
+        self.configured_relay_namespace()
+    }
+
     /// `sync.pullHosted`: one pass of the hosted feed. A pass that adopted a
     /// new scope applies nothing and has no `pendingCursor`: pull again.
     /// Otherwise materialize its `pendingCursor` with
     /// `sync.materializePendingCursor`, then commit it with
     /// `sync.commitCursor`, and pull again while the pass or the commit
     /// answers `hasMore`. Adopting a scope and committing also park the
-    /// documents that left the scope.
+    /// documents that left the scope. The pass's held documents are listed
+    /// after `heldAfter`, as many as fit; the next pull asks after its
+    /// `heldThrough`, and from the first again once that is null. Departed
+    /// documents page the same way, after `departedAfter` through
+    /// `departedThrough`, in the pass and in its commit.
     pub(super) async fn sync_pull_hosted(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
+        request_id: u64,
     ) -> Result<Value, WireError> {
-        let params: RelayWorkspaceParams = parse(params)?;
+        let params: PullHostedParams = parse(params)?;
+        for after in [&params.held_after, &params.departed_after]
+            .into_iter()
+            .flatten()
+        {
+            super::held_documents::object_id(after)?;
+        }
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        // The feed's namespace comes only from the configured host, and a
+        // hosted pass records it with everything it keeps. Without one the
+        // pull is refused before it reads or changes anything.
+        let relay_namespace = self
+            .hosted_feed_namespace()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .hosted_execute(
@@ -1552,6 +1874,7 @@ impl EngineService {
                 RelayOperation::PullHosted {
                     workspace_id: open.workspace_id.clone(),
                     root: open.root.clone(),
+                    relay_namespace,
                     now_ms: now_ms()?,
                 },
                 "sync.pullHosted",
@@ -1572,22 +1895,33 @@ impl EngineService {
         if !pass.has_more {
             self.notify_editors_behind(ctx, &open).await;
         }
-        let pending = pass.pending_cursor.take();
-        let materialization_paths = pass.changed_paths.clone();
-        let mut result = hosted_pass_json(pass, departed);
-        if let Some(cursor) = pending {
-            let issued =
-                self.issue_pending_cursor(bound_handle, &open, IssuedCursor::Hosted(cursor))?;
-            let token = issued["token"]
-                .as_str()
-                .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
-            lock(&self.pending_cursors)
-                .get_mut(token)
-                .ok_or_else(|| WireError::new(ErrorCode::Internal, "issued cursor disappeared"))?
-                .materialization_paths = materialization_paths;
-            result["pendingCursor"] = issued;
-        }
-        Ok(result)
+        let pending_cursor = match pass.pending_cursor.take() {
+            Some(cursor) => {
+                let issued =
+                    self.issue_pending_cursor(bound_handle, &open, IssuedCursor::Hosted(cursor))?;
+                let token = issued["token"]
+                    .as_str()
+                    .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
+                let mut pending = lock(&self.pending_cursors);
+                let entry = pending.get_mut(token).ok_or_else(|| {
+                    WireError::new(ErrorCode::Internal, "issued cursor disappeared")
+                })?;
+                entry.materialization_paths = pass.changed_paths.clone();
+                entry.departed_after = params.departed_after.clone();
+                drop(pending);
+                issued
+            }
+            None => Value::Null,
+        };
+        hosted_pass_json(
+            request_id,
+            pass,
+            departed,
+            pending_cursor,
+            params.held_after.as_deref(),
+            params.departed_after.as_deref(),
+            HELD_RESPONSE_BYTE_BUDGET,
+        )
     }
 
     pub(super) async fn sync_recover_origin(
@@ -1978,6 +2312,384 @@ mod tests {
     use dohc_engine_sync::ShareCursor;
     use dohc_engine_sync::SyncPassOutcome;
     use serde_json::json;
+
+    fn released_binding() -> dohc_engine_collab::live_update_application::ReleasedLineageBinding {
+        use dohc_engine_collab::live_update_application::{
+            IncomingCoordinate, ProtectedTails, ReleasedLineageBinding,
+        };
+        ReleasedLineageBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "a".repeat(64),
+            current_path: Some("notes/plan.md".into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 3,
+                relay_seq: 9,
+            },
+            head_digest: "b".repeat(64),
+            tails: std::sync::Arc::new(ProtectedTails::Invalid),
+        }
+    }
+
+    fn released_hold() -> dohc_engine_sync::HostedHold {
+        dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+            binding: Box::new(released_binding()),
+            continuation: dohc_engine_sync::ReleasedHoldContinuation::Frozen,
+            binding_stale: false,
+        }
+    }
+
+    /// A released-lineage hold reaches the relay as the summary discovery
+    /// lists: its path, its binding's digest, continuation and staleness,
+    /// never the binding, whose tails are unbounded.
+    #[test]
+    fn a_released_lineage_hold_reaches_the_wire_as_its_summary() {
+        let held =
+            hosted_hold_json("object", &released_hold(), Some("notes/plan.md")).expect("summary");
+        assert_eq!(
+            held,
+            json!({
+                "objectId": "object", "reason": "released-lineage-unsettled",
+                "path": "notes/plan.md", "bindingDigest": released_binding().digest(),
+                "continuation": "frozen", "bindingStale": false,
+            })
+        );
+        assert!(held.get("binding").is_none(), "{held}");
+    }
+
+    /// Opus's review: a released-lineage hold whose path the pass did not
+    /// record reached the wire as a null path, which the relay refuses on
+    /// every pull. The answer is an internal error instead.
+    #[test]
+    fn a_held_document_with_no_recorded_path_answers_an_internal_error() {
+        let pass = HostedPassOutcome {
+            held: BTreeMap::from([("object".to_owned(), released_hold())]),
+            ..HostedPassOutcome::default()
+        };
+        let error = hosted_pass_json(
+            7,
+            pass,
+            Vec::new(),
+            Value::Null,
+            None,
+            None,
+            HELD_RESPONSE_BYTE_BUDGET,
+        )
+        .expect_err("a hold without its path");
+        assert_eq!(error.code, ErrorCode::Internal);
+    }
+
+    /// `count` documents held for work waiting, of about 110 bytes each.
+    fn waiting(count: usize) -> BTreeMap<String, dohc_engine_sync::HostedHold> {
+        (0..count)
+            .map(|index| {
+                (
+                    format!("doc-{index:05}-{}", "x".repeat(100)),
+                    dohc_engine_sync::HostedHold::WorkWaiting,
+                )
+            })
+            .collect()
+    }
+
+    /// A 300-byte identifier that sorts by `index`.
+    fn long_id(index: usize) -> String {
+        format!("{index:05}-{}", "x".repeat(294))
+    }
+
+    /// The object IDs a list names, in its order.
+    fn object_ids(list: &Value) -> Vec<String> {
+        list.as_array()
+            .expect("list")
+            .iter()
+            .map(|entry| {
+                let id = entry.get("objectId").unwrap_or(entry);
+                id.as_str().expect("object ID").to_owned()
+            })
+            .collect()
+    }
+
+    /// Every answer to the pulls that page through the pass's held and
+    /// departed lists from the first, each asking after where the last
+    /// answer's lists stopped and within the budget, until both reached
+    /// their last.
+    fn pages(pass: &HostedPassOutcome, departed: &[String]) -> Vec<Value> {
+        let pending = json!({"kind": "hosted", "token": "a".repeat(64)});
+        let mut pages = Vec::new();
+        let (mut held_after, mut departed_after) = (None::<String>, None::<String>);
+        let (mut held_done, mut departed_done) = (false, false);
+        loop {
+            let value = hosted_pass_json(
+                7,
+                pass.clone(),
+                departed.to_vec(),
+                pending.clone(),
+                held_after.as_deref(),
+                departed_after.as_deref(),
+                HELD_RESPONSE_BYTE_BUDGET,
+            )
+            .expect("answer");
+            assert!(response_encoded_bytes(7, &value) <= HELD_RESPONSE_BYTE_BUDGET);
+            assert_eq!(value["pendingCursor"], pending);
+            held_after = value["heldThrough"].as_str().map(str::to_owned);
+            departed_after = value["departedThrough"].as_str().map(str::to_owned);
+            assert!(
+                held_after.is_none() || object_ids(&value["held"]).last() == held_after.as_ref()
+            );
+            assert!(
+                departed_after.is_none()
+                    || object_ids(&value["departed"]).last() == departed_after.as_ref()
+            );
+            held_done |= held_after.is_none();
+            departed_done |= departed_after.is_none();
+            pages.push(value);
+            if held_done && departed_done {
+                return pages;
+            }
+        }
+    }
+
+    /// What `list` names across `pages`, through the first page that
+    /// reached its last.
+    fn paged(pages: &[Value], list: &str) -> Vec<String> {
+        let through = format!("{list}Through");
+        let end = pages
+            .iter()
+            .position(|page| page[through.as_str()].is_null())
+            .expect("a last page");
+        pages[..=end]
+            .iter()
+            .flat_map(|page| object_ids(&page[list]))
+            .collect()
+    }
+
+    /// A pass that holds more documents than one answer fits lists them in
+    /// object ID order within the budget and says where its list stops. The
+    /// pulls that ask after there list the rest, each document once, and
+    /// the last says its list is complete.
+    #[test]
+    fn a_pass_holding_more_than_fits_pages_its_held_list_within_budget() {
+        let pass = HostedPassOutcome {
+            held: waiting(2_000),
+            ..HostedPassOutcome::default()
+        };
+        let pages = pages(&pass, &["gone".to_owned()]);
+        assert!(
+            pages.len() > 1,
+            "2,000 holds of about 160 bytes pass 240 KiB"
+        );
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
+        let gone = |page: &Value| page["departed"] == json!(["gone"]);
+        assert!(
+            pages
+                .iter()
+                .all(|page| gone(page) && page["departedThrough"].is_null())
+        );
+    }
+
+    /// Sol's review: departed documents the engine cannot park, more than
+    /// fit, filled every answer's departed list from the first, so one after
+    /// them was never named and its host never learned it parked. The list
+    /// now pages after where the pull asks, like the held list, and keeps a
+    /// share however much else the pass reports: every departed document is
+    /// listed within a few pulls, each once, and a parked one, listed by
+    /// none, is known gone.
+    #[test]
+    fn a_stuck_departed_prefix_larger_than_fits_still_pages_to_the_documents_after_it() {
+        let pass = HostedPassOutcome {
+            held: waiting(2_000),
+            ..HostedPassOutcome::default()
+        };
+        // A removed folder of 1,000 documents nothing parks: about 300 KiB
+        // of IDs alone. The parked document after them is in none.
+        let departed = (0..1_000).map(long_id).collect::<Vec<_>>();
+        let pages = pages(&pass, &departed);
+        assert!(!object_ids(&pages[0]["departed"]).is_empty());
+        assert!(pages[0]["departedThrough"].is_string());
+        assert_eq!(paged(&pages, "departed"), departed);
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
+    }
+
+    /// Sol's and Opus's review: changed paths, refusals and declined shares
+    /// went out whole, so they alone could pass the budget. Each list now
+    /// stops where it no longer fits and counts what it leaves out. The held
+    /// and departed lists keep their shares and page on, and a document the
+    /// pass moved from ready to held is named, only by what the relay needs,
+    /// though the page stops before it.
+    #[test]
+    fn a_pass_reporting_more_than_fits_cuts_each_list_and_counts_what_it_leaves_out() {
+        let held = waiting(2_000);
+        let last = held.keys().next_back().expect("held").clone();
+        let pass = HostedPassOutcome {
+            newly_held: [last.clone()].into(),
+            changed_paths: (0..2_000)
+                .map(|index| dohc_engine_sync::MomentMaterializationChange {
+                    version_id: "main".to_owned(),
+                    path: format!("docs/{}.md", long_id(index)),
+                    operation: "write",
+                    content_kind: "text",
+                })
+                .collect(),
+            refusals: (0..2_000)
+                .map(|index| dohc_engine_sync::ReplicationRefusal {
+                    workspace_id: "workspace".to_owned(),
+                    origin_id: "peer".to_owned(),
+                    origin_seq: i64::try_from(index).expect("sequence"),
+                    op_kind: "text.write".to_owned(),
+                    reason: dohc_engine_sync::RefusalReason::InvalidInput {
+                        reason: long_id(index),
+                    },
+                })
+                .collect(),
+            sharing_declined: (0..2_000)
+                .map(|index| dohc_engine_sync::SharingDeclined {
+                    object_id: long_id(index),
+                    version_id: "main".to_owned(),
+                    lineage_pruned: false,
+                    head_blob_sha256: None,
+                    path: format!("docs/{}.md", long_id(index)),
+                    constraint: "MAX_YDOC_UPDATE_BYTES",
+                    limit_bytes: 1,
+                    observed_bytes: 2,
+                })
+                .collect(),
+            held,
+            ..HostedPassOutcome::default()
+        };
+        // A removed folder of 1,000 documents: about 300 KiB of IDs alone.
+        let departed = (0..1_000).map(long_id).collect::<Vec<_>>();
+        let pages = pages(&pass, &departed);
+        let first = &pages[0];
+        for list in ["refusals", "sharingDeclined", "changedPaths"] {
+            let listed = first[list].as_array().expect("list").len() as u64;
+            let omitted = first[format!("{list}Omitted")].as_u64().expect("count");
+            assert!(omitted > 0, "{list} is cut");
+            assert_eq!(listed + omitted, 2_000, "{list}");
+        }
+        let held = object_ids(&first["held"]);
+        assert!(
+            held.len() > 300,
+            "the held list keeps its share: {}",
+            held.len()
+        );
+        assert!(!held.contains(&last));
+        assert!(object_ids(&first["departed"]).len() > 40, "{first}");
+        assert_eq!(
+            (&first["newlyHeld"], &first["newlyHeldOmitted"]),
+            (
+                &json!([{"objectId": last, "reason": "hosted-backfill-work-waiting"}]),
+                &json!(0)
+            )
+        );
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
+        assert_eq!(paged(&pages, "departed"), departed);
+    }
+
+    /// Sol's review: a pass moving more documents from ready to held than
+    /// fit cut `newlyHeld` without saying so, so the relay could keep a
+    /// held document open. Each entry is now only what the relay needs, a
+    /// cut list counts what it leaves out, and the answer stays in budget.
+    #[test]
+    fn a_pass_holding_more_documents_newly_than_fit_counts_what_it_leaves_out() {
+        let mut held = (0..2_000)
+            .map(|index| (long_id(index), dohc_engine_sync::HostedHold::WorkWaiting))
+            .collect::<BTreeMap<_, _>>();
+        held.insert(long_id(2_000), released_hold());
+        let pass = HostedPassOutcome {
+            newly_held: held.keys().cloned().collect(),
+            held_paths: BTreeMap::from([(long_id(2_000), "notes/plan.md".to_owned())]),
+            held,
+            ..HostedPassOutcome::default()
+        };
+        let cut = pages(&pass, &[]);
+        let first = &cut[0];
+        let listed = object_ids(&first["newlyHeld"]);
+        let omitted = first["newlyHeldOmitted"].as_u64().expect("count");
+        assert!(listed.len() > 300 && omitted > 0, "{} listed", listed.len());
+        assert_eq!(listed.len() as u64 + omitted, 2_001);
+        assert_eq!(
+            first["newlyHeld"][0],
+            json!({"objectId": long_id(0), "reason": "hosted-backfill-work-waiting"})
+        );
+        let whole = pages(
+            &HostedPassOutcome {
+                newly_held: [long_id(2_000)].into(),
+                ..pass.clone()
+            },
+            &[],
+        );
+        assert_eq!(
+            whole[0]["newlyHeld"],
+            json!([{
+                "objectId": long_id(2_000), "reason": "released-lineage-unsettled",
+                "bindingDigest": released_binding().digest(),
+            }])
+        );
+        assert_eq!(whole[0]["newlyHeldOmitted"], 0);
+    }
+
+    /// Sol's review, for the commit: its departed list pages after where
+    /// its pass's list started, so the commit after a pull that asked past
+    /// a stuck prefix lists the documents after it. An unread list is null.
+    #[test]
+    fn a_hosted_commit_lists_departed_documents_after_where_its_pass_asked() {
+        let departed = (0..1_000).map(long_id).collect::<Vec<_>>();
+        let commit = |after: Option<&str>, departed| {
+            let value = hosted_commit_json(
+                COMMITTED,
+                Ok(false),
+                Ok(Vec::new()),
+                departed,
+                after,
+                HELD_RESPONSE_BYTE_BUDGET,
+            )
+            .expect("commit JSON");
+            assert!(response_encoded_bytes(u64::MAX, &value) <= HELD_RESPONSE_BYTE_BUDGET);
+            value
+        };
+        let first = commit(None, Ok(departed.clone()));
+        let listed = object_ids(&first["departed"]);
+        assert!(!listed.is_empty() && listed.len() < 1_000);
+        assert_eq!(listed, departed[..listed.len()]);
+        assert_eq!(first["departedThrough"], json!(listed.last()));
+        let next = commit(first["departedThrough"].as_str(), Ok(departed.clone()));
+        let after = object_ids(&next["departed"]);
+        assert_eq!(after.first(), departed.get(listed.len()));
+        let last = commit(Some(departed[998].as_str()), Ok(departed.clone()));
+        assert_eq!(
+            (&last["departed"], &last["departedThrough"]),
+            (&json!([departed[999]]), &Value::Null)
+        );
+        let unread = commit(
+            None,
+            Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+        );
+        assert_eq!(
+            (
+                &unread["departed"],
+                &unread["departedThrough"],
+                &unread["hasMore"]
+            ),
+            (&Value::Null, &Value::Null, &json!(true))
+        );
+    }
 
     #[tokio::test]
     async fn direct_status_reads_offline_and_preserves_workspace_and_path_fences() {
@@ -4017,12 +4729,14 @@ mod tests {
 
     #[test]
     fn a_hosted_commit_that_could_not_read_its_unready_documents_stands_and_pulls_again() {
-        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
-            commit: COMMITTED,
-            retirement: Ok(false),
-            unready: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
-            departed: Ok(vec!["doc-b".to_owned()]),
-        })
+        let value = hosted_commit_json(
+            COMMITTED,
+            Ok(false),
+            Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+            Ok(vec!["doc-b".to_owned()]),
+            None,
+            HELD_RESPONSE_BYTE_BUDGET,
+        )
         .expect("commit JSON");
         assert_eq!(
             (
@@ -4039,12 +4753,14 @@ mod tests {
     /// answer an empty list, which would let the host release them.
     #[test]
     fn a_hosted_commit_that_could_not_read_its_departed_documents_says_so_and_pulls_again() {
-        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
-            commit: COMMITTED,
-            retirement: Ok(false),
-            unready: Ok(Vec::new()),
-            departed: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
-        })
+        let value = hosted_commit_json(
+            COMMITTED,
+            Ok(false),
+            Ok(Vec::new()),
+            Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+            None,
+            HELD_RESPONSE_BYTE_BUDGET,
+        )
         .expect("commit JSON");
         assert_eq!(
             (
@@ -4062,15 +4778,17 @@ mod tests {
     #[test]
     fn a_hosted_commit_that_kept_a_document_held_for_its_files_pulls_again() {
         let answer = |has_more| {
-            relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
-                commit: dohc_engine_sync::HostedCommit {
+            hosted_commit_json(
+                dohc_engine_sync::HostedCommit {
                     committed: true,
                     has_more,
                 },
-                retirement: Ok(false),
-                unready: Ok(Vec::new()),
-                departed: Ok(Vec::new()),
-            })
+                Ok(false),
+                Ok(Vec::new()),
+                Ok(Vec::new()),
+                None,
+                HELD_RESPONSE_BYTE_BUDGET,
+            )
             .expect("commit JSON")["hasMore"]
                 .clone()
         };

@@ -3247,6 +3247,137 @@ it("a settling close persists outage text when the user never types again", asyn
   await capture.stop();
 });
 
+// Forget closes every session through the workspace close before anything
+// else closes the document, so that close is the last chance to persist it.
+it("a workspace close persists outage text when the user never types again", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-forget-",
+    "ydoc-death-forget",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-forget",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  await capture.settleAndCloseAllLiveSessions();
+
+  expect(state.settled.at(-1)).toBe("alive PRE_KILL");
+  expect(state.diskMarkdown).toBe("alive PRE_KILL");
+  expect(state.generation).toBe(2);
+  await capture.stop();
+});
+
+// A close that couldn't save the outage text fails, so Forget stops before it
+// deletes the only copy.
+it("a workspace close fails while the daemon is still down, and reopens nothing", async () => {
+  const reported: string[] = [];
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-still-down-",
+    "ydoc-death-still-down",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-still-down",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => reported.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow(/closed/i);
+  expect(state.generation).toBe(1);
+  expect(state.diskMarkdown).toBe("alive ");
+
+  state.daemonAlive = true;
+  await capture.stop();
+  await session.close();
+  expect(state.generation).toBe(1);
+  expect(reported).toContain("Y.Doc close recovery of note.md");
+});
+
+// Forget stops the capture, which closes the workspace's engine session, and
+// then closes the sessions its close loop could not save. Their close must not
+// open an engine session that nothing would close.
+it("a session closed after its capture stopped opens no engine session", async () => {
+  const reported: string[] = [];
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-after-stop-",
+    "ydoc-after-stop",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-after-stop",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => reported.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  state.daemonAlive = true;
+
+  await capture.stop();
+  await session.close();
+  expect(state.generation).toBe(1);
+  // The text it could not save is reported, not dropped quietly.
+  expect(reported).toContain("Y.Doc close recovery of note.md");
+});
+
+it("a workspace close still closes every session after one refuses its release", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-close-every-",
+    "ydoc-close-every",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-close-every",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  await capture.openYDocSession({ path: "a.md", onRemoteUpdate: () => undefined });
+  await capture.openYDocSession({ path: "b.md", onRemoteUpdate: () => undefined });
+  // Only the first release is refused.
+  let refusals = 1;
+  Object.defineProperty(state, "failRelease", { get: () => refusals-- > 0 });
+
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow("release-refused");
+  expect(state.releasedGenerations).toEqual([2]);
+  await capture.stop();
+});
+
 // The reconcile half of adoptGeneration: a replacement generation carrying
 // daemon-side work the canonical doc never saw must be merged in, exactly once.
 it("merges a daemon-side edit made during the outage into the canonical doc once", async () => {

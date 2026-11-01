@@ -28,11 +28,16 @@ test("reader generations and staging files stay out of git", () => {
 test("unsupported reader targets leave desktop and self-host preparation available", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-unsupported-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["linux", "arm64"], ["win32", "arm64"], ["freebsd", "x64"]]) {
+  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["win32", "arm64"], ["freebsd", "x64"]]) {
     assert.deepEqual(await stageEngineReader({ resources: root, platform, arch, selfHost: true }), { supported: false });
     assert.equal(await requireEngineReader(root, platform, arch), undefined);
     assert.deepEqual(await readdir(root), []);
   }
+  // Only the self-host image has a linux-arm64 reader.
+  assert.deepEqual(await stageEngineReader({ resources: root, platform: "linux", arch: "arm64" }), { supported: false });
+  assert.equal(await requireEngineReader(root, "linux", "arm64"), undefined);
+  assert.deepEqual(await readdir(root), []);
+  await assert.rejects(requireEngineReader(root, "linux", "arm64", process.execPath), { code: "ENOENT" });
   assert.equal(installedReaderConfig("/absent", "darwin"), undefined);
   assert.equal(installedReaderConfig("/absent", "win32"), undefined);
 });
@@ -100,7 +105,6 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     assert.deepEqual((await readdir(base)).sort(), [staged.generation, "selection.json"].sort());
   });
   await t.test("preparation repairs a corrupt existing generation before selecting it", async () => {
-    await chmod(staged.bundle, 0o600);
     await writeFile(staged.bundle, "corrupt existing bundle");
     assert.deepEqual(await stageEngineReader({ resources, platform, arch }), staged);
     await requireEngineReader(resources, platform, arch);
@@ -112,6 +116,11 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
   await copyFiles(getFileMatchers({ extraResources }, "extraResources", packaged, {
     defaultSrc: join(root, "source"), globalOutDir: packaged, customBuildOptions: {}, macroExpander: x => x,
   }));
+  // Updaters replace every packaged file, and macOS ShipIt cannot clear quarantine from a read-only one.
+  for (const entry of await readdir(join(packaged, "engine-reader"), { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    if (entry.isFile()) assert.ok((await stat(path)).mode & 0o200, `${path} is owner-writable`);
+  }
   await t.test("plain rm deletes the staged layout without mode repair", async () => {
     await rm(join(root, "source"), { recursive: true, force: true });
   });
@@ -144,14 +153,12 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     const oldRoot = join(packaged, "engine-reader", staged.generation);
     const newRoot = join(packaged, "engine-reader", changed.buildSha256);
     await chmod(oldRoot, 0o700);
-    await chmod(installed.manifest, 0o600);
     await writeFile(installed.manifest, JSON.stringify(changed));
     await rename(oldRoot, newRoot);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: changed.buildSha256 }));
     await assert.rejects(requireEngineReader(packaged, platform, arch), /identity mismatch/);
     await rename(newRoot, oldRoot);
     await writeFile(installed.manifest, JSON.stringify(manifest));
-    await chmod(installed.manifest, 0o444);
     await chmod(oldRoot, 0o755);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: staged.generation }));
   }
@@ -175,6 +182,7 @@ test("macOS signing uses the reader hook without enabling Electron Node mode", a
 });
 
 test("the reader has no Intel Mac runtime pin", async () => {
-  const { PINNED_NODE } = await import("./pinned-node.mjs");
+  const { PINNED_NODE, SELF_HOST_NODE } = await import("./pinned-node.mjs");
   assert.equal(PINNED_NODE["darwin-x64"], undefined);
+  assert.equal(SELF_HOST_NODE["darwin-x64"], undefined);
 });

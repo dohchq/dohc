@@ -1376,7 +1376,7 @@ async function detectSiteAt(
   // workspace-core/src/sites.ts) for the identical malformed input — a
   // dohc.json preview.mode that isn't one of the three valid values must
   // surface the same diagnostic here as it does for the desktop detector,
-  // or dohc_test_app can silently pass a config the desktop Apps view flags.
+  // or dohc_test_app can silently pass a config the desktop Explorer flags.
   if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1531,7 +1531,7 @@ async function detectSiteAt(
   // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
   // framework config file (vite.config.ts, ...) is "configured", and
   // either one is a high-confidence signal on its own, same as an actual
-  // index.html file — the desktop Apps view and MCP's dohc_detect_apps must
+  // index.html file — the desktop Explorer's Apps section and MCP's dohc_detect_apps must
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only

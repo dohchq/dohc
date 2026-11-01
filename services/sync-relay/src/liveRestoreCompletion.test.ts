@@ -20,11 +20,14 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
   const store = {
     readStopRestoreReview: vi.fn((): {proposalDigest: string} | null => ({proposalDigest: digest})),
     readStopRestoreLifecycle: vi.fn(() => current),
+    continueStopRestore: vi.fn((): "continue" | "cancel" | "declined" => "continue"),
+    pendingStopRestoreCancellation: vi.fn(() => null),
     admitStopRestoreProposal: vi.fn(() => save("relay-admitted")),
     admitReviewedStopRestoreProposal: vi.fn(() => save("relay-admitted")),
     acknowledgeStopRestoreReplacement: vi.fn(() => save("native-applied")),
     acknowledgeStopRestoreSettlement: vi.fn(() => save("settled")),
     acknowledgeStopRestoreResume: vi.fn(() => save("resumed")),
+    stopRestoreFinishedAtMovedPath: vi.fn(() => false),
   };
   const send = vi.fn(async (_request: unknown, operation: string, _bytes: Uint8Array, _limit: number, _signal?: AbortSignal) => ({
     response: {result: {status: operation}}, bytes: Buffer.from(JSON.stringify(operation === "resume" ? resume : operation === "settle" ? settlement : {applied: true})),
@@ -153,7 +156,7 @@ describe("private restore continuation", () => {
     ["resumed", []],
   ] as const)("continues from durable %s without repeating recorded phases", async (phase, operations) => {
     const f = fixture(phase);
-    await expect(f.run()).resolves.toEqual({kind: "resumed", proposalDigest: digest, receipt: f.base.resume});
+    await expect(f.run()).resolves.toEqual({kind: "resumed", proposalDigest: digest, receipt: f.base.resume, moved: false});
     expect(f.send.mock.calls.map(call => call[1])).toEqual(operations);
     expect(f.store.admitStopRestoreProposal).toHaveBeenCalledTimes(phase === null ? 1 : 0);
     for (const [, operation, bytes, limit] of f.send.mock.calls) {
@@ -164,6 +167,19 @@ describe("private restore continuation", () => {
       expect(header.settlementId).toBe(operation === "resume" ? "settlement" : undefined);
       expect(limit).toBe(config.maxBytes);
     }
+  });
+
+  // Proves: an unadmitted restore that Decline or a departed path ended is
+  // not admitted. Confirmation ends it through its host's cancellation first.
+  it.each(["cancel", "declined"] as const)("ends an unadmitted restore instead of admitting it: %s", async continuation => {
+    const f = fixture();
+    f.store.continueStopRestore.mockReturnValue(continuation);
+    await expect(f.run()).rejects.toThrow("The restore was declined.");
+    await expect(f.confirm()).rejects.toThrow("The restore was declined.");
+    expect(f.store.pendingStopRestoreCancellation).toHaveBeenCalledTimes(continuation === "cancel" ? 2 : 0);
+    expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
+    expect(f.store.admitReviewedStopRestoreProposal).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
   });
 
   it("refuses a changed proposal digest before sending", async () => {

@@ -202,13 +202,23 @@ export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; headS
   // another that records the same source.
   const meta = input.doc?.getMap('meta');
   const hasWitness = meta && ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'].some(key => meta.has(key));
-  const key = input.doc && hasWitness ? `session:${docId(input.doc)}:${metaRevision}:${sha}:${meta?.get('dohcMarkdownSourceProjectionSha256')}:${input.headSha256}` : null;
+  const projection = meta?.get('dohcMarkdownSourceProjectionSha256');
+  // As isLossyDocument decides, a file head other than the witnessed source
+  // is clear, so a save that moves the head never takes the editor away. Only
+  // a witness this open already checked counts: a change outside dohc can
+  // deliver its new witness before its new head.
+  const checked = useRef<{open: string; doc: Y.Doc; sha: unknown; projection: unknown} | null>(null);
+  const last = checked.current;
+  const headLeftSource = typeof input.headSha256 === 'string' && input.headSha256 !== sha
+    && last?.open === input.open && last.doc === input.doc && last.sha === sha && last.projection === projection;
+  const key = input.doc && hasWitness && !headLeftSource ? `session:${docId(input.doc)}:${metaRevision}:${sha}:${projection}:${input.headSha256}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
   const verdict = useVerdict(input.open, key, undefined, () => {
     if (!doc.current || input.headSha256 === undefined) return Promise.resolve(true);
     return ask({state: Y.encodeStateAsUpdate(doc.current), headSha256: input.headSha256}).then(answer => answer.lossy);
   });
+  if (verdict !== undefined && input.doc) checked.current = {open: input.open, doc: input.doc, sha, projection};
   if (key === null) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
 }

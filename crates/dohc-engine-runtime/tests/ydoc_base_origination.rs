@@ -3500,6 +3500,83 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
     );
 }
 
+/// Opus's low finding: open left a conflict a queued row had opened to its
+/// drain, then skipped that drain when the document's marker was not
+/// replicated, and opened the editor with the conflict still open. The
+/// conflict check runs after the drain whenever the earlier one left it
+/// there, so the open refuses with that conflict, drained or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_that_does_not_drain_still_refuses_the_conflict_its_queue_opened() {
+    const PATH: &str = "notes/undrained-conflict.md";
+    const OBJECT: &str = "undrained-conflict";
+    let a_scratch = ScratchDir::new().unwrap();
+    let b_scratch = ScratchDir::new().unwrap();
+    let a = engine_db_path(&a_scratch).unwrap();
+    let b = engine_db_path(&b_scratch).unwrap();
+    for (db, text, moment) in [
+        (&a, "local seed", "local-head"),
+        (&b, "remote seed", "remote-head"),
+    ] {
+        enable_sync(db, WS_TWO_DEVICES);
+        seed_shared_file(db, OBJECT, PATH, moment, text);
+    }
+    let key = open_and_type(&a, PATH, " plus local edit").await;
+    open_and_type(&b, PATH, " plus remote edit").await;
+    let a_ops = local_ydoc_ops(&a);
+    let b_ops = local_ydoc_ops(&b);
+    let remote = relayed(&b, &b_ops, "device-b", &[1, 3]);
+    {
+        let mut store = EngineStore::open(&a, 300).unwrap();
+        settle_head(&mut store, &key, PATH);
+        learn_own_base_position(&mut store, &key, &a_ops[0], 2);
+        deliver(&mut store, &remote, &AlwaysLive);
+        // A drain opened the conflict and stopped before its cleanup.
+        let (drained, _cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(drained.conflicts_opened > 0, "{drained:?}");
+        assert_eq!(deferred_rows(&store, &key), 2);
+        // Nothing lets an open drain it now.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET regime='local-only',lineage_claim_status='unclaimed', \
+                     lineage_claim_id=NULL,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL \
+                     WHERE object_id=?1",
+                    [OBJECT],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&a, 400).unwrap().actor;
+    let opened = handle
+        .ydoc_open_state(
+            WS_TWO_DEVICES.to_owned(),
+            500,
+            true,
+            Some(key.clone()),
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await;
+    match opened {
+        Err(RuntimeError::YdocOpenConflict { .. }) => {}
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("the editor opened with the conflict open"),
+    }
+    supervisor.close(&a).unwrap();
+    let store = EngineStore::open(&a, 600).unwrap();
+    assert_eq!(deferred_rows(&store, &key), 2, "nothing drained");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_review() {
     const PATH: &str = "notes/seed-conflict.md";
@@ -4148,6 +4225,7 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
         Ok(dohc_engine_sync::PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted: req.ops.len(),
             inserted: req.ops.len(),
             skipped: 0,

@@ -88,10 +88,11 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await expect(page.getByTestId("chats-manage-agent")).toBeVisible();
 
-    // The agent's screen states what runs it.
+    // A ready agent's chat opens on its conversation, with its settings in the header.
     await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
     await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
-    await expect(page.getByTestId("chats-agent-screen")).toBeVisible();
+    await expect(page.getByTestId("chats-agent-settings")).toBeVisible();
+    await expect(page.getByTestId("chats-agent-problem")).toHaveCount(0);
     await shoot(page, "agent-screen");
 
     // A question with choices is a poll; picking one answers it.

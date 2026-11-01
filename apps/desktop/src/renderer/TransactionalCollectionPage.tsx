@@ -459,7 +459,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         </div>
       </details> : null}
     </div>
-    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
+    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+      : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
@@ -495,7 +496,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         <IconButton title="Create record" aria-label="Create record" disabled={disabled} onClick={submitEditor}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
       </div></td></tr> : null}
       {createInRow && invalid ? <tr><td colSpan={columns} role="alert" className="px-3 py-1.5 text-[12px] text-danger">{invalid}</td></tr> : null}
-      {canCreate && !createInRow ? <tr><td colSpan={columns} className="p-0"><button ref={addRow} type="button" disabled={writeDisabled || editor !== null} className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50" onClick={event => openCreate(event.currentTarget)}><Plus size={14} strokeWidth={1.9} aria-hidden />New record</button></td></tr> : null}
+      {canCreate && !createInRow ? <tr><td colSpan={columns} className="p-0"><button ref={addRow} type="button" disabled={writeDisabled || editor !== null} className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink dohc-focus-row disabled:cursor-not-allowed disabled:opacity-50" onClick={event => openCreate(event.currentTarget)}><Plus size={14} strokeWidth={1.9} aria-hidden />New record</button></td></tr> : null}
     </tbody>
     </table></div> : null}
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}

@@ -607,6 +607,26 @@ describe("local dataset owner adapter", () => {
     expect(changes).toBe(3);
   });
 
+  // A read that finds a stopped move resumes it. Were a stop a change, the reads it sets off would resume the move again, without end.
+  it("tells the executor when a move fences a Collection and when it finishes, not when it stops", async () => {
+    let changes = 0, stopped = true;
+    const {host} = await open({onDatasetsChanged: () => { changes += 1; }}); await activate(host);
+    const target: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
+      for await (const _chunk of input.stream) { /* The server reads the whole archive before it answers. */ }
+      if (stopped) throw new Error("Sharing failed (502).");
+      return {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
+        targetCursor:{...input.sourceCursor,hostEpoch:"server-epoch",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
+    } };
+    const move = () => host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target});
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    stopped = false;
+    expect((await move()).state).toBe("imported");
+    expect(changes).toBe(3);
+  });
+
   it("lists every other dataset's rules when one dataset's rules cannot be read", async () => {
     const {host, workspaceRoot} = await open(), approved = await activate(host);
     const db = new DatabaseSync(join(workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));

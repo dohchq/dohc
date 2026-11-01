@@ -99,7 +99,7 @@ impl Worker {
             .current_dir(cwd.path())
             .arg("--permission")
             .arg(read_grant)
-            .arg("--max-old-space-size=256")
+            .arg("--max-old-space-size=512")
             .arg(&c.bundle)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -187,8 +187,14 @@ fn file_sha(file: &mut File, cap: u64, deadline: Instant) -> std::result::Result
                 .collect());
         }
         length += n as u64;
-        if length > cap || Instant::now() >= deadline {
+        if length > cap {
             return Err(Failure::Unavailable);
+        }
+        // A slow start is not a changed reader. Unavailable would close the
+        // reader for the life of the engine; a timeout lets the next request
+        // start it again.
+        if Instant::now() >= deadline {
+            return Err(Failure::TimedOut);
         }
         hasher.update(&buffer[..n]);
     }

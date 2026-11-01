@@ -1,13 +1,13 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, LoaderCircle, MessageSquare, Reply, RotateCw, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
   ChatDecisionRecord,
-  ChatDispatchStoppedRun,
+  ChatDispatchFailedRun,
   ChatMessageRecord,
   ChatReactionRecord,
   ChatRunRecord,
@@ -18,7 +18,6 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { SecondaryButton } from "../ui/controls";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -33,6 +32,7 @@ import {
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
+import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -86,58 +86,6 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
   );
 }
 
-// How a run dohc's restart or quit stopped ended, under each of its posts.
-// Try again shows where the run ended, while its request can run once more.
-function StoppedRunLine(props: {
-  stopped: ChatDispatchStoppedRun;
-  run?: ChatRunRecord;
-  askedBy?: ChatMessageRecord;
-  busy: boolean;
-  onRetry?: () => void;
-  className: string;
-}) {
-  return (
-    <div
-      data-testid="chats-run-stopped"
-      data-ending={props.stopped.ending}
-      className={`flex items-center gap-2 text-[11px] text-subtle ${props.className}`}
-    >
-      <span aria-hidden className="size-1.5 rounded-full bg-warning" />
-      <span role="status">{props.stopped.ending === "quit" ? "Stopped when dohc quit" : "Stopped when dohc restarted"}</span>
-      {props.onRetry ? (
-        <SecondaryButton
-          size="row"
-          data-testid="chats-run-try-again"
-          aria-disabled={props.busy || undefined}
-          aria-busy={props.busy || undefined}
-          onClick={props.busy ? undefined : props.onRetry}
-        >
-          {props.busy
-            ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
-            : <RotateCw size={12} aria-hidden />}
-          Try again
-        </SecondaryButton>
-      ) : null}
-      {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      {props.run ? <RunChip run={props.run} /> : null}
-    </div>
-  );
-}
-
-// The run's last post in the conversation, by when it was posted. Of two
-// posted at once, the later in the conversation wins.
-function lastPostOfRun(
-  runId: string,
-  runRecords: Record<string, ChatRunRecord>,
-  messages: readonly ChatMessageRecord[],
-): string | undefined {
-  let last: ChatMessageRecord | undefined;
-  for (const message of messages) {
-    if (runRecords[message.id]?.runId === runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
-  }
-  return last?.id;
-}
-
 // A poll's choices, stacked. Picking one is the answer. An answered poll
 // keeps its choices and marks the one taken.
 export function PollOptions(props: {
@@ -164,7 +112,7 @@ export function PollOptions(props: {
               disabled={!props.onChoose}
               aria-pressed={taken}
               onClick={() => props.onChoose?.(option)}
-              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
+              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
                   : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
@@ -222,7 +170,7 @@ export function DecisionStatus(props: {
             type="button"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
+            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink"
           >
             Answer
           </button>
@@ -313,7 +261,6 @@ function RunChip(props: { run: ChatRunRecord }) {
     };
   }, [open]);
 
-  const started = formatChatTime(props.run.startedAtMs);
   return (
     <span
       ref={containerRef}
@@ -327,7 +274,7 @@ function RunChip(props: { run: ChatRunRecord }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
@@ -338,50 +285,61 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Command</span>
-            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
-              {props.run.command}
-            </code>
-          </span>
-          <span className="grid grid-cols-2 gap-2">
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Started</span>
-              <time
-                data-testid="chats-run-started"
-                dateTime={started.iso}
-                className="text-[11px] tabular-nums text-ink"
-              >
-                {started.label}
-              </time>
-            </span>
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
-                {props.run.exitCode ?? "—"}
-              </span>
-            </span>
-          </span>
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Log</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
-                {props.run.logPath ?? "No log path"}
-              </code>
-              {props.run.logPath ? (
-                <CopyButton
-                  iconOnly
-                  testId="chats-run-copy-log"
-                  label="Copy log path"
-                  pinName
-                  getText={() => props.run.logPath ?? null}
-                />
-              ) : null}
-            </span>
-          </span>
+          <RunDetails run={props.run} />
         </span>
       ) : null}
     </span>
+  );
+}
+
+// What ran for an agent's reply: its command, when it started, how it
+// ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord }) {
+  const started = formatChatTime(props.run.startedAtMs);
+  return (
+    <>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Command</span>
+        <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
+          {props.run.command}
+        </code>
+      </span>
+      <span className="grid grid-cols-2 gap-2">
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Started</span>
+          <time
+            data-testid="chats-run-started"
+            dateTime={started.iso}
+            className="text-[11px] tabular-nums text-ink"
+          >
+            {started.label}
+          </time>
+        </span>
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Exit code</span>
+          <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
+            {props.run.exitCode ?? "—"}
+          </span>
+        </span>
+      </span>
+      <span className="grid gap-0.5">
+        <span className="text-[11px] text-muted">Log</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.logPath ?? "No log path"}
+          </code>
+          {props.run.logPath ? (
+            <CopyButton
+              iconOnly
+              testId="chats-run-copy-log"
+              label="Copy log path"
+              pinName
+              getText={() => props.run.logPath ?? null}
+            />
+          ) : null}
+        </span>
+      </span>
+    </>
   );
 }
 
@@ -405,7 +363,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -427,7 +385,7 @@ export function BookmarkAction(props: {
               event.stopPropagation();
               props.onToggle?.("live");
             }}
-            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
+            className={`grid size-6 place-items-center rounded disabled:opacity-50 ${
               props.active
                 ? "text-accent hover:bg-hover"
                 : "text-subtle hover:bg-hover hover:text-ink"
@@ -457,10 +415,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   threadLocked: boolean;
   flashMessageId: string | null;
   runRecords: Record<string, ChatRunRecord>;
-  // The conversation's latest run, when dohc's restart or quit stopped it.
-  stoppedRun: ChatDispatchStoppedRun | null;
-  stoppedRunBusy: boolean;
-  onRetryStoppedRun?: () => void;
+  // The conversation's run that didn't reply, and Try again for it.
+  failedRun: ChatDispatchFailedRun | null;
+  retryBusy: boolean;
+  onRetryFailedRun?: () => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -494,9 +452,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     threadLocked,
     flashMessageId,
     runRecords,
-    stoppedRun,
-    stoppedRunBusy,
-    onRetryStoppedRun,
+    failedRun,
+    retryBusy,
+    onRetryFailedRun,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -530,27 +488,24 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingIsAgent = openingMessage.authorKind === "agent";
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
-  // A stopped run ends under its last post, or under its request when it
-  // posted nothing.
-  const stoppedRunEnd = stoppedRun
-    ? lastPostOfRun(stoppedRun.runId, runRecords, messages) ?? stoppedRun.triggerMessageId
-    : null;
-  const ofStoppedRun = (messageId: string) =>
-    stoppedRun !== null && runRecords[messageId]?.runId === stoppedRun.runId;
-  // The opening post shows its run's chip in its own row, so its line leaves
-  // the run out.
-  const stoppedLine = (messageId: string, className: string, showRun: boolean) => {
-    if (!stoppedRun || !(ofStoppedRun(messageId) || messageId === stoppedRunEnd)) return null;
-    const run = showRun && ofStoppedRun(messageId) ? runRecords[messageId] : undefined;
+  const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
+  // Under the failed run's last post, its line takes the run's chip in. The
+  // opening post shows its chip in its own row, so its line leaves it out.
+  const failedLine = (messageId: string, className: string, showRun: boolean) => {
+    if (!failedRun || messageId !== failedEnd) return null;
+    const run = showRun && runRecords[messageId]?.runId === failedRun.runId ? runRecords[messageId] : undefined;
+    const askedBy = run ? automationAsking(run, messagesById) : undefined;
     return (
-      <StoppedRunLine
-        stopped={stoppedRun}
-        run={run}
-        askedBy={run ? automationAsking(run, messagesById) : undefined}
-        busy={stoppedRunBusy}
-        onRetry={messageId === stoppedRunEnd && stoppedRun.retryable ? onRetryStoppedRun : undefined}
+      <FailedRunLine
+        testIdPrefix="chats"
+        failed={failedRun}
+        busy={retryBusy}
+        onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
         className={className}
-      />
+      >
+        {askedBy ? <RunAskedBy message={askedBy} /> : null}
+        {run ? <RunChip run={run} /> : null}
+      </FailedRunLine>
     );
   };
 
@@ -607,7 +562,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
@@ -760,13 +715,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         </div>
         </AgentColorScope>
-        {runRecords[comment.id] && !ofStoppedRun(comment.id) ? (
+        {runRecords[comment.id] && comment.id !== failedEnd ? (
           <RunLine
             run={runRecords[comment.id]}
             askedBy={automationAsking(runRecords[comment.id], messagesById)}
           />
         ) : null}
-        {stoppedLine(comment.id, "mt-1 px-2", true)}
+        {failedLine(comment.id, "mt-1 px-2", true)}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
@@ -894,7 +849,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               ) : null}
             </div>
           ) : null}
-          {stoppedLine(openingMessage.id, "mt-2", false)}
+          {failedLine(openingMessage.id, "mt-2", false)}
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}

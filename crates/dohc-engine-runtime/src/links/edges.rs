@@ -80,6 +80,10 @@ fn markdown(path: &str) -> bool {
         "md" | "markdown" | "mdx"
     )
 }
+fn drawing(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("excalidraw"))
+}
 fn corrupt() -> StorageError {
     StorageError::InvalidInput {
         reason: "invalid or stale links.edges cursor or metadata",
@@ -190,12 +194,15 @@ impl ActorHandle {
                     last = Position { path:source.path.clone(), object:source.object.clone(), key:source.key.clone(),
                         ordinal:-1,incomplete:last.incomplete,building,..Default::default() };
                 }
-                if !markdown(&source.path) { last.finished = true; continue; }
+                let drawing = drawing(&source.path);
+                if !drawing && !markdown(&source.path) { last.finished = true; continue; }
                 if !last.emitted {
                     let title = if source.title.is_empty() { source.path.rsplit('/').next().unwrap_or(&source.path) } else { &source.title };
                     if !add(&mut page,"files",json!({"path":source.path,"objectId":source.object,"title":title})) { stopped=true; break; }
                     last.emitted = true;
                 }
+                // The parser records no links from drawings, so none is ever unchecked.
+                if drawing { last.finished = true; continue; }
                 if source.key.is_none() {
                     last.incomplete = true;
                     if !add(&mut page,"unchecked",json!(source.path)) { stopped=true; break; }

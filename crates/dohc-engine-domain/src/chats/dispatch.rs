@@ -268,13 +268,17 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "dispatch claim raced its own pending row",
                 });
             }
-            // Cover the agent's every trigger pending in this thread at claim
-            // time under one run.
+            // Cover the agent's every trigger pending at claim time in the same
+            // place under one run: the main stream, or one message's thread.
             tx.execute(
                 "UPDATE chat_dispatch_ledger \
                  SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, updated_at_ms = ?5 \
-                 WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?3 AND state = 'pending'",
-                params![ws, thread_id, agent_id, run, now_ms],
+                 WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?3 AND state = 'pending' \
+                   AND (SELECT m.parent_message_id FROM chat_messages m \
+                        WHERE m.workspace_id = ?1 AND m.message_id = chat_dispatch_ledger.trigger_message_id) \
+                    IS (SELECT m.parent_message_id FROM chat_messages m \
+                        WHERE m.workspace_id = ?1 AND m.message_id = ?6)",
+                params![ws, thread_id, agent_id, run, now_ms, trigger],
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(

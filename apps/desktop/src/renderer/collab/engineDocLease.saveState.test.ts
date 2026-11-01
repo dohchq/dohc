@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { liveStopError } from "../../ipc/liveEditingStop";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -8,6 +9,8 @@ import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftSt
 import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
+import { HOST_STOP_CASES, hostStopWireError } from "../../testing/liveStopHost.test-helper";
+import { pendingStopHarness } from "../../testing/ownerLiveStop.test-helper";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 import {
@@ -114,6 +117,33 @@ beforeEach(() => {
   projectionGate.pending = null;
   projectionGate.completed = 0;
   projectionGate.held = null;
+});
+
+it.each([
+  ["edits-pending", liveStopError({code: "edits-pending"}), "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."],
+  ...HOST_STOP_CASES.map(([code, sessionHost, words]) => [code, hostStopWireError(code, sessionHost, "untrusted relay text"), words] as const),
+] as const)("reopens editors and clears the recorded Stop after %s", async (_code, refusal, words) => {
+  retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  act(() => editDocument());
+  const h = pendingStopHarness("ws-1", "notes/big.md", "object");
+  h.relay.mockRejectedValueOnce(refusal);
+  await act(async () => {
+    await expect(withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, async () => {
+      expect(harness.mainText()).toBe("seed!");
+      expect(harness.closed).toContain(previous);
+      expect(retained.snapshot.outcome).toBeNull();
+      await h.actions.stop({workspaceId: "ws-1", path: "notes/big.md"}, {workspace: {workspaceId: "ws-1"}, assertCurrent() {}});
+    })).rejects.toThrow(words);
+  });
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+  expect(harness.sessionId()).not.toBe(previous);
+  expect(h.recorded()).toBeUndefined();
+  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  expect(h.ownerLiveStop).toHaveBeenLastCalledWith({workspaceId: "ws-1"}, "clear", "notes/big.md", h.document);
+  act(() => editDocument());
+  await waitFor(() => expect(harness.mainText()).toBe("seed!!"));
 });
 
 it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {

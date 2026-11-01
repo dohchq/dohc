@@ -13,6 +13,7 @@ fn actor(scratch: &ScratchDir) -> WorkspaceActor {
         1,
         0,
         None,
+        Default::default(),
     )
     .unwrap()
 }
@@ -230,7 +231,7 @@ fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
     let db = dir.join("engine.db");
     drop(EngineStore::open(&db, 0).unwrap());
     let identity = EngineDbIdentity::of_existing(&db).unwrap();
-    let mut actor = WorkspaceActor::spawn(db, identity, 1, 0, None).unwrap();
+    let mut actor = WorkspaceActor::spawn(db, identity, 1, 0, None, Default::default()).unwrap();
     add_sources(&actor, &scratch, 1);
     std::fs::write(engine.join("displaced/worker-0"), b"outside").unwrap();
     std::fs::rename(&engine, scratch.path().join(".dohc/moved")).unwrap();
@@ -318,6 +319,7 @@ fn passive_store_never_spawns_a_retention_worker_even_after_root_binding() {
         0,
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     assert!(actor.retention.is_none());

@@ -26,6 +26,9 @@ export function AgentBadge(props: {
   // The agent's token where its avatar shows, so the sparkle takes the avatar's hue.
   // Its `self` says the message is your person's, which a name alone never proves.
   presentation?: ActorPresentation;
+  // What shows in place of the sparkle, such as the agent's face, which
+  // then says whose agent it is on hover or focus.
+  children?: ReactNode;
 }) {
   const settings = useContext(AgentSettingsContext);
   const ink = useAgentInk(props.presentation);
@@ -62,7 +65,7 @@ export function AgentBadge(props: {
         }}
         className="inline-flex rounded"
       >
-        <Sparkles size={12} strokeWidth={1.9} aria-hidden />
+        {props.children ?? <Sparkles size={12} strokeWidth={1.9} aria-hidden />}
         <span className="sr-only">agent</span>
       </span>
       {open ? (

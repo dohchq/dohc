@@ -132,7 +132,7 @@ export function FeedReactionPill(props: {
         event.stopPropagation();
         props.onClick(event);
       }}
-      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
+      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
     >
       <span aria-hidden>{props.emoji}</span>
       <span className="tabular-nums">{props.count}</span>
@@ -240,7 +240,7 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-visible focus-visible:rounded-lg focus-visible:-outline-offset-2`}
+      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-row focus-visible:rounded-lg`}
     >
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The row itself is the semantic button. */}

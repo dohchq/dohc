@@ -2912,8 +2912,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     dispatch.runId = runId;
     dispatch.attemptCount += 1;
     dispatch.updatedAtMs = atMs;
+    // Fold only triggers from the same place: the main stream, or one message's thread.
+    const place = (messageId: string) => state.messages.get(messageId)?.parentMessageId ?? null;
     for (const other of state.dispatches.values()) {
-      if (other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending") {
+      if (
+        other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending" &&
+        place(other.triggerMessageId) === place(dispatch.triggerMessageId)
+      ) {
         other.state = "done";
         other.runId = runId;
         other.attemptCount += 1;

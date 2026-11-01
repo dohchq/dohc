@@ -970,6 +970,41 @@ describe("ChatsLiveAdapter", () => {
     }
   });
 
+  it("folds pending requests only from the same place: the stream, or one message's thread", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      messageId: "main-1", author, body: "First", namedAgentIds: ["codex"],
+    });
+    for (const [messageId, parentMessageId] of [
+      ["main-2", undefined], ["a-1", "main-1"], ["a-2", "main-1"], ["b-1", "main-2"],
+    ] as const) {
+      await adapter.sendMessage({
+        authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+        messageId, author, body: messageId, namedAgentIds: ["codex"],
+        ...(parentMessageId ? { parentMessageId } : {}),
+      });
+    }
+    const claimed: string[] = [];
+    for (let run = 0; run < 3; run += 1) {
+      const claim = await adapter.claimNextPending("workspace");
+      claimed.push(claim!.dispatch.triggerMessageId);
+      await adapter.completeRun({ runId: claim!.run.runId, exitCode: 0 });
+    }
+    expect(claimed).toEqual(["main-1", "a-1", "b-1"]);
+    const runOf = (trigger: string) => loopback.readDispatch(WORKSPACE, trigger, "codex")?.runId;
+    expect(runOf("main-2")).toBe(runOf("main-1"));
+    expect(runOf("a-2")).toBe(runOf("a-1"));
+    expect(new Set(["main-1", "a-1", "b-1"].map(runOf)).size).toBe(3);
+  });
+
   it("uses a fresh idempotency key for added, removed, then added reaction transitions", async () => {
     const loopback = new ChatsLoopbackEngine();
     const requests: Request[] = [];

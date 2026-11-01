@@ -223,6 +223,8 @@ describe("ended Edit Collection shares", () => {
       datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "remote/dataset.json", name: "Remote", revision: 1,
       revisionSha256: "a".repeat(64), operations: [], tables: [{ tableId: "00000000-0000-4000-8000-000000000002", name: "Remote table", fields: [] }],
     }], nextCursor: null });
+    // Home lists the Collections.
+    bridge.getWorkspaceUiState.mockResolvedValue({ ...storedStateWithTabs([collectionTabPath("tasks")]), explorerMode: "home" });
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
     await screen.findByText("Remote table");

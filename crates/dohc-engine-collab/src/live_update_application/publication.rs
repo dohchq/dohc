@@ -99,7 +99,7 @@ pub(crate) fn adoption_contains_predecessor_in(
     };
     let result = (|| {
         let cursor: Option<i64> = conn.query_row(
-            "SELECT terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0",
+            &format!("SELECT terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND binding_json=?6 AND terminal_cursor>0", owner_activations::CURRENT_ACTIVATIONS),
             params![namespace, key.workspace_id, key.version_id, key.object_id, binding.lineage_claim_id,
                 serde_json::to_string(binding).map_err(|_| ApplicationError::Corrupt)?],
             |row| row.get(0),
@@ -227,9 +227,7 @@ pub(crate) fn require_restore_registration_in(
 
 /// The text restore_fence::require_registration reads from the document's newest fence.
 fn fence_registration(document: &str) -> String {
-    format!(
-        "coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)"
-    )
+    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0)+CASE WHEN cancelled_json IS NULL THEN 0 ELSE length(CAST(cancelled_json AS BLOB))+length(CAST(input_json AS BLOB))+length(CAST(receipt_json AS BLOB)) END FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
 }
 
 fn charge_sql(
@@ -304,6 +302,7 @@ fn registration_in(
                         instance_id: row.get(7)?,
                         connection_id: row.get(8)?,
                     },
+                    activation_id: None,
                     live: row.get::<_, i64>(9)? == 1,
                 })
             },

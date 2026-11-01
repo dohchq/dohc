@@ -217,6 +217,12 @@ export function createDeviceLiveDelivery(options: {
       if (!consumer) throw new Error("Workspace is not configured on this device host.");
       return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.completeRestore(lookup, proposalDigest, joined));
     },
+    async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+      requireReady();
+      const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+      if (!consumer) throw new Error("Workspace is not configured on this device host.");
+      return runDocument(consumer.documentForRestore(lookup), signal, joined => consumer.declineRestore(lookup, joined));
+    },
     async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
       requireReady();
       const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);

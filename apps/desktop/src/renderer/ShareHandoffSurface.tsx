@@ -19,12 +19,16 @@ const BUSY_COPY =
   "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
+// A Group invitation or message request waits in Chats.
+const CHATS_COPY = "Find it in Chats, in a workspace of your own.";
+const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces first.`;
 
 type ReceivedShareState =
   | { kind: "idle" }
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
+  | { kind: "chats"; shareId: string }
   | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
 
 function HandoffCard(props: {
@@ -56,6 +60,8 @@ export function ShareHandoffSurface(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
   onBack: () => void;
   onOpened: () => void;
+  // Whether the person has a workspace of their own, not only shared views.
+  ownWorkspace?: boolean;
   mountInto?: {
     workspaceId: string;
     onMounted: (label: string, access: ShareAccess | null) => void;
@@ -88,9 +94,11 @@ export function ShareHandoffSurface(props: {
       .then((result) => {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
-          result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) }
-            : { kind: "missing", shareId },
+          !result.found
+            ? { kind: "missing", shareId }
+            : "chats" in result
+              ? { kind: "chats", shareId }
+              : { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) },
         );
       })
       .catch(() => {
@@ -234,6 +242,19 @@ export function ShareHandoffSurface(props: {
         >
           Check again
         </SecondaryButton>
+      </HandoffCard>
+    );
+  }
+
+  if (
+    receivedShare.kind === "chats" &&
+    receivedShare.shareId === shareId
+  ) {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="status" data-testid="handoff-opens-in-chats" className="m-0 text-xs leading-relaxed text-muted">
+          {props.ownWorkspace ? CHATS_COPY : NO_OWN_WORKSPACE_COPY}
+        </p>
       </HandoffCard>
     );
   }

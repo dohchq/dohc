@@ -13,6 +13,10 @@ afterEach(() => {
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
+    recentFiles: [],
     files: [
       { path: "apps/reading-list/index.html", kind: "file" },
       { path: "notes.md", kind: "file" },

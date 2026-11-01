@@ -7,11 +7,14 @@ if (host) {
   const status = host.querySelector<HTMLElement>("[data-demo-status]");
   const retry = host.querySelector<HTMLButtonElement>("[data-demo-retry]");
   let reactRoot: Root | undefined;
+  let stopKeyboardNavigation: (() => void) | undefined;
   const failed = (error: unknown) => {
     console.error("Unable to load the interactive dohc demo", error);
     queueMicrotask(() => {
       reactRoot?.unmount();
       reactRoot = undefined;
+      stopKeyboardNavigation?.();
+      stopKeyboardNavigation = undefined;
       host.shadowRoot?.replaceChildren(document.createElement("slot"));
       mounted = false;
       if (status) status.textContent = "The demo could not load. Try again.";
@@ -33,6 +36,7 @@ if (host) {
         { hydrateDemoWorkspaceAssets },
         { createRoot },
         { createElement },
+        { initKeyboardNavigation },
       ] = await Promise.all([
         import("@fontsource-variable/inter/index.css"),
         import("@fontsource/ibm-plex-mono/400.css"),
@@ -42,6 +46,7 @@ if (host) {
         import("./demoDesktopBridge"),
         import("react-dom/client"),
         import("react"),
+        import("../../desktop/src/renderer/keyboardNavigation"),
       ]);
       await hydrateDemoWorkspaceAssets();
       // Browsers ignore @property inside a shadow root, which leaves
@@ -60,6 +65,8 @@ if (host) {
       root.id = "root";
       root.style.height = "100%";
       shadow.replaceChildren(style, root);
+      // The demo's focus shows only while the keyboard moves, as in the app.
+      stopKeyboardNavigation = initKeyboardNavigation(root);
       reactRoot = createRoot(root, { onUncaughtError: failed });
       reactRoot.render(createElement(ProductDemo));
       return true;

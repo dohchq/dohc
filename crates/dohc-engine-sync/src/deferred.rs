@@ -200,6 +200,26 @@ pub(crate) fn release_hosted_in_tx(
     Ok(first)
 }
 
+/// The relay namespace a hosted replica recorded when it retained `op`, or
+/// none when it recorded none; `None` when nothing hosted retains `op`. A
+/// replay decides under the feed the op arrived on, never the current one.
+pub(crate) fn retained_namespace(
+    store: &EngineStore,
+    op: &ReplicationEnvelope,
+) -> Result<Option<Option<String>>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT relay_namespace FROM relay_deferred_ops WHERE workspace_id=?1 \
+                 AND origin_id=?2 AND origin_seq=?3 AND ingress_kind<>'local'",
+                params![op.workspace_id, op.origin_id, op.origin_seq],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+        .map_err(local)
+}
+
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
     store
         .read_with(|conn| {
@@ -236,13 +256,17 @@ pub(crate) fn check_redelivery(
 /// Retain `ops` within the workspace's limit. Past it, an ordinary replica
 /// fails and retains nothing. A hosted replica never fails: a document whose
 /// next op would pass it retains no more, and is answered so its read can
-/// stop at that op instead.
+/// stop at that op instead. Each hosted op records the feed it arrived on,
+/// `relay_namespace` as the pull's trusted configuration names it; a hosted
+/// pull it names none for retains nothing and fails.
 pub(crate) fn retain(
     store: &mut EngineStore,
     identity: &SyncIdentity,
+    relay_namespace: Option<&str>,
     ops: &[&ReplicationEnvelope],
     faults: &dyn FaultInjector,
 ) -> Result<BTreeSet<String>, RelayError> {
+    let relay_namespace = relay_namespace.filter(|namespace| !namespace.is_empty());
     if ops.is_empty() {
         return Ok(BTreeSet::new());
     }
@@ -274,7 +298,7 @@ pub(crate) fn retain(
                 let object_id = crate::hosted::hosted_document(op).ok_or(SyncError::InvalidInput {
                     reason: "a hosted replica retains only its documents' work",
                 })?;
-                let relay_seq = op.relay_seq.ok_or(SyncError::InvalidInput {
+                let relay_seq = op.relay_seq.filter(|seq| *seq > 0).ok_or(SyncError::InvalidInput {
                     reason: "retained hosted work has no relay position",
                 })?;
                 Some((object_id, relay_seq))
@@ -301,6 +325,13 @@ pub(crate) fn retain(
                 }
             }
             let cost = json.len() as i64 + charged.iter().map(|(_, _, bytes)| bytes).sum::<i64>();
+            // A hosted pull no configured host names a feed for fails
+            // rather than stop at the same op on every pass.
+            if hosted && relay_namespace.is_none() {
+                return Err(SyncError::RetryableState {
+                    reason: crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED,
+                });
+            }
             if count >= MAX_PENDING_OPS || bytes + cost > MAX_PENDING_BYTES {
                 match placed {
                     Some((object_id, _)) => {
@@ -323,11 +354,14 @@ pub(crate) fn retain(
                     params![op.workspace_id,op.origin_id], |r| r.get(0)),
             }.map_err(SyncError::corrupt)?;
             let inserted = tx.execute(
-                "INSERT OR IGNORE INTO relay_deferred_ops
-                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
+                "INSERT INTO relay_deferred_ops
+                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence,
+                  ingress_kind,relay_namespace)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,
-                    COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
-                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,cost,turn])
+                    COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0),?9,?10)
+                 ON CONFLICT DO NOTHING",
+                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,cost,turn,
+                    if hosted { "hosted" } else { "local" }, relay_namespace.filter(|_| hosted)])
                 .map_err(SyncError::persist)?;
             if inserted == 0 { continue; }
             if let Some((object_id, relay_seq)) = placed {

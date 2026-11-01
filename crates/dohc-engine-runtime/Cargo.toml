@@ -11,6 +11,9 @@ description = "Workspace actor runtime for the engine: one actor per engine.db o
 # Forwards the storage crash-injection seam so a build that arms faults (the
 # testkit / `cargo test --workspace`) also arms them under the actor loop.
 fault-injection = ["dohc-engine-storage/fault-injection", "dohc-engine-domain/fault-injection"]
+# Relay requests answered by a test's own transport, and hooks for measurements
+# that compare revisions. Production builds must not enable this feature.
+test-support = ["dohc-engine-storage/test-support"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -65,6 +68,7 @@ winapi-util = "=0.1.11"
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 base64 = "0.22"
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
+dohc-engine-runtime = { path = ".", features = ["test-support"] }
 yrs = "=0.27.3"
 tokio = { version = "1", features = [
   "sync",

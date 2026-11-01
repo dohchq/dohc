@@ -7,6 +7,7 @@ import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -227,7 +228,7 @@ test("an agent's question with choices is a poll; picking one answers it and the
   }
 });
 
-test("a runner that exits silently leaves the thread alone and posts a failed-run notice", async () => {
+test("a runner that exits silently says why under the message and posts a notice", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-dispatch-failure-e2e";
@@ -244,20 +245,68 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
+    // The failure's toast sits above the message box, so Send stays in reach.
+    const toasts = page.getByTestId("notice-toasts");
+    await expect(toasts).toContainText("Nova didn't reply");
+    // The same words sit under the message that asked. Nothing can run it
+    // again today, so the line offers no Try again.
+    const line = page.getByTestId("chats-lane-run-failed");
+    await expect(line).toHaveText("Nova didn't reply. Its run ended with an error.");
+    await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
+    await waitForVisibleAnimations(page);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
+      }
+    }
+    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
+    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
+    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
+    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
+
     // The failure is a row in Notices. The conversation keeps only what
     // people and the agent wrote, so once the notice is there it still holds
     // one message.
     await page.getByTestId("notice-center-toggle").click();
-    // "failed", not "failed to start": the runner started, then exited silently.
-    await expect(page.getByTestId("notice-center").getByText(
-      // An agent DM's conversation has no title, so the title names no thread.
-      "Nova's run failed",
-      { exact: true },
-    )).toBeVisible();
+    // An agent DM's conversation has no title, so the title names no thread.
+    const center = page.getByTestId("notice-center");
+    await expect(center.getByText("Nova didn't reply", { exact: true })).toBeVisible();
+    await expect(center.getByText("Its run ended with an error.", { exact: true })).toBeVisible();
     const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
     await expect(messages.getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "human");
     await expect(messages).toContainText("audit the projections");
+
+    // The message's thread repeats the line under it.
+    await page.keyboard.press("Escape");
+    await messages.hover();
+    await page.getByTestId("chats-lane-reply-in-thread").click();
+    const panel = page.getByTestId("chats-lane-thread-panel");
+    await expect(panel.getByTestId("chats-lane-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `thread-run-failed-${theme}.png`) });
+      }
+    }
+
+    // A post in a group says the same under its opening message.
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `post-run-failed-${theme}.png`) });
+      }
+    }
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

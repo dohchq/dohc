@@ -113,6 +113,7 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         reportFailureMessage={() => undefined}
         historyRevision={0}
         openMoment={() => undefined}
+        openHistory={() => undefined}
         linksRevision={0}
         openPathAtLine={() => undefined}
         openChatMention={() => undefined}
@@ -194,9 +195,7 @@ describe("About for an open conversation", () => {
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     await userEvent.setup().click(await screen.findByTestId("about-access-toggle"));
-    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
-      "No share from this workspace includes this chat.",
-    );
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
     expect(bridgeMock.getObjectAccess).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
       ref: { kind: "chat", channelWireId: "wire-general" },
@@ -325,7 +324,8 @@ describe("About for an open conversation", () => {
   });
 
   it("keeps Access open across conversations, though the next one loads first", async () => {
-    bridgeMock.getObjectAccess.mockResolvedValue(answer());
+    // A stale answer keeps its check line, so the head stays a disclosure.
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...answer(), freshness: "stale" });
     publish("workspace-a", GENERAL, conversation({}));
     const { rerender } = render(<Rail />);
     await userEvent.setup().click(await screen.findByTestId("about-access-toggle"));
@@ -424,7 +424,7 @@ describe("Links for an open conversation", () => {
     await waitFor(() => expect(document.activeElement?.getAttribute("data-path")).toBe("notes/plan.md"));
   });
 
-  it("offers only Show more for a page with no files it may show, and says the list is empty once the pages end", async () => {
+  it("offers only Show more for a page with no files it may show, and draws only the head once the pages end", async () => {
     bridgeMock.chatLinks
       .mockResolvedValueOnce(linksPage([], { nextCursor: "next" }))
       .mockResolvedValueOnce(linksPage([]));
@@ -432,13 +432,10 @@ describe("Links for an open conversation", () => {
     render(<Rail />);
     const more = await screen.findByTestId("about-conversation-links-more");
     expect(count()).toBe("0+");
-    expect(screen.queryByTestId("about-conversation-links-empty")).toBeNull();
     await userEvent.setup().click(more);
-    expect((await screen.findByTestId("about-conversation-links-empty")).textContent).toBe(
-      "No files mentioned here yet. Type / in a message to add one.",
-    );
+    await waitFor(() => expect(screen.queryByTestId("about-conversation-links-more")).toBeNull());
     expect(count()).toBe("0");
-    expect(screen.queryByTestId("about-conversation-links-more")).toBeNull();
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
   it("names an agent or an automation as one to a screen reader, as the avatar shows it", async () => {
@@ -457,14 +454,13 @@ describe("Links for an open conversation", () => {
     expect(words.map((word) => [word.textContent, word.className])).toEqual([["agent ", "sr-only"], ["automation ", "sr-only"]]);
   });
 
-  it("says how to mention a file when the conversation mentions none, and never names a file it did not list", async () => {
+  it("draws only the head when the conversation mentions no file, and never names a file it did not list", async () => {
     bridgeMock.chatLinks.mockResolvedValue(linksPage([], { unchecked: ["private/salaries.md"] }));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
-    expect((await screen.findByTestId("about-conversation-links-empty")).textContent).toBe(
-      "No files mentioned here yet. Type / in a message to add one.",
-    );
-    expect(count()).toBe("0");
+    await waitFor(() => expect(bridgeMock.chatLinks).toHaveBeenCalled());
+    await waitFor(() => expect(count()).toBe("0"));
+    expect(screen.queryByTestId("about-links-toggle")).toBeNull();
     expect(screen.queryByText(/salaries/)).toBeNull();
   });
 
@@ -494,7 +490,6 @@ describe("Links for an open conversation", () => {
     expect((await screen.findByTestId("about-conversation-links-partial")).textContent).toBe(
       "This list may not include every file mentioned here.",
     );
-    expect(screen.queryByTestId("about-conversation-links-empty")).toBeNull();
   });
 
   it("files a failed read in Notices with Try again, and a read that lands clears it", async () => {
@@ -530,7 +525,7 @@ describe("Links for an open conversation", () => {
     // Notices' Try again reads the conversation again.
     bridgeMock.chatLinks.mockResolvedValueOnce(linksPage([]));
     act(() => (notices.report.mock.calls[0]![0] as { retry: () => void }).retry());
-    await screen.findByTestId("about-conversation-links-empty");
+    await waitFor(() => expect(linkRows()).toHaveLength(0));
   });
 
   it("says dohc does not list a conversation main has no Links for, and files no row", async () => {
@@ -581,6 +576,7 @@ describe("Links for an open conversation", () => {
   );
 
   it("reads nothing before the page says what it shows, or while Links is closed, which it stays", async () => {
+    bridgeMock.chatLinks.mockResolvedValue(linksPage([mention("notes/plan.md", SAM, 1)]));
     const { rerender } = render(<Rail />);
     expect(screen.getByText("Loading About...")).toBeTruthy();
     expect(bridgeMock.chatLinks).not.toHaveBeenCalled();

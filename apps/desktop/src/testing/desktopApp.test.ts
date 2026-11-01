@@ -21,7 +21,8 @@ vi.mock("node:fs", async (original) => ({
   existsSync: () => true,
 }));
 
-import { launchDesktopApp } from "../../e2e/helpers/desktopApp";
+import type { Page } from "@playwright/test";
+import { launchDesktopApp, waitForPaintedFrames } from "../../e2e/helpers/desktopApp";
 
 afterEach(() => {
   if (fixture.output) rmSync(fixture.output, { recursive: true, force: true });
@@ -34,7 +35,10 @@ test("desktop evidence decodes split UTF-8 independently on stdout and stderr", 
   const stderr = new PassThrough();
   const child = { pid: 42, stdout, stderr };
   const page = { on: vi.fn(), isClosed: () => true };
-  const app = { process: () => child, firstWindow: async () => page, evaluate: async () => 43 };
+  const app = {
+    process: () => child, firstWindow: async () => page, evaluate: async () => 43,
+    browserWindow: async () => ({ evaluate: async () => true, dispose: async () => undefined }),
+  };
   fixture.launch.mockResolvedValue(app);
   fixture.close.mockImplementation(async () => {
     stdout.end(); stderr.end();
@@ -70,4 +74,21 @@ test("failed desktop launch gives cleanup the renderer and teardown budget", asy
     baseDir: fixture.output, homeDir: fixture.output, rootPath: fixture.output,
   } })).rejects.toBe(failure);
   expect(fixture.close).toHaveBeenCalledExactlyOnceWith(app, child, 10_000);
+});
+
+test("a click helper stops after 5 s without frames and reports the page's state", async () => {
+  vi.useFakeTimers();
+  try {
+    const evaluate = vi.fn()
+      .mockReturnValueOnce(new Promise(() => undefined))
+      .mockResolvedValueOnce({ visibilityState: "visible", hasFocus: false });
+    const waiting = expect(waitForPaintedFrames({ evaluate } as unknown as Page)).rejects.toThrow(
+      "The desktop window didn't get two animation frames within 5 s, so Playwright can't click in it. "
+      + 'Page: {"visibilityState":"visible","hasFocus":false}. Window: unknown, not launched by launchDesktopApp.',
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    await waiting;
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -54,6 +54,10 @@ _Avoid_: version (the line of history that holds moments), snapshot (a file's cu
 
 ### Notes
 
+**Page**:
+A Markdown file in a workspace, shown with its title and icon. The Explorer's Home lists pages by their folders. A page open in an editor is a live document.
+_Avoid_: document (in the interface), doc
+
 **Lossy note**:
 A Markdown note whose meaning would change if dohc saved it from its editor, because the editor can't hold some of its parts, such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens and opens a lossy note read-only.
 _Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
@@ -114,6 +118,10 @@ The canonical server URL that distinguishes account identities from different se
 **Group**:
 A named space with members where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
+
+**Comment**:
+A chat about one file, started from the file's About. Its first message is the comment and its replies continue as chat. The share's discussion, which Comment share access adds, is separate.
+_Avoid_: linked chat, file chat (in the interface)
 
 ### Sharing
 

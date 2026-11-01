@@ -15,10 +15,10 @@ export default async function prepareEngineReaderMacOS(context, { chmod: setMode
   for (const entry of await readdir(base)) {
     if (![generation, "selection.json", "node-LICENSE.txt"].includes(entry)) await rm(join(base, entry), { recursive: true, force: true });
   }
-  await setMode(join(base, "selection.json"), 0o444);
-  await setMode(config.manifest, 0o444);
-  await setMode(config.bundle, 0o444);
-  await setMode(config.node, 0o555);
+  await setMode(join(base, "selection.json"), 0o644);
+  await setMode(config.manifest, 0o644);
+  await setMode(config.bundle, 0o644);
+  await setMode(config.node, 0o755);
   await setMode(root, 0o755);
   await setMode(base, 0o755);
 }

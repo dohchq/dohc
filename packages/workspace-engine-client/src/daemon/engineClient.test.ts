@@ -8,6 +8,7 @@ import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
+import { encodeReplicaJournalPage, type ReplicaRestoreCancellation } from "./replicaJournal";
 import {
   EngineClient,
   EngineClientError,
@@ -77,6 +78,26 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
     expect(field()).toEqual(Buffer.from(update));expect(field()).toEqual(Buffer.from(checkpoint));expect(offset).toBe(bytes.length);
     expect(chunks.length).toBeGreaterThan(1);
   } finally {transport.close();}
+});
+
+// A cancellation control entry keeps its place among the rows and adds no span.
+it("encodes a replica cancellation entry in order and without byte spans", () => {
+  const update=Uint8Array.from([1,2,3]), binding={workspaceId:"ws",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1};
+  const metadata={accepted:{receipt:{deliveryId:"replica",updateDigest:createHash("sha256").update(update).digest("hex"),journalCursor:9,acceptingHostEpoch:parseHostEpoch(1)},
+    binding,authority:{principalKind:"owner" as const,principalId:"owner",grantId:null,grantGeneration:null},receivedAtMs:10},firstSeen:[]};
+  const cancellation:ReplicaRestoreCancellation={relayDatabaseNamespace:"relay",journalCursor:8,cancellation:{
+    fence:{operation:{point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...binding,restoreFenceGeneration:0},hostId:"host",newFence:1,
+      origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
+    binding,endpoint:{terminalReceipt:null,eventCount:0,historyEvidenceDigest:"b".repeat(64)},recordedAtMs:11},
+    authority:{lineageClaimId:binding.lineageClaimId,baselineSequence:1,restoreFenceGeneration:1}};
+  const bytes=encodeReplicaJournalPage([cancellation,{admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"c".repeat(64),journalCursor:9,authority:null,restore:null}]);
+  let offset=0;
+  const field=()=>{const size=bytes.readUInt32LE(offset);offset+=4;const value=bytes.subarray(offset,offset+size);offset+=size;return value;};
+  const entries=JSON.parse(field().toString());
+  expect(entries[0]).toEqual(cancellation);
+  expect(entries[1].admitted).toEqual({metadata,updateBytes:[]});
+  expect(field()).toEqual(Buffer.from(update));
+  expect(offset).toBe(bytes.length);
 });
 
 describe("private owner delivery transport", () => {
@@ -3224,6 +3245,94 @@ describe("EngineClient", () => {
     expect(onBlob).toHaveBeenCalledWith(
       expect.objectContaining({ streamId: 83, bytes: Buffer.from("abcdef") }),
     );
+    transport.close();
+  });
+
+  it("frees an abandoned request's mid-stream blob allocation and drops its late frames", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    const controller = new AbortController();
+    const stopped = new Error("caller left");
+    const abandoned = transport.sendRequest(request(26, "blob.abandoned"), controller.signal);
+    const rejected = expect(abandoned).rejects.toBe(stopped);
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 1, streamId: 84, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("abc"), false));
+    controller.abort(stopped);
+    await rejected;
+    expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+
+    // The engine stops at a frame boundary: one more chunk, then its cancellation.
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("de"), false));
+    peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "cancelled", retry: "no" } });
+
+    const following = transport.sendRequest(request(27, "blob.after.abandon"));
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 2, streamId: 85, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(85, Buffer.from("abcdef"), true));
+    peer.send({ type: "response", id: 2, result: null });
+
+    await expect(following).resolves.toMatchObject({ id: 27 });
+    expect(onBlob).toHaveBeenCalledOnce();
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 85, bytes: Buffer.from("abcdef") }),
+    );
+    transport.close();
+  });
+
+  it("forgets an abandoned request's streams at its answer, however many are abandoned", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    // Each is abandoned mid-stream, and the engine's cancellation, which
+    // carries no FIN, ends it.
+    for (const wireId of [1, 2, 3]) {
+      const controller = new AbortController();
+      const stopped = new Error("caller left");
+      const abandoned = transport.sendRequest(request(40 + wireId, "blob.abandoned"), controller.signal);
+      const rejected = expect(abandoned).rejects.toBe(stopped);
+      await nextImmediate();
+      peer.send({ type: "blobStart", requestId: wireId, streamId: 90 + wireId, totalBytes: 6, sha256: null });
+      peer.sendRaw(blobChunkFrame(90 + wireId, Buffer.from("abc"), false));
+      controller.abort(stopped);
+      await rejected;
+      peer.send({ type: "error", id: wireId, error: { code: "CANCELLED", message: "cancelled", retry: "no" } });
+    }
+
+    // None of their stream IDs is still held, nor any of their bytes: each
+    // ID streams a whole budget again.
+    for (const [wireId, streamId] of [[4, 91], [5, 92], [6, 93]] as const) {
+      const following = transport.sendRequest(request(40 + wireId, "blob.after.abandon"));
+      await nextImmediate();
+      peer.send({ type: "blobStart", requestId: wireId, streamId, totalBytes: 6, sha256: null });
+      peer.sendRaw(blobChunkFrame(streamId, Buffer.from("abcdef"), true));
+      peer.send({ type: "response", id: wireId, result: null });
+      await expect(following).resolves.toMatchObject({ id: 40 + wireId });
+    }
+    expect(onBlob).toHaveBeenCalledTimes(3);
+    transport.close();
+  });
+
+  it("settles a cancelled held read with the engine's cancellation in place of its answer", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const cancelling = new AbortController();
+    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancelling.signal);
+    await nextImmediate();
+    cancelling.abort();
+    await vi.waitFor(() => expect(peer.received).toContainEqual({ type: "cancel", id: 1 }));
+    // Its handler had answered; the engine writes the cancellation instead.
+    peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "held document answer cancelled", retry: "no" } });
+    await expect(reading).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
     transport.close();
   });
 

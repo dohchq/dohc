@@ -2,6 +2,7 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
+import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
@@ -27,6 +28,7 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  busy?: boolean;
 };
 
 export type Notice = {
@@ -77,11 +79,14 @@ export interface WorkspaceErrorNotice {
   filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
+  retryBusy?: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
   additionalActionLabels?: string[];
   seen: boolean;
   read?: boolean;
+  // The row has no Dismiss: it stays until its action runs.
+  noDismiss?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -119,7 +124,7 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// A failed automation run, or an agent run that says why it didn't start. Its
+// A failed automation run, or an agent run that says why it didn't reply. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
   notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
@@ -194,7 +199,7 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
-  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 dohc-focus-row";
 // A row's first line is as tall as its tallest control, so a title that
 // wraps leaves its controls where they were. It holds only icon controls;
 // worded actions get a line under the text, so they never squeeze the title.
@@ -420,12 +425,12 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
-  // The server's copy misses an edit made while live editing was off, and
-  // nothing the owner does in dohc fixes that yet, so nothing offers a Resume.
+  // The server's copy is missing an owner edit. Resume in Live documents
+  // retries it, as it does for a refused document.
   if (reason === "live-edit-unadmitted") {
     return {
-      title: "Live editing can't resume",
-      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      title: "Live editing stopped",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -516,10 +521,11 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 // clear of them with scroll room (Overlay), and F6 reaches them from the
 // dialog's focus trap (modalFocus). Their rows stay in Notices, which opens
 // on the same layer.
+// A chat's message box raises them above it (toastClearance).
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
+  rail: "fixed bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)] right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
+  corner: "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -619,8 +625,10 @@ export function WorkspaceErrorToast(props: {
         <button
           type="button"
           data-testid="workspace-shell-error-retry"
+          disabled={error.retryBusy}
+          aria-busy={error.retryBusy || undefined}
           onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
         >
           Try again
         </button>
@@ -735,6 +743,7 @@ export function LocalNoticeRow(props: {
                     key={action.label}
                     type="button"
                     disabled={action.disabled}
+                    aria-busy={action.busy || undefined}
                     onClick={() => props.onAction(action)}
                     className={ROW_ACTION_CLASS}
                   >
@@ -874,8 +883,11 @@ export function NoticeCenter(props: {
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(stack);
+    // A chat's message box moves the stack without resizing it.
+    const stopRoom = onComposerRoomChange(measure);
     return () => {
       observer?.disconnect();
+      stopRoom();
       root.style.removeProperty("--dohc-toast-room");
     };
   }, [open]);
@@ -1194,10 +1206,12 @@ export function NoticeCenter(props: {
             ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
+                disabled: error.retryBusy,
+                busy: error.retryBusy,
               }]
             : []),
         ],
-        ...(props.onDismissWorkspaceError
+        ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
         ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
@@ -2173,7 +2187,7 @@ export function NoticeCenter(props: {
                       type="button"
                       data-testid="sent-notices-more"
                       onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                     >
                       Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
                     </button>

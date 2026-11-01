@@ -1,4 +1,5 @@
 import { historyCursor, historyPageFields, timelinePage } from "../testing/historyPageFixture";
+import { defaultWorkbenchState, serializeUiState } from "./workbench/workbenchState";
 import "../testing/legendListMock";
 import {
   act,
@@ -8,11 +9,13 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
   AgentRunStatusResult,
@@ -196,7 +199,15 @@ export const STORED_STATE: WorkspaceUiState = {
   activeEditorGroup: "primary",
   aboutVisible: true,
   aboutWidth: 360,
+  explorerMode: "files",
 };
+
+// These tests drive the folder tree, so a workspace with no saved state
+// opens the Explorer in Files rather than Home.
+const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({ ...defaultWorkbenchState(), explorerMode: "files" });
+
+// A workspace with no saved state but its Explorer on Home, as a new one opens.
+export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
 
 // The stored state with the chat list showing in the left side panel.
 export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
@@ -344,7 +355,7 @@ function makeBaseBridge(
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    getWorkspaceUiState: vi.fn((): Promise<WorkspaceUiState | null> => uiStatePromise.then((state) => state ?? FRESH_FILES_STATE)),
     openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -705,6 +716,8 @@ function makeBaseBridge(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
+    // The Explorer's Apps section: no apps unless a test says so.
+    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({ sites: [] })),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
@@ -840,6 +853,12 @@ export function makeBridge(
       if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
       throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
     }),
+    // The synced workspace lists its unfinished restores when it opens; the
+    // restore tests swap in their own.
+    ownerRestore: vi.fn(async (request: OwnerRestoreRequest): Promise<unknown> => {
+      if (request.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
+      throw new Error(`Unexpected owner restore action in shell fixture: ${request.action}`);
+    }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
       objectId: "object-test",
@@ -862,6 +881,13 @@ export function makeBridge(
       async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
         timelinePage([], { workspaceId: payload.workspaceId }),
     ),
+    // About opens Access with each file: by default only its owner has it.
+    getObjectAccess: vi.fn(async (input: { ref: AccessObjectRef }): Promise<AccessAnswer> => ({
+      ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+      coverage: { kind: "granted", complete: true, observation: "interval" },
+      checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+    })),
+    requestAccessRefresh: vi.fn(async () => undefined),
     // About's per-file History still reads moments directly.
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({

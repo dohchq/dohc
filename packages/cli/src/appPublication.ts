@@ -36,6 +36,7 @@ const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
 export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("createLink"), workspaceId: id, appRoot: z.string().min(1).max(1024), paths: selector.shape.paths.optional(), access: access.default("view"), operationId: z.string().uuid(), agentLabel: z.string().min(1).max(160).optional() }).strict(),
   z.object({ action: z.literal("listLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
+  z.object({ action: z.literal("checkLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
   z.object({ action: z.literal("prepareLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
   z.object({ action: z.literal("launchLocal"), workspaceId: id, publicationId: hash }).strict(),
   z.object({ action: z.literal("list"), workspaceId: id, appRoot: z.string().min(1).max(1024), cursor: hash.optional() }).strict(),
@@ -52,7 +53,12 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("urlUnavailable"), ...linkFacts }).strict(),
   z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
   z.object({ kind: z.literal("localListed"), publications: z.array(LocalPublication).max(64) }).strict(),
+  // The source revision prepareLocal would capture now. It differs from an approval's sourceRevision once the app's source changed.
+  // declaresCollection is false for an app that reaches no Collection. prepareLocal refuses such an app, so it has nothing to approve here.
+  z.object({ kind: z.literal("localChecked"), appRoot: z.string().min(1).max(1024), sourceRevision: hash, sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512), declaresCollection: z.boolean() }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
+  // The relay answered not found: it does not publish apps for this workspace and account.
+  z.object({ kind: z.literal("listUnavailable") }).strict(),
   z.object({ kind: z.literal("prepared"), approvalId: z.string().uuid(), candidateDigest: hash,
     appRoot: z.string().min(1).max(1024), versionId: id, sourceRevision: hash,
     audience: z.object({shareId:id,grantId:id,selector:z.object({paths:z.array(z.string()),versionId:id.nullable()}).strict(),access}).strict().optional(),

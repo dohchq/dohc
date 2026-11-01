@@ -3433,8 +3433,10 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
     const loopback = new VersionedLoopbackEngine();
     const changes: RelayMaterializedPath[] = [];
+    // Linux allows 255 bytes in one name, so each path's 540 bytes span three folders.
+    const segment = "\u6587".repeat(60);
     for (let index = 0; index < 90; index++) {
-      const path = `${"\u6587".repeat(180)}${index}.md`;
+      const path = `${segment}/${segment}/${segment}${index}.md`;
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `unicode-${index}`, path, text: "recorded" });
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `unicode-${index}`, path, text: "incoming" });
       await write(root, path, "recorded");
@@ -3454,7 +3456,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
         expect(Buffer.byteLength(JSON.stringify(params.targets))).toBeLessThanOrEqual(48 * 1024);
       }
       expect(notice).not.toHaveBeenCalled();
-      expect((await readdir(root)).some(name => name.includes("(kept copy"))).toBe(false);
+      expect((await readdir(root, { recursive: true })).some(name => name.includes("(kept copy"))).toBe(false);
     } finally { await engine.stop(); }
   });
 

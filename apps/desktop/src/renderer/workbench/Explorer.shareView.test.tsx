@@ -24,6 +24,10 @@ const GRANTER = "granter@dohc.test";
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
+    recentFiles: [],
     files: [
       { path: "note.md", kind: "file" },
       { path: "other.md", kind: "file" },

@@ -34,11 +34,12 @@ export function chatsNavigationRequiresRemount(
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.
-// An agent's chat takes its own agent's name.
+// An agent's chat takes its own agent's name. A group's tab draws its "#",
+// so the name goes without one.
 export function chatEditorTitle(nav: ChatsNav | null, agents: readonly SettingsAgent[]): string {
   if (!nav || nav.level === "feed") return "Home";
   if (nav.level === "channel" || nav.level === "thread") {
-    return nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, agents).label : `#${nav.channel.name}`;
+    return nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, agents).label : nav.channel.name;
   }
   if (nav.level === "dm") return nav.dm.peerLabel;
   return nav.level === "dm-new" ? "New message" : "Chats";

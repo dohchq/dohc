@@ -877,7 +877,9 @@ export const FileInspector = memo(function FileInspector(
             engine={engine}
             lossyNote={lossyNote}
             changeHeld={props.changeHeld}
-            onEditAnyway={() => {
+            // A shared view's session drops Edit anyway's consent, so a
+            // received share doesn't offer it (#2991).
+            onEditAnyway={props.receivedShare ? undefined : () => {
               const source = typeof boundSource === "string" ? boundSource : contentHash;
               setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash });
               if (engine.available && source) {

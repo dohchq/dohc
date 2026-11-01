@@ -1353,6 +1353,18 @@ describe("exact received relay share IPC contract", () => {
     ).toBe(false);
   });
 
+  it("answers a Group or message request as opening in Chats, with nothing else", () => {
+    expect(GetRelayReceivedShareResult.parse({ found: true, chats: true })).toEqual({ found: true, chats: true });
+    for (const result of [
+      { found: false, chats: true },
+      { found: true, chats: false },
+      { found: true, chats: true, share: received },
+      { found: true, chats: true, channelWireId: "wire-orders" },
+    ]) {
+      expect(GetRelayReceivedShareResult.safeParse(result).success).toBe(false);
+    }
+  });
+
   it("returns only the existing received-share schema", () => {
     const parsed = GetRelayReceivedShareResult.parse({
       found: true,
@@ -2208,14 +2220,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRunId: "run-1",
+        liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: -1,
         paused: true,
       }).success,

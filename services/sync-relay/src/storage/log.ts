@@ -6,9 +6,11 @@ import {
   type AppendLogBatchGuardContext,
   type AppendLogBatchResult,
   type FetchLogPageResult,
+  type RedundantRecovery,
   type SyncRelayLogRow,
   type SqliteDb,
 } from "./types";
+import { asRecord } from "@dohc/workspace-core";
 import { SyncRelayConflictError, logBlobsMissing } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
 import {
@@ -43,12 +45,41 @@ function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapsho
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
+/** Every copy of retained work's creation moment ID starts with this. */
+export const RELEASED_COPY_MOMENT_PREFIX = "released-copy-moment-";
+
+/**
+ * A copy of retained work's creation, by what identical creations on two
+ * devices share: version, object, moment, bytes, length and correlation, a
+ * new text object, and exactly the same authors as each push left them.
+ * Recording time and path are left out.
+ */
+function releasedCopyCreation(payloadJson: string): {objectId: string; momentId: string; key: string} | null {
+  let payload: Record<string, unknown> | null;
+  try {
+    payload = asRecord(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
+  const metadata = asRecord(payload?.metadata);
+  if (!payload || typeof payload.momentId !== "string" || !payload.momentId.startsWith(RELEASED_COPY_MOMENT_PREFIX) ||
+    typeof payload.objectId !== "string" || payload.operation !== "write" ||
+    (payload.beforePresent !== "absent" && payload.beforePresent !== "null") ||
+    (payload.payloadAfterContentKind != null && payload.payloadAfterContentKind !== "text") ||
+    typeof metadata?.correlationId !== "string" || !/^[0-9a-f]{64}$/.test(metadata.correlationId)) return null;
+  return {objectId: payload.objectId, momentId: payload.momentId, key: stableJsonStringify([payload.versionId, payload.objectId,
+    payload.momentId, payload.payloadAfterBlobSha256, payload.payloadAfterByteLength, metadata.correlationId,
+    payload.authors ?? null, payload.attributionUnavailable ?? null])};
+}
+
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
     admit?: (ops: SyncRelayLogInput[]) => void;
+    confirm?: (ops: SyncRelayLogInput[]) => void;
+    classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
@@ -60,6 +91,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   ops: SyncRelayLogInput[];
   guard?: (context: AppendLogBatchGuardContext) => void;
   admit?: (ops: SyncRelayLogInput[]) => void;
+  confirm?: (ops: SyncRelayLogInput[]) => void;
+  classifyRedundantRecoveries?: boolean;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
@@ -92,6 +125,26 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       let currentMax = Number(
         maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
       );
+      // The log's first accepted creation of a copy is its only projected one,
+      // so the first object moment with its ID names it, on every retry alike.
+      const redundant = new Map<number, RedundantRecovery>();
+      const firstCreationStmt = input.classifyRedundantRecoveries ? storage.db.prepare(
+        `SELECT l.origin_id, l.origin_seq, l.relay_seq, l.payload_json
+         FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq = m.relay_seq
+         WHERE m.workspace_id = ? AND m.object_id = ? AND m.moment_id = ?
+           AND l.op_kind = 'moment.append' AND l.relay_admission IS NULL
+         ORDER BY m.relay_seq LIMIT 1`,
+      ) : undefined;
+      const classify = (op: SyncRelayLogInput) => {
+        if (!firstCreationStmt || op.opKind !== "moment.append") return;
+        const creation = releasedCopyCreation(op.payloadJson);
+        if (!creation) return;
+        const first = firstCreationStmt.get(input.workspaceId, creation.objectId, creation.momentId);
+        if (!first || (first.origin_id === input.originId && Number(first.origin_seq) === op.originSeq)) return;
+        if (releasedCopyCreation(String(first.payload_json))?.key !== creation.key) return;
+        redundant.set(op.originSeq, {originSeq: op.originSeq, recoveryMomentId: creation.momentId,
+          acceptedOriginId: String(first.origin_id), acceptedOriginSeq: Number(first.origin_seq), acceptedRelaySeq: Number(first.relay_seq)});
+      };
       for (const inputOp of input.ops) {
         const admittedChat = input.originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX) &&
           (inputOp.opKind === "chat.message.append" || inputOp.opKind === "chat.reaction.set") &&
@@ -115,6 +168,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
             skipped += 1;
+            classify(op);
             continue;
           }
           throw new SyncRelayConflictError(
@@ -127,6 +181,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           );
         }
         currentMax = op.originSeq;
+        classify(op);
         newOps.push(op);
         addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
         if (op.admittedAuthorSnapshot !== undefined) {
@@ -150,6 +205,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
         }
       }
+      input.confirm?.(newOps);
       addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
         (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
         (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);
@@ -206,8 +262,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         );
         inserted += 1;
         // A departed publication must move neither projection: either one
-        // alone would bring the document back where it no longer is.
-        if(op.settlementAdmission?.status === "refused" || op.relayAdmission !== undefined)continue;
+        // alone would bring the document back where it no longer is. A
+        // redundant copy keeps the accepted creation's object, path and file.
+        if(op.settlementAdmission?.status === "refused" || op.relayAdmission !== undefined || redundant.has(op.originSeq))continue;
         // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
@@ -270,7 +327,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       }
       const settlementRefusals=input.ops.filter(op=>op.settlementAdmission?.status === "refused").map(op=>({originId:input.originId,originSeq:op.originSeq,
         momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:op.settlementAdmission!.settlementId,reason:"authorship-mismatch"}));
-      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}) };
+      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}),
+        ...(redundant.size ? {redundantRecoveries: [...redundant.values()]} : {}) };
   }
 
 export function maxOriginSeq(storage: StorageContext, workspaceId: string, originId: string): number {

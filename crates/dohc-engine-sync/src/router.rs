@@ -114,9 +114,11 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_in_batch(store, cache, envelope, faults, leases, false)
+    apply_replication_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
 }
 
+/// `relay_namespace` names the feed a pull read `envelope` from, when the
+/// pull's trusted configuration names one.
 pub(crate) fn apply_replication_envelope_in_batch(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -124,6 +126,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
+    relay_namespace: Option<&str>,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     if envelope
         .origin_id
@@ -190,6 +193,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 faults,
                 leases,
                 batch_inactive,
+                relay_namespace,
             ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
@@ -215,7 +219,17 @@ pub(crate) fn apply_replication_envelope_in_batch(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults, leases),
+            {
+                let tails = cache.released_tails(store);
+                crate::moment_apply::apply_moment_envelope_in_batch(
+                    store,
+                    envelope,
+                    faults,
+                    leases,
+                    relay_namespace,
+                    &tails,
+                )
+            },
             |moment| RoutedApply {
                 conflicts_opened: moment.conflicts_opened,
                 materialization_changes: moment.materialization_changes,

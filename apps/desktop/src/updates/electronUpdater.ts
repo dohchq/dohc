@@ -1,3 +1,5 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   initialUpdateState,
   transition,
@@ -21,8 +23,9 @@ export type PublicUpdateState = {
   // A Linux .deb that did not install: the command that installs it from a terminal.
   installCommand?: string;
   // The last step that failed, while its state stands. `message` says why. A
-  // new id is a new failure to report.
-  failure?: { step: UpdateStep; id: number };
+  // new id is a new failure to report. `notInstalled` is the version of an
+  // update a person chose that dohc opened without.
+  failure?: { step: UpdateStep; id: number; notInstalled?: string };
 };
 
 export type UpdateActionResult = {
@@ -132,7 +135,19 @@ export function installsOnQuit(platform: NodeJS.Platform): boolean {
   return INSTALL_ON_QUIT && platform !== "linux";
 }
 
-type InstallFailure = { message: string; installCommand?: string };
+type InstallFailure = { message: string; installCommand?: string; notInstalled?: string };
+
+// The update a person chose, and the version dohc was on when they chose it.
+type ChosenUpdate = { version: string; from: string };
+
+function readChosenUpdate(path: string): ChosenUpdate | null {
+  try {
+    const { version, from } = JSON.parse(readFileSync(path, "utf8")) as Partial<ChosenUpdate>;
+    return typeof version === "string" && typeof from === "string" ? { version, from } : null;
+  } catch {
+    return null;
+  }
+}
 
 // Each failure shows while the state it left stands: a failed check leaves
 // "error", a failed download "available", and a failed install "ready".
@@ -234,6 +249,8 @@ export async function startAutoUpdates(options: {
   // own quit on the first call and has none left to start on a second, so
   // main makes it.
   quitForStagedRestart?: () => void;
+  // The folder that keeps the update a person chose across a quit.
+  stateDir?: string;
   importUpdater?: () => Promise<UpdaterModuleLike>;
   platform?: NodeJS.Platform;
 }): Promise<AutoUpdateController | null> {
@@ -269,8 +286,13 @@ export async function startAutoUpdates(options: {
       restartStaged,
     });
     if (!failure || FAILED_STATUS[failure.step] !== state.status) return base;
-    const { step, id, message, installCommand } = failure;
-    return { ...base, message, failure: { step, id }, ...(installCommand ? { installCommand } : {}) };
+    const { step, id, message, installCommand, notInstalled } = failure;
+    return {
+      ...base,
+      message,
+      failure: { step, id, ...(notInstalled ? { notInstalled } : {}) },
+      ...(installCommand ? { installCommand } : {}),
+    };
   };
   // A background check that fails as the last one did keeps that failure,
   // so its row updates without a new toast. Anything a person asked for is
@@ -311,18 +333,43 @@ export async function startAutoUpdates(options: {
   }
   if (autoUpdater.isUpdaterActive?.() === false) return null;
 
+  // Still on the version a person chose an update on: dohc did not install
+  // it. Once the feed offers an update again, that is reported, and Try
+  // again downloads it. A feed that offers none leaves nothing to report.
+  const chosenPath = options.stateDir ? join(options.stateDir, "chosen-update.json") : null;
+  const chosen = chosenPath ? readChosenUpdate(chosenPath) : null;
+  let notInstalled = chosen?.from === currentVersion ? chosen.version : null;
+  const keepChosen = (version: string | null): void => {
+    if (!chosenPath) return;
+    // An unwritten record loses only its notice.
+    try {
+      if (version) writeFileSync(chosenPath, JSON.stringify({ version, from: currentVersion }));
+      else rmSync(chosenPath, { force: true });
+    } catch {}
+  };
+  if (!notInstalled) keepChosen(null);
+
   autoUpdater.on("checking-for-update", () => {
     checkInFlight = true;
     dispatch({ type: "check" });
   });
   autoUpdater.on("update-available", (info) => {
     failure = null;
+    if (notInstalled) {
+      fail("download", { message: `dohc is still on version ${currentVersion}.`, notInstalled }, true);
+      notInstalled = null;
+      keepChosen(null);
+    }
     dispatch({ type: "available", version: info.version });
     checkInFlight = false;
     emit();
   });
   autoUpdater.on("update-not-available", () => {
     failure = null;
+    if (notInstalled) {
+      notInstalled = null;
+      keepChosen(null);
+    }
     dispatch({ type: "not-available" });
     checkInFlight = false;
     emit();
@@ -399,6 +446,9 @@ export async function startAutoUpdates(options: {
       return { accepted: false, state: publicState() };
     }
     failure = null;
+    // Quitting installs a downloaded update, except on Linux, where only
+    // Restart to update does.
+    if (installsOnQuit(platform)) keepChosen(state.version);
     dispatch({ type: "download" });
     // The updater's error event reports a failure first; this covers one it
     // never emitted, so the download cannot stay running forever.
@@ -427,6 +477,7 @@ export async function startAutoUpdates(options: {
     }
     restartStaged = true;
     failure = null;
+    keepChosen(state.version);
     emit();
     try {
       autoUpdater.quitAndInstall(false, true);

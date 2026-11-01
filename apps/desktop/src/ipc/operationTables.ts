@@ -33,6 +33,7 @@ import {
   folderAppOfferOperations,
   workspaceVersionOperations,
   historyOperations,
+  appViewOperations,
 } from "./bridgeContract";
 import { settingsOperations } from "./settingsOperations";
 import type { OperationTable } from "./operationTable";
@@ -84,4 +85,5 @@ export const OPERATION_TABLES = [
   noticeOperations,
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,
+  appViewOperations,
 ] as const satisfies readonly OperationTable[];

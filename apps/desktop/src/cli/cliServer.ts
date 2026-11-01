@@ -1103,6 +1103,32 @@ function resolveThreadOrMessage(
   };
 }
 
+// Where a run's reply goes when the agent names no message: under the
+// message the asking one replied to, so a question asked in a thread of a
+// conversation is answered in that thread. A post's comments stay top-level.
+async function askingThreadParent(
+  context: CliWorkspaceContext,
+  threadId: string,
+  messages: readonly ChatMessage[],
+  runId: string | null | undefined,
+  onError: CliServerOptions["onError"],
+): Promise<ChatMessage | undefined> {
+  if (!runId) return undefined;
+  try {
+    const run = await context.dispatchStore.getRunRecord(runId);
+    if (!run || run.workspaceId !== context.workspaceId || run.threadId !== threadId) return undefined;
+    const parentId = messages.find((message) => message.id === run.triggerMessageId)?.parentMessageId;
+    const parent = parentId ? messages.find((message) => message.id === parentId) : undefined;
+    if (!parent) return undefined;
+    const { thread } = await context.store.getThread({ workspaceId: context.workspaceId, threadId });
+    return thread.lane === "chat" ? parent : undefined;
+  } catch (error) {
+    // The reply still posts, in the conversation itself.
+    onError?.(new Error(`Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`, { cause: error }));
+    return undefined;
+  }
+}
+
 function branchFromMessage(
   messages: readonly ChatMessage[],
   rootMessage: ChatMessage,
@@ -3651,9 +3677,12 @@ async function dispatchWorkspace(
 
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
+      const actor = writeActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
-        : undefined;
+        : actor === "agent"
+          ? await askingThreadParent(context, threadId, messages, request.args.runId ?? options.dispatchedRunId(context.workspaceId), options.onError)
+          : undefined;
       let decisionMessage: ChatMessage | undefined;
       if (request.args.resolve) {
         decisionMessage = resolveMessageInThread(request.args.resolve, messages);
@@ -3678,7 +3707,6 @@ async function dispatchWorkspace(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
-      const actor = writeActor(request.args.actor, context, options);
       const reply = {
         writer: cliChatWriter(actor, context, options),
         threadId,

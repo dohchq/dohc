@@ -130,6 +130,9 @@ pub(super) fn append(
         &edit.update,
         actor.as_deref(),
         attribution.as_ref(),
+        // `record_update_in_tx` already refused an adopted owner, whose
+        // activation alone a preparation blocks.
+        &Default::default(),
         &mut outcome,
         now,
     )?;

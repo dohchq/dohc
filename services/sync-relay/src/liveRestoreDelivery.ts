@@ -3,8 +3,8 @@ import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveHostConnectionCoordinate} from "./storage";
 import type {LiveCommittedDeliveryStore, StopRestoreCutCapture} from "./storage/liveCommittedDelivery";
-import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
-import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
+import {StopRestoreCancellationRefused, type StopRestoreLookup} from "./storage/liveRestoreOperation";
+import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {settlementResponse,settlementPending} from "./liveSettlement";
@@ -12,6 +12,42 @@ import {settlementResponse,settlementPending} from "./liveSettlement";
 export type StopRestoreOutcome = {kind: "pending"; reason: string} | {kind: "done"; receipt: NativeRestoreFenceReceipt};
 export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestoreLookup {
   return {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId), ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+}
+
+export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} | {kind: "refused"; reason: string} | {kind: "declined"};
+
+/**
+ * Asks the fencing host to end a restore whose Decline the relay recorded,
+ * and records its durable answer. A lost reply, an unreadable answer, one
+ * that holds no binding, or a failure to record it, such as a storage error
+ * or this host losing its standing meanwhile, leaves the restore pending for
+ * the next attempt. Only an answer that does not prove the restore's end is
+ * refused: asking again gets the same answer.
+ * The consumer holds its normal document exclusion for this entire call.
+ */
+export async function cancelStopRestore(options: {
+  store: LiveCommittedDeliveryStore;
+  lookup: StopRestoreLookup;
+  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number};
+  signal?: AbortSignal;
+}): Promise<StopRestoreCancellationOutcome> {
+  const {store, connection: c, signal} = options, input = {...snapshotStopRestoreLookup(options.lookup), host: c.host};
+  signal?.throwIfAborted();
+  const params = store.pendingStopRestoreCancellation(input);
+  if (!params) return {kind: "declined"};
+  const response = await c.client.sendRequest({id: c.nextRequestId(), workspace: c.workspace, deadlineMs: c.deadlineMs,
+    method: "liveApplication.cancelRestoreFence", params: {...params}}, signal);
+  signal?.throwIfAborted();
+  const answer = parseNativeRestoreCancellationAnswer(response.result);
+  // The host holds no binding at that generation now, so its answer proves nothing about this restore.
+  if (answer.status === "cancelled" && answer.binding === null) return {kind: "pending", reason: "The host holds no binding at the restore's generation."};
+  try {store.acknowledgeStopRestoreCancellation(input, answer, Date.now());}
+  catch (error) {
+    if (error instanceof StopRestoreCancellationRefused) return {kind: "refused", reason: error.message};
+    console.error("[sync-relay] restore cancellation not recorded:", error);
+    return {kind: "pending", reason: "The host's cancellation answer was not recorded."};
+  }
+  return {kind: "declined"};
 }
 
 /** The consumer holds its normal document exclusion for this entire call. */

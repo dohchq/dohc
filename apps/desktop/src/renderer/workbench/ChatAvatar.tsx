@@ -16,10 +16,10 @@ export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPres
   return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
 }
 
-// One avatar for every chat surface: a person's initials on a tint of their
+// One avatar for every chat surface: a person's initial on a tint of their
 // admitted hue, the agent's sparkle in the agent voice, an automation's bare
 // lightning mark, the same mark as the Automations button, or a link holder's
-// initials in a share link's dashed ring. Sized by the caller; 36px in the
+// initial in a share link's dashed ring. Sized by the caller; 36px in the
 // composer, 32px on a feed row or an opening post, 28px on a comment, 18px in
 // a strip.
 
@@ -31,9 +31,6 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
-
-// A strip shows one initial: two wide letters, such as "WW", overflow 18px.
-const INITIALS = { post: 2, row: 2, comment: 2, strip: 1 } as const;
 
 // An agent is a rounded square and a person is round, whatever their colors.
 // The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
@@ -49,10 +46,9 @@ function firstGrapheme(word: string): string | undefined {
     : Array.from(word)[0];
 }
 
-// The first letter of each of the first `count` words. One word gives one letter.
-function initials(name: string, count: number): string {
-  const letters = name.trim().split(/\s+/, count).flatMap((word) => firstGrapheme(word) ?? []);
-  return letters.length ? letters.join("").toUpperCase() : "?";
+// The first letter of a name.
+function initial(name: string): string {
+  return firstGrapheme(name.trim())?.toUpperCase() ?? "?";
 }
 
 export function ChatAvatar(props: {
@@ -77,7 +73,7 @@ export function ChatAvatar(props: {
           SIZES[size]
         } ${props.className ?? ""}`}
       >
-        {initials(props.name, INITIALS[size])}
+        {initial(props.name)}
       </span>
     );
   }
@@ -106,7 +102,7 @@ export function ChatAvatar(props: {
           : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
-      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name, INITIALS[size])}
+      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initial(props.name)}
     </span>
   );
 }

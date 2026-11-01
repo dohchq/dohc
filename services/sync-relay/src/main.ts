@@ -27,6 +27,7 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
+import type { HeldDocumentHost } from "./heldDocumentRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
 import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./automationServerRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
@@ -42,6 +43,7 @@ import { startPublicationOperator } from "./appPublicationOperator";
 import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
+import { checkReaderConfig } from "./readerConfig";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
@@ -100,6 +102,13 @@ if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)
 const automationsOn = automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
 if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
   fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
+}
+// A live host without the Markdown reader starts, but its Edit shares never go live.
+if (selfHostedLive || process.env.DOHC_RELAY_SERVICE_HOST_CONFIG) {
+  const reader = checkReaderConfig(process.env.DOHC_ENGINE_READER_CONFIG);
+  if ("problem" in reader) fatal(`FATAL: Edit shares need the Markdown reader, but ${reader.problem}. DOHC_ENGINE_READER_CONFIG holds the startup.json that stage-engine-reader.mjs --self-host writes. The self-host image reads /opt/dohc-reader/engine-reader/startup.json, which is missing if the image was built without the reader.`);
+  // The engines this relay starts get the value checked here.
+  process.env.DOHC_ENGINE_READER_CONFIG = reader.config;
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -373,8 +382,10 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   ownerRestoreHost: () => ownerRestoreHost?.(),
+  heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -634,6 +645,8 @@ ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
 };
+// Only a session service keeps hosted replicas, so only it holds documents for released retained work.
+heldDocumentHost = () => storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
 if (publicEditRelease) {
   const mode = storage.getLiveHostControl()?.configuredMode;
   if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? (!configuredServiceHost && !selfHost) : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {

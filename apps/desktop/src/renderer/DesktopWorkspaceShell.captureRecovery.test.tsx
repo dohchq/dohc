@@ -93,7 +93,6 @@ describe("text kept in History", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     await waitFor(()=>expect(restore).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,momentId:RECOVERY.momentId}));
     await waitFor(()=>expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull());
     expect(await noticeRows(user)).toEqual([]);
@@ -137,7 +136,6 @@ describe("text kept in History", () => {
     renderShell(bridge);
     await openRecoveryFromToast(user);
     await user.click(screen.getByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
       "Restored the earlier state. Undo restore is available here.",
     );
@@ -193,9 +191,10 @@ describe("text kept in History", () => {
           pendingOperation: { operationId: "restore", phase, proposalDigest } };
       }
       if (input.action === "status") return status();
+      if (input.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
       if (input.action === "confirm") {
         phase = "resumed";
-        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {} } };
+        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {}, moved: false } };
       }
       throw new Error(`Unexpected owner restore action ${input.action}.`);
     });
@@ -208,7 +207,6 @@ describe("text kept in History", () => {
 
     const refuse = async () => {
       await user.click(screen.getByTestId("engine-diff-restore-file"));
-      await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     };
     await refuse();
     const toast = await screen.findByTestId(NOTICE_TOAST);
@@ -240,6 +238,7 @@ describe("text kept in History", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
 
     // A finished Restore shared file leaves the kept typing and its notice.
+    await user.click(screen.getByTestId("engine-diff-more"));
     await user.click(screen.getByTestId("engine-diff-shared-restore"));
     const dialog = await screen.findByTestId("owner-restore-dialog");
     expect(ownerRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, action: "options", path: PATH });

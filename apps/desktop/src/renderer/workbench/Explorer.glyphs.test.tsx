@@ -18,6 +18,10 @@ afterEach(cleanup);
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
+    recentFiles: [],
     files: [],
     folders: [],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
@@ -98,35 +102,29 @@ describe("Explorer kind glyphs", () => {
       <Explorer
         {...explorerProps({
           files: [file("cache.db"), file("store.bin", "database")],
-          pinned: ["store.bin"],
           editorGroups: [{ id: "group-1", tabs: [{ path: "cache.db" }], activeTab: null, size: 1 }],
         })}
       />,
     );
     expect(glyphOf(treeRow("cache.db")).classList.contains("lucide-file")).toBe(true);
     expect(glyphOf(treeRow("store.bin")).classList.contains("lucide-database")).toBe(true);
-    expect(glyphOf(screen.getByTestId("pinned-row")).classList.contains("lucide-database")).toBe(true);
     expect(glyphOf(screen.getByTestId("open-editor-row")).classList.contains("lucide-file")).toBe(true);
   });
 
   it("shows a page's emoji in place of its glyph without renaming the row", () => {
-    render(<Explorer {...explorerProps({ files: [{ path: "launch.md", kind: "file", icon: "🚀" }], pinned: ["launch.md"] })} />);
-    for (const row of [treeRow("launch.md"), screen.getByTestId("pinned-row")]) {
-      expect(row.querySelector("svg")).toBeNull();
-      const hidden = [...row.querySelectorAll("[aria-hidden]")].map((element) => element.textContent);
-      expect(hidden).toContain("🚀");
-    }
-    expect(screen.getByRole("treeitem", { name: "launch.md" })).toBe(treeRow("launch.md"));
-    expect(screen.getByRole("button", { name: "launch.md" })).toBe(screen.getByTestId("pinned-row"));
+    render(<Explorer {...explorerProps({ files: [{ path: "launch.md", kind: "file", icon: "🚀" }] })} />);
+    const row = treeRow("launch.md");
+    expect(row.querySelector("svg")).toBeNull();
+    const hidden = [...row.querySelectorAll("[aria-hidden]")].map((element) => element.textContent);
+    expect(hidden).toContain("🚀");
+    expect(screen.getByRole("treeitem", { name: "launch.md" })).toBe(row);
   });
 
   it("keeps folders on their folder icons", () => {
-    render(<Explorer {...explorerProps({ files: [file("notes/plan.md")], folders: ["notes"], pinned: ["notes"] })} />);
-    for (const row of [treeRow("notes"), screen.getByTestId("pinned-row")]) {
-      const glyph = row.querySelector(".lucide-folder");
-      expect(glyph?.getAttribute("width")).toBe("15");
-      expect(glyph?.classList.contains("text-subtle")).toBe(true);
-    }
+    render(<Explorer {...explorerProps({ files: [file("notes/plan.md")], folders: ["notes"] })} />);
+    const glyph = treeRow("notes").querySelector(".lucide-folder");
+    expect(glyph?.getAttribute("width")).toBe("15");
+    expect(glyph?.classList.contains("text-subtle")).toBe(true);
   });
 
   it("draws an app folder's glyph in the folder glyph's box and keeps it a tree row", () => {
@@ -135,7 +133,6 @@ describe("Explorer kind glyphs", () => {
         {...explorerProps({
           files: [file("site/index.html"), file("notes/plan.md")],
           folders: ["site", "notes"],
-          pinned: ["site"],
           expandedFolders: ["site"],
           collectionFolders: new Set(["site"]),
           appFolders: new Set(["site"]),
@@ -147,12 +144,10 @@ describe("Explorer kind glyphs", () => {
     expect(app.dataset.collection).toBe("true");
     expect(app.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("treeitem", { name: "site" })).toBe(app);
-    for (const row of [app, screen.getByTestId("pinned-row")]) {
-      const glyph = row.querySelector(".lucide-app-window");
-      expect(glyph?.getAttribute("width")).toBe("15");
-      expect(glyph?.getAttribute("aria-hidden")).toBe("true");
-      expect(row.querySelector(".lucide-folder, .lucide-folder-open")).toBeNull();
-    }
+    const glyph = app.querySelector(".lucide-app-window");
+    expect(glyph?.getAttribute("width")).toBe("15");
+    expect(glyph?.getAttribute("aria-hidden")).toBe("true");
+    expect(app.querySelector(".lucide-folder, .lucide-folder-open")).toBeNull();
     expect(treeRow("notes").dataset.app).toBeUndefined();
     expect(treeRow("notes").querySelector(".lucide-folder")).not.toBeNull();
   });
@@ -162,7 +157,6 @@ describe("Explorer kind glyphs", () => {
       <Explorer
         {...explorerProps({
           files: [file("plan.md"), file("notes.md")],
-          pinned: ["notes.md"],
           editorGroups: [{ id: "group-1", tabs: [{ path: "plan.md" }, { path: "notes.md" }], activeTab: "plan.md", size: 1 }],
         })}
       />,
@@ -173,7 +167,6 @@ describe("Explorer kind glyphs", () => {
       [treeRow("notes.md"), "text-subtle"],
       [activeEditor, "text-ink"],
       [otherEditor, "text-subtle"],
-      [screen.getByTestId("pinned-row"), "text-subtle"],
     ];
     for (const [row, tone] of cases) {
       if (!row) throw new Error("missing row");

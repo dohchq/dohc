@@ -58,10 +58,17 @@ export function updateFailureTitle(step: UpdateAction, version: string | undefin
   return `dohc could not ${step === "download" ? "download" : "install"} update ${version ?? ""}`.trimEnd();
 }
 
+// What a failure main reports says happened.
+function reportedFailureTitle(failure: NonNullable<UpdateStateEvent["failure"]>, version: string | undefined): string {
+  return failure.notInstalled ? `dohc didn't install update ${failure.notInstalled}` : updateFailureTitle(failure.step, version);
+}
+
 // The updater's sentence, or the step that failed when main reports one.
 export function updateStatusLine(state: UpdateStateEvent): string {
   if (!state.failure) return state.message;
-  const title = updateFailureTitle(state.failure.step, state.version);
+  const title = reportedFailureTitle(state.failure, state.version);
+  // One sentence, so it names dohc once.
+  if (state.failure.notInstalled && state.currentVersion) return `${title} and is still on version ${state.currentVersion}.`;
   return readError(state.message).words ? `${title}. ${state.message}` : `${title}.`;
 }
 
@@ -190,13 +197,14 @@ export function useUpdateFailureNotices(
     shown.current = key;
     const quiet = toastedFailures.has(failure.id);
     toastedFailures.add(failure.id);
-    const title = updateFailureTitle(failure.step, state.version);
+    const title = reportedFailureTitle(failure, state.version);
     report({
       kind: "update",
       quiet,
       ...(readError(state.message).words ? { title, message: state.message } : { message: `${title}.` }),
       ...(state.installCommand ? { command: state.installCommand } : {}),
-      details: [["Cause", state.message]],
+      // dohc does not know why an update it opened without did not install.
+      details: failure.notInstalled ? [] : [["Cause", state.message]],
       retry: () => void run(failure.step),
     });
   }, [state, scope, report, clear, run]);
@@ -217,7 +225,7 @@ export function TitlebarUpdateButton(props: { update: DesktopUpdate }) {
       title={step.title}
       aria-disabled={action === null ? true : undefined}
       onClick={action === null ? undefined : () => void props.update.run(action)}
-      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold dohc-focus-visible focus-visible:outline-offset-1 @min-[9.75rem]:px-2.5 ${
+      className={`titlebar-no-drag inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-semibold @min-[9.75rem]:px-2.5 ${
         action === null
           ? "cursor-default border border-line text-muted"
           : "cursor-pointer bg-accent text-bg hover:opacity-90"

@@ -91,29 +91,25 @@ it("answers a replica's held read at once and never reports a watch", async () =
   expect(await reported.text()).toBe(body);
 });
 
-it("publishes the native mixed batch beyond its cursor while refusing unproved authors", async () => {
+it("publishes the native batch beyond its cursor as the engine wrote it", async () => {
   const f = await fixture();
   f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: "native-service", ops: [0, 1, 2].map(originSeq => parseLogOp({
     originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {},
   }))});
+  const ops = nativeAuthoredSettlement.map(op => ({...op, originSeq: op.originSeq + 3}));
   // Provenance replay: the relay validates blob presence; native blob contents are tested by the engine.
-  for (const op of nativeAuthoredSettlement) {
+  for (const op of ops) {
     for (const sha256 of referencedBlobShas(op.opKind, JSON.stringify(op.payload), {workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs})) {
       f.storage.putBlob({workspaceId: scope.workspaceId, sha256, content: new Uint8Array([0]), createdAtMs: 1});
     }
   }
-  const response = await f.post(nativeAuthoredSettlement);
+  const response = await f.post(ops);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ok: true, accepted: 10, inserted: 10, skipped: 0, currentMaxOriginSeq: 12});
-  for (const op of nativeAuthoredSettlement) {
+  expect(await response.json()).toMatchObject({ok: true, accepted: 8, inserted: 8, skipped: 0, currentMaxOriginSeq: 10});
+  for (const op of ops) {
     const row = f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "native-service", originSeq: op.originSeq});
     expect(row?.opKind).toBe(op.opKind);
-    if (op.opKind === "moment.append" && Object.hasOwn(op.payload, "authors")) {
-      const {authors: _authors, ...expected} = op.payload as Record<string, unknown>;
-      expect(JSON.parse(row!.payloadJson)).toEqual(expected);
-      expect(row?.settlementAdmission?.status).toBe("refused");
-      expect(row?.admittedAuthorSnapshot).toBeUndefined();
-    } else expect(JSON.parse(row!.payloadJson)).toEqual(op.payload);
+    expect(JSON.parse(row!.payloadJson)).toEqual(op.payload);
   }
 });
 

@@ -184,6 +184,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
 
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("launch");
+    await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
     // createChannel opens the new channel directly.
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();

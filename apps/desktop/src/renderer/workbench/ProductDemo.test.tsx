@@ -29,7 +29,10 @@ it("offers only the five working demo panels, then Notices, each titled as in th
     const button = rail.getByRole("button", { name });
     fireEvent.click(button);
     expect(button.getAttribute("aria-current")).toBe("page");
-    expect(container.querySelector('[data-testid="side-panel"] > header > .dohc-section-label')?.textContent).toBe(name);
+    // The Explorer's header is its Home | Files switch.
+    const header = container.querySelector('[data-testid="side-panel"] > header');
+    if (name === "Explorer") expect(within(header as HTMLElement).getByRole("tablist", { name: "Explorer" })).toBeTruthy();
+    else expect(header?.querySelector(".dohc-section-label")?.textContent).toBe(name);
   }
 });
 
@@ -41,6 +44,7 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
   shadow.append(container);
   render(<ProductDemo />, { container });
   const demo = within(container);
+  fireEvent.click(demo.getByRole("tab", { name: "Files" }));
   fireEvent.click(demo.getByRole("button", { name: "New folder" }));
   const input = demo.getByTestId("tree-edit-input");
   fireEvent.change(input, { target: { value: "welcome.md" } });

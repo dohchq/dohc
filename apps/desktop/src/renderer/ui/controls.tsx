@@ -21,31 +21,31 @@ const secondaryButtonClass =
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:outline-offset-1 disabled:opacity-50";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
-  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 // The secondary recipe at a table row's height, for a control inside a
 // cell. `aria-disabled` keeps a button that says why it cannot run in the
 // tab order, where `disabled` would drop it.
 const rowSecondaryButtonClass =
   "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
 const compactSecondaryButtonClass =
-  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50";
 // The primary recipe on the danger fill, for the confirm of an action that
 // removes or revokes something. Paper text on danger clears AA in both
 // themes (tokens.test.ts guards the pair).
 const dangerButtonClass =
   "h-8 rounded-lg bg-danger px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
 const compactDangerButtonClass =
-  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
-  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(

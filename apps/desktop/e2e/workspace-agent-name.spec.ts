@@ -30,6 +30,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await expect(page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').getByTestId("chats-my-agent-name")).toHaveText("Nova");
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("Agent name check");
+    await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
     const view = page.locator("main");
     await view.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");

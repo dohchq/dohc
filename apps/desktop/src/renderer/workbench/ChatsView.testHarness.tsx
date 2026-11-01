@@ -362,7 +362,7 @@ beforeEach(() => {
     },
   });
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-    liveRunId: null,
+    liveRunId: null, liveTriggerMessageId: null,
     pendingCount: 0,
     paused: false,
   });
