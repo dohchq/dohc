@@ -638,7 +638,8 @@ export function serviceHostEnrollmentCovered(storage: StorageContext, enrollment
 /**
  * Called once the service host no longer holds the document. Applies the
  * owner's pending Pause, and retires an enrollment that no active Edit
- * grant covers and no owner's restore kept live. Returns null when neither applies.
+ * grant covers and no owner's restore kept live, with its activation if no
+ * retirement names it yet. Returns null when neither applies.
  */
 export function releaseServiceHostEnrollment(storage: StorageContext, input: {workspaceId: string; objectId: string; nowMs: number}): ServiceHostEnrollment | null {
   const nowMs = timestamp(input.nowMs), standing = storage.captureStanding();
@@ -652,6 +653,12 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
     if (!current.retired && !uncovered && !(current.enabled && current.ownerStop)) return null;
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=?,host_drained_at_ms=COALESCE(host_drained_at_ms,?),updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(Number(current.retired || uncovered || current.ownerStop === "retire"), nowMs, Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
+    // A live session the owner's restore kept, and that no longer holds, left its activation with no retirement:
+    // the run ends and the activation retires here. Every other end of Edit access already opened one, and that stands.
+    if (uncovered && retirableServiceActivation(storage, current)) {
+      endServiceHostRun(storage, current, nowMs);
+      openServiceActivationRetirement(storage, current, nowMs);
+    }
     forgetIdleServiceHostUploads(storage, current.workspaceId);
     return read(storage, current.workspaceId, current.path);
   });
