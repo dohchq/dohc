@@ -698,31 +698,64 @@ it("keeps only the restored document live, not a replacement or sibling", async 
   }
 });
 
-// Proves: the owner's Pause or Stop wins over the continuation. Before the
-// owner's next activation exists, either fences the document while it stands,
-// and Resume returns it. Once that activation exists, Pause or Stop opens its
-// retirement, which no restore opened, so live editing ends until the owner
-// shares the document again.
-it.each(["pause", "stop"] as const)("lets the owner's %s end live editing that their restore kept", async action => {
-  const f = await restored();
-  if (action === "pause") {
-    f.setEnabled(false);
+// The host retiring the owner's next activation at the boundary it released.
+const retireSuccessor = (f: Awaited<ReturnType<typeof restored>>) =>
+  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(SUCCESSOR);
+
+// Proves: Pause only fences a restored document, before or after the owner's
+// next activation exists, and Resume brings live editing back for the owner
+// alone. The paused activation retires as any other, the grant stays revoked,
+// and admission waits for the owner's next activation to complete.
+it.each([["before", false], ["after", true]] as const)("brings live editing back when the owner resumes a paused restored document %s their next activation exists",
+  async (_when, successor) => {
+    const f = await restored();
+    if (successor) retainSuccessorActivation(f.raw, true);
+    expect(f.owner()).toBe(successor ? "current" : "refused");
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40})).toMatchObject({ownerStop: "pause"});
     expect(f.enabled(f.asOwner)).toBe(false);
+    expect(f.owner()).toBe("refused");
+    expect(f.covered()).toBe(true);
     expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
-  } else expect(f.stop()).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
-  expect(f.enabled(f.asOwner)).toBe(false);
-  expect(f.setEnabled(true)).toMatchObject({enabled: true, retired: false, ownerStop: null});
-  expect(f.enabled(f.asOwner)).toBe(true);
-  retainSuccessorActivation(f.raw, true);
-  if (action === "pause") f.setEnabled(false);
-  else f.stop({prepared: {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}}});
-  expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 20});
-  f.setEnabled(true);
-  expect(f.enabled(f.asOwner)).toBe(false);
-  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=50,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(SUCCESSOR);
-  expect(f.covered()).toBe(false);
-  expect(f.enabled(f.asOwner)).toBe(false);
-});
+    if (successor) {
+      expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 40});
+      retireSuccessor(f);
+    }
+    expect(f.enabled(f.asOwner)).toBe(false);
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.covered()).toBe(true);
+    expect(f.enabled(f.asOwner)).toBe(true);
+    expect(f.enabled({userId: scope.userId, shareId: scope.shareId})).toBe(false);
+    expect(f.owner()).toBe("refused");
+    expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+  });
+
+// Proves: Stop ends live editing that the owner's restore kept, before or
+// after the owner's next activation exists. Neither Resume nor enrolling the
+// document again brings it back. Sharing it for editing again does.
+it.each([["before", false], ["after", true]] as const)("ends live editing for good when the owner stops a restored document %s their next activation exists",
+  async (_when, successor) => {
+    const f = await restored();
+    if (successor) retainSuccessorActivation(f.raw, true);
+    const prepared = successor ? {prepared: {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}}} : {};
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, nowMs: 40, ...prepared}))
+      .toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+    expect(f.enabled(f.asOwner)).toBe(false);
+    expect(f.release()).toMatchObject({retired: true});
+    if (successor) {
+      expect(f.retirement()).toMatchObject({activationId: SUCCESSOR, requestedAtMs: 40});
+      retireSuccessor(f);
+    }
+    expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.covered()).toBe(false);
+    expect(f.enabled(f.asOwner)).toBe(false);
+    expect(f.release()).toMatchObject({enabled: false, retired: true});
+    expect(f.enroll({nowMs: 60})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+    expect(f.covered()).toBe(false);
+    expect(f.enabled(f.asOwner)).toBe(false);
+    f.share("again", "again-edit");
+    expect(f.covered()).toBe(true);
+    expect(f.enabled(f.asOwner)).toBe(true);
+  });
 
 // Proves: overlapping Edit grants decide as before. A new Edit share keeps
 // the document live by itself; ending it is an ordinary revocation that

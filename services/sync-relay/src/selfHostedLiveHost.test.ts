@@ -534,8 +534,11 @@ it("keeps a document resumed before its activation retired departing until that 
 });
 
 // Proves: the owner's finished restore that ended the document's last Edit
-// grant keeps it hosted, with no release, until the owner pauses or stops it.
-it.each(["pause", "stop"] as const)("keeps hosting a document its owner's restore kept live until the owner's %s", async action => {
+// grant keeps it hosted, with no release. After the owner's next activation
+// exists, Pause takes it out of the hosted set and Resume brings it back once
+// the paused activation retired. Stop takes it out for good: Resume leaves it
+// out, and its enrollment retires again.
+it.each(["pause", "stop"] as const)("keeps hosting a document its owner's restore kept live through the owner's %s and Resume as decided", async action => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   retainServiceActivation(f.raw, namespace, true);
   restoredWithoutEditGrant(f.storage, f.raw, namespace);
@@ -545,13 +548,20 @@ it.each(["pause", "stop"] as const)("keeps hosting a document its owner's restor
   expect(f.updates.at(-1)!.departing).toEqual([]);
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
   expect(f.events).toEqual([]);
-  retainSuccessorActivation(f.raw, true);
+  const successor = retainSuccessorActivation(f.raw, true);
   const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, ...(action === "stop" ? {retire: true, restoreFenceGeneration: 8, prepared} : {})});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40, ...(action === "stop" ? {retire: true, restoreFenceGeneration: 8, prepared} : {})});
   await f.waitUpdate([]);
-  // Either one opened the next activation's retirement, which the restore did not, so nothing keeps the document live.
   await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
-  expect(f.enrollment()).toMatchObject({enabled: false, retired: true, ownerStop: action === "pause" ? "pause" : "retire"});
+  expect(f.enrollment()).toMatchObject({enabled: false, retired: action === "stop", ownerStop: action === "pause" ? "pause" : "retire"});
+  // The host retired the activation the Pause or Stop ended.
+  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(successor);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50});
+  if (action === "pause") await f.waitUpdate(["docs/a.md"]);
+  else {
+    await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, retired: true}), {timeout: 10_000});
+    expect(f.updates.at(-1)!.documents).toEqual([]);
+  }
   expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
 });
 

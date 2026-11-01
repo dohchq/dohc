@@ -13,7 +13,6 @@ import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, restoredActivation, serviceActivationRetirementOpen,
   type RetirableServiceActivation} from "./serviceActivationRetirement";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
-import {readServiceActivation} from "./serviceActivationAccess";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -327,8 +326,10 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
       if (current.objectId !== objectId) throw relayError("conflict", "Service host enrollment path belongs to another document.");
       if (current.retired) assertCapacity(storage, workspaceId);
       if (input.held) retireHeldActivation(storage, current, identity, input.held, nowMs);
-      storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
-        .run(Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
+      // A retired enrollment enrolled again starts a new run.
+      storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,
+        created_at_ms=CASE WHEN retired=1 THEN ? ELSE created_at_ms END,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+        .run(nowMs, Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
       return read(storage, workspaceId, path)!;
     }
     if (input.held) throw relayError("conflict", HELD_CHANGED);
@@ -494,8 +495,11 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     if (ownerStop === "pause") openServiceActivationRetirement(storage, current, nowMs);
     const enabled = input.retire ? false : input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
-    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,host_drained_at_ms=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
-      .run(ownerStop, Number(enabled), Number(retired), input.enabled ? null : current.hostDrainedAtMs, Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
+    // Resume of a stopped enrollment starts a new run, as enrolling it again does.
+    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,host_drained_at_ms=?,
+      created_at_ms=CASE WHEN ? THEN ? ELSE created_at_ms END,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+      .run(ownerStop, Number(enabled), Number(retired), input.enabled ? null : current.hostDrainedAtMs, Number(input.enabled && current.retired), nowMs,
+        Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
     // Stop retires at once, so the release that clears upload proof never sees this row. The retirement it opened keeps that proof until it completes.
     forgetIdleServiceHostUploads(storage, workspaceId);
     return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
@@ -546,36 +550,42 @@ export function retireUncoveredServiceActivations(storage: StorageContext, enrol
 type CoveredEnrollment = Pick<ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">;
 /**
  * Whether the owner keeps live editing a document whose last Edit grant
- * ended in their own restore. That restore resumed at the document's current
- * generation and path, and its revocation opened the retirement of the
- * activation it continued. Only that activation, retired or retiring, or one
- * successor of it that nothing retires, continues. A later Pause, Stop,
- * revocation or restore leaves a newer retirement or generation instead.
+ * ended in their own restore. The latest restore at the document's current
+ * generation resumed at its path, and its revocation opened the retirement of
+ * the activation it continued. The enrollment's run began before that
+ * revocation, and no Edit grant covering the document ended after it. A Pause
+ * keeps the run, so Resume continues it. A Stop ends the run, and the
+ * enrollment that follows starts a new one.
  */
 export function serviceHostOwnerContinues(storage: StorageContext, enrollment: CoveredEnrollment): boolean {
   const {workspaceId, objectId, path, ownerUserId} = enrollment;
   const lineage = storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
     WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' AND current_path=?`).get(workspaceId, objectId, path);
-  if (!lineage || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId) || restoreInProgress(storage, workspaceId, objectId) ||
-    storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== objectId) return false;
-  const tail = readServiceActivation(storage, {workspaceId, mainVersionId: "main", objectId, lineageClaimId: String(lineage.lineage_claim_id)});
-  const restored = tail?.retire_requested_at_ms === null && tail.predecessor_activation_id !== null
-    ? storage.db.prepare(`SELECT * FROM ${SERVICE_ACTIVATIONS} WHERE relay_database_namespace=? AND activation_id=?`)
-      .get(tail.relay_database_namespace, tail.predecessor_activation_id) : tail;
   const identity = storage.getWorkspaceIdentity(workspaceId);
-  if (!restored || restored.retire_requested_at_ms === null || restored.retire_restore_generation !== lineage.restore_fence_generation ||
-    restored.owner_user_id !== ownerUserId || restored.share_id !== enrollment.shareId || !identity) return false;
-  const source: {replicationEpoch?: unknown; streamIdentity?: unknown} = JSON.parse(String(restored.source_json));
-  if (source.replicationEpoch !== identity.replicationEpoch || source.streamIdentity !== identity.streamIdentity) return false;
-  const restore = storage.db.prepare(`SELECT intent_json,basis_json FROM ${LIVE_RESTORE_OPERATIONS} WHERE relay_database_namespace=? AND workspace_id=?
-    AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND new_fence=? AND phase='resumed' AND invalidated_at_ms=?`)
-    .get(restored.relay_database_namespace, workspaceId, objectId, lineage.lineage_claim_id, lineage.restore_fence_generation, restored.retire_requested_at_ms);
+  if (!lineage || !identity || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId) || restoreInProgress(storage, workspaceId, objectId) ||
+    storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== objectId) return false;
+  const restore = storage.db.prepare(`SELECT relay_database_namespace,intent_json,basis_json,invalidated_at_ms FROM ${LIVE_RESTORE_OPERATIONS}
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND new_fence=? AND phase='resumed'
+    ORDER BY invalidated_at_ms DESC LIMIT 1`).get(workspaceId, objectId, lineage.lineage_claim_id, lineage.restore_fence_generation);
   if (!restore) return false;
   const intent: {deliveryKind?: unknown; ownerUserId?: unknown} = JSON.parse(String(restore.intent_json));
   const basis: {binding?: {currentPath?: unknown}; baselineSequence?: unknown} = JSON.parse(String(restore.basis_json));
-  return intent.deliveryKind === "owner" && intent.ownerUserId === ownerUserId && basis.binding?.currentPath === path &&
-    typeof basis.baselineSequence === "number" && basis.baselineSequence > storage.getEpochLogFloor(workspaceId) &&
-    restoredActivation(String(restore.basis_json)) === restored.activation_id;
+  if (intent.deliveryKind !== "owner" || intent.ownerUserId !== ownerUserId || basis.binding?.currentPath !== path ||
+    typeof basis.baselineSequence !== "number" || basis.baselineSequence <= storage.getEpochLogFloor(workspaceId)) return false;
+  const restored = storage.db.prepare(`SELECT * FROM ${SERVICE_ACTIVATIONS} WHERE relay_database_namespace=? AND activation_id=?
+    AND workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`)
+    .get(restore.relay_database_namespace, String(restoredActivation(String(restore.basis_json))), workspaceId, objectId, lineage.lineage_claim_id);
+  if (!restored || restored.retire_requested_at_ms !== restore.invalidated_at_ms || restored.retire_restore_generation !== lineage.restore_fence_generation ||
+    restored.owner_user_id !== ownerUserId || restored.share_id !== enrollment.shareId) return false;
+  const source: {replicationEpoch?: unknown; streamIdentity?: unknown} = JSON.parse(String(restored.source_json));
+  if (source.replicationEpoch !== identity.replicationEpoch || source.streamIdentity !== identity.streamIdentity) return false;
+  const run = storage.db.prepare(`SELECT created_at_ms FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId, objectId);
+  if (!run || Number(run.created_at_ms) > Number(restore.invalidated_at_ms)) return false;
+  const ended = storage.db.prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
+    WHERE s.workspace_id=? AND s.granter_user_id=? AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id
+      AND g.access='edit' AND g.status='revoked' AND g.revoked_at_ms>?)`).iterate(workspaceId, ownerUserId, restore.invalidated_at_ms);
+  for (const share of ended) if (coversEnrolledPath(share, path)) return false;
+  return true;
 }
 const covered = (storage: StorageContext, enrollment: CoveredEnrollment) =>
   coveredByEditGrant(storage, enrollment) || serviceHostOwnerContinues(storage, enrollment);
