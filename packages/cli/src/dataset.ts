@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
 import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
@@ -190,6 +191,8 @@ const description = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export type AddressedDatasetDescription = z.infer<typeof description>;
+// A computer's name, checked as the Collections record checks it, so every name a record holds passes.
+const computerLabel = z.string().refine(label => isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS), "Invalid computer name.");
 /**
  * A list on a computer that doesn't keep the workspace's Collections. It
  * holds the Collections on `server`, which this computer asked, and
@@ -197,11 +200,12 @@ export type AddressedDatasetDescription = z.infer<typeof description>;
  */
 export const DatasetListElsewhere = z.object({
   server: z.string().url().max(2048),
-  computer: z.object({ label: z.string().min(1).max(64), sameName: z.boolean() }).strict(),
+  computer: z.object({ label: computerLabel, sameName: z.boolean() }).strict(),
 }).strict();
 export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
-const refusalWords = z.string().min(1).max(1024);
-const refusalComputer = z.string().min(1).max(64).nullable();
+// No limit: an unreadable record's words can carry the error that stopped dohc reading it, with the workspace's path.
+const refusalWords = z.string().min(1);
+const refusalComputer = computerLabel.nullable();
 /**
  * Why this computer can't list a workspace's Collections. `words` say why
  * and what to do. `elsewhere`: another computer keeps them, and `computer`
