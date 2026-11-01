@@ -166,6 +166,8 @@ win:
     - ext: [md, markdown, txt, csv, json]
       name: dohc workspace document
       description: Open with dohc
+nsis:
+  include: build/installer.nsh
 linux:
   # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
   # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
