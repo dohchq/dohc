@@ -1219,11 +1219,36 @@ fn every_documents_history_exports_while_others_wait() {
     assert_eq!(count(&f.store, "live_audit_held_exports"), 500);
 }
 
+/// A held stream that exports on its retry is no longer held.
+#[test]
+fn a_held_stream_that_exports_on_its_retry_is_no_longer_held() {
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_audit_held_exports(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,retry_order)
+                 SELECT relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,1 FROM live_audit_pending_exports",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(count(&f.store, "live_audit_held_exports"), 1);
+    prepare(&mut f, 201);
+    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
+    assert_eq!(count(&f.store, "live_audit_held_exports"), 0);
+}
+
 fn report_lines(store: &EngineStore) -> Vec<String> {
     let mut lines = Vec::new();
     let mut after = Some(crate::HistoryReport::default());
     while let Some(position) = after {
-        let (batch, next) = crate::history_report(store, position).unwrap();
+        let (batch, next) =
+            crate::history_report(store, position, std::time::Duration::MAX).unwrap();
         lines.extend(batch);
         after = next;
     }
@@ -1265,7 +1290,8 @@ fn each_store_logs_a_problem_in_a_documents_history() {
 
 /// The report reads a bounded batch at a time and resumes where it stopped,
 /// so the engine's first command never waits on a long report and each
-/// document is reported once.
+/// document is reported once. A batch whose time is spent stops after the
+/// row it is reading.
 #[test]
 fn the_history_report_reads_in_small_steps() {
     let (mut f, _) = new_owner_holds();
@@ -1284,21 +1310,25 @@ fn the_history_report_reads_in_small_steps() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
-    let mut batches = Vec::new();
-    let mut after = crate::HistoryReport::default();
-    loop {
-        let (lines, next) = crate::history_report(&f.store, after).unwrap();
-        batches.push(lines.len());
-        match next {
-            Some(next) => after = next,
-            None => break,
+    let batches = |time| {
+        let mut batches = Vec::new();
+        let mut after = Some(crate::HistoryReport::default());
+        while let Some(position) = after {
+            let (lines, next) = crate::history_report(&f.store, position, time).unwrap();
+            batches.push(lines.len());
+            after = next;
         }
-    }
-    assert_eq!(batches.iter().sum::<usize>(), 101, "{batches:?}");
+        batches
+    };
+    let rows = batches(std::time::Duration::MAX);
+    assert_eq!(rows.iter().sum::<usize>(), 101, "{rows:?}");
     assert!(
-        batches.len() > 1 && batches.iter().all(|lines| *lines <= 64),
-        "{batches:?}"
+        rows.len() > 1 && rows.iter().all(|lines| *lines <= 64),
+        "{rows:?}"
     );
+    let timed = batches(std::time::Duration::ZERO);
+    assert_eq!(timed.iter().sum::<usize>(), 101, "{timed:?}");
+    assert!(timed.iter().all(|lines| *lines <= 1), "{timed:?}");
 }
 
 /// Owner records that share a coordinate log different

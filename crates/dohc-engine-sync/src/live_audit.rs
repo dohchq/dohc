@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::apply::{MutationOutcome, apply_envelope_with_mutation_outcome};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx};
@@ -554,14 +555,17 @@ const REPORT_ROWS: [(&str, &str); 2] = [
     ),
 ];
 
-/// One bounded batch of the history report. It returns the batch's log
-/// lines and where the next batch resumes, or `None` once every row has been
-/// read.
+/// One bounded batch of the history report. A batch reads at most
+/// `REPORT_BATCH` rows and stops after the row that spends `time`. It returns
+/// the batch's log lines and where the next batch resumes, or `None` once
+/// every row has been read.
 pub fn history_report(
     store: &EngineStore,
     mut after: HistoryReport,
+    time: Duration,
 ) -> Result<(Vec<String>, Option<HistoryReport>), SyncError> {
     store.read_with(|conn| {
+        let started = Instant::now();
         let mut budget = REPORT_BATCH;
         let mut lines = Vec::new();
         for (index, (role, sql)) in REPORT_ROWS.into_iter().enumerate() {
@@ -582,18 +586,17 @@ pub fn history_report(
                         row.get::<_, String>(2)?,
                     ))
                 })
-                .map_err(SyncError::corrupt)?
-                .collect::<Result<Vec<_>, _>>()
                 .map_err(SyncError::corrupt)?;
-            for (rowid, imported, other) in &rows {
-                *position = *rowid;
-                if let Some(imported) = imported.as_ref().filter(|imported| *imported != other) {
-                    lines.push(history_line(conn, imported, role, other)?);
+            for row in rows {
+                let (rowid, imported, other) = row.map_err(SyncError::corrupt)?;
+                *position = rowid;
+                if let Some(imported) = imported.filter(|imported| *imported != other) {
+                    lines.push(history_line(conn, &imported, role, &other)?);
                 }
-            }
-            budget -= rows.len() as i64;
-            if budget == 0 {
-                return Ok((lines, Some(after)));
+                budget -= 1;
+                if budget == 0 || started.elapsed() >= time {
+                    return Ok((lines, Some(after)));
+                }
             }
             *position = i64::MAX;
         }
