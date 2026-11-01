@@ -462,7 +462,7 @@ export function markdownToYDoc(
   options: { clientID?: number; reading?: 'source' | 'projection' } = {},
 ): Y.Doc {
   const usesCrlf = markdown.includes('\r\n')
-  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf)
+  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf, true)
   const doc = new Y.Doc()
   if (options.clientID !== undefined) doc.clientID = options.clientID
 
@@ -785,13 +785,21 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
   )
 
-  return `${frontmatterBlockFor(
+  const markdown = `${frontmatterBlockFor(
     frontmatter,
     internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
     body,
     usesCrlf ? '\r\n' : '\n',
     writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), internalMeta),
   )}${restoreLineEndings(body)}`
+  return getDohcYDocPlainText(doc) ? markdown : withFinalLineEnding(markdown, usesCrlf ? '\r\n' : '\n')
+}
+
+/** A rich document's file ends with exactly one line ending, unless it is empty. */
+function withFinalLineEnding(markdown: string, lineEnding: '\n' | '\r\n'): string {
+  let end = markdown.length
+  while (end > 0 && markdown[end - 1] === '\n') end -= markdown[end - 2] === '\r' ? 2 : 1
+  return end === 0 ? '' : `${markdown.slice(0, end)}${lineEnding}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {

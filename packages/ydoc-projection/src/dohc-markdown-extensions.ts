@@ -1142,7 +1142,7 @@ function renderItemBlocks(node: JSONContent, helpers: MarkdownRendererHelpers, p
     const previous = index === 0 ? first : children[index - 1]
     const interrupts = child.type === 'orderedList' ? /^1\. [ \t]*[^ \t]/u.test(firstLine)
       : child.type !== 'bulletList' || firstLine.replace(/[ \t]+$/u, '') !== '-'
-    const separate = child.type === 'paragraph' || child.type === 'horizontalRule' || child.type === 'mathBlock'
+    const separate = ['paragraph', 'horizontalRule', 'mathBlock', 'table'].includes(child.type ?? '')
       || (['paragraph', 'mathBlock', 'table', 'blockquote', 'callout'].includes(previous?.type ?? '') && !interrupts)
     const boundary = separate || (['blockquote', 'callout'].includes(previous?.type ?? '') && ['blockquote', 'callout'].includes(child.type ?? ''))
       || (previous?.type === child.type && ['bulletList', 'orderedList', 'taskList'].includes(child.type ?? ''))
@@ -1308,15 +1308,16 @@ export const DohcMarkdownTable = Table.extend({
       renderChildren: (nodes, separator) =>
         prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
     }
-    // Tiptap's table renderer includes its own trailing newline, while the
-    // document renderer also joins sibling blocks with `\n\n`. Returning both
-    // would put two blank lines between a table and its next sibling.
+    // Tiptap's table renderer adds a line break before and after the table,
+    // while the parent renderer already separates sibling blocks. Keeping
+    // them would put an extra blank line on each side of the table.
     const table = renderTableToMarkdown(
       node,
       tableHelpers,
       { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-    ).replace(/\n$/u, '')
-    return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
+    ).replace(/^\n/u, '').replace(/\n$/u, '')
+    const annotation = table ? tableRowHeightsAnnotation(node.content ?? []) : ''
+    return annotation ? `${annotation}\n${table}` : table
   },
 })
 

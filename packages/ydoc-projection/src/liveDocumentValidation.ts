@@ -818,7 +818,10 @@ function validatePublicState(
 
   const projectedMarkdown = yDocToMarkdown(scratch)
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
-  if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
+  // An empty note keeps its CRLF preference for the text added later.
+  if (metadata.dohcMarkdownCrlf === true && projectedMarkdown !== '' && !projectedMarkdown.includes('\r\n')) {
+    refuse('invalid-schema')
+  }
   const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader)
   if (source.kind === 'capacity-refused') refuse('capacity-refused')
   if (source.kind === 'invalid' || source.kind === 'import-failed'
@@ -831,6 +834,7 @@ function validatePublicState(
         const kept = { ...values }
         if (engineReader) {delete kept.dohcLineageEpoch; delete kept.dohcMarkdownSourceReader}
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key]
+        if (projectedMarkdown === '') delete kept.dohcMarkdownCrlf
         for (const key of Object.keys(kept)) if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key]
         return kept
       }

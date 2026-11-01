@@ -23,9 +23,9 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  * Whether `markdown` is a lossy note: one whose meaning would change if dohc
  * wrote it back from its editor document.
  *
- * A note dohc wrote is its own canonical Markdown, apart from the final
- * newline a save drops, so it skips the render. A note the editor cannot
- * import at all is lossy too.
+ * A note dohc wrote is its own canonical Markdown, so it skips the render, as
+ * does one that differs from it only by a missing final line ending. A note
+ * the editor cannot import at all is lossy too.
  */
 export function isLossyMarkdown(markdown: string): boolean {
   let canonical: string
@@ -39,7 +39,7 @@ export function isLossyMarkdown(markdown: string): boolean {
   } catch {
     return true
   }
-  if (canonical === markdown.replace(/\r?\n$/u, '')) return false
+  if (canonical.replace(/\r?\n$/u, '') === markdown.replace(/\r?\n$/u, '')) return false
   return !sameMarkdownMeaning(markdown, canonical)
 }
 

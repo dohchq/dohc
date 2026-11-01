@@ -1280,7 +1280,7 @@ impl Ydoc {
                 } else {
                     body_markdown
                 })?;
-                return Ok(preserved.into_string());
+                return with_final_line_ending(preserved.into_string(), uses_crlf);
             }
         }
         let mut out = ProjectionBuffer::new();
@@ -1296,11 +1296,14 @@ impl Ydoc {
         }
         out.push_str(&body_markdown)?;
         let projected = out.into_string();
-        if uses_crlf {
-            ensure_projection_string(projected.replace('\n', "\r\n"))
-        } else {
-            Ok(projected)
-        }
+        with_final_line_ending(
+            if uses_crlf {
+                projected.replace('\n', "\r\n")
+            } else {
+                projected
+            },
+            uses_crlf,
+        )
     }
 
     // ---- Rust-side edit helpers (used to build lineages in unit tests without
@@ -1569,7 +1572,9 @@ impl Ydoc {
                 let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
                 let source = match prefix {
-                    Some(prefix) => frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?,
+                    Some(prefix) => {
+                        frontmatter_yaml::source(prefix, &frontmatter, body.is_empty(), uses_crlf)?
+                    }
                     None => None,
                 };
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
@@ -2058,11 +2063,14 @@ impl Ydoc {
     /// Keep the frontmatter text of exact source bytes, so the frontmatter
     /// survives once a later edit makes the bytes stale.
     fn keep_frontmatter_source_of(&self, markdown: &str) -> Result<(), CollabError> {
-        let (frontmatter, prefix, _) = split_markdown_frontmatter(markdown);
+        let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
         let source = match prefix {
-            Some(prefix) => {
-                frontmatter_yaml::source(prefix, &frontmatter, markdown.contains("\r\n"))?
-            }
+            Some(prefix) => frontmatter_yaml::source(
+                prefix,
+                &frontmatter,
+                body.is_empty(),
+                markdown.contains("\r\n"),
+            )?,
             None => None,
         };
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -5457,6 +5465,21 @@ fn checked_projection_len(current: usize, additional: usize) -> Result<usize, Co
     }
 }
 
+/// A rich document's file ends with exactly one line ending, unless it is
+/// empty. The ending counts toward the projection's byte limit.
+fn with_final_line_ending(mut markdown: String, uses_crlf: bool) -> Result<String, CollabError> {
+    while markdown.ends_with('\n') {
+        markdown.pop();
+        if markdown.ends_with('\r') {
+            markdown.pop();
+        }
+    }
+    if !markdown.is_empty() {
+        markdown.push_str(if uses_crlf { "\r\n" } else { "\n" });
+    }
+    ensure_projection_string(markdown)
+}
+
 fn ensure_projection_string(value: String) -> Result<String, CollabError> {
     if value.len() > MAX_PROJECTION_BYTES {
         Err(projection_too_large(value.len()))
@@ -7122,7 +7145,7 @@ fn render_list_item(
             output.push('\n')?;
         } else if matches!(
             element_tag(child),
-            Some("paragraph" | "horizontalRule" | "mathBlock")
+            Some("paragraph" | "horizontalRule" | "mathBlock" | "table")
         ) || (matches!(
             element_tag(previous),
             Some("paragraph" | "mathBlock" | "table" | "blockquote" | "callout")
@@ -7565,8 +7588,12 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         }
     }
     let mut output = ProjectionBuffer::new();
-    output.push_str(&render_table_row_heights(&row_heights)?)?;
-    output.push_str("\n| ")?;
+    let annotation = render_table_row_heights(&row_heights)?;
+    if !annotation.is_empty() {
+        output.push_str(&annotation)?;
+        output.push('\n')?;
+    }
+    output.push_str("| ")?;
     for (index, width) in widths.iter().enumerate() {
         if index != 0 {
             output.push_str(" | ")?;

@@ -252,10 +252,12 @@ fn double(value: &str) -> ProjectionResult<String> {
 
 /// The frontmatter block and blank lines a document starts with, when the
 /// projection would write them differently. Import keeps them as the
-/// document's frontmatter source.
+/// document's frontmatter source. With no body after it (`body_is_empty`),
+/// canonical frontmatter ends with its closing delimiter's line.
 pub(super) fn source(
     prefix: &str,
     frontmatter: &serde_json::Map<String, Value>,
+    body_is_empty: bool,
     uses_crlf: bool,
 ) -> ProjectionResult<Option<String>> {
     let mut canonical = String::new();
@@ -266,7 +268,7 @@ pub(super) fn source(
         for (key, value) in ordered {
             canonical.push_str(&project_frontmatter(key, value)?);
         }
-        canonical.push_str("---\n\n");
+        canonical.push_str(if body_is_empty { "---\n" } else { "---\n\n" });
     }
     if uses_crlf {
         canonical = canonical.replace('\n', "\r\n");

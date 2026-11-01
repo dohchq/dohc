@@ -431,9 +431,11 @@ export function loadMarkdownFrontmatter(
 /**
  * Split a document into frontmatter values and body. The block and the blank
  * lines after it come back as `frontmatterSource` when canonical frontmatter
- * would be written differently, so a settle can keep them.
+ * would be written differently, so a settle can keep them. In a rich
+ * document (`richdoc`), canonical frontmatter with no body after it ends with
+ * its closing delimiter's line.
  */
-export function parseFrontmatter(src: string, usesCrlf: boolean): {
+export function parseFrontmatter(src: string, usesCrlf: boolean, richdoc = false): {
   meta: Record<string, unknown>
   body: string
   frontmatterSource?: string
@@ -449,17 +451,18 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
   }
   const separator = /^(?:\r?\n)*/u.exec(block.rest)?.[0] ?? ''
   const source = src.slice(0, src.length - block.rest.length + separator.length)
+  const body = block.rest.slice(separator.length)
   let canonical: string
   try {
     canonical = Object.keys(block.value).length === 0
       ? ''
-      : `---\n${frontmatterYaml(block.value)}---\n\n`
+      : `---\n${frontmatterYaml(block.value)}---\n${richdoc && body === '' ? '' : '\n'}`
   } catch {
     return { meta: {}, body: src }
   }
   return {
     meta: block.value,
-    body: block.rest.slice(separator.length),
+    body,
     ...(source === (usesCrlf ? canonical.replaceAll('\n', '\r\n') : canonical)
       ? {}
       : { frontmatterSource: source }),
