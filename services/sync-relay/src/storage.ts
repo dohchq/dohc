@@ -499,11 +499,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }
-  serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
-    return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
+  serviceHostEnrollmentCovered(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
-    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner);
   }
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);

@@ -76,11 +76,11 @@ export async function startSelfHostedLiveHost(options: {
   const changes = Effect.runSync(Queue.sliding<void>(1));
   // Whether the enrollment names its workspace's current owner and identity.
   const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant covers it.
+  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's finished restore covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;
-  const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentHasEditGrant(row);
+  const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
   const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
   const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);

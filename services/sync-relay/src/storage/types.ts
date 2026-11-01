@@ -672,8 +672,9 @@ export interface SyncRelayStorage {
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
-  serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
+  /** Whether an Edit grant of its owner, or the owner's finished restore that ended the last one, keeps the enrolled document live. */
+  serviceHostEnrollmentCovered(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">): boolean;
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** Whether the document has a restore that has neither resumed nor been declined. */

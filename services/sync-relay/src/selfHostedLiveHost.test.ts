@@ -12,7 +12,7 @@ import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
-import {fixture as ticketFixture, binding, scope, retainServiceActivation} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, scope, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
@@ -531,6 +531,44 @@ it("keeps a document resumed before its activation retired departing until that 
   f.host.reconcile();
   await f.waitUpdate(["docs/a.md"]);
   expect(f.updates.at(-1)!.departing).toEqual([]);
+});
+
+// Proves: the owner's finished restore that ended the document's last Edit
+// grant keeps it hosted, with no release, until the owner pauses or stops it.
+it.each(["pause", "stop"] as const)("keeps hosting a document its owner's restore kept live until the owner's %s", async action => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  retainServiceActivation(f.raw, namespace, true);
+  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  notifyRelayWrite(f.storage);
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  expect(f.updates.at(-1)!.departing).toEqual([]);
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.events).toEqual([]);
+  retainSuccessorActivation(f.raw, true);
+  const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, ...(action === "stop" ? {retire: true, restoreFenceGeneration: 8, prepared} : {})});
+  await f.waitUpdate([]);
+  // Either one opened the next activation's retirement, which the restore did not, so nothing keeps the document live.
+  await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
+  expect(f.enrollment()).toMatchObject({enabled: false, retired: true, ownerStop: action === "pause" ? "pause" : "retire"});
+  expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+});
+
+// Proves: a restore that ended one of two Edit grants keeps nothing live by
+// itself. Revoking the other grant later retires the document as usual.
+it("retires a document after an overlapping grant's later revocation, though a restore ended the first grant", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  f.share("share-overlap", ["docs"]);
+  await f.waitUpdate(["docs/a.md"]);
+  retainServiceActivation(f.raw, namespace, true);
+  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  notifyRelayWrite(f.storage);
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  expect(f.storage.revokeShareGrant({shareId: "share-overlap", grantId: "share-overlap-edit", revokedAtMs: 31}).ok).toBe(true);
+  await f.waitUpdate([]);
+  await vi.waitFor(() => expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => row.path)).toEqual(["docs/a.md"]), {timeout: 10_000});
 });
 
 it("retires the last document without stopping the daemon", async () => {
