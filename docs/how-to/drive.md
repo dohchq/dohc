@@ -320,56 +320,117 @@ If any command connects, apply the Cloud Firewall to the Droplet at once, then c
 
 ## Accept the server
 
-The rehearsal cannot test mail, snapshots, the heartbeat, a published app, or live editing. Test them here with the real providers.
-Do the steps in order. If a step fails, stop and report it.
+The rehearsal does not test mail, snapshots, the heartbeat, a published app, or live editing.
+After the first start, the operator tests each of them with the real providers.
+Do the checks in order. If a check fails, stop and report it.
+
+Write each result in the server's acceptance record, with the release revision.
+Never record a key, password, token, cookie, or email address.
 
 1. **Operator:** [Check that only Cloudflare reaches the origin](#check-that-only-cloudflare-reaches-the-origin).
-2. **Approval:** Send the first delivery test only after approval. Create a test account with an approved address, and check that its email arrives.
-3. **Operator:** From a desktop connected to Drive, share a document with an Edit link. Open the link in two browsers.
-   Edit the document in each browser. Each edit must appear in the other browser without a reload.
-   Repeat with a named recipient who signs in.
-   The release check proves the connection descriptor, not live editing.
-4. **Operator:** Publish a small app to Drive from the desktop, and open its share link in a browser.
-   The app opens on a host under `dohc.app`. In the browser's developer tools, check the first response from that host:
-   - `Set-Cookie` names `__Host-dohc-app`, with `Secure`, `HttpOnly`, and `SameSite=Strict`.
-   - `Cache-Control` is `private, no-store`.
-   - `Content-Security-Policy` is present. `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy` are `same-origin`.
-   - `cf-cache-status` is not `HIT`.
-5. **Operator:** Verify the first snapshot with the key from the password manager, on a Linux host other than the Droplet.
-   The host needs the same release bundle and its loaded image. Wait until Healthchecks.io shows the first ping.
-   1. Write the password manager copy of `drive.env` to `$HOME/drive-check/drive.env`, with mode 0600.
-   2. Download the newest snapshot from the R2 bucket into `$HOME/drive-check/offsite`.
-   3. Verify it, as in [Verify an encrypted snapshot](self-host-recovery.md#verify-an-encrypted-snapshot):
+   Record the exit status of each command.
 
-      ```sh
-      cd <release-bundle>
-      node scripts/self-host/recovery.mjs verify "$HOME/drive-check/verified" --snapshot "$HOME/drive-check/offsite/<snapshot-file>" \
-        --env-file "$HOME/drive-check/drive.env"
-      ```
+### App launch
 
-      The command must report the snapshot's namespace, stamp, and time. A wrong or truncated key fails here.
-   4. Delete the folder. It holds the configuration and unencrypted workspace data:
+1. **Operator:** From a desktop connected to Drive, publish a small app and share it with a link.
+2. **Operator:** Open the share link in a browser. The app opens on a host under `dohc.app`.
+3. **Operator:** In the browser's developer tools, copy the launch host and the value of its `__Host-dohc-app` cookie.
+4. **Operator:** Within 10 minutes, request the launch page again with that cookie:
 
-      ```sh
-      rm -r "$HOME/drive-check"
-      ```
+   ```sh
+   curl -sS -o /dev/null -D - --cookie '__Host-dohc-app=<cookie>' https://<launch-host>/bootstrap \
+     | sed 's/__Host-dohc-app=[^;]*/__Host-dohc-app=<hidden>/'
+   ```
 
-6. **Operator:** Stop the snapshot job on the Droplet:
+   This request ends the browser's app session. Reopen the share link to continue.
+
+The check passes when the app loads in the browser and the command shows status 200 with these headers:
+
+- `cache-control: private, no-store`
+- `content-security-policy`, ending with `frame-ancestors 'none'`
+- `cross-origin-opener-policy: same-origin`
+- `cross-origin-resource-policy: same-origin`
+- `permissions-policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()`
+- `referrer-policy: no-referrer`
+- `x-content-type-options: nosniff`
+- `set-cookie: __Host-dohc-app=<hidden>`, with `Secure`, `HttpOnly`, `SameSite=Strict`, and `Path=/`
+
+The response must not show `cf-cache-status: HIT`.
+
+Record the command's output. Its `sed` step hides the cookie.
+
+### Account email
+
+1. **Approval:** Send the first delivery test only after approval.
+2. **Operator:** Create a test account with an approved address.
+
+The check passes when the account's email arrives, and the mail provider's delivery record shows that the receiving server accepted it over TLS.
+If the record does not show the transport, open the received message's headers.
+The `Received` header added by the receiving server must show TLS, such as `with ESMTPS`.
+
+Record the time the email arrived and the provider's delivery record, without the address.
+
+### Live edit
+
+1. **Operator:** Sign in to two approved accounts, one in each of two browsers.
+2. **Operator:** From a desktop connected to Drive, share one page with both accounts, with edit access.
+3. **Operator:** Open the page in both browsers. Type a different line in each browser.
+4. **Operator:** Reload both browsers.
+
+The check passes when each browser shows the other browser's line without a reload, and both lines remain after the reload.
+The release check proves the connection descriptor, not live editing.
+
+Record what each browser showed before and after the reload.
+
+### Snapshot
+
+Do this on a Linux host other than the Droplet, with the same release bundle and its loaded image.
+
+1. **Provider:** Wait until Healthchecks.io shows the first ping. Then confirm that the R2 bucket holds the first snapshot.
+2. **Operator:** Write the password manager copy of `drive.env` to `$HOME/drive-check/drive.env`, with mode 0600.
+3. **Operator:** Download the newest snapshot from the R2 bucket into `$HOME/drive-check/offsite`.
+4. **Operator:** Verify it, as in [Verify an encrypted snapshot](self-host-recovery.md#verify-an-encrypted-snapshot):
+
+   ```sh
+   cd <release-bundle>
+   node scripts/self-host/recovery.mjs verify "$HOME/drive-check/verified" --snapshot "$HOME/drive-check/offsite/<snapshot-file>" \
+     --env-file "$HOME/drive-check/drive.env"
+   ```
+
+5. **Operator:** Delete the folder. It holds the configuration and unencrypted workspace data:
+
+   ```sh
+   rm -r "$HOME/drive-check"
+   ```
+
+The check passes when the verify command exits with status 0 and reports the snapshot's namespace, generation, stamp, time, and release.
+A wrong or truncated key fails here.
+
+Record the verify command's output. It holds no key material.
+
+### Heartbeat
+
+1. **Operator:** Stop the snapshot job on the Droplet:
 
    ```sh
    sudo docker stop $(sudo docker ps --quiet --filter label=com.docker.compose.service=relay-snapshot)
    ```
 
-   Wait until Healthchecks.io marks the check down and alerts the operator. This takes up to 1 hour plus the check's grace time.
-7. **Operator:** Start the snapshot job again:
+2. **Operator:** Wait until Healthchecks.io marks the check down and alerts the operator.
+   This takes up to 1 hour plus the check's grace time.
+3. **Operator:** Start the snapshot job again:
 
    ```sh
    sudo docker start $(sudo docker ps --all --quiet --filter label=com.docker.compose.service=relay-snapshot)
    ```
 
-   The job takes a snapshot when it starts. Healthchecks.io must mark the check up after its ping.
+   The job takes a snapshot when it starts, then pings Healthchecks.io.
 
-The server is accepted when every step passes. Record the results with the release revision.
+The check passes when the operator receives the down alert, and Healthchecks.io then marks the check up again.
+
+Record the times when the job stopped, the alert arrived, the job started, and the check recovered.
+
+The server is accepted when every check passes.
 
 ## Replace a dead server
 
