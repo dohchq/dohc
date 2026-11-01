@@ -12,7 +12,7 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { collectionPlace, finishedTransfer, movedTransfer, moveCollectionToServer } from "./collectionMove";
+import { collectionPlace, createBackgroundDatasetRouter, finishedTransfer, movedTransfer, moveCollectionToServer } from "./collectionMove";
 import { createHistoryCollectionRemote } from "./historyCollectionRemote";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
@@ -93,6 +93,9 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
   const moved = (datasetId: string) => movedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
   const data = (status = finished) => createDatasetAuthorityRouter(local, { status, marker: datasetId => local.transferStatus(datasetId),
     async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } });
+  // The Collections History reads, as main builds them.
+  const background = () => createBackgroundDatasetRouter(local, { ...move, server: async () => move, signal: controller.signal },
+    async origin => { expect(origin).toBe("https://relay.test"); return owner; }, () => {});
   const owner = createRemoteDatasetData({ workspaceId: "w", credentials: credentials("owner"), ...session, relayJson: authorized("owner") });
   const teammate = createRemoteDatasetData({ workspaceId: "w", shareId: "team", credentials: credentials("teammate"), ...session, relayJson: authorized("teammate") });
   const workspace = { workspaceId: "w" };
@@ -116,7 +119,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
     collection("window", { ...address, action: "invoke", ...pinned, operationId, idempotencyKey, input });
   await ownerInvoke(id(6), "owner-before", { name: "Owner" });
   const setGrant = { ...address, action: "setGrant", grantId: "team-grant", grant: { ...pinned, operationIds: [id(6)], discover: true } };
-  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, data, moved, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
+  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, data, moved, background, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
 }
 
 it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
@@ -259,7 +262,7 @@ it("reads a stopped move's automations and buttons from this computer, without t
 
 it("reads a stopped move's History from this computer, without trying the move again while the server is away", async () => {
   let refusals = 0;
-  const { collection, setGrant, data, moved, controller, transferStatus } = await collectionOnThisComputer({
+  const { collection, setGrant, background, controller, transferStatus } = await collectionOnThisComputer({
     async relay() { refusals++; throw Error("The server stopped answering."); } });
   await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
   expect(refusals).toBe(1);
@@ -267,7 +270,7 @@ it("reads a stopped move's History from this computer, without trying the move a
   // History reads each Collection with a transfer record as main does. This one keeps its records here, with the owner's change.
   const operation = { state: {}, workspace: { attachmentId: Symbol("workspace") }, signal: controller.signal, assertCurrent() {} };
   const history = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
-    withOperation: work => work(operation), dataFor: () => data(moved) });
+    withOperation: work => work(operation), dataFor: background });
   const page = await history(id(1), undefined, new AbortController().signal);
   expect(page).toMatchObject({ datasetId: id(1), name: "Items" });
   expect(page.entries.length).toBeGreaterThan(0);

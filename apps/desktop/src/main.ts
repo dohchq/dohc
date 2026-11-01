@@ -55,7 +55,7 @@ import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
 import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
-import { collectionPlace, finishedTransfer, movedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
+import { collectionPlace, createBackgroundDatasetRouter, finishedTransfer, movedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -4783,8 +4783,11 @@ interface ServerCollection {
 // A background read passes `movedTransfer`, which never waits for an unfinished move or resumes a stopped one.
 function finishedTransferOf(workspace: RegistryEntry, local: LocalDatasetHost, datasetId: string, signal: AbortSignal,
   read: typeof finishedTransfer = finishedTransfer) {
-  return read({ local, workspaceId: workspace.workspaceId, datasetId, server: () => remoteForWorkspace(workspace),
-    currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal });
+  return read({ local, datasetId, ...transferSession(workspace, signal) });
+}
+function transferSession(workspace: RegistryEntry, signal: AbortSignal) {
+  return { workspaceId: workspace.workspaceId, server: () => remoteForWorkspace(workspace),
+    currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal };
 }
 // The automations panel, buttons and presses ask here. None of them waits for an unfinished move or resumes a stopped
 // one: a Collection whose move hasn't finished answers `unfinished`, in the words of the move's own error.
@@ -6511,16 +6514,12 @@ function registerIpcHandlers(): void {
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
         // History reads every Collection with a transfer record, and reads ahead in the background. A Collection
         // whose move hasn't finished reads this computer's history, which still keeps its records.
-        remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
-          status: async id => { current(); return finishedTransferOf(workspace, local, id, signal, movedTransfer); },
-          marker: id => local.transferStatus(id),
-          remote: async targetOrigin => {
-            const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
-            if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
-            return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
-              currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
-          },
-        })),
+        remote: remote((signal, current) => createBackgroundDatasetRouter(local, transferSession(workspace, signal), async targetOrigin => {
+          const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
+          if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+          return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+            currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+        }, current)),
       };
     },
     recordHistoryPersonName:(workspaceId, userId, sender) => {
