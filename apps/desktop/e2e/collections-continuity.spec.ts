@@ -53,10 +53,11 @@ views:
       page.getByRole("button", { name: "Open Launch plan" }),
     ).toBeVisible();
     await page.getByTestId("collection-page").getByRole("checkbox").click();
-    await page.getByRole("button", { name: "Open Launch plan" }).click();
+    // Opening the record before the edit saves can fail the edit (#3078).
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
+    await page.getByRole("button", { name: "Open Launch plan" }).click();
     await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
     await page.getByRole("button", { name: "Board", exact: true }).click();
     await folder.press("F2");
