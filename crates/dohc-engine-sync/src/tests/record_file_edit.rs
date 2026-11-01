@@ -729,8 +729,6 @@ fn lossy_record_conflict_keeps_its_exact_source_under_a_later_replica_edit() {
     replica
         .preserve_folded_markdown_source(LOSSY)
         .expect("witness the exact source");
-    replica.richdoc_append_paragraph(NOTES);
-    let draft = projected(&replica);
     let claim = b
         .put_binary_blob(&replica.encode_full_state())
         .expect("base blob");
@@ -756,6 +754,14 @@ fn lossy_record_conflict_keeps_its_exact_source_under_a_later_replica_edit() {
         &NoLiveLeases,
     )
     .expect("the replica's base arrives");
+    assert!(open_conflicts(&b).is_empty(), "the base matches the file");
+    // B types into the claimed lineage and never settles.
+    let local = Ydoc::wire();
+    local
+        .apply(&replica.encode_full_state())
+        .expect("B holds the base");
+    b_types(&mut b, &mut WriterDocCache::new(), &local, &[NOTES], 2_001);
+    let draft = projected(&local);
 
     let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
     hydrate(&mut b, &[&flown]);
@@ -779,7 +785,8 @@ fn lossy_record_conflict_keeps_its_exact_source_under_a_later_replica_edit() {
         "the exact source stays the current side"
     );
     assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
-    assert_eq!(lineage_text(&b), projected(&replica), "the lineage keeps the edit");
+    local.apply(&delta).expect("merge the replica's edit");
+    assert_eq!(lineage_text(&b), projected(&local), "the lineage keeps the edit");
     assert_eq!(recovered(&b, &draft), 1);
 }
 
@@ -859,8 +866,9 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
             let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
             let doc = richdoc(&planned);
             if claimed {
-                doc.richdoc_append_paragraph(NOTES);
                 device_c_base(&mut b, &doc);
+                assert!(open_conflicts(&b).is_empty(), "the base matches the file");
+                b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
             } else {
                 b_opens(&mut b, &doc, &planned, &[NOTES]);
             }
