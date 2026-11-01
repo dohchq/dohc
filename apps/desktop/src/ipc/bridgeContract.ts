@@ -6840,7 +6840,7 @@ export const chatDispatchNoticeOperations = {
     scope: "workspace",
     channel: "desktop:register-chat-dispatch-notices",
     payload: WorkspaceIdPayload, result: ChatDispatchNoticesEvent,
-    guard: "active-workspace", inactiveMessage: "Open this workspace to read its dispatch notices.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to read its notices about agent replies.",
   },
   dismissChatDispatchNotice: {
     capabilityId: "chat.dispatch.notice.dismiss",

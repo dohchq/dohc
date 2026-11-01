@@ -3855,7 +3855,7 @@ describe("chatDispatchService", () => {
     if (reason === "shutdown") await fixture.service.stop();
     else fixture.serviceOptions.runSlotOccupied = () => true;
     thread.resolve("test-thread");
-    await expect(result).resolves.toEqual({ ok: false, detail: reason === "shutdown" ? "Agent dispatch is stopping." : "A runner became active before the self-test could start." });
+    await expect(result).resolves.toEqual({ ok: false, detail: reason === "shutdown" ? "dohc is quitting." : "A runner became active before the self-test could start." });
     expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.attributions).toEqual([]);
   });

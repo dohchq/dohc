@@ -1781,7 +1781,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<RunnerSelfTestResult> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
-    if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+    if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
     if (
       workspaceProcessReserved(workspace)
     ) {
@@ -1852,7 +1852,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return {
             ok: false,
             detail: shuttingDown
-              ? "Agent dispatch is stopping."
+              ? "dohc is quitting."
               : "A runner became active before the self-test could start.",
           };
         }
@@ -1862,7 +1862,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           title: SELF_TEST_THREAD_TITLE,
           body: SELF_TEST_OPENING,
         });
-        if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+        if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
         if (liveRuns.has(workspaceId) || runReservations.has(workspaceId) || selfTests.has(workspaceId) || options.runSlotOccupied?.(workspace) === true) {
           return { ok: false, detail: "A runner became active before the self-test could start." };
         }

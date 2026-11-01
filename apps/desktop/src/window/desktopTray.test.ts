@@ -110,11 +110,11 @@ describe("desktop tray owner", () => {
     expect(h.created).toHaveLength(1);
     const first = h.created[0]!;
     expect(first.image.path).toBe(light);
-    expect(first.setToolTip).toHaveBeenCalledWith("dohc agent dispatch");
+    expect(first.setToolTip).toHaveBeenCalledWith("dohc");
     expect(first.setContextMenu).toHaveBeenCalledTimes(2);
     expect(first.menu.map(({ label, type, checked }) => ({ label, type, checked }))).toEqual([
       { label: "Open dohc", type: undefined, checked: undefined },
-      { label: "Pause agent dispatch", type: "checkbox", checked: false },
+      { label: "Pause agent replies", type: "checkbox", checked: false },
       { label: undefined, type: "separator", checked: undefined },
       { label: "Quit dohc", type: undefined, checked: undefined },
     ]);
@@ -147,7 +147,7 @@ describe("desktop tray owner", () => {
     h.setSchedules(1);
     await h.configure(true);
     await h.owner.refreshDispatchTray();
-    expect(tray.menu.map(({ label }) => label)).toEqual(["Open dohc", "Running 1 schedule", "Pause agent dispatch", undefined, "Quit dohc"]);
+    expect(tray.menu.map(({ label }) => label)).toEqual(["Open dohc", "Running 1 schedule", "Pause agent replies", undefined, "Quit dohc"]);
     h.setSchedules(0);
     await h.configure(false);
     await expect(h.owner.refreshDispatchTray()).resolves.toBe(false);
@@ -181,7 +181,7 @@ describe("desktop tray owner", () => {
     await h.owner.noticeRunningInBackground();
     expect(h.notices.map(({ options }) => options)).toEqual([{
       title: "dohc is still running",
-      body: "Agent dispatch is on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
+      body: "Agent replies are on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
     }]);
     expect(h.notices[0]!.show).toHaveBeenCalledTimes(1);
     h.notices[0]!.listeners.get("click")!();
@@ -199,13 +199,13 @@ describe("desktop tray owner", () => {
     expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
   });
 
-  it("says agent dispatch is paused when it is", async () => {
+  it("says agent replies are paused when they are", async () => {
     const h = await harness("linux");
     await h.asset("icon-light.png");
     await h.owner.refreshDispatchTray();
     h.service.setPaused(true);
     await h.owner.noticeRunningInBackground();
-    expect(h.notices[0]?.options.body).toBe("Agent dispatch is paused. To quit, open dohc and press Ctrl+Q.");
+    expect(h.notices[0]?.options.body).toBe("Agent replies are paused. To quit, open dohc and press Ctrl+Q.");
   });
 
   it("sends one notice when two closes overlap", async () => {
