@@ -36,7 +36,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
+import { CollectionMoveUnfinishedError, ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
@@ -4632,11 +4632,11 @@ function createCollectionAutomationsFor(
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     // A Collection on the server, read for a person who asked about it. The server runs it.
-    // One whose move hasn't finished is still here, so the panel and button reads never resume a stopped move.
     serverDataset: (datasetId) => withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
-      const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal, movedTransfer);
-      return server && await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
+      const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
+      if (server === null || "unfinished" in server) return server;
+      return await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
         // The server doesn't have it: the computer that keeps the workspace's other Collections does.
         if (error instanceof CollectionsRefusalError) return null;
         throw error;
@@ -4784,14 +4784,19 @@ function finishedTransferOf(workspace: RegistryEntry, local: LocalDatasetHost, d
   return read({ local, workspaceId: workspace.workspaceId, datasetId, server: () => remoteForWorkspace(workspace),
     currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal });
 }
-async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal,
-  read: typeof finishedTransfer): Promise<ServerCollection | null> {
+// The automations panel, buttons and presses ask here. None of them waits for an unfinished move or resumes a stopped
+// one: a Collection whose move hasn't finished answers `unfinished`, in the words of the move's own error.
+async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal):
+  Promise<ServerCollection | { unfinished: string } | null> {
   const authority = await collectionsAuthorityFor(workspace, signal);
   let credentials: CloudSessionCredentials, credentialGeneration: number;
   if (authority.kind === "server") ({ credentials, credentialGeneration } = authority.server);
   else {
-    const transfer = await finishedTransferOf(workspace, authority.local, datasetId, signal, read);
-    if (transfer === null) return null;
+    const transfer = await finishedTransferOf(workspace, authority.local, datasetId, signal, movedTransfer);
+    if (transfer === null) {
+      const moving = authority.local.transferStatus(datasetId);
+      return moving?.state === "ready" ? { unfinished: new CollectionMoveUnfinishedError(new URL(moving.targetOrigin).host, { cause: null }).message } : null;
+    }
     ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
     signal.throwIfAborted();
     if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error("Sign in to the server that hosts this Collection.");
@@ -6491,8 +6496,10 @@ function registerIpcHandlers(): void {
       return {
         scope: JSON.stringify([scope, generation]),
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
+        // History reads every Collection with a transfer record, and reads ahead in the background. A Collection
+        // whose move hasn't finished reads this computer's history, which still keeps its records.
         remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
-          status: async id => { current(); return finishedTransferOf(workspace, local, id, signal); },
+          status: async id => { current(); return finishedTransferOf(workspace, local, id, signal, movedTransfer); },
           marker: id => local.transferStatus(id),
           remote: async targetOrigin => {
             const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
@@ -7187,7 +7194,11 @@ function registerIpcHandlers(): void {
       }
       return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch }).inspect(shareId, input);
     },
-    serverCollection: (operation, datasetId) => serverCollectionOf(operation.workspace, datasetId, operation.signal, finishedTransfer),
+    // A press of a Collection whose move hasn't finished goes to this computer's executor, which refuses it with the button's reason.
+    serverCollection: async (operation, datasetId) => {
+      const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
+      return server !== null && "unfinished" in server ? null : server;
+    },
     inspectionChanged: (workspaceId, attachmentId) => {
       withWorkspaceAttachment({ workspaceId }, lease => {
         if (lease.binding.attachmentId === attachmentId) notifyCollectionAutomationsChanged(workspaceId);

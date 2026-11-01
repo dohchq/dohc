@@ -13,6 +13,7 @@ import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler"
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { collectionPlace, finishedTransfer, movedTransfer, moveCollectionToServer } from "./collectionMove";
+import { createHistoryCollectionRemote } from "./historyCollectionRemote";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 
@@ -251,6 +252,25 @@ it("reads a stopped move's automations and buttons from this computer, without t
   await expect(moved(id(1))).resolves.toBeNull();
   // The buttons describe the Collection from this computer.
   await expect(data(moved).describe(id(1))).resolves.toMatchObject({ datasetId: id(1), name: "Items" });
+  expect(refusals).toBe(1);
+  expect(transferStatus(id(1))?.state).toBe("ready");
+  controller.abort();
+});
+
+it("reads a stopped move's History from this computer, without trying the move again while the server is away", async () => {
+  let refusals = 0;
+  const { collection, setGrant, data, moved, controller, transferStatus } = await collectionOnThisComputer({
+    async relay() { refusals++; throw Error("The server stopped answering."); } });
+  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
+  expect(refusals).toBe(1);
+
+  // History reads each Collection with a transfer record as main does. This one keeps its records here, with the owner's change.
+  const operation = { state: {}, workspace: { attachmentId: Symbol("workspace") }, signal: controller.signal, assertCurrent() {} };
+  const history = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
+    withOperation: work => work(operation), dataFor: () => data(moved) });
+  const page = await history(id(1), undefined, new AbortController().signal);
+  expect(page).toMatchObject({ datasetId: id(1), name: "Items" });
+  expect(page.entries.length).toBeGreaterThan(0);
   expect(refusals).toBe(1);
   expect(transferStatus(id(1))?.state).toBe("ready");
   controller.abort();

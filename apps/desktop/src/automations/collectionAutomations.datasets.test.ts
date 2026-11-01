@@ -47,6 +47,7 @@ import {
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import { SERVER_TRIGGERS_ELSEWHERE, type ServerDataset } from "@dohc/automation-executor/collection-automations";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
+import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import { PERSONAL_NEEDS_ACCOUNT } from "@dohc/automation-executor/automation-reach";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
@@ -2306,6 +2307,54 @@ ${step}`;
       { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF }, { cannotRun: AUTOMATION_SERVER_OFF },
     ] });
     expect(await button()).toEqual([{ kind: "disabled", reason: AUTOMATION_SERVER_OFF }]);
+    expect(f.errors).toEqual([]);
+  });
+
+  it("says a Collection's move didn't finish in its panel note, its buttons and its presses, never that its rules aren't approved", async () => {
+    const f = await world();
+    await f.writeAutomations(markPaid());
+    // The move stopped after this computer stopped changing the Collection, so its store keeps the transfer record.
+    const store = new DatabaseSync(join(f.root, ".dohc", "local", "datasets", "state.sqlite"));
+    try {
+      store.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'ready',NULL,NULL,NULL)").run("workspace", BUDGET, id(402), "https://relay.example", "{}");
+    } finally { store.close(); }
+    // What main answers for it: the words of the move's own error, read without trying the move again.
+    const unfinished = new CollectionMoveUnfinishedError("relay.example", { cause: null }).message;
+    expect(unfinished).toBe("This Collection didn't finish moving to relay.example. Its records are kept on this computer.");
+    const executor = f.makeExecutor({ serverDataset: async (datasetId) => datasetId === BUDGET ? { unfinished } : null });
+    onTestFinished(() => executor.dispose());
+    await executor.open();
+    const { id: invoice } = await f.create({});
+
+    // The ⚡ panel's note, the automations it lists, and the button.
+    expect(await executor.datasetCollection(BUDGET)).toEqual({ status: "cannot-run", reason: unfinished });
+    expect(await executor.automationsIn("Budget")).toMatchObject({ status: "read", automations: [{ automationId: BUTTON_AUTOMATION, cannotRun: unfinished }] });
+    expect(await executor.datasetButtons(BUDGET, [{ field: "Mark paid", table: "Invoices" }], async () => owner(f))).toEqual([{ kind: "disabled", reason: unfinished }]);
+    // A window's press, and a press by folder as the CLI and agents send it, refuse with the button's words.
+    await expect(press(f, { recordId: invoice, pressId: pressId(41) })).rejects.toThrow(unfinished);
+    type Operation = { workspace: { workspaceId: string; rootPath: string }; state: { collectionAutomations: typeof executor } };
+    const { pressNamed } = registerAutomationButtonsIpc<{ isDestroyed(): boolean; send(): void }, { sender: { isDestroyed(): boolean; send(): void } }, Operation>({
+      registerHandler: () => undefined,
+      assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async () => { throw new Error("No window presses here."); },
+      readText: async () => null,
+      buttonFields: async () => { throw new Error("A dataset's buttons aren't a document Collection's."); },
+      recordAt: async () => null,
+      describeDataset: async () => { throw new Error("The CLI describes the dataset itself."); },
+      pressedBy: async () => PRESSER,
+      relayPress: async () => { throw new Error("Nothing relays here."); },
+      relayInspect: async () => { throw new Error("Nothing relays here."); },
+      serverCollection: async () => null,
+      inspectionAccount: async () => null,
+      inspectionChanged: () => undefined,
+      pressWindows: createPressWindows(() => null),
+    });
+    const operation: Operation = { workspace: { workspaceId: "workspace", rootPath: f.root }, state: { collectionAutomations: executor } };
+    const caller = { by: { kind: "agent" as const, originId: "agent-run-1", depth: 1 }, withOperation: async <Result>(work: (op: Operation) => Promise<Result>) => await work(operation),
+      describeDataset: async () => owner(f), watch: () => undefined };
+    await expect(pressNamed({ workspaceId: "workspace", collectionPath: "Budget", field: "Mark paid", recordId: JSON.stringify(invoice), confirm: [], pressKey: "cli-1" }, caller))
+      .rejects.toThrow(unfinished);
+    expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toEqual([]);
     expect(f.errors).toEqual([]);
   });
 

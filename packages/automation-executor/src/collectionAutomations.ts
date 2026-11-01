@@ -328,10 +328,12 @@ export interface ServerDataset {
 export interface CollectionAutomationsOptions {
   /**
    * The dataset Collection with this id on the workspace's server, read now,
-   * or null when it is not there. Asked only for a person: nothing the server
-   * runs is subscribed, claimed or run here.
+   * or null when it is not there. `unfinished` says why its automations run
+   * neither here nor there while its move to the server hasn't finished.
+   * Asked only for a person: nothing the server runs is subscribed, claimed
+   * or run here.
    */
-  serverDataset?(datasetId: string): Promise<ServerDataset | null>;
+  serverDataset?(datasetId: string): Promise<ServerDataset | { unfinished: string } | null>;
   resolveRelayedPress?(hostPressId: string): Promise<RelayedPressAuthority>;
   resolveButtonInspection?(inspectionId: string): Promise<RelayButtonAuthority>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -479,6 +481,12 @@ type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | nul
 type DatasetAt = (path: string) => IndexedDataset | undefined;
 /** A dataset Collection on the workspace's server, at its folder here. */
 type OnServer = { collectionPath: string; dataset: IndexedDataset; runs: ServerDataset["runs"] };
+/** A dataset Collection whose move to the server hasn't finished, and why its automations can't run. */
+type Unfinished = { datasetId: string; unfinished: string };
+/** Why a dataset Collection this computer hasn't indexed can't run its automations, from what the server answered. */
+function unindexedReason(server: OnServer | Unfinished | null): string {
+  return server !== null && "unfinished" in server ? server.unfinished : DATASET_NOT_APPROVED;
+}
 /**
  * A dataset Collection's approved rules, whether dohc generated its
  * operations, and its data grants, as the reach check reads them.
@@ -1813,14 +1821,14 @@ export class CollectionAutomations {
     // A dataset whose rules are not approved is not in the index, and neither is one on the server.
     const unapproved = await this.maybeDataset(collectionPath);
     const server = unapproved ? await this.onServer({ folder: collectionPath }) : null;
-    if (server !== null) return await this.serverAutomationsIn(server);
+    if (server !== null && !("unfinished" in server)) return await this.serverAutomationsIn(server);
     const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
     const roster = await this.options.cachedRoster();
     const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
     if (!indexed || collectionId === null) return { status: "missing", ...you };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved);
+    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved ? unindexedReason(server) : null);
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionId, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -2023,7 +2031,7 @@ export class CollectionAutomations {
     // A Collection on the server pins against the server's rules.
     const server = await this.onServer({ folder: collectionPath });
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    const datasetAt = server === null ? undefined : await this.serverDatasetsFor(server, automations);
+    const datasetAt = server === null || "unfinished" in server ? undefined : await this.serverDatasetsFor(server, automations);
     return automations.map((automation) => this.pinned(collectionPath, automation, held, datasetAt));
   }
 
@@ -2062,7 +2070,7 @@ export class CollectionAutomations {
     const held = new Set(indexed?.file.status === "read"
       ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
       : []);
-    return (await this.reasonsIn(collectionPath, false)).reasonOf(this.pinned(collectionPath, automation, held));
+    return (await this.reasonsIn(collectionPath, null)).reasonOf(this.pinned(collectionPath, automation, held));
   }
 
   /**
@@ -2097,11 +2105,11 @@ export class CollectionAutomations {
    * panel lists it and a draft's check says it: `unsupported`, what keeps
    * it from running anywhere, and `reasonOf`, that or what keeps it from
    * starting here, such as a Group it cannot read or schedules without
-   * sync. `unapproved` is a dataset whose rules are not approved.
+   * sync. `unindexed` is why a dataset the index lacks can't run, or null.
    */
-  private async reasonsIn(collectionPath: string, unapproved: boolean) {
+  private async reasonsIn(collectionPath: string, unindexed: string | null) {
     const unsupported = (automation: Automation) =>
-      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
+      unindexed ?? this.cannotRun(collectionPath, automation);
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
     // Only the computer that keeps a dataset can run its schedules and Group messages.
     const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
@@ -2939,7 +2947,11 @@ export class CollectionAutomations {
    */
   async datasetIn(collectionPath: string): Promise<string | null> {
     await this.indexCollection(collectionPath);
-    return this.datasets.get(collectionPath)?.definition.datasetId ?? (await this.onServer({ folder: collectionPath }))?.dataset.definition.datasetId ?? null;
+    const indexed = this.datasets.get(collectionPath);
+    if (indexed !== undefined) return indexed.definition.datasetId;
+    // A dataset whose move hasn't finished is still a dataset, so a press of its button gives the button's reason.
+    const server = await this.onServer({ folder: collectionPath });
+    return server === null ? null : "unfinished" in server ? server.datasetId : server.dataset.definition.datasetId;
   }
 
   /** Whether the dataset ledger remembers a press by this id, so sending it again answers its claim. */
@@ -2963,10 +2975,10 @@ export class CollectionAutomations {
     const description = await descriptions(datasetId);
     const states: AutomationButtonState[] = [];
     for (const button of buttons) {
-      states.push(server !== null
+      states.push(server !== null && !("unfinished" in server)
         ? await this.serverButton(server, button, description, roster, descriptions)
         : collectionPath === null
-        ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
+        ? { kind: "disabled", reason: unindexedReason(server) }
         : (await this.datasetButton(collectionPath, button, description, roster, descriptions)).state);
     }
     return states;
@@ -2990,7 +3002,7 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationPress> {
     await this.ready();
     const collectionPath = await this.datasetFolder(input.datasetId);
-    if (collectionPath === null) throw new Error(DATASET_NOT_APPROVED);
+    if (collectionPath === null) throw new Error(unindexedReason(await this.onServer({ datasetId: input.datasetId })));
     const recordId = datasetRecordIdOf(input.recordId);
     if (recordId === null) throw new Error(`This record is not in ${input.table}.`);
     const request = createHash("sha256")
@@ -3095,8 +3107,10 @@ export class CollectionAutomations {
    */
   async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
     await this.ready();
-    const collectionPath = await this.datasetFolder(datasetId) ?? (await this.onServer({ datasetId }))?.collectionPath ?? null;
-    return collectionPath === null ? { status: "cannot-run", reason: DATASET_NOT_APPROVED } : { status: "found", collectionPath };
+    const folder = await this.datasetFolder(datasetId);
+    if (folder !== null) return { status: "found", collectionPath: folder };
+    const server = await this.onServer({ datasetId });
+    return server === null || "unfinished" in server ? { status: "cannot-run", reason: unindexedReason(server) } : { status: "found", collectionPath: server.collectionPath };
   }
 
   /**
@@ -3105,12 +3119,13 @@ export class CollectionAutomations {
    * it, as an indexed dataset's must. A Collection this computer indexed is
    * not on the server. Nothing here subscribes, claims or runs it.
    */
-  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | null> {
+  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | Unfinished | null> {
     if (this.options.serverDataset === undefined) return null;
     const datasetId = "datasetId" in place ? place.datasetId : await this.describedDatasetId(place.folder);
     if (datasetId === null || this.collectionPathOf(datasetId) !== null) return null;
     const server = await this.options.serverDataset(datasetId);
     if (server === null) return null;
+    if ("unfinished" in server) return { datasetId, unfinished: server.unfinished };
     const { definition } = server.approved;
     const folder = datasetBaseFolder(definition);
     if (definition.datasetId !== datasetId || folder === "." || ("folder" in place && place.folder !== folder) ||
@@ -3129,7 +3144,7 @@ export class CollectionAutomations {
     const reached = new Set(automations.flatMap((automation) => [...recordStepDestinations(automation, server.collectionPath).values()]));
     const others = [...reached].filter((folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder));
     for (const other of await Promise.all(others.map((folder) => this.onServer({ folder })))) {
-      if (other !== null) found.set(other.collectionPath, other.dataset);
+      if (other !== null && !("unfinished" in other)) found.set(other.collectionPath, other.dataset);
     }
     return (path) => found.get(path) ?? this.datasets.get(path);
   }
