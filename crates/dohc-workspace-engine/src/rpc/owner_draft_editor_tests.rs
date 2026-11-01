@@ -28,6 +28,11 @@ async fn accepted_frame_replay_does_not_rewind_editor_revision() {
     accepted_frame_editor_case(EditorCase::Replay).await;
 }
 
+#[tokio::test]
+async fn accepted_frame_keeps_edit_when_compaction_fails() {
+    accepted_frame_editor_case(EditorCase::CompactionFails).await;
+}
+
 #[derive(Clone, Copy)]
 enum EditorCase {
     Peer,
@@ -35,6 +40,7 @@ enum EditorCase {
     Replaced,
     Quarantined,
     Replay,
+    CompactionFails,
 }
 
 async fn accepted_frame_editor_case(case: EditorCase) {
@@ -70,6 +76,12 @@ async fn accepted_frame_editor_case(case: EditorCase) {
         current_path: "owner.md".into(),
         selector_paths: vec!["owner.md".into()],
         restore_fence_generation: 0,
+    };
+    // The accepted frame brings the log to the compaction threshold.
+    let earlier = if matches!(case, EditorCase::CompactionFails) {
+        i64::from(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD) - 1
+    } else {
+        0
     };
     let before;
     {
@@ -108,6 +120,15 @@ async fn accepted_frame_editor_case(case: EditorCase) {
         .unwrap();
         let doc = Ydoc::wire();
         doc.apply(&bytes).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                for index in 0..earlier {
+                    let update = doc.richdoc_append_paragraph(&format!("earlier edit {index}"));
+                    dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 3)?;
+                }
+                Ok::<_, dohc_engine_collab::CollabError>(())
+            })
+            .unwrap();
         let checkpoint = doc.encode_full_state();
         store
             .write_with(&NoFaults, |tx| {
@@ -121,7 +142,7 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                         relay_database_namespace: "relay".into(),
                         revision: 1,
                         accepted_cursor: 0,
-                        native_head_sequence: 0,
+                        native_head_sequence: earlier,
                         checkpoint_digest: hex_sha256(&checkpoint),
                         limits: dohc_engine_collab::OwnerOutboxLimits {
                             max_pending_bytes: 1_000_000,
@@ -281,6 +302,16 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 .await
                 .unwrap();
         }
+        EditorCase::CompactionFails => {
+            // The fold runs after the frame's transaction commits.
+            let mut store = EngineStore::open(&db, 10).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch("CREATE TRIGGER refuse_fold BEFORE INSERT ON ydoc_snapshots WHEN NEW.up_to_seq>0 BEGIN SELECT RAISE(ABORT, 'fold failure'); END;").unwrap();
+                    Ok::<_, dohc_engine_collab::OwnerOutboxError>(())
+                })
+                .unwrap();
+        }
         _ => {}
     }
     let mut ctx = RequestContext::unbounded();
@@ -291,7 +322,7 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 binding: binding.clone(),
                 relay_database_namespace: "relay".into(),
                 expected_revision: 1,
-                expected_native_head_sequence: 0,
+                expected_native_head_sequence: earlier,
                 previous_accepted_cursor: 0,
                 journal_cursor: 1,
                 stream_id: 4,
@@ -389,6 +420,17 @@ async fn accepted_frame_editor_case(case: EditorCase) {
     let recorded =
         recorded.expect("accepted-frame revision must not refuse a local edit before resync");
     assert_eq!(recorded["ownerDraft"]["sequence"], 3);
+    if matches!(case, EditorCase::CompactionFails) {
+        // The failed fold kept every update. A later fold tries again.
+        let mut store = EngineStore::open(&db, 20).unwrap();
+        assert_eq!(store.table_row_count("ydoc_updates").unwrap(), earlier + 1);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch("DROP TRIGGER refuse_fold").unwrap();
+                Ok::<_, dohc_engine_collab::OwnerOutboxError>(())
+            })
+            .unwrap();
+    }
     // Merge the remote frame only after the local append, as the client does.
     doc.apply(&remote.encode_full_state()).unwrap();
     let (_, resync) = service
@@ -466,10 +508,9 @@ async fn accepted_frame_editor_case(case: EditorCase) {
             .unwrap()
             .unwrap()
             .head_update_seq,
-        if matches!(case, EditorCase::Replay) {
-            2
-        } else {
-            1
+        match case {
+            EditorCase::Replay => 2,
+            _ => earlier + 1,
         }
     );
 }
