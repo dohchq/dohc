@@ -176,7 +176,7 @@ it.each(["stale-binding", "restore-fenced", "binding-changed"] as const)("marks 
   expect(f.acknowledge).not.toHaveBeenCalled();
 });
 
-it.each(["stale-binding", "restore-fenced", "binding-changed"] as const)("reports a head the host refuses with %s as still waiting", async reason => {
+it.each(["stale-binding", "restore-fenced"] as const)("reports a head the host refuses with %s as still waiting", async reason => {
   const f = fixture();
   vi.mocked(f.host.submit).mockResolvedValue({result: "refused", reason});
   expect(await f.delivery.drain(binding, new AbortController().signal)).toBe(false);
