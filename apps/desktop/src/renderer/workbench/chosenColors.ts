@@ -5,14 +5,15 @@ import type { AgentHue, IdentityHue } from "../tokens";
 // and canvas presentation subscribe, so a change repaints their colours
 // without rendering the shell again.
 
-type Chosen = { human: IdentityHue | null; agent: IdentityHue | null; agents: ReadonlyMap<string, IdentityHue | null> };
-let chosen: Chosen = { human: null, agent: null, agents: new Map() };
+// Until the first settings read, `agents` is null: no agent reads as removed before then.
+type Chosen = { human: IdentityHue | null; agent: IdentityHue | null; agents: ReadonlyMap<string, IdentityHue | null> | null };
+let chosen: Chosen = { human: null, agent: null, agents: null };
 const listeners = new Set<() => void>();
 
 const chosenAgentHue = (hue: AgentHue): IdentityHue | null => hue === "olive" ? null : hue;
 
-function sameAgents(a: ReadonlyMap<string, IdentityHue | null>, b: ReadonlyMap<string, IdentityHue | null>): boolean {
-  return a.size === b.size && [...a].every(([id, hue]) => b.has(id) && b.get(id) === hue);
+function sameAgents(a: ReadonlyMap<string, IdentityHue | null> | null, b: ReadonlyMap<string, IdentityHue | null>): boolean {
+  return a !== null && a.size === b.size && [...a].every(([id, hue]) => b.has(id) && b.get(id) === hue);
 }
 
 // A message from your agent that names no agent, such as one through MCP, takes your first agent's hue.
@@ -34,7 +35,13 @@ export function chosenHue(kind: "human" | "agent"): IdentityHue | null {
   return chosen[kind];
 }
 
-/** The hue Settings gives this agent, null for olive, or undefined once Settings no longer has it. */
+/** The hue Settings gives this agent, null for olive, or undefined once Settings no longer has it. Olive before the first read. */
 export function settingsAgentHue(agentId: string): IdentityHue | null | undefined {
-  return chosen.agents.get(agentId);
+  return chosen.agents === null ? null : chosen.agents.get(agentId);
+}
+
+/** Forgets the settings read, as at startup. Only tests call it. */
+export function resetChosenColorsForTests(): void {
+  chosen = { human: null, agent: null, agents: null };
+  for (const listener of listeners) listener();
 }

@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { identityHues, palette } from "../tokens";
 import { ownPresentation, neutralPresentation, presentationColor, presentationClasses, relayPresentation, setOwnPresentation, ownAgentPresentation, bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides, subscribePresentation, goneAgentPresentation, agentTextClass, canChooseAgentColor } from "./actorPresentation";
-import { setChosenColors } from "./chosenColors";
+import { resetChosenColorsForTests, setChosenColors } from "./chosenColors";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 afterEach(() => { clearAgentColorOverrides(); setChosenColors(DEFAULT_USER_SETTINGS); setOwnPresentation(undefined); });
@@ -53,6 +53,21 @@ it("colors your agent's run by its own agent in Settings, and a removed agent's 
 
   setChosenColors({ ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }) } });
   expect(presentationClasses(codex, "agent")).toBe("border-subtle bg-panel text-subtle");
+  expect(agentTextClass(codex)).toBe("text-subtle");
+});
+
+it("paints your agent's run olive until Settings are read, then in its Settings color", () => {
+  resetChosenColorsForTests();
+  const codex = { group: "codex-group", hue: null, self: true, agentId: "codex" } as const;
+  expect(presentationClasses(codex, "agent")).toBe("border-agent bg-bg text-agent");
+  expect(agentTextClass(codex)).toBe("text-agent");
+  const repaint = vi.fn();
+  const unsubscribe = subscribePresentation(repaint);
+  setChosenColors({ ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex", hue: "blue" }) } });
+  expect(repaint).toHaveBeenCalledOnce();
+  expect(presentationClasses(codex, "agent")).toContain("text-hue-blue");
+  unsubscribe();
+  setChosenColors(DEFAULT_USER_SETTINGS);
   expect(agentTextClass(codex)).toBe("text-subtle");
 });
 

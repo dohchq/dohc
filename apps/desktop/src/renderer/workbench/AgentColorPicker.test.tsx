@@ -198,6 +198,18 @@ it.each([
   expect(screen.queryByRole("button", { name: "Color for Orbit" })).toBeNull();
 });
 
+it("leaves your agent's run post unclickable, its color set in Settings", () => {
+  const { unmount } = render(<Row save={vi.fn()} />);
+  expect(screen.queryByTestId("agent-color-trigger")).not.toBeNull();
+  expect(screen.getByTestId("author").querySelector(".cursor-pointer")).not.toBeNull();
+  unmount();
+  render(<Row save={vi.fn()} presentation={{ ...ORBIT, self: true, agentId: "codex" }} />);
+  expect(screen.queryByTestId("agent-color-trigger")).toBeNull();
+  expect(screen.getByTitle("Orbit").closest("button")).toBeNull();
+  expect(screen.getByTestId("author").querySelector(".cursor-pointer, .hover\\:underline")).toBeNull();
+  expect(screen.getByTestId("author").innerHTML).toBe("Orbit");
+});
+
 it("puts the choice on an agent's message in a conversation, and saves it with the workspace and the token's group", async () => {
   const user = userEvent.setup();
   const api = { setAgentColor: vi.fn(async () => undefined) };
