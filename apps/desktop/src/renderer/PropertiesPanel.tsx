@@ -92,10 +92,15 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
   );
 }
 
-// Whether another row saves under this name, whatever its case.
-function nameTaken(index: number, key: string, entries: FrontmatterEntry[]): boolean {
+// Whether another property has this name, whatever its case: another row, or
+// a key of the note as it is now that this row wasn't read as. The note can
+// hold a property another device added before the rows read it.
+function nameTaken(index: number, key: string, entries: FrontmatterEntry[], noteKeys: readonly string[]): boolean {
   const name = key.trim().toLowerCase();
-  return name !== "" && entries.some((entry, i) => i !== index && propertyKey(entry)?.trim().toLowerCase() === name);
+  if (name === "" || isReserved(name)) return false;
+  const same = (other: string | null | undefined) => other?.trim().toLowerCase() === name;
+  return entries.some((entry, i) => i !== index && same(propertyKey(entry)))
+    || noteKeys.some((noteKey) => noteKey !== entries[index]?.sourceKey && same(noteKey));
 }
 
 function shouldDeferKeyCommit(
@@ -170,12 +175,12 @@ function propertyKey(entry: FrontmatterEntry): string | null {
 
 // What saving `next` changes, measured from what each row was read as, so a
 // property the rows haven't read yet stays as it is. `saves` holds the key
-// each row saves under. A row given a name another row has keeps the name it
-// was read with, so it never writes over that property.
-function rowChanges(shown: Row[], next: Row[], readNote: () => readonly FrontmatterEntry[]) {
+// each row saves under. A row given a name another property has keeps the
+// name it was read with, so it never writes over that property.
+function rowChanges(shown: Row[], next: Row[], noteKeys: readonly string[], readNote: () => readonly FrontmatterEntry[]) {
   const saves = next.map((row, index) => {
     const key = propertyKey(row);
-    return key !== null && key !== row.sourceKey && nameTaken(index, key, next) ? (row.sourceKey ?? null) : key;
+    return key !== null && key !== row.sourceKey && nameTaken(index, key, next, noteKeys) ? (row.sourceKey ?? null) : key;
   });
   const values = new Map<string, unknown>();
   const renamed = new Map<string, string>();
@@ -365,9 +370,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     return file === null ? sourceEntries : frontmatterEntries(file);
   }
 
+  // The note's keys as it is now. A live note's map can hold a key its update
+  // hasn't brought to the rows yet.
+  function noteKeys(): string[] {
+    return ydoc ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys()) : fileEntries().map((entry) => entry.key);
+  }
+
   function commit(next: Row[]) {
     if (refused) return;
-    const { saves, values, remove, renamed } = rowChanges(entries, next, () => (ydoc ? liveEntries(ydoc) : fileEntries()));
+    const { saves, values, remove, renamed } = rowChanges(entries, next, noteKeys(), () => (ydoc ? liveEntries(ydoc) : fileEntries()));
     try {
       if (values.size > 0 || remove.length > 0) {
         if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
@@ -396,34 +407,19 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // It goes once its pill goes or no other property has the name.
   const [heldName, setHeldName] = useState<{ row: number; text: string } | null>(null);
   const heldRow = heldName
-    ? entries.findIndex((entry, index) => entry.id === heldName.row && nameTaken(index, heldName.text, entries))
+    ? entries.findIndex((entry, index) => entry.id === heldName.row && nameTaken(index, heldName.text, entries, noteKeys()))
     : -1;
   useLayoutEffect(() => {
     if (heldName && heldRow === -1) setHeldName(null);
   });
 
-  // Whether the note as it is now has this name, whatever its case, on a
-  // property other than the one this row was read as.
-  function noteHas(key: string, entry: Row): boolean {
-    const name = key.trim().toLowerCase();
-    if (!name || isReserved(name)) return false;
-    const keys = ydoc ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys()) : sourceEntries.map((read) => read.key);
-    return keys.some((read) => read !== entry.sourceKey && read.trim().toLowerCase() === name);
-  }
-
   function setKey(index: number, key: string) {
     const entry = entries[index];
-    if (!entry) return;
-    // The rows may not have read a property another device just added. If
-    // the note has the name, the rows read the note now, so the name is held.
-    const rows = nameTaken(index, key, entries) || !noteHas(key, entry)
-      ? entries
-      : withRead(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), entries);
-    const at = rows.findIndex((row) => row.id === entry.id);
-    if (at !== -1 && nameTaken(at, key, rows)) {
+    if (entry && nameTaken(index, key, entries, noteKeys())) {
       setHeldName({ row: entry.id, text: key });
       // The row keeps the name it was read with until the new name is free.
-      setEntries(rows.map((row, i) => (i === at ? { ...row, key: row.sourceKey ?? "" } : row)));
+      const read = entry.sourceKey ?? "";
+      if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
       return;
     }
     if (index === heldRow) setHeldName(null);

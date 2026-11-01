@@ -1553,6 +1553,56 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it.each([
+    { shared: true, added: false },
+    { shared: false, added: false },
+    { shared: true, added: true },
+    { shared: false, added: true },
+  ])("keeps another device's property and the pill's typed name and value when leaving a name it just took (shared: $shared, new pill: $added)", ({ shared, added }) => {
+    const markdown = added ? "---\nowner: Sam\n---\n\nBody\n" : "---\nstatus: draft\nowner: Sam\n---\n\nBody\n";
+    const remote = markdown.replace("owner: Sam\n", "owner: Sam\nown: remote\n");
+    const doc = markdownToYDoc(markdown);
+    const onChange = vi.fn();
+    const row = added ? 2 : 1;
+    const name = () => screen.getByLabelText(`Property ${row} name`);
+    const saved = () => shared
+      ? frontmatterMapValues(doc.getMap("frontmatter"))
+      : parseFrontmatter(onChange.mock.lastCall?.[0] ?? remote).meta;
+    const panel = (body: string) => (shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />);
+    // Leave the name after the panel reads the other device's property,
+    // before its effect refreshes the rows.
+    function LeavesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.focusOut(name());
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<>{panel(markdown)}</>);
+      if (added) {
+        fireEvent.click(screen.getByTestId("property-add"));
+        fireEvent.change(screen.getByLabelText("Property 2 value"), { target: { value: "Ada" } });
+      }
+      // A prefix of owner waits instead of saving.
+      fireEvent.change(name(), { target: { value: "own" } });
+
+      act(() => {
+        setFrontmatterValue(doc, "own", "remote");
+        rerender(<>{panel(remote)}<LeavesOnCommit /></>);
+      });
+
+      const kept = added ? { owner: "Sam" } : { status: "draft", owner: "Sam" };
+      expect(saved()).toEqual({ ...kept, own: "remote" });
+      expect(name()).toHaveProperty("value", "own");
+      expect(screen.getAllByTestId("property-row")[row - 1]!.querySelector('[data-testid="property-duplicate"]')).not.toBeNull();
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+
+      fireEvent.change(name(), { target: { value: "lead" } });
+
+      expect(saved()).toEqual(added ? { owner: "Sam", own: "remote", lead: "Ada" } : { lead: "draft", owner: "Sam", own: "remote" });
+    } finally { doc.destroy(); }
+  });
+
   it("holds a live document's name that a property with a cleared name still saves under", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc("---\na: one\nb: two\n---\n\nBody\n");
