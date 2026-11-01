@@ -6847,7 +6847,7 @@ export const chatDispatchNoticeOperations = {
     scope: "workspace",
     channel: "desktop:dismiss-chat-dispatch-notice",
     payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
-    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its dispatch notice.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its notice about agent replies.",
   },
 } as const satisfies OperationTable;
 
