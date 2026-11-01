@@ -29,6 +29,7 @@ try {
     'tools/self-host/bootstrap.mjs', 'tools/self-host/config.mjs', 'tools/self-host/Caddyfile', 'tools/self-host/Caddyfile.private', 'tools/self-host/compose.private.yml',
     'tools/self-host/compose.data-disk.yml', 'tools/self-host/compose.external-postgres.yml', 'scripts/self-host/move.mjs',
     'tools/self-host/Caddyfile.cloudflare', 'tools/self-host/compose.cloudflare.yml', 'tools/self-host/cloudflare-proxies.caddy',
+    'tools/self-host/Caddyfile.cloudflare-apps', 'tools/self-host/compose.cloudflare-apps.yml',
     'scripts/self-host/refresh-cloudflare-ranges.mjs',
     ...['scripts/self-host/recovery.mjs', 'scripts/self-host/archive.mjs', 'docs/how-to/self-host.md', 'docs/how-to/self-host-recovery.md', 'services/share-web/README.md'].filter(existsSync)];
   for (const path of files) {

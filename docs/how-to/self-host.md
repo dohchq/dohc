@@ -28,6 +28,7 @@ Keep the viewer outside the app domain.
 The app domain must not be the viewer's registrable domain or a host under it.
 Launch hosts must not be public suffixes.
 Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
+Behind Cloudflare, the bundle can serve the app domain: see [Serve published apps behind Cloudflare](#serve-published-apps-behind-cloudflare).
 Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
 Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.
 Reading an app does not consume this limit. Uploads and write operations do. Workspace storage quotas still apply.
@@ -341,6 +342,54 @@ Restart the deployment to apply them:
 node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
+
+### Serve published apps behind Cloudflare
+
+Behind Cloudflare, the gateway can also serve published apps on their app domain.
+Choose the domain as described in [App domains](../../services/share-web/README.md#app-domains).
+Use the app domain only for published apps. Serve nothing else on it, including its apex.
+
+1. In Cloudflare, add a proxied wildcard A record for `*.your-app-domain.net` with the origin's IPv4 address.
+   Do not add an AAAA record.
+2. Set the zone's SSL/TLS encryption mode to Full (strict).
+   Cloudflare's Universal SSL certificate covers the app hosts at the edge.
+3. Create a Cloudflare Origin CA certificate for `*.your-app-domain.net`.
+   Install the certificate and its private key on the server:
+
+   ```sh
+   sudo install -d -m 0700 /etc/dohc/app-tls
+   sudo install -m 0644 app-origin.pem /etc/dohc/app-tls/cert.pem
+   sudo install -m 0600 app-origin.key /etc/dohc/app-tls/key.pem
+   ```
+
+4. Set these values in `.env.self-host`:
+
+   ```dotenv
+   DOHC_RELAY_APP_PUBLICATIONS=1
+   DOHC_SHARE_WEB_APP_DOMAIN=your-app-domain.net
+   DOHC_APP_TLS_CERT_FILE=/etc/dohc/app-tls/cert.pem
+   DOHC_APP_TLS_KEY_FILE=/etc/dohc/app-tls/key.pem
+   ```
+
+5. Bypass the cache and turn off bot challenges for the app hosts, as for the server's own host.
+6. Stop and start the deployment.
+
+With `DOHC_BEHIND_CLOUDFLARE=1` and an app domain, the setup and recovery commands add the Cloudflare app overlay.
+They refuse to run when the certificate or key setting is missing.
+They also refuse a certificate setting without Cloudflare and an app domain.
+Docker refuses to start the gateway when either file is missing, and never creates it.
+
+The gateway serves each app host with the certificate you installed, and Caddy never requests one for those hosts.
+It sends app requests only to `share-web`, with the Host header unchanged.
+It sets the forwarded address, host, and protocol as on the server's own host, and answers 404 for `/internal/` paths.
+Sign-in and the relay stay on the server's own host.
+`DOHC_SHARE_WEB_PUBLIC_HOSTS` keeps only that host.
+The server's own host still gets its certificate from Caddy's automatic HTTPS.
+
+Only Cloudflare trusts an Origin CA certificate. Browsers do not.
+Keep the wildcard record proxied.
+Never turn off certificate checks in a client to reach the origin directly.
+To replace the certificate, install the new files at the same paths, then stop and start the deployment.
 
 ## Start and check the server
 
