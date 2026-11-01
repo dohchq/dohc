@@ -37,9 +37,9 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await expect(formDialog).toBeHidden();
     await page.getByRole("button", { name: "Review and open app", exact: true }).click();
     const publication = page.getByTestId("app-publication-dialog");
-    await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
+    await expect(publication.getByTestId("app-publication-approve")).toBeEnabled();
     await publication.getByTestId("app-publication-approve").click();
-    await expect(publication.getByRole("button", { name: /^Open in browser / })).toBeVisible();
+    await expect(publication).toBeHidden();
     const local = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ workspaceId, appRoot: "registrations-form", action: "listLocal" }), workspaceId);
     if (local.kind !== "localListed" || !local.publications[0]) throw Error("Expected approved form.");
     const launched = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ ...input, action: "launchLocal" }), { workspaceId, publicationId: local.publications[0].publicationId });
@@ -50,7 +50,6 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await form.getByLabel("Name", { exact: false }).fill("Synthetic participant");
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
-    await publication.getByRole("button", { name: "Close publication" }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!;

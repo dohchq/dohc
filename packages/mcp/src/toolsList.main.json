@@ -2740,6 +2740,31 @@
                 "properties": {
                   "action": {
                     "type": "string",
+                    "const": "checkLocal"
+                  },
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "appRoot": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "required": [
+                  "action",
+                  "workspaceId",
+                  "appRoot"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
                     "const": "prepareLocal"
                   },
                   "workspaceId": {

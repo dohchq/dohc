@@ -50,7 +50,7 @@ Create a share link, prepare an immutable app revision, and approve publication 
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -1618,6 +1618,17 @@ List an app's publications on this computer.
 
 Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
 
+#### `dohc app checkLocal`
+
+Read an app's current source revision on this computer.
+
+Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`. Required.
+
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths, declaresCollection }`.
+
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
@@ -1644,11 +1655,13 @@ Returns `{ kind: "localLaunched", publicationId, url }`.
 
 List an app's shared publications.
 
+listUnavailable means the server does not publish apps for this workspace.
+
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
 
 #### `dohc app prepare`
 

@@ -171,6 +171,7 @@
     "appPublication": [
       "app.link.create",
       "app.local.list",
+      "app.local.check",
       "app.local.prepare",
       "app.local.launch",
       "app.publication.list",
@@ -301,6 +302,7 @@
     "dataset invoke": "dataset.operation.invoke",
     "app createLink": "app.link.create",
     "app listLocal": "app.local.list",
+    "app checkLocal": "app.local.check",
     "app prepareLocal": "app.local.prepare",
     "app launchLocal": "app.local.launch",
     "app list": "app.publication.list",
