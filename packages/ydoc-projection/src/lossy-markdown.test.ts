@@ -37,9 +37,12 @@ it.each([
 
 it('does not flag a note dohc wrote, with or without its final newline', () => {
   const written = yDocToMarkdown(markdownToYDoc('# Plan\n\n- [ ] Book flights\n- [x] Pick dates\n\n**Budget:** $1,200\n'))
+  expect(written.endsWith('$1,200\n')).toBe(true)
   expect(isLossyMarkdown(written)).toBe(false)
+  expect(isLossyMarkdown(written.slice(0, -1))).toBe(false)
   expect(isLossyMarkdown(`${written}\n`)).toBe(false)
-  expect(isLossyMarkdown(`${written.replaceAll('\n', '\r\n')}\r\n`)).toBe(false)
+  expect(isLossyMarkdown(written.replaceAll('\n', '\r\n'))).toBe(false)
+  expect(isLossyMarkdown(written.replaceAll('\n', '\r\n').slice(0, -2))).toBe(false)
 })
 
 it('does not flag a respelling that keeps the meaning', () => {
@@ -133,6 +136,25 @@ it('checks the whole session when its witness records a lossy source, or a proje
   const mismatched = seeded('Title\n=====\n\n* one\n')
   mismatched.getMap('meta').set('dohcMarkdownSource', 'Title\n=====\n\n* two\n')
   expect(witnessKeepsMeaning(mismatched)).toBe(false)
+})
+
+// A note the desktop seeded before rich notes ended with one line ending:
+// its file, and the projection the import gave for it then.
+const OLD_FORMAT = { source: 'Title\n=====\n\n* one\n', projection: '# Title\n\n- one' }
+
+it('opens a note read-only when its witness records the projection from before the final newline', () => {
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex')
+  const doc = markdownToYDoc(OLD_FORMAT.source)
+  try {
+    doc.getMap('meta').set('dohcMarkdownSource', OLD_FORMAT.source)
+    doc.getMap('meta').set('dohcMarkdownSourceSha256', sha(OLD_FORMAT.source))
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha(OLD_FORMAT.projection))
+    expect(yDocToMarkdown(doc)).toBe(`${OLD_FORMAT.projection}\n`)
+    expect(witnessKeepsMeaning(doc)).toBe(false)
+    expect(isLossyDocument(doc, sha(OLD_FORMAT.source))).toBe(true)
+    // A consented conversion saves the current format, and the head leaves the source.
+    expect(isLossyDocument(doc, sha(yDocToMarkdown(doc)))).toBe(false)
+  } finally { doc.destroy() }
 })
 
 it('names the note when it could not be read to check', () => {

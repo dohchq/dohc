@@ -6389,9 +6389,10 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 }
 
 /// #815 pin 1: a session whose only update is the client-declared seed closes
-/// without writing — file bytes, mtime, and history untouched — for both
-/// projection-normalization victims (a trailing newline the projection trims,
-/// and CRLF line endings the round trip rewrites as LF).
+/// without writing — file bytes, mtime, and history untouched — for each
+/// ending the projection would rewrite: several final newlines it collapses
+/// to one, a missing final newline it adds, and CRLF line endings the round
+/// trip rewrites as LF.
 ///
 /// Mutation kill: remove the seed-only skip in `ydoc_settle_on_store` (or the
 /// seed-only coverage arm in `close_session`) and this test goes red — the
@@ -6399,7 +6400,8 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n");
+    write_file(scratch.path(), "notes/p/README.md", b"Readme body.\n\n\n");
+    write_file(scratch.path(), "notes/unterminated.md", b"No final newline.");
     write_file(scratch.path(), "notes/crlf.md", b"cr line\r\n");
 
     let service = Arc::new(EngineService::new());
@@ -6408,7 +6410,8 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 
     for (id, path, seed_paragraph) in [
         (10_u64, "notes/p/README.md", "Readme body."),
-        (30_u64, "notes/crlf.md", "cr line"),
+        (30_u64, "notes/unterminated.md", "No final newline."),
+        (50_u64, "notes/crlf.md", "cr line"),
     ] {
         let absolute = scratch.path().join(path);
         let before_bytes = std::fs::read(&absolute).expect("bytes before");
@@ -6496,6 +6499,54 @@ async fn a_declared_seed_only_session_closes_without_writing() {
         .await;
     }
     call(&transport, &handle, 90, "workspace.close", json!({})).await;
+}
+
+/// A note saved before rich notes ended with one line ending has no final
+/// newline and an extra blank line above its table. With no witness it opens
+/// and edits normally, and the save after an edit writes the current format.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_format_note_without_a_witness_saves_the_current_format_after_an_edit() {
+    let old = "Intro.\n\n\n| a   | b   |\n| --- | --- |\n| 1   | 2   |";
+    let path = "notes/old.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), path, old.as_bytes());
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-old-format", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "richdoc" }),
+    )
+    .await;
+    let session = opened["sessionId"].as_str().expect("session");
+    let doc = Ydoc::wire();
+    let seed = doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, old)
+        .expect("the old bytes import");
+    assert!(!doc.has_markdown_witness());
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null, "sessionId": session,
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(seed), "seed": true
+    })).await;
+    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null, "sessionId": session,
+        "updateBase64": richdoc_update(&doc, "Edited.")
+    })).await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).expect("settled bytes"),
+        "Intro.\n\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nEdited.\n"
+    );
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
 
 /// #815 pin 2 — the data-loss direction: one real edit after the seed and the

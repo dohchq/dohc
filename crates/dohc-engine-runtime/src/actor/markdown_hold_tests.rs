@@ -23,10 +23,15 @@ impl Fixture {
     }
 
     async fn with_reader_source(keep_reader: bool) -> Self {
-        let data: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../dohc-engine-collab/tests/reader-resolver.json"
-        ))
-        .unwrap();
+        Self::from_resolver(
+            include_str!("../../../dohc-engine-collab/tests/reader-resolver.json"),
+            keep_reader,
+        )
+        .await
+    }
+
+    async fn from_resolver(resolver: &str, keep_reader: bool) -> Self {
+        let data: serde_json::Value = serde_json::from_str(resolver).unwrap();
         let source = data["source"].as_str().unwrap().to_owned();
         let wire = yrs::Doc::new();
         wire.transact_mut()
@@ -529,6 +534,50 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
             .unwrap();
         f.supervisor.close(&f.db).unwrap();
     }
+}
+
+/// A note saved before rich notes ended with one line ending keeps a witness
+/// that records the old projection's digest. Its settle waits for conversion
+/// consent, and the consented conversion saves the current format.
+#[tokio::test]
+async fn markdown_hold_old_projection_witness_waits_for_consent_then_saves_the_current_format() {
+    let f = Fixture::from_resolver(
+        include_str!("../../../dohc-engine-collab/tests/reader-resolver-old-format.json"),
+        false,
+    )
+    .await;
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.unchanged().await;
+    let grant = f.consent();
+    assert!(
+        f.settle(false, Some(grant.clone()))
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
+    assert!(grant.is_consumed());
+    let key = f.key.clone();
+    f.actor
+        .run(move |store, _| {
+            let saved = VersionedTextStore::new(store)
+                .read_text("w", "main", "note.md")?
+                .unwrap()
+                .text;
+            let doc = dohc_engine_collab::load_persisted(store, &key)?
+                .unwrap()
+                .doc;
+            assert_eq!(saved, doc.project(ContentKind::Richdoc)?.content);
+            assert!(saved.ends_with("Accepted text remains available\n"), "{saved:?}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.supervisor.close(&f.db).unwrap();
 }
 
 #[tokio::test]
