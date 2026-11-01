@@ -64,7 +64,7 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
       if (command === "docker" && args[0] === "compose") {
         assert.deepEqual(args.slice(-6), ["run", "--rm", "--no-deps", "-T", "postgres-migrate", "check-accounts"]);
         assert.equal(options.cwd, bundle);
-        return accounts === undefined ? { status: 1, stdout: "" } : { status: 0, stdout: `${accounts}\n` };
+        return accounts === null ? { status: 1, stdout: "" } : { status: 0, stdout: `${accounts}\n` };
       }
       if (command === "docker") {
         assert.deepEqual(args.slice(0, 2), ["image", "inspect"]);
@@ -154,7 +154,7 @@ test("start runs a first start only when asked, and every other start as a norma
 });
 
 test("a first start refuses a database that already holds accounts, or one it cannot check, before the release runs", async () => {
-  for (const [accounts, message] of [["present", /already holds dohc accounts.*Recover from total loss/], [undefined, /Could not check database dohc on db\.provider\.invalid/]]) {
+  for (const [accounts, message] of [["present", /already holds dohc accounts.*Recover from total loss/], [null, /Could not check database dohc on db\.provider\.invalid/]]) {
     const { host, calls } = driveHost({ accounts });
     await assert.rejects(runDrive(options("start", { firstStart: true }), host), message, String(accounts));
     assert.equal(releaseCall(calls), undefined);
