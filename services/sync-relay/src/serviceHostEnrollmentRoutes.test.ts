@@ -3,7 +3,7 @@ import {EventEmitter} from "node:events";
 import type {ServerResponse} from "node:http";
 import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {afterEach, expect, it, vi} from "vitest";
-import {fixture as ticketFixture, binding, restoredWithoutEditGrant, retainServiceActivation, retainSuccessorActivation, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "./liveTickets.test-helper";
 import {readServiceActivationRetirement, type RetirableServiceActivation} from "./storage/serviceActivationRetirement";
 import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
@@ -416,33 +416,26 @@ it("reports ready only with completed retained activation and the current native
 
 // Proves: when the owner's restore ends a note's last Edit grant, the owner
 // keeps live editing once the restore resumed. The host keeps the note
-// enrolled when it lets the retired activation go, and once the owner's next
-// activation completes, the owner's desktop finds the note ready at the
-// restored generation.
+// enrolled, and the owner's desktop finds the note ready at the restored
+// generation.
 it("reports a restored note ready to its owner after the restore ended its last Edit grant", async () => {
   const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
   f.host.ready.mockReturnValue(true);
   retainServiceActivation(f.raw, namespace, true);
-  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  keptByOwnerRestore(f.raw, namespace);
   expect(f.release(binding.objectId)).toBeNull();
-  retainSuccessorActivation(f.raw, true);
   expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
     document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace, shareId: scope.shareId}}]);
 });
 
-// Proves: only the owner discovers the restored note, and it reads as ready
-// only once the owner's next activation completed. The revoked recipient and
-// another account find nothing, and the owner's Pause still pauses it.
-it("shows a restored note only to its owner, ready once the owner's next activation completed", async () => {
+// Proves: only the owner discovers the restored note. The revoked recipient
+// and another account find nothing, and the owner's Pause still pauses it.
+it("shows a restored note only to its owner, and the owner's Pause still pauses it", async () => {
   const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
   f.host.ready.mockReturnValue(true);
   retainServiceActivation(f.raw, namespace, true);
-  restoredWithoutEditGrant(f.storage, f.raw, namespace);
+  keptByOwnerRestore(f.raw, namespace);
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
-  const successor = retainSuccessorActivation(f.raw, false);
-  expect((await documents())[0].status).toBe("preparing");
-  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(successor);
   expect((await documents())[0].status).toBe("ready");
   for (const userId of [scope.userId, "other"]) {
     f.setActor({workspaceId: scope.workspaceId, userId});
@@ -451,28 +444,6 @@ it("shows a restored note only to its owner, ready once the owner's next activat
   f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false})).toMatchObject({ownerStop: "pause"});
   expect((await documents())[0].status).toBe("paused");
-});
-
-// Proves: the owner's next activation completing after the owner's Pause or
-// Stop does not bring live editing back. Discovery never reports the restored
-// note ready, and the relay admits nothing, until the owner resumes a Pause.
-it.each(["pause", "stop"] as const)("keeps a restored note off when the owner's next activation completes after the owner's %s", async action => {
-  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
-  f.host.ready.mockReturnValue(true);
-  retainServiceActivation(f.raw, namespace, true);
-  restoredWithoutEditGrant(f.storage, f.raw, namespace);
-  const successor = retainSuccessorActivation(f.raw, false);
-  const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40, ...(action === "stop" ? {retire: true, prepared} : {})});
-  f.raw.prepare("UPDATE sync_relay_service_activations SET completion_json='{}' WHERE activation_id=?").run(successor);
-  const documents = async () => (await (await f.handle(f.request())).json()).documents as Array<{status: string}>;
-  const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId,
-    lineageClaimId: binding.lineageClaimId}, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
-  expect((await documents()).map(row => row.status)).not.toContain("ready");
-  expect(owner()).toBe("refused");
-  expect(f.release(binding.objectId)).toMatchObject({enabled: false, retired: action === "stop"});
-  expect((await documents()).map(row => row.status)).not.toContain("ready");
-  expect(owner()).toBe("refused");
 });
 
 it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {

@@ -76,7 +76,7 @@ export async function startSelfHostedLiveHost(options: {
   const changes = Effect.runSync(Queue.sliding<void>(1));
   // Whether the enrollment names its workspace's current owner and identity.
   const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's finished restore covers it.
+  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;

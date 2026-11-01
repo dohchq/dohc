@@ -552,13 +552,13 @@ export async function startServiceLiveHost(options: {
     const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
       ? (consumer, document, joined) => consumer.settle(document, joined) : undefined;
     // Whether a hosted document's owner lost live authority over it: Pause or
-    // Stop fenced it, or neither an Edit grant of its owner nor the owner's
-    // finished restore that ended the last one covers it any more.
+    // Stop fenced it, or neither an Edit grant of its owner covers it nor the
+    // owner's restore kept it live, even while that restore is unfinished.
     const authorityLost = ({target, objectId}: {target: ServiceActivationTarget; objectId: string}) => {
       const share = storage.getShare(target.shareId);
       if (!share || share.workspaceId !== target.workspaceId) return true;
       const owner = {userId: share.granterUserId, shareId: share.shareId};
-      return !storage.serviceHostDocumentEnabled({workspaceId: target.workspaceId, objectId}, owner) ||
+      return !storage.serviceHostDocumentEnabled({workspaceId: target.workspaceId, objectId}, owner, true) ||
         !storage.serviceHostEnrollmentCovered({workspaceId: target.workspaceId, objectId, ownerUserId: owner.userId, shareId: owner.shareId, path: target.path});
     };
     const PARKING = "Waiting for its hosted replica to confirm the document parked.";
