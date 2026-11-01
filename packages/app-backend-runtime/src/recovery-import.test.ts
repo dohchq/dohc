@@ -146,14 +146,17 @@ it("retries a fenced recovery import after the target store reopens mid-install 
     expect(db.prepare("SELECT phase FROM dohc_dataset_imports WHERE import_id=?").get(input.transferId)).toMatchObject({ phase: "staging" });
     const transaction = <T>(run: () => T) => { db.exec("BEGIN IMMEDIATE"); try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
     const journal = createDatasetJournal({ db, transaction });
+    let restartDiscards = 0;
     const restarted = createRecoveryInstaller({ db, transaction, journal,
       account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); },
       async installAttachment(_context, attachment) { for await (const _bytes of attachment.stream) { /* Consume the retry's validated attachment. */ } },
       commitAttachments() {},
-      async discardAttachments() {},
+      async discardAttachments() { restartDiscards++; },
     });
-    await restarted.discardInterrupted({}, f.authorize);
+    // The relay's startup discards each import left before installation with this call.
+    await restarted.discard({}, { ...f.scope, transferId: input.transferId, authorize: f.authorize });
     expect(discards).toBe(0);
+    expect(restartDiscards).toBe(1);
     expect(db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n).toBe(0);
     expect(db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(0);
     expect(restarted.status({ ...f.scope, transferId: input.transferId, authorize: f.authorize })).toBeNull();
