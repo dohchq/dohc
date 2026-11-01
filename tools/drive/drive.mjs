@@ -40,7 +40,7 @@ export function parseDriveArguments(args) {
 }
 
 export function redactor(settings) {
-  const values = [...new Set(secretNames.map(name => settings[name]).filter(value => value && value.length >= 6)
+  const values = [...new Set(secretNames.map(name => settings[name]).filter(Boolean)
     .flatMap(value => [value, encodeURIComponent(value)]))].sort((a, b) => b.length - a.length);
   return text => values.reduce((result, value) => result.split(value).join("[redacted]"), text);
 }
@@ -80,7 +80,7 @@ export const systemHost = {
   write: text => process.stdout.write(text),
 };
 
-const privateMode = stats => (stats.mode & 0o077) === 0;
+const hasMode = (stats, mode) => (stats.mode & 0o777) === mode;
 
 function checkRelease(options, host) {
   const read = path => { try { return JSON.parse(host.readFile(path)); } catch { return undefined; } };
@@ -121,10 +121,12 @@ function checkFiles(settings, host) {
     if (!stats?.isFile() || !check(stats)) throw new Error(`${settings[name]}, named by ${name}, ${problem}`);
   };
   // The services run as UID 1000 and read the CA file. The gateway runs as root and reads the app certificate and key.
-  file("DOHC_POSTGRES_CA_FILE", stats => (stats.mode & 0o004) !== 0, "must be a regular file that UID 1000 can read, with mode 0644.");
+  // Only root may change them: a replaced CA file or certificate would let its writer pose as Neon or the app hosts.
+  const rootFile = mode => stats => stats.uid === 0 && hasMode(stats, mode);
+  file("DOHC_POSTGRES_CA_FILE", rootFile(0o644), "must be a regular file that belongs to root, with mode 0644.");
   if (settings.DOHC_APP_TLS_CERT_FILE) {
-    file("DOHC_APP_TLS_CERT_FILE", () => true, "must be a regular file.");
-    file("DOHC_APP_TLS_KEY_FILE", privateMode, "must be a regular file that only its owner can read, with mode 0600.");
+    file("DOHC_APP_TLS_CERT_FILE", rootFile(0o644), "must be a regular file that belongs to root, with mode 0644.");
+    file("DOHC_APP_TLS_KEY_FILE", rootFile(0o600), "must be a regular file that belongs to root, with mode 0600.");
   }
 }
 
@@ -137,7 +139,7 @@ async function checkHost(settings, release, host) {
     image.Config?.Labels?.["org.opencontainers.image.revision"] !== release.revision) {
     throw new Error(`Image ${settings.DOHC_IMAGE} is not the image this release bundle records. Load services.tar from the same bundle.`);
   }
-  // Docker publishes ports 80 and 443 on IPv6 too, and DOCKER-USER filters only IPv4, so an IPv6 address bypasses Cloudflare's ranges.
+  // Docker publishes ports 80 and 443 on IPv6 too. Drive's origin serves only IPv4, from Cloudflare's IPv4 ranges.
   const addresses = await host.run("ip", ["-json", "-6", "address", "show", "scope", "global"]);
   let global;
   try { global = addresses.status === 0 ? JSON.parse(addresses.stdout || "[]").flatMap(link => link.addr_info ?? []) : undefined; } catch { global = undefined; }
@@ -162,8 +164,21 @@ async function mountState(mount, uuid, host) {
   return Boolean(current);
 }
 
-async function mountVolume(mount, uuid, host) {
-  if (!host.lstat(`/dev/disk/by-uuid/${uuid}`)) {
+/** Returns true when one device has the filesystem UUID. A restored volume snapshot keeps its UUID, so a copy has the same one. */
+async function attached(uuid, host) {
+  const result = await host.run("blkid", ["-c", "/dev/null", "-t", `UUID=${uuid}`, "-o", "device"]);
+  // blkid exits 2 when no device matches.
+  if (result.status === 2) return false;
+  if (result.status !== 0) throw new Error("Could not list attached volumes with blkid. Run this command as root, then try again.");
+  const devices = result.stdout.split("\n").filter(Boolean);
+  if (devices.length > 1) {
+    throw new Error(`Devices ${devices.join(", ")} all have filesystem UUID ${uuid}. Detach every copy of the volume in DigitalOcean, then try again.`);
+  }
+  return devices.length === 1;
+}
+
+async function mountVolume(mount, uuid, isAttached, host) {
+  if (!isAttached) {
     throw new Error(`No attached volume has filesystem UUID ${uuid}. Attach the volume to this Droplet in DigitalOcean, then try again. ` +
       "This command never attaches, formats or creates a volume.");
   }
@@ -182,10 +197,22 @@ function checkFolders(settings, mount, host) {
     // A missing folder means the wrong volume or a new one. Recreating it would start a new, empty deployment.
     if (!stats) throw new Error(`${path} is missing from the volume. Check --volume-uuid and DOHC_DATA_DIRECTORY. Never recreate deployment folders.`);
     if (!stats.isDirectory() || stats.dev !== device) throw new Error(`${path} must be a folder on the volume mounted at ${mount}.`);
-    if (path !== directory && (stats.uid !== 1000 || stats.gid !== 1000 || !privateMode(stats))) {
+    if (path !== directory && (stats.uid !== 1000 || stats.gid !== 1000 || !hasMode(stats, 0o700))) {
       throw new Error(`${path} must belong to UID 1000 and group 1000, with mode 0700.`);
     }
   }
+}
+
+/** A first start creates a new relay deployment. Under Drive's existing accounts, none of them could open their workspaces. */
+async function checkNoAccounts(options, settings, config, host) {
+  const result = await host.run("docker", config.composeArgs(options.envFile, settings, "run", "--rm", "--no-deps", "-T", "postgres-migrate", "check-accounts"),
+    { cwd: options.bundle });
+  const state = result.status === 0 ? result.stdout.trim() : undefined, database = `${settings.POSTGRES_DB} on ${settings.DOHC_POSTGRES_HOST}`;
+  if (state === "present") {
+    throw new Error(`Database ${database} already holds dohc accounts, so this is not the deployment's first start. ` +
+      'A first start needs a database that has never held dohc. If the volume is lost, follow "Recover from total loss" in docs/how-to/drive.md.');
+  }
+  if (state !== "missing") throw new Error(`Could not check database ${database} for dohc accounts. Check the database settings and the CA file, then try again.`);
 }
 
 const releaseCommands = {
@@ -200,21 +227,26 @@ export async function runDrive(options, host = systemHost) {
     if (host.platform !== "linux") throw new Error("Run Drive commands on the Drive server, which runs Linux.");
     const release = checkRelease(options, host);
     const envStats = host.lstat(options.envFile);
-    if (!envStats?.isFile() || envStats.uid !== host.uid || !privateMode(envStats)) {
-      throw new Error(`${options.envFile} must be a regular file that belongs to you and only you can read, with mode 0600. It holds the server's secrets.`);
+    if (!envStats?.isFile() || envStats.uid !== host.uid || !hasMode(envStats, 0o600)) {
+      throw new Error(`${options.envFile} must be a regular file that belongs to you, with mode 0600. It holds the server's secrets.`);
     }
     const settings = parseEnv(host.readFile(options.envFile));
+    // Output is redacted a line at a time, so a secret that spans lines could escape it.
+    const multiline = secretNames.filter(name => /[\r\n]/.test(settings[name] ?? ""));
+    if (multiline.length) throw new Error(`Put ${multiline.join(", ")} on one line in ${options.envFile}. A secret setting cannot span lines.`);
     redact = redactor(settings);
-    const mount = checkSettings(options, settings, release, await host.loadConfig(options.bundle));
+    const config = await host.loadConfig(options.bundle), mount = checkSettings(options, settings, release, config);
     checkFiles(settings, host);
     await checkHost(settings, release, host);
+    const isAttached = await attached(options.volumeUuid, host);
     if (!await mountState(mount, options.volumeUuid, host)) {
       if (options.command !== "move") {
         throw new Error(`Volume ${options.volumeUuid} is not mounted at ${mount}. Mount it as described in docs/how-to/drive.md, then try again.`);
       }
-      await mountVolume(mount, options.volumeUuid, host);
+      await mountVolume(mount, options.volumeUuid, isAttached, host);
     }
     checkFolders(settings, mount, host);
+    if (options.firstStart) await checkNoAccounts(options, settings, config, host);
     host.write(`Release ${release.revision} for ${release.platform}, volume ${options.volumeUuid} at ${mount}: checks passed.\n`);
     if (options.firstStart) host.write("First start: the release creates a new relay deployment and refuses if any deployment folder holds data.\n");
     const output = lineWriter(redact, host.write);

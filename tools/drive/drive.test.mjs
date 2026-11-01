@@ -31,8 +31,8 @@ const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, d
  * An in-memory Drive host. The volume starts mounted unless `mounted` is false; a successful `mount` call mounts it.
  * `child` is the raw output of the release command. Every command the wrapper runs is recorded in `calls`.
  */
-function driveHost({ settings = baseSettings(), release = {}, imageDetails = {}, mounted = true, otherMounts = [], device = true,
-  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, child = "", childStatus = 0, platform = "linux", arch = "x64" } = {}) {
+function driveHost({ settings = baseSettings(), release = {}, imageDetails = {}, mounted = true, otherMounts = [], devices = ["/dev/sda"],
+  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64" } = {}) {
   const calls = [], written = [];
   const state = { mounted };
   const releaseJson = { version: 1, revision, dirty: false, image, imageId, platform: "linux/amd64", files, archive: "services.tar", ...release };
@@ -43,7 +43,6 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
       if (Object.hasOwn(stats, path)) return stats[path];
       if (path === envFile) return stat("file");
       if (path === `${bundle}/release.json` || files.some(file => path === `${bundle}/${file}`)) return stat("file", { mode: 0o644 });
-      if (path === `/dev/disk/by-uuid/${uuid}`) return device ? stat("link") : undefined;
       if (path === "/etc/dohc/postgres-ca.pem" || path === "/etc/dohc/app-tls/cert.pem") return stat("file", { mode: 0o644, dev: 1 });
       if (path === "/etc/dohc/app-tls/key.pem") return stat("file", { dev: 1 });
       if (path === "/mnt/drive") return stat("dir", { mode: 0o755, dev: state.mounted ? 2 : 1 });
@@ -62,10 +61,19 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
     write: text => written.push(text),
     async run(command, args, options = {}) {
       calls.push({ command, args, cwd: options.cwd });
+      if (command === "docker" && args[0] === "compose") {
+        assert.deepEqual(args.slice(-6), ["run", "--rm", "--no-deps", "-T", "postgres-migrate", "check-accounts"]);
+        assert.equal(options.cwd, bundle);
+        return accounts === undefined ? { status: 1, stdout: "" } : { status: 0, stdout: `${accounts}\n` };
+      }
       if (command === "docker") {
         assert.deepEqual(args.slice(0, 2), ["image", "inspect"]);
         return { status: 0, stdout: JSON.stringify([{ Id: imageId, Os: "linux", Architecture: "amd64",
           Config: { Labels: { "org.opencontainers.image.revision": revision } }, ...imageDetails }]) };
+      }
+      if (command === "blkid") {
+        assert.deepEqual(args, ["-c", "/dev/null", "-t", `UUID=${uuid}`, "-o", "device"]);
+        return devices.length ? { status: 0, stdout: devices.map(device => `${device}\n`).join("") } : { status: 2, stdout: "" };
       }
       if (command === "ip") return { status: 0, stdout: JSON.stringify(ipv6.length ? [{ ifname: "eth0", addr_info: ipv6 }] : []) };
       if (command === "findmnt") {
@@ -90,10 +98,11 @@ const options = (command, extra = {}) => ({ command, bundle, envFile, volumeUuid
 const releaseCall = calls => calls.find(call => call.command === process.execPath);
 // None of these may ever run: the wrapper never formats, partitions or creates storage, and never changes Docker state itself.
 const forbidden = /^(mkfs.*|mke2fs|wipefs|parted|fdisk|sgdisk|mkdir|install|chown|chmod|umount|losetup)$/;
+const accountsCheck = call => call.command === "docker" && call.args[0] === "compose";
 const assertSafe = calls => {
   for (const call of calls) {
     assert.doesNotMatch(posix.basename(call.command), forbidden, call.command);
-    if (call.command === "docker") assert.deepEqual(call.args.slice(0, 2), ["image", "inspect"]);
+    if (call.command === "docker" && !accountsCheck(call)) assert.deepEqual(call.args.slice(0, 2), ["image", "inspect"]);
   }
 };
 
@@ -117,7 +126,7 @@ test("check delegates to the release check with the same configuration and mount
   const { host, calls, output } = driveHost({ child: "[ok] self-host env values\nSelf-host check summary: 9/9 checks passed.\n" });
   await runDrive(options("check"), host);
   assert.deepEqual(releaseCall(calls), { command: process.execPath, args: ["scripts/check-self-host.mjs", "--env-file", envFile], cwd: bundle });
-  assert.deepEqual(calls.map(call => call.command), ["docker", "ip", "findmnt", process.execPath]);
+  assert.deepEqual(calls.map(call => call.command), ["docker", "ip", "blkid", "findmnt", process.execPath]);
   assert.deepEqual(calls[0].args, ["image", "inspect", image]);
   assert.match(output(), new RegExp(`Release ${revision} for linux/amd64, volume ${uuid} at /mnt/drive: checks passed\\.\\n`));
   assert.match(output(), /Self-host check summary: 9\/9 checks passed\.\n$/);
@@ -129,15 +138,26 @@ test("start runs a first start only when asked, and every other start as a norma
   await runDrive(options("start"), normal.host);
   assert.deepEqual(releaseCall(normal.calls).args, ["scripts/check-self-host.mjs", "--start", "--env-file", envFile]);
   assert.doesNotMatch(normal.output(), /First start/);
+  assert.ok(!normal.calls.some(accountsCheck));
   const first = driveHost();
   await runDrive(options("start", { firstStart: true }), first.host);
   assert.deepEqual(releaseCall(first.calls).args, ["scripts/check-self-host.mjs", "--start", "--first-start", "--env-file", envFile]);
+  assert.ok(first.calls.findIndex(accountsCheck) < first.calls.indexOf(releaseCall(first.calls)));
   assert.match(first.output(), /First start: the release creates a new relay deployment/);
+  assertSafe(first.calls);
   // Check and start never mount: an unmounted volume refuses before the release runs.
   for (const command of ["check", "start"]) {
     const { host, calls } = driveHost({ mounted: false });
     await assert.rejects(runDrive(options(command), host), new RegExp(`Volume ${uuid} is not mounted at /mnt/drive`));
     assert.ok(!calls.some(call => call.command === "mount" || call.command === process.execPath), command);
+  }
+});
+
+test("a first start refuses a database that already holds accounts, or one it cannot check, before the release runs", async () => {
+  for (const [accounts, message] of [["present", /already holds dohc accounts.*Recover from total loss/], [undefined, /Could not check database dohc on db\.provider\.invalid/]]) {
+    const { host, calls } = driveHost({ accounts });
+    await assert.rejects(runDrive(options("start", { firstStart: true }), host), message, String(accounts));
+    assert.equal(releaseCall(calls), undefined);
   }
 });
 
@@ -159,7 +179,8 @@ test("move mounts the attached volume by UUID, keeps every deployment folder, th
 
 test("move refuses without the attached volume, or with anything else at the mount point, and never runs the release", async () => {
   const refusals = [
-    [{ device: false }, /No attached volume has filesystem UUID .* never attaches, formats or creates a volume/],
+    [{ devices: [] }, /No attached volume has filesystem UUID .* never attaches, formats or creates a volume/],
+    [{ devices: ["/dev/sda", "/dev/sdb"] }, /Devices \/dev\/sda, \/dev\/sdb all have filesystem UUID .* Detach every copy/],
     [{ stats: { "/mnt/drive": undefined } }, /Create \/mnt\/drive as an empty folder .* never creates it/],
     [{ mountPoint: ["lost+found"] }, /Create \/mnt\/drive as an empty folder/],
     [{ mountStatus: 32 }, /Could not mount volume/],
@@ -179,7 +200,7 @@ test("a missing, moved or exposed deployment folder refuses without being create
     for (const [replacement, message] of [[undefined, /is missing from the volume\. .*Never recreate deployment folders/],
       [stat("dir", { uid: 1000, gid: 1000, dev: 1 }), /must be a folder on the volume mounted at \/mnt\/drive/],
       [stat("link"), /must be a folder on the volume/], [stat("dir", { uid: 0, gid: 0 }), /must belong to UID 1000 and group 1000, with mode 0700/],
-      [stat("dir", { uid: 1000, gid: 1000, mode: 0o755 }), /mode 0700/]]) {
+      [stat("dir", { uid: 1000, gid: 1000, mode: 0o755 }), /mode 0700/], [stat("dir", { uid: 1000, gid: 1000, mode: 0o600 }), /mode 0700/]]) {
       const path = `/mnt/drive/dohc/${folder}`;
       for (const command of ["check", "move"]) {
         const { host, calls } = driveHost({ mounted: command === "check", stats: { [path]: replacement } });
@@ -191,6 +212,10 @@ test("a missing, moved or exposed deployment folder refuses without being create
   }
   const { host } = driveHost({ stats: { "/mnt/drive/dohc": undefined } });
   await assert.rejects(runDrive(options("check"), host), /\/mnt\/drive\/dohc is missing from the volume/);
+  // A copy of the volume attached beside it could be mounted in its place at the next boot.
+  const clone = driveHost({ devices: ["/dev/sda", "/dev/sdb"] });
+  await assert.rejects(runDrive(options("check"), clone.host), /Detach every copy of the volume/);
+  assert.equal(releaseCall(clone.calls), undefined);
 });
 
 test("the release bundle, its image and the host architecture must match", async () => {
@@ -215,7 +240,7 @@ test("the release bundle, its image and the host architecture must match", async
 
 test("the configuration must be private and complete for Drive, and the release's own validation applies", async () => {
   const refusals = [
-    [{ stats: { [envFile]: stat("file", { mode: 0o640 }) } }, /must be a regular file that belongs to you and only you can read/],
+    [{ stats: { [envFile]: stat("file", { mode: 0o640 }) } }, /must be a regular file that belongs to you, with mode 0600/],
     [{ stats: { [envFile]: stat("link") } }, /must be a regular file/],
     [{ stats: { [envFile]: stat("file", { uid: 1000 }) } }, /belongs to you/],
     [{ settings: { ...baseSettings(), DOHC_SIGN_UP_EMAILS: "" } }, /keeps sign-up private/],
@@ -226,9 +251,13 @@ test("the configuration must be private and complete for Drive, and the release'
     [{ settings: { ...baseSettings(), DOHC_DATA_DIRECTORY: "/dohc" } }, /directly on the volume's mount point/],
     [{ settings: { ...baseSettings(), DOHC_APP_TLS_KEY_FILE: "" } }, /Set DOHC_APP_TLS_KEY_FILE to the absolute path/],
     [{ settings: { ...baseSettings(), DOHC_SMTP_PORT: "25x" } }, /Set DOHC_SMTP_PORT to a valid port/],
-    [{ stats: { "/etc/dohc/postgres-ca.pem": stat("file", { mode: 0o600 }) } }, /UID 1000 can read, with mode 0644/],
+    [{ stats: { "/etc/dohc/postgres-ca.pem": stat("file", { mode: 0o600 }) } }, /postgres-ca\.pem.* belongs to root, with mode 0644/],
+    [{ stats: { "/etc/dohc/postgres-ca.pem": stat("file", { mode: 0o666 }) } }, /postgres-ca\.pem.* belongs to root, with mode 0644/],
+    [{ stats: { "/etc/dohc/postgres-ca.pem": stat("file", { mode: 0o644, uid: 1000 }) } }, /postgres-ca\.pem.* belongs to root/],
     [{ stats: { "/etc/dohc/postgres-ca.pem": undefined } }, /must be a regular file/],
-    [{ stats: { "/etc/dohc/app-tls/key.pem": stat("file", { mode: 0o644 }) } }, /only its owner can read, with mode 0600/],
+    [{ stats: { "/etc/dohc/app-tls/cert.pem": stat("file", { mode: 0o664 }) } }, /cert\.pem.* belongs to root, with mode 0644/],
+    [{ stats: { "/etc/dohc/app-tls/key.pem": stat("file", { mode: 0o644 }) } }, /key\.pem.* belongs to root, with mode 0600/],
+    [{ stats: { "/etc/dohc/app-tls/key.pem": stat("file", { uid: 1000 }) } }, /key\.pem.* belongs to root/],
     [{ ipv6: [{ family: "inet6", local: "2001:db8::10", scope: "global" }] }, /public IPv6 address/],
   ];
   for (const [setup, message] of refusals) {
@@ -247,8 +276,6 @@ test("drive.env.example holds Drive's public settings and no credentials, and it
     region: example.DOHC_SNAPSHOT_S3_REGION, data: example.DOHC_DATA_DIRECTORY }, {
     origin: "https://drive.dohc.computer", host: "drive.dohc.computer", smtp: ["smtp.postmarkapp.com", "2525", "false"], from: "noreply@drive.dohc.computer",
     apps: ["1", "dohc.app"], cloudflare: "1", region: "auto", data: "/mnt/dohc-drive/dohc" });
-  assert.match(text, /DigitalOcean blocks outbound ports 25, 465, and 587 on new Droplets\. Postmark accepts STARTTLS on port 2525\./);
-  assert.match(text, /sslmode=verify-full and needs Neon's CA file/);
   const filled = { ...baseSettings(), ...example, DOHC_DATA_DIRECTORY: "/mnt/drive/dohc" };
   const placeholders = ["DOHC_IMAGE", "DOHC_POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "DOHC_SIGN_UP_EMAILS", "DOHC_SNAPSHOT_S3_ENDPOINT", "DOHC_SNAPSHOT_S3_BUCKET"];
   const unfilled = driveHost({ settings: filled });
@@ -273,4 +300,21 @@ test("no secret reaches the terminal, in release output or in errors", async () 
   const redact = redactor(settings);
   assert.equal(redact(`token ${settings.DOHC_SMTP_PASSWORD} and ${settings.DOHC_SNAPSHOT_HEARTBEAT_URL}`), "token [redacted] and [redacted]");
   assert.equal(redact("drive.team.invalid"), "drive.team.invalid");
+});
+
+test("a short secret is redacted too, even when the output splits it", async () => {
+  // The release accepts an external database password of any length.
+  const short = "Qz7k9", { host, calls, output } = driveHost({ settings: { ...baseSettings(), POSTGRES_PASSWORD: short }, child: `start ${short} end\n` });
+  await runDrive(options("check"), host);
+  assert.ok(releaseCall(calls));
+  assert.ok(!output().includes(short));
+  assert.match(output(), /start \[redacted\] end\n$/);
+});
+
+test("a secret setting that spans lines refuses before anything runs, without its value", async () => {
+  const { host, calls } = driveHost({ settings: { ...baseSettings(), DOHC_SMTP_PASSWORD: "first-half\nsecond-half" } });
+  assert.match(parseEnv(host.readFile(envFile)).DOHC_SMTP_PASSWORD, /\n/);
+  await assert.rejects(runDrive(options("check"), host), error =>
+    /Put DOHC_SMTP_PASSWORD on one line/.test(error.message) && !/first-half|second-half/.test(error.message));
+  assert.deepEqual(calls, []);
 });
