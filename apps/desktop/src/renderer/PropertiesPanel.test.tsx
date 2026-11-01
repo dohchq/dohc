@@ -202,6 +202,26 @@ describe("PropertiesPanel", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("keeps a new property's value when another device adds the same name", () => {
+    const doc = markdownToYDoc("---\nowner: Sam\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      fireEvent.click(screen.getByTestId("property-add"));
+      fireEvent.change(screen.getByLabelText("Property 2 value"), { target: { value: "Ada" } });
+      // A prefix of owner waits instead of saving the new property.
+      fireEvent.change(screen.getByLabelText("Property 2 name"), { target: { value: "own" } });
+      expect(propertyValue("own")).toBe("Ada");
+      expect(doc.getMap("frontmatter").has("own")).toBe(false);
+
+      act(() => setFrontmatterValue(doc, "own", "remote"));
+      // Resolve the clash by giving the draft a free name. Its typed value
+      // must still be available, even if a duplicate flag hid the value field.
+      fireEvent.change(screen.getByLabelText("Property 2 name"), { target: { value: "lead" } });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", own: "remote", lead: "Ada" });
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
