@@ -251,26 +251,30 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
-  it("delivers changed and absent heads only to the current renderer session", async () => {
+  it("delivers a head in the same event as the update it was read with, only to the current renderer session", async () => {
     const sender = new FakeSender(7);
-    const session = providerSession();
-    const h = harness(session);
+    const h = harness(providerSession());
     await h.ipc.open(sender, openPayload);
     const opened = h.capturedOpen()!;
-    opened.onHeadChanged?.("a".repeat(64));
-    expect(sender.sent.at(-1)?.payload).toMatchObject({
-      ...openPayload, headSha256: "a".repeat(64),
+    const update = new Uint8Array([1, 2, 3]);
+    opened.onRemoteUpdate(update, { sha256: "a".repeat(64) });
+    expect(sender.sent.at(-1)).toEqual({
+      channel: CHANNELS.engineYDocRemoteUpdate,
+      payload: { sessionId: openPayload.sessionId, update, head: { sha256: "a".repeat(64) }, lineageGeneration: 1 },
     });
-    opened.onHeadChanged?.(null);
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...openPayload, headSha256: null });
+    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null, committed: true });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: null, committed: true } });
+    // A delta from another editor brings no head.
+    opened.onRemoteUpdate(new Uint8Array([4]));
+    expect(sender.sent.at(-1)?.payload).not.toHaveProperty("head");
     const sent = sender.sent.length;
     h.setGeneration(2);
-    opened.onHeadChanged?.("b".repeat(64));
+    opened.onRemoteUpdate(new Uint8Array([5]), { sha256: "b".repeat(64) });
     expect(sender.sent).toHaveLength(sent);
     await h.ipc.shutdown();
   });
 
-  it("does not deliver an old head callback into a reopened editor for the same path", async () => {
+  it("does not deliver an old session's state and head into a reopened editor for the same path", async () => {
     const sender = new FakeSender(7);
     const h = harness(providerSession());
     await h.ipc.open(sender, openPayload);
@@ -281,11 +285,11 @@ describe("engine Y.Doc IPC adapter", () => {
     const current = h.capturedOpen()!;
     sender.sent.length = 0;
 
-    old.onHeadChanged?.("a".repeat(64));
-    old.onHeadChanged?.(null);
+    old.onRemoteUpdate(new Uint8Array([1]), { sha256: "a".repeat(64) });
+    old.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null, committed: true });
     expect(sender.sent).toEqual([]);
-    current.onHeadChanged?.("b".repeat(64));
-    expect(sender.sent.at(-1)?.payload).toMatchObject({...reopened, headSha256: "b".repeat(64)});
+    current.onRemoteUpdate(new Uint8Array([2]), { sha256: "b".repeat(64) });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({sessionId: reopened.sessionId, head: {sha256: "b".repeat(64)}});
     await h.ipc.shutdown();
   });
   it("names main's person when each request first arrives and keeps that person for its retries", async () => {
@@ -1654,14 +1658,16 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onLineageReplaced?.(
       new Uint8Array([9]),
       ["recovered/losing.md"],
+      { sha256: "c".repeat(64) },
     );
-    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([8]));
+    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([8]), { sha256: "d".repeat(64) });
 
     expect(sender.sent.at(-1)?.payload).toMatchObject({
       sessionId: openPayload.sessionId,
       update: new Uint8Array([9]),
       recoveredPaths: ["recovered/losing.md"],
       artifactAssets: [winner],
+      head: { sha256: "c".repeat(64) },
       lineageGeneration: 2,
     });
     await expect(
@@ -1676,7 +1682,7 @@ describe("engine Y.Doc IPC adapter", () => {
         sessionId: openPayload.sessionId,
         lineageGeneration: 2,
       }),
-    ).toEqual({ accepted: true, updates: [new Uint8Array([8])] });
+    ).toEqual({ accepted: true, updates: [{ update: new Uint8Array([8]), head: { sha256: "d".repeat(64) } }] });
     expect(
       h.ipc.acknowledgeLineageReplacement(sender, {
         sessionId: openPayload.sessionId,

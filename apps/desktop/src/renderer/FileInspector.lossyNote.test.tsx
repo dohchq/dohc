@@ -52,13 +52,13 @@ const WRITTEN = `${yDocToMarkdown(markdownToYDoc("# Plan\n\n- [ ] Book flights\n
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
-// An engine session seeded from LOSSY, with the witness the engine records.
+// An engine session seeded from LOSSY, with the witness and head the engine records.
 function lossySession() {
   const doc = markdownToYDoc(LOSSY);
   doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
   doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
   doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
+  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(LOSSY) };
 }
 
 function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {

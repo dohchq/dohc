@@ -10,6 +10,8 @@ import {
   EngineYDocPendingLimitError,
   EngineYDocUpdateTooLargeError,
   type EngineYDocBatchScheduler,
+  type EngineYDocDelivery,
+  type EngineYDocHead,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
@@ -82,15 +84,16 @@ function mockTransport(
   shippedSequences: number[];
   staged: () => number;
   shippedGenerations: number[];
-  pushRemote: (update: Uint8Array, lineageGeneration?: number) => void;
+  pushRemote: (update: Uint8Array, lineageGeneration?: number, head?: EngineYDocHead) => void;
   replaceLineage: (input: {
     update: Uint8Array;
     recoveredPaths: string[];
     artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
+    head?: EngineYDocHead;
     lineageGeneration: number;
   }) => Promise<void>;
   releaseReplacement: () => void;
-  bufferDuringReplacement: (update: Uint8Array) => void;
+  bufferDuringReplacement: (update: Uint8Array, head?: EngineYDocHead) => void;
   acknowledgedGenerations: number[];
   closed: () => boolean;
   events: string[];
@@ -113,13 +116,14 @@ function mockTransport(
   let staged = 0;
   const shippedGenerations: number[] = [];
   let remoteListener:
-    | ((update: Uint8Array, lineageGeneration: number) => void)
+    | ((update: Uint8Array, lineageGeneration: number, head?: EngineYDocHead) => void)
     | null = null;
   let replacementListener:
     | ((input: {
         update: Uint8Array;
         recoveredPaths: string[];
         artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
+        head?: EngineYDocHead;
         lineageGeneration: number;
       }) => void | Promise<void>)
     | null = null;
@@ -128,7 +132,7 @@ function mockTransport(
     releaseReplacement = resolve;
   });
   const acknowledgedGenerations: number[] = [];
-  const bufferedReplacementUpdates: Uint8Array[] = [];
+  const bufferedReplacementUpdates: EngineYDocDelivery[] = [];
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
@@ -182,13 +186,14 @@ function mockTransport(
     shippedSequences,
     staged: () => staged,
     shippedGenerations,
-    pushRemote: (update, lineageGeneration = 1) =>
-      remoteListener?.(update, lineageGeneration),
+    pushRemote: (update, lineageGeneration = 1, head) =>
+      remoteListener?.(update, lineageGeneration, head),
     replaceLineage: async (input) => {
       await replacementListener?.(input);
     },
     releaseReplacement,
-    bufferDuringReplacement: (update) => bufferedReplacementUpdates.push(update),
+    bufferDuringReplacement: (update, head) =>
+      bufferedReplacementUpdates.push({ update, ...(head ? { head } : {}) }),
     acknowledgedGenerations,
     closed: () => closed,
     events,
@@ -1168,6 +1173,90 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     typeIntoBody(binding.doc!, "Fresh local.");
     await vi.waitFor(() => expect(mock.shippedGenerations.at(-1)).toBe(2));
+    await binding.destroy();
+  });
+
+  it("changes the head in the same task as the state it came with, and forgets it for a source without one", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const seen: Array<{ text: string; head: string | null | undefined; committed: boolean }> = [];
+    binding.onHeadChanged(() => seen.push({
+      text: bodyText(binding.doc!), head: binding.headSha256, committed: binding.headCommitted,
+    }));
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
+    const push = (change: () => void, lineageGeneration?: number, head?: EngineYDocHead) => {
+      const before = Y.encodeStateVector(remote);
+      change();
+      mock.pushRemote(Y.encodeStateAsUpdate(remote, before), lineageGeneration, head);
+    };
+
+    push(() => typeIntoBody(remote, "Remote."), 1, { sha256: "a".repeat(64) });
+    expect(seen).toEqual([{ text: bodyText(remote), head: "a".repeat(64), committed: false }]);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
+    expect(seen.at(-1)).toEqual({ text: bodyText(remote), head: "b".repeat(64), committed: true });
+
+    // A delta that keeps the source keeps its head.
+    push(() => typeIntoBody(remote, "More."));
+    expect(seen).toHaveLength(2);
+    expect(binding.headSha256).toBe("b".repeat(64));
+
+    push(() => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)));
+    expect(seen).toHaveLength(3);
+    expect(binding.headSha256).toBeUndefined();
+    expect(binding.headCommitted).toBe(false);
+
+    // Another lineage's pair is not this doc's.
+    push(() => typeIntoBody(remote, "Stale."), 2, { sha256: "d".repeat(64) });
+    expect(seen).toHaveLength(3);
+    expect(binding.headSha256).toBeUndefined();
+    expect(bodyText(binding.doc!)).not.toContain("Stale.");
+    remote.destroy();
+    await binding.destroy();
+  });
+
+  it("installs a replacement with its head, then the head of state buffered behind it", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    const headsAtReplacement: Array<string | null | undefined> = [];
+    binding.onDocumentReplaced(() => headsAtReplacement.push(binding.headSha256));
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    winner.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [],
+      head: { sha256: "b".repeat(64) }, lineageGeneration: 2,
+    });
+    const beforeRemote = Y.encodeStateVector(winner);
+    typeIntoBody(winner, "Read with the next head.");
+    mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, beforeRemote), { sha256: "c".repeat(64) });
+    mock.releaseReplacement();
+    await replacing;
+
+    expect(bodyText(binding.doc!)).toContain("Read with the next head.");
+    expect(headsAtReplacement).toEqual(["c".repeat(64)]);
+    expect(binding.headSha256).toBe("c".repeat(64));
+    winner.destroy();
+    await binding.destroy();
+  });
+
+  it("does not keep the old head for a replacement that records another source and came without one", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    winner.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(binding.headSha256).toBeUndefined();
+    winner.destroy();
     await binding.destroy();
   });
 

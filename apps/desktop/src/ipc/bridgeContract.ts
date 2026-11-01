@@ -6932,6 +6932,16 @@ const ENGINE_YDOC_UPDATE = z
       });
     }
   });
+// The file head an update's state was read with. `committed` marks the head
+// of this session's own save. An update without one came with no head.
+const ENGINE_YDOC_HEAD = z.object({
+  sha256: z.string().min(1).nullable(),
+  committed: z.literal(true).optional(),
+}).strict();
+const ENGINE_YDOC_DELIVERY = z.object({
+  update: ENGINE_YDOC_UPDATE,
+  head: ENGINE_YDOC_HEAD.optional(),
+});
 const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
   (value) => value instanceof Uint8Array && value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
   "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",
@@ -7119,7 +7129,7 @@ export const AcknowledgeEngineYDocLineageReplacementResult =
   z.discriminatedUnion("accepted", [
     z.object({
       accepted: z.literal(true),
-      updates: z.array(ENGINE_YDOC_UPDATE),
+      updates: z.array(ENGINE_YDOC_DELIVERY),
     }),
     z.object({
       accepted: z.literal(false),
@@ -7140,9 +7150,8 @@ export const EngineYDocOwnerHandoff = z.object({
 export type EngineYDocOwnerHandoff = z.infer<typeof EngineYDocOwnerHandoff>;
 export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessionPayload>;
 
-export const EngineYDocRemoteUpdateEvent = z.object({
+export const EngineYDocRemoteUpdateEvent = ENGINE_YDOC_DELIVERY.extend({
   sessionId: ENGINE_YDOC_SESSION_ID,
-  update: ENGINE_YDOC_UPDATE,
   lineageGeneration: z.number().int().positive(),
 });
 export type EngineYDocRemoteUpdateEvent = z.infer<typeof EngineYDocRemoteUpdateEvent>;
@@ -7152,6 +7161,7 @@ export const EngineYDocLineageReplacementEvent = z.object({
   update: ENGINE_YDOC_UPDATE,
   recoveredPaths: z.array(SAFE_RELATIVE_PATH),
   artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR),
+  head: ENGINE_YDOC_HEAD.optional(),
   lineageGeneration: z.number().int().positive(),
 });
 export type EngineYDocLineageReplacementEvent = z.infer<
@@ -7169,7 +7179,6 @@ export const SaveFailureReason = z.enum(["deleted", "read-only", "privacy-denied
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
-  headSha256: z.string().min(1).nullable().optional(),
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),

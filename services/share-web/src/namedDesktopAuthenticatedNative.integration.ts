@@ -186,7 +186,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
           if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
         },
         onRemoteUpdate(listener) {
-          const receive = (payload: unknown) => {const value = EngineYDocRemoteUpdateEvent.parse(payload); listener(value.update, value.lineageGeneration);};
+          const receive = (payload: unknown) => {const value = EngineYDocRemoteUpdateEvent.parse(payload); listener(value.update, value.lineageGeneration, value.head);};
           sender.on(CHANNELS.engineYDocRemoteUpdate, receive); return () => {sender.off(CHANNELS.engineYDocRemoteUpdate, receive);};
         },
         onLineageReplacement: () => () => {}, acknowledgeLineageReplacement: async () => [], close: () => ipc.close(sender, {sessionId})});

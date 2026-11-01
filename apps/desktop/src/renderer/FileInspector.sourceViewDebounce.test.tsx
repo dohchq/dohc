@@ -40,6 +40,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
   return {
     available: true,
     headSha256: sha(INITIAL_MARKDOWN),
+    headCommitted: false,
     opening: false,
     doc,
     objectId: "object-1",

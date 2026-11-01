@@ -280,10 +280,11 @@ it("receives saved state at the resolved path when opened through a case alias",
   expect(retained.snapshot.saveState.kind).toBe("saving");
   act(() => report({
     sessionId: harness.sessionId()!, workspaceId: "ws-1", path: "Notes/Folder/A.md",
-    state: { kind: "saved-here" }, seq: harness.applied.at(-1)!.seq, headSha256: "a".repeat(64),
+    state: { kind: "saved-here" }, seq: harness.applied.at(-1)!.seq,
   }));
   expect(retained.snapshot.saveState.kind).toBe("saved-here");
-  expect(boundOutcome().headSha256).toBe("a".repeat(64));
+  harness.emitHead({ sha256: "a".repeat(64), committed: true });
+  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), headCommitted: true });
 });
 
 it("never flips back to Saved on a timer — only a real settle report clears it", async () => {

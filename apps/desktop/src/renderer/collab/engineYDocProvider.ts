@@ -27,6 +27,32 @@ import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
 const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
+/**
+ * The file head an update's state was read with. `committed` marks the head
+ * of this session's own save.
+ */
+export interface EngineYDocHead {
+  sha256: string | null;
+  committed?: true;
+}
+
+export interface EngineYDocDelivery {
+  update: Uint8Array;
+  head?: EngineYDocHead;
+}
+
+const WITNESS_KEYS = ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256"] as const;
+
+// The saved source a document records, which the lossy-note check reads with its head.
+function sourceWitness(doc: Y.Doc): unknown[] {
+  const meta = doc.getMap("meta");
+  return WITNESS_KEYS.map(key => meta.get(key));
+}
+
+function sameWitness(left: unknown[], right: unknown[]): boolean {
+  return left.every((value, index) => value === right[index]);
+}
+
 // One name for one concept, shared by the transport's open answer and the
 // binding it produces (and re-exported from useEngineDoc.ts) — three inline
 // copies of the same shape could drift silently if a third operation joins
@@ -89,9 +115,10 @@ export interface EngineYDocTransport {
     requestId: string,
   ): void | Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
-  // through the engine). Returns an unsubscribe function.
+  // through the engine), with the head their state was read with when main
+  // has one. Returns an unsubscribe function.
   onRemoteUpdate(
-    listener: (update: Uint8Array, lineageGeneration: number) => void,
+    listener: (update: Uint8Array, lineageGeneration: number, head?: EngineYDocHead) => void,
   ): () => void;
   // A divergent relay base replaced this session's lineage. The payload is a
   // full state, not a delta: merging it into the old Y.Doc would preserve the
@@ -101,10 +128,11 @@ export interface EngineYDocTransport {
       update: Uint8Array;
       recoveredPaths: string[];
       artifactAssets: readonly ArtifactAssetDescriptor[];
+      head?: EngineYDocHead;
       lineageGeneration: number;
     }) => void | Promise<void>,
   ): () => void;
-  acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
+  acknowledgeLineageReplacement(lineageGeneration: number): Promise<EngineYDocDelivery[]>;
   adoptOwner?(lineageGeneration: number): Promise<void>;
   onOwnerHandoff?(listener: (lineageGeneration: number) => void): () => void;
   // Settle + close the engine session in main (releases the reservation).
@@ -214,7 +242,15 @@ const timeoutBatchScheduler: EngineYDocBatchScheduler = {
 };
 
 export interface EngineYDocBinding {
+  // The file head the doc's state was installed with, changed in the same
+  // task as the state. Undefined while a source main sent without its head
+  // waits for one.
   readonly headSha256?: string | null;
+  // Whether this session's own save wrote that head.
+  readonly headCommitted: boolean;
+  // A delivery changed the head of the current doc. A replacement doc
+  // brings its head with onDocumentReplaced instead.
+  onHeadChanged(listener: () => void): () => void;
   // The mirror Y.Doc the editor binds to, or null when the doc is not
   // engine-backed (available:false) — the caller stays on the local autosave
   // editor.
@@ -269,6 +305,7 @@ export async function bindEngineYDoc(
     update: Uint8Array;
     recoveredPaths: string[];
     artifactAssets: readonly ArtifactAssetDescriptor[];
+    head?: EngineYDocHead;
     lineageGeneration: number;
   };
   const replacementsBeforeOpen: LineageReplacement[] = [];
@@ -308,6 +345,10 @@ export async function bindEngineYDoc(
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
+      headCommitted: false,
+      onHeadChanged() {
+        return () => undefined;
+      },
       readArtifactAsset(descriptor) {
         return Promise.reject(
           new Error(
@@ -566,12 +607,26 @@ export async function bindEngineYDoc(
   };
   doc.on("update", onUpdate);
 
+  let head: { sha256: string | null | undefined; committed: boolean } = { sha256: opened.headSha256, committed: false };
+  const headListeners = new Set<() => void>();
+  // Applies an engine update and returns the head its state now pairs with:
+  // the one it came with, else the current one unless it changed the source.
+  const install = (target: Y.Doc, current: typeof head, delivery: EngineYDocDelivery): typeof head => {
+    const before = sourceWitness(target);
+    Y.applyUpdate(target, delivery.update, ENGINE_SOURCED_ORIGIN);
+    if (delivery.head) return { sha256: delivery.head.sha256, committed: delivery.head.committed === true };
+    return sameWitness(before, sourceWitness(target)) ? current : { sha256: undefined, committed: false };
+  };
+
   // Apply forwarded remote deltas under the engine origin so they render live
   // in the editor but are never shipped back to main.
-  const unsubscribe = transport.onRemoteUpdate((update, updateGeneration) => {
+  const unsubscribe = transport.onRemoteUpdate((update, updateGeneration, updateHead) => {
     if (destroyed) return;
     if (updateGeneration !== lineageGeneration) return;
-    Y.applyUpdate(doc, update, ENGINE_SOURCED_ORIGIN);
+    const next = install(doc, head, { update, ...(updateHead ? { head: updateHead } : {}) });
+    if (next.sha256 === head.sha256 && next.committed === head.committed) return;
+    head = next;
+    for (const listener of headListeners) listener();
   });
 
   const replacementListeners = new Set<
@@ -613,7 +668,7 @@ export async function bindEngineYDoc(
       if (unacknowledgedBatches > 0) {
         await sendChain.catch(() => undefined);
       }
-      let bufferedUpdates: Uint8Array[];
+      let bufferedUpdates: EngineYDocDelivery[];
       try {
         if (options.onDocumentReplacing) {
           await options.onDocumentReplacing(retired, input.recoveredPaths);
@@ -633,12 +688,18 @@ export async function bindEngineYDoc(
         replacement.destroy();
         return;
       }
-      for (const update of bufferedUpdates) {
-        Y.applyUpdate(replacement, update, ENGINE_SOURCED_ORIGIN);
+      // The replacement's head comes with it. Without one, the old head still
+      // pairs with it only if it records the same source.
+      let replacementHead: typeof head = input.head
+        ? { sha256: input.head.sha256, committed: input.head.committed === true }
+        : sameWitness(sourceWitness(retired), sourceWitness(replacement)) ? head : { sha256: undefined, committed: false };
+      for (const delivery of bufferedUpdates) {
+        replacementHead = install(replacement, replacementHead, delivery);
       }
       replacement.on("update", onUpdate);
       retiredDocs.add(retired);
       doc = replacement;
+      head = replacementHead;
       lineageGeneration = input.lineageGeneration;
       artifactAssets = input.artifactAssets;
       localUpdatesRefused = false;
@@ -675,7 +736,16 @@ export async function bindEngineYDoc(
       return doc;
     },
     available: true,
-    headSha256: opened.headSha256,
+    get headSha256() {
+      return head.sha256;
+    },
+    get headCommitted() {
+      return head.committed;
+    },
+    onHeadChanged(listener) {
+      headListeners.add(listener);
+      return () => headListeners.delete(listener);
+    },
     objectId: opened.objectId ?? null,
     versionId: opened.versionId ?? null,
     notInVersion: false,
@@ -726,6 +796,7 @@ export async function bindEngineYDoc(
       destroyed = true;
       doc.off("update", onUpdate);
       unsubscribe();
+      headListeners.clear();
       unsubscribeOwnerHandoff();
       // A close settles the engine state. Flush and await every accepted local
       // edit before close so teardown cannot settle behind the mirror. If the

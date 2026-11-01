@@ -13,6 +13,7 @@ import {
   YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import { YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
@@ -161,7 +162,6 @@ function saveFailureReason(absolutePath: string, failure: unknown, shared: boole
 }
 
 interface SessionEvent {
-  headSha256?: string | null;
   readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
   saveFailure?: { reason: SaveFailureReason };
@@ -171,10 +171,17 @@ interface SessionEvent {
   seq: number;
 }
 
+// An update for the renderer and, when the engine sent one, the head it was read with.
+interface RemoteDelivery {
+  update: Uint8Array;
+  head?: YdocDeliveredHead;
+}
+
 interface LineageReplacement {
   update: Uint8Array;
   recoveredPaths: string[];
   artifactAssets: readonly ArtifactAssetDescriptor[];
+  head?: YdocDeliveredHead;
 }
 
 interface EngineYDocIpcOwnedSession {
@@ -334,14 +341,14 @@ type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
   EngineYDocIpcOwnedSession,
   SessionEvent,
-  Uint8Array,
+  RemoteDelivery,
   LineageReplacement
 >;
 
 type SessionOutbound = EngineYDocSessionOutbound<
   EngineYDocIpcSender,
   SessionEvent,
-  Uint8Array,
+  RemoteDelivery,
   LineageReplacement
 >;
 
@@ -689,13 +696,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let lastEvent: SessionEvent | null = null;
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         const emit = (event: SessionEvent): void => {
-          if (provider?.headSha256 !== undefined) event = { ...event, headSha256: provider.headSha256 };
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
-            lastEvent.headSha256 === event.headSha256 &&
             lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
             lastEvent.editRefusal?.message === event.editRefusal?.message) return;
@@ -744,19 +749,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 ...(readOnlyCause ? { readOnlyCause } : {}), ...(saveFailure ? { saveFailure } : {}),
               }));
             },
-            onRemoteUpdate: (update) => {
-              publish(() => signals.remoteUpdate(update));
+            onRemoteUpdate: (update, head) => {
+              publish(() => signals.remoteUpdate({ update, ...(head ? { head } : {}) }));
             },
-            onHeadChanged: headSha256 => {
-              publish(() => emit({ ...(lastEvent ?? { state: "settling", seq: 0 }), headSha256 }));
-            },
-            onLineageReplaced: (update, recoveredPaths) => {
+            onLineageReplaced: (update, recoveredPaths, head) => {
               lastEvent = null;
               publish(() =>
                 signals.replaceLineage({
                   update,
                   recoveredPaths,
                   artifactAssets: provider.artifactAssets ?? [],
+                  ...(head ? { head } : {}),
                 }),
               );
             },
@@ -791,7 +794,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           deleted: false,
           objectChanged: false,
           emit,
-          show: (update) => publish(() => signals.remoteUpdate(update)),
+          show: (update) => publish(() => signals.remoteUpdate({ update })),
           markDeleted() {
             owned.deleted = true;
             owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
@@ -1430,7 +1433,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           CHANNELS.engineYDocRemoteUpdate,
           EngineYDocRemoteUpdateEvent.parse({
             sessionId: outbound.sessionId,
-            update: message.update,
+            ...message.update,
             lineageGeneration: message.lineageGeneration,
           }),
         );
