@@ -196,15 +196,15 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("markdown-editor")).toContainText(sentinel);
 
-    // History says how the typed sentence arrived. The settle names no
-    // author, so the row names the live edit and not a person.
+    // History names who typed the sentence: the settle is this computer's
+    // person's edit, so the row names them.
     await openHistoryView(page);
     await expect(
       page
         .locator('[data-testid="engine-moment-open"][data-moment-path="notes/rich.md"]')
         .first()
         .getByTestId("engine-moment-source"),
-    ).toHaveText("Live edit");
+    ).toHaveText("You");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
