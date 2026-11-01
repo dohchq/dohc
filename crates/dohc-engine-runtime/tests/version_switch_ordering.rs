@@ -1183,6 +1183,15 @@ async fn an_os_metadata_file_keeps_its_folder_off_macos() {
     assert_eq!(jobs, 0, "no write of the file waits for the folder");
 }
 
+#[cfg(target_vendor = "apple")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finder_metadata_lets_its_folder_become_a_file_on_macos() {
+    let (scratch, _) = switch_folder_to_file("ws-folder-drops-metadata", Some(".DS_Store")).await;
+    let plans = scratch.path().join("plans");
+    assert!(plans.is_file(), "the folder gives way to the file");
+    assert_eq!(std::fs::read_to_string(plans).expect("plans"), "target\n");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_a_secret_folder_to_a_same_named_secret_places_the_file() {
     let scratch = ScratchDir::new().expect("scratch");

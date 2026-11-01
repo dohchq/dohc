@@ -668,6 +668,7 @@ fn switch_folder_stays(
     job: &MaterializationJob,
 ) -> bool {
     if job.operation != MaterializationOperation::Write
+        || !matches!(job.preimage, dohc_engine_storage::Preimage::Absent)
         || !std::fs::symlink_metadata(root_dir.join(&job.target_path))
             .is_ok_and(|metadata| metadata.is_dir())
     {
