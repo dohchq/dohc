@@ -4,8 +4,7 @@ export const REGISTRY_READ_FAILURE_TITLE = "dohc couldn't read its workspace reg
 export const REGISTRY_READ_FAILURE_NEXT =
   "Your files are untouched. Fix or move the registry file named in the technical details, then relaunch dohc.";
 
-// Keeps Error's name, so the registry IPC still carries a plain error and
-// the registry error screen still shows its sentence.
+// Carries the file dohc couldn't read, so the startup failure box can name it.
 export class RegistryReadError extends Error {
   constructor(message: string, readonly registryFile: string) {
     super(message);
