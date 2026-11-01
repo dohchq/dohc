@@ -2111,15 +2111,13 @@ pub fn apply_committed_with_settlement_limit(
             if compaction_due
                 && matches!(&result, ApplicationResult::Applied(ack, _) if !ack.application_replayed)
             {
-                // The key is already evicted. As in self_bound_log, an injected
-                // fold crash keeps the committed ACK; a real error suppresses it.
-                durable::maybe_compact(
+                // The key is already evicted.
+                durable::compact_after_commit(
                     store,
                     &key,
-                    DEFAULT_COMPACTION_THRESHOLD,
                     faults,
                     event.metadata.accepted.received_at_ms,
-                )?;
+                );
             }
             Ok(result)
         }

@@ -595,13 +595,7 @@ impl ActorHandle {
                 Err(error) => Err(error),
             };
             if result.is_ok() {
-                dohc_engine_collab::maybe_compact(
-                    store,
-                    &key,
-                    dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
-                    &NoFaults,
-                    now_ms,
-                )?;
+                dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
             }
             Ok(result)
         })
