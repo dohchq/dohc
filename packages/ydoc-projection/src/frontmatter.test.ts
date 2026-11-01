@@ -367,6 +367,23 @@ describe('live property renames', () => {
     }
   })
 
+  it('refuses a rename onto a property another device added before the write', () => {
+    const doc = markdownToYDoc('---\nstatus: draft\n---\n\nBody')
+    const replica = new Y.Doc()
+    try {
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+      const value = doc.getMap('frontmatter').get('status')
+      setFrontmatterValue(replica, 'state', 'remote')
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc)))
+      const before = Y.encodeStateAsUpdate(doc)
+
+      expect.soft(() => rename(doc, 'status', 'state', value)).toThrow()
+
+      expect(frontmatterMapValues(doc.getMap('frontmatter'))).toEqual({ status: 'draft', state: 'remote' })
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+    } finally { replica.destroy(); doc.destroy() }
+  })
+
   it('never brings back the comments of a deleted key', () => {
     const renamedOnto = markdownToYDoc(budget)
     const recreated = markdownToYDoc(budget)
