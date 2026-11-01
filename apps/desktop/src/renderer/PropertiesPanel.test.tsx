@@ -177,6 +177,32 @@ describe("PropertiesPanel", () => {
     } finally { doc.destroy(); }
   });
 
+  it.each([true, false])("keeps another device's new value when a rename lands before the rows refresh (live: %s)", (live) => {
+    const markdown = "---\nstatus: draft\n---\n\nBody\n";
+    const doc = markdownToYDoc(markdown);
+    const onChange = vi.fn();
+    const panel = (body: string) => (live ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />);
+    // Rename after the panel reads the new value, before its effect refreshes
+    // the rows, which still hold the value they read.
+    function RenamesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "phase" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<>{panel(markdown)}</>);
+
+      act(() => {
+        setFrontmatterValue(doc, "status", "ready");
+        rerender(<>{panel(markdown.replace("draft", "ready"))}<RenamesOnCommit /></>);
+      });
+
+      const saved = live ? frontmatterMapValues(doc.getMap("frontmatter")) : parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta;
+      expect(saved).toEqual({ phase: "ready" });
+    } finally { doc.destroy(); }
+  });
+
   it("preserves an empty-named property when another local property is edited", () => {
     render(<ControlledPropertiesPanel initialBody={'---\n"": draft\nstatus: pending\n---\n\nBody\n'} />);
 
