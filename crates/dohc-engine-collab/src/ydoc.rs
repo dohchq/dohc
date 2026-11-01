@@ -9852,7 +9852,10 @@ mod projection_tests {
         let body = "x".repeat(2 * 1024 * 1024);
         let doc = remote_doc_with_body([paragraph(&body)]);
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert_eq!(doc.project_richdoc_with_node_budget(3).unwrap(), format!("{body}\n"));
+        assert_eq!(
+            doc.project_richdoc_with_node_budget(3).unwrap(),
+            format!("{body}\n")
+        );
         PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
         PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
         assert!(matches!(
@@ -12294,7 +12297,8 @@ fn main() {}
     #[test]
     fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
         let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
-        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
+        let artifact =
+            "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
         let result_sha256 = crate::hex_sha256(artifact.as_bytes());
         let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
             key: &key,
@@ -12469,7 +12473,8 @@ fn main() {}
         }
     }
 
-    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody\n";
+    const WIFI: &str =
+        "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody\n";
 
     /// A key deleted and written again, by any writer and in any number of
     /// updates, no longer holds the item its kept text was written for, so
@@ -12891,7 +12896,10 @@ fn main() {}
                 "---\nvalue: -0.0\n---\n\n",
             );
         }
-        assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody\n");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\nvalue: 0\n---\n\nBody\n"
+        );
     }
 
     fn decode_fixture_int64_markers(value: &mut Value) {
@@ -13060,7 +13068,8 @@ fn main() {}
     #[test]
     fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
         let doc = Ydoc::wire();
-        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
+        let chosen =
+            "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
 
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");

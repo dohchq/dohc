@@ -388,7 +388,10 @@ fn delete_sets_require_acceptance_even_when_struct_clocks_already_match() {
     // Yjs deletion of all body children in the pinned owner-source seed: its
     // one client's clocks 1 to 29. It carries no new structs, so comparing
     // state vectors would accept it early.
-    let client_end = 3 + checkpoint[2..].iter().position(|byte| byte & 0x80 == 0).unwrap();
+    let client_end = 3 + checkpoint[2..]
+        .iter()
+        .position(|byte| byte & 0x80 == 0)
+        .unwrap();
     let deletion = [&[0, 1][..], &checkpoint[2..client_end], &[1, 1, 0x1d]].concat();
     let before = Ydoc::wire();
     before.apply(&checkpoint).unwrap();

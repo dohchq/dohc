@@ -4856,8 +4856,11 @@ mod tests {
                 .lineage_claim_id,
             claim
         );
-        assert_eq!(projected_ydoc_text(&mut store, &key), "current text
-");
+        assert_eq!(
+            projected_ydoc_text(&mut store, &key),
+            "current text
+"
+        );
     }
 
     #[test]
