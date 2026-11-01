@@ -9074,13 +9074,13 @@ mod projection_tests {
     #[test]
     fn a_canonical_file_fold_clears_the_old_source_witness_without_storing_a_copy() {
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "old\n")
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "old")
             .unwrap();
         assert!(doc.markdown_source_reference().is_some());
-        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "old")
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "old\n")
             .unwrap();
         assert!(doc.markdown_source_reference().is_none());
-        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, "old");
+        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, "old\n");
     }
 
     #[test]
@@ -10115,7 +10115,7 @@ mod projection_tests {
     #[test]
     fn a_fresh_successor_is_stable_distinct_and_keeps_its_epoch_immutable() {
         let key = crate::DocKey::new("ws", "main", "object-one").expect("valid key");
-        let chosen = "# Chosen\n\nExact body";
+        let chosen = "# Chosen\n\nExact body\n";
         let chosen_sha = crate::hex_sha256(chosen.as_bytes());
         let predecessor_state_vector_sha = "b".repeat(64);
         let artifact_preimage_sha = "c".repeat(64);
@@ -11207,7 +11207,7 @@ mod projection_tests {
                 .project(ContentKind::Richdoc)
                 .expect("projection")
                 .content,
-            "Map&lt;K&#44; &amp;&#35;59&#59; V&gt;"
+            "Map&lt;K&#44; &amp;&#35;59&#59; V&gt;\n"
         );
         assert!(markdown_reads_alike(
             "Map<K, V>",
@@ -11446,7 +11446,7 @@ mod projection_tests {
 
     #[test]
     fn resolution_fold_keeps_lists_the_projector_separated() {
-        let chosen = "- one\n\n- two\n\n1. first\n\n1. again";
+        let chosen = "- one\n\n- two\n\n1. first\n\n1. again\n";
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");
@@ -11456,7 +11456,7 @@ mod projection_tests {
     #[test]
     fn engine_seeded_rewrites_carry_schema_version_in_the_same_update() {
         let mut fixtures = Vec::new();
-        for markdown in ["", "Body", "---\ntitle: Plan\n---\n\nBody"] {
+        for markdown in ["", "Body\n", "---\ntitle: Plan\n---\n\nBody\n"] {
             let doc = Ydoc::wire();
             let update = doc
                 .rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
@@ -11890,7 +11890,7 @@ mod projection_tests {
             "&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\n\
              Sunscreen and a spare charger.\n\n&lt;/details&gt;\n\n\
              See [the airline's bag rules](https://example.com/bags).\n\n\
-             &#91;bags&#93;&#58; https&#58;//example&#46;com/bags"
+             &#91;bags&#93;&#58; https&#58;//example&#46;com/bags\n"
         );
         assert_eq!(doc.preserved_markdown_source(&canonical), None);
         assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
@@ -11923,7 +11923,7 @@ mod projection_tests {
             .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
             .unwrap();
         assert_eq!(native.project_richdoc().unwrap(), canonical);
-        assert_eq!(canonical, source.trim_end());
+        assert_eq!(canonical, source);
         assert_eq!(
             settled(&desktop, &canonical, source).as_deref(),
             Some(source)
@@ -12466,14 +12466,14 @@ fn main() {}
         }
     }
 
-    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody";
+    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody\n";
 
     /// A key deleted and written again, by any writer and in any number of
     /// updates, no longer holds the item its kept text was written for, so
     /// its old comment never comes back.
     #[test]
     fn a_deleted_key_written_again_never_brings_back_its_comment() {
-        let expected = "---\nwifi: new\n# Monthly\nbudget: 100\n---\n\nBody";
+        let expected = "---\nwifi: new\n# Monthly\nbudget: 100\n---\n\nBody\n";
         // A plain writer, in two updates and then in one.
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
@@ -12512,12 +12512,12 @@ fn main() {}
         doc.frontmatter_set("budget", "200").unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody"
+            "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody\n"
         );
         write_key_directly(&doc, "wifi", Some("changed"));
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody"
+            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody\n"
         );
     }
 
@@ -12529,7 +12529,7 @@ fn main() {}
         let base = Ydoc::wire();
         base.rewrite_content_to_markdown(
             ContentKind::Richdoc,
-            "---\n# owner note\nowner: rec_a\n# editor note\neditor: rec_b\nstatus:   open\n---\n\nBody",
+            "---\n# owner note\nowner: rec_a\n# editor note\neditor: rec_b\nstatus:   open\n---\n\nBody\n",
         )
         .unwrap();
         let (a, b) = (Ydoc::wire(), Ydoc::wire());
@@ -12542,13 +12542,13 @@ fn main() {}
         a.apply(&b.encode_full_state()).unwrap();
         assert_eq!(
             a.project_richdoc().unwrap(),
-            "---\nstatus:   open\n---\n\nBody"
+            "---\nstatus:   open\n---\n\nBody\n"
         );
         a.frontmatter_set("owner", "rec_c").unwrap();
         a.frontmatter_set("editor", "rec_d").unwrap();
         assert_eq!(
             a.project_richdoc().unwrap(),
-            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody"
+            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody\n"
         );
     }
 
@@ -13178,7 +13178,7 @@ fn main() {}
     fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
         for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
             let doc = Ydoc::wire();
-            let chosen = format!("{}deep", "> ".repeat(levels));
+            let chosen = format!("{}deep\n", "> ".repeat(levels));
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
                 .expect("richdoc rewrite");
             let projected = doc.project(ContentKind::Richdoc).expect("projection");

@@ -889,7 +889,7 @@ mod collection_adoption_update_tests {
 
     #[test]
     fn canonical_empty_seed_completion_adopts_without_a_source_witness() {
-        assert_completed_empty_seed_adopts("Completed");
+        assert_completed_empty_seed_adopts("Completed\n");
     }
 
     fn assert_completed_empty_seed_adopts(completed: &str) {
@@ -926,7 +926,7 @@ mod collection_adoption_update_tests {
                 .content,
             completed
         );
-        if completed == "Completed" {
+        if completed == "Completed\n" {
             assert!(doc.markdown_source_reference().is_none());
         }
         capture(&mut store, path, completed, 6);
