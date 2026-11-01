@@ -1,3 +1,5 @@
+import { windowFocused } from "../windowFocus";
+
 // The chats this window shows, by thread, so a notice about a run the person
 // can already see is skipped.
 const shown = new Map<string, Set<Element>>();
@@ -17,6 +19,6 @@ export function showChat(threadId: string, element: Element): () => void {
 // A background tab keeps its chat mounted but hidden, and a person working in
 // another window isn't looking at this one.
 export function chatOnScreen(threadId: string): boolean {
-  if (document.visibilityState !== "visible" || !document.hasFocus()) return false;
+  if (document.visibilityState !== "visible" || !windowFocused()) return false;
   return [...(shown.get(threadId) ?? [])].some((element) => element.isConnected && (element.checkVisibility?.() ?? true));
 }

@@ -6012,6 +6012,11 @@ export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 export const WindowFullScreenEvent = z.object({ fullScreen: z.boolean() });
 export type WindowFullScreenEvent = z.infer<typeof WindowFullScreenEvent>;
 
+// Main sends whether a window has focus to its renderer on every load and every
+// change. Focus that moves into an app's webview leaves the window focused.
+export const WindowFocusedEvent = z.object({ focused: z.boolean() });
+export type WindowFocusedEvent = z.infer<typeof WindowFocusedEvent>;
+
 // One zoom mutation, owned by main: it persists appearance.zoomLevel before
 // applying it to the windows, and answers with the settings now on disk so
 // the caller can paint the level in effect. The menu accelerators call the
@@ -7650,6 +7655,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onWindowFocused(listener: (event: WindowFocusedEvent) => void): () => void;
   onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,

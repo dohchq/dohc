@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileResolvedChatDecision } from "./ChatsView";
 import { chatOnScreen } from "./chatsOnScreen";
+import { tellWindowFocused } from "../../testing/windowFocus";
 import {
   NOW,
   thread,
@@ -770,10 +771,10 @@ describe("ChatsView runs that didn't reply", () => {
 
 describe("ChatsView post on screen", () => {
   beforeEach(() => {
-    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    tellWindowFocused(true);
   });
   afterEach(() => {
-    vi.mocked(document.hasFocus).mockRestore();
+    tellWindowFocused(false);
   });
 
   it("counts an open post as on screen, so a notice about its run is skipped", async () => {

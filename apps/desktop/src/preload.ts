@@ -62,6 +62,7 @@ import {
   WorkspaceIdPayload,
   WorkspaceActivated,
   WorkspacePathOpenFailedEvent,
+  WindowFocusedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
   collectionCopiesLeftOperations,
@@ -493,6 +494,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWindowFullScreen: (listener) =>
     onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onWindowFocused: (listener) =>
+    onEvent(CHANNELS.windowFocused, WindowFocusedEvent, listener),
   onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
