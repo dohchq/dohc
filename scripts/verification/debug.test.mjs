@@ -133,6 +133,8 @@ if (process.argv[2] === "fixture") {
     let link;
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
+    // In these phases the signal ends the launcher, so it has nothing left to release.
+    const signalEnds = phase === "startup" || phase === "playwright";
     const interrupt = () => process.platform === "win32" ? child.send("signal") : child.kill(signal);
     child.on("message", (message) => {
       if (message.phase === "launched") launcherPid = message.pid;
@@ -141,7 +143,7 @@ if (process.argv[2] === "fixture") {
       if (message.phase === phase) {
         protectedCleanup = message.listeners > 0;
         interrupt();
-        child.send("release");
+        if (!signalEnds) child.send("release");
       }
     });
     const closed = new Promise((resolve, reject) => {
@@ -152,7 +154,7 @@ if (process.argv[2] === "fixture") {
     try {
       const result = await closed;
       t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")) }));
-      if (phase === "startup" || phase === "playwright") {
+      if (signalEnds) {
         // A signal that ends the launcher before its cleanup runs leaves no link to the session's home.
         assert.equal(result.code, signal === "SIGTERM" ? 143 : 130, output);
         assert.equal(protectedCleanup, true, "the launcher listens for the signal during startup");
