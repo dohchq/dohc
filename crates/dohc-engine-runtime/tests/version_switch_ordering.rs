@@ -1136,6 +1136,31 @@ async fn an_untracked_file_keeps_its_folder_and_the_file_unwritten() {
     assert_eq!(jobs, 0, "no write of the file waits for the folder");
 }
 
+// On a disk that tells names apart by case, deleting `trip.md` leaves an
+// untracked `TRIP.md`, which keeps the folder.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_differing_only_in_case_keeps_its_folder() {
+    let (scratch, database) =
+        switch_folder_to_file("ws-folder-keeps-case-twin", Some("TRIP.md")).await;
+    let plans = scratch.path().join("plans");
+    assert!(plans.is_dir(), "a folder with an untracked file stays");
+    assert_eq!(
+        std::fs::read_to_string(plans.join("TRIP.md")).expect("untracked"),
+        "mine\n"
+    );
+    let connection = Connection::open(&database).expect("sqlite");
+    let jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id GLOB 'version-switch-*' AND target_path = 'plans'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("switch jobs");
+    assert_eq!(jobs, 0, "no write of the file waits for the folder");
+}
+
 // Only macOS removes a folder that Finder's files alone keep. Elsewhere such
 // a file keeps the folder like any other.
 #[cfg(not(target_vendor = "apple"))]
