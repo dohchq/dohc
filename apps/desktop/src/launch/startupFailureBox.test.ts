@@ -33,6 +33,21 @@ describe("startupFailureBox", () => {
     });
   });
 
+  it("tells the person to update dohc for a registry a newer dohc wrote", async () => {
+    const registryFile = join(await createTestScratch("dohc-startup-box-"), "dohc-workspaces.json");
+    await writeFile(registryFile, JSON.stringify({ version: 2, workspaces: [] }));
+    expect(startupFailureBox(listingFailure(registryFile))).toEqual({
+      title: "dohc couldn't read its workspace registry",
+      content: [
+        "Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.",
+        "",
+        "Technical details",
+        `File: ${registryFile}`,
+        `Detail: Workspace registry version 2 is newer than supported (${registryFile}); refusing to overwrite it.`,
+      ].join("\n"),
+    });
+  });
+
   it("keeps the generic box for any other startup failure", () => {
     expect(startupFailureBox(new Error("settings unavailable"))).toEqual({
       title: "dohc failed to start",
