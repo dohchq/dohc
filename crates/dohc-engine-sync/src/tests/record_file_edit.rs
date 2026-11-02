@@ -630,6 +630,56 @@ fn b_opens_lossy(b: &mut EngineStore, typing: &[&str]) -> Ydoc {
     doc
 }
 
+/// A file written over an older head waits while an owner restore holds the
+/// record, and meets B's edits in a conflict once the restore ends.
+#[test]
+fn record_file_edit_waits_out_an_owner_restore() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let settled = projected(&doc);
+    b_settles(&mut b, &settled);
+    b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_060);
+    let latest = projected(&doc);
+    let fence = |b: &mut EngineStore, sql: &str| {
+        b.write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(SyncError::persist))
+            .expect("change the restore fence");
+    };
+    fence(
+        &mut b,
+        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,\
+         relay_database_namespace,operation_id,input_json,receipt_json) \
+         VALUES ('ws','main','apollo','relay','restore','{}','{}')",
+    );
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    let waited = deliver(&mut b, &flown_op, &NoLiveLeases);
+    assert!(
+        matches!(
+            waited,
+            Err(SyncError::RetryableState {
+                reason: "live document is stopped"
+            })
+        ),
+        "{waited:?}"
+    );
+    assert!(open_conflicts(&b).is_empty());
+    assert_eq!(head_text(&b, RECORD), Some(settled));
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM replication_pending_refusals"),
+        0,
+        "the file waits, it is not refused"
+    );
+
+    fence(&mut b, "DELETE FROM live_restore_fences");
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    assert_eq!(open_conflicts(&b), vec![(sha(&latest), sha(&flown))]);
+}
+
 /// A lossy note's projection never replaces its exact source unchecked. The
 /// conflict holds that source beside A's file instead of waiting forever,
 /// and a recovery copy keeps B's typing.
