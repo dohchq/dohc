@@ -9,8 +9,7 @@ description = "Workspace engine domain: versioned objects, moment history, forks
 
 [features]
 # Forwards the storage crash-injection seam so the version-create / restore
-# crash tests can arm the named fault points. It also lets a test lift one
-# synced-deletion revival refusal on its own thread.
+# crash tests can arm the named fault points.
 fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]

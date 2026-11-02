@@ -236,6 +236,11 @@ enum LocalLineagePlan {
     UnclaimedRetire {
         key: DocKey,
     },
+    RetiredIncoming {
+        key: DocKey,
+        path: String,
+        text: String,
+    },
 }
 
 pub(crate) fn build_conflict_resolve_v1(
@@ -1757,6 +1762,9 @@ fn unbound_receiver_lineages_match_reviewed_sides(
     payload: &ConflictResolveV1,
 ) -> Result<bool, SyncError> {
     for key in unbound_receiver_ydoc_keys(payload)? {
+        if live_document_bound(tx, &key)? {
+            return Ok(false);
+        }
         let Some(lineage) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
             continue;
         };
@@ -3154,6 +3162,15 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 result.conflict.updated_at_ms,
             )?;
         }
+        LocalLineagePlan::RetiredIncoming { key, path, text } => {
+            crate::ydoc_apply::revive_retired_lineage_in_tx(
+                tx,
+                key,
+                path,
+                text,
+                result.conflict.updated_at_ms,
+            )?;
+        }
     }
     crate::conflict_outbox::persist_local_conflict_resolve_v1_in_tx(
         tx,
@@ -3398,7 +3415,7 @@ fn prepare_local_lineage_in_tx(
     result_text: Option<&str>,
 ) -> Result<LocalLineagePlan, SyncError> {
     let Some(current) = payload.current.present() else {
-        return Ok(LocalLineagePlan::None);
+        return prepare_retired_incoming_lineage_in_tx(tx, payload, result_text);
     };
     let key = DocKey::new(
         &payload.workspace_id,
@@ -3408,14 +3425,7 @@ fn prepare_local_lineage_in_tx(
     .map_err(|_| SyncError::InvalidInput {
         reason: "conflict.resolve Y.Doc coordinates are invalid",
     })?;
-    let bound: bool = tx.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
-         OR EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
-         OR EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-            dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
-        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
-    ).map_err(SyncError::corrupt)?;
-    if bound {
+    if live_document_bound(tx, &key)? {
         return Err(SyncError::LiveDocumentBindingActive);
     }
     let Some(marker) =
@@ -3543,6 +3553,68 @@ fn prepare_local_lineage_in_tx(
             }
         }
     }
+}
+
+/// Whether a live editor binding owns `key`'s lineage.
+fn live_document_bound(tx: &Transaction<'_>, key: &DocKey) -> Result<bool, SyncError> {
+    tx.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+            dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)
+}
+
+/// Keeping the other machine's copy after this machine deleted the note takes
+/// up the lineage the other machine still edits, once its updates wait here
+/// for a lineage this machine retired.
+fn prepare_retired_incoming_lineage_in_tx(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    result_text: Option<&str>,
+) -> Result<LocalLineagePlan, SyncError> {
+    let Some(result) = payload.result.present().filter(|result| {
+        result.content_kind == HeadContentKindV1::Text
+            && payload
+                .incoming
+                .present()
+                .is_some_and(|incoming| incoming.object_id == result.object_id)
+    }) else {
+        return Ok(LocalLineagePlan::None);
+    };
+    let key = DocKey::new(
+        &payload.workspace_id,
+        &payload.target_version_id,
+        &result.object_id,
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "conflict.resolve Y.Doc coordinates are invalid",
+    })?;
+    if live_document_bound(tx, &key)? {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    let waiting: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !waiting
+        || dohc_engine_collab::read_marker_in(tx, &key)
+            .map_err(map_local_collab_error)?
+            .is_some()
+    {
+        return Ok(LocalLineagePlan::None);
+    }
+    Ok(LocalLineagePlan::RetiredIncoming {
+        key,
+        path: payload.paths[result.path_ref].clone(),
+        text: result_text
+            .ok_or_else(|| corrupt_local("kept text has no canonical body"))?
+            .to_owned(),
+    })
 }
 
 fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitionV1>, SyncError> {
