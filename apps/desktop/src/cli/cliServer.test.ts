@@ -1017,11 +1017,15 @@ describe("CLI socket server", () => {
       await guard.beforeMove(WORKSPACE_ID, async () => input.fromPath);
       return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, ...input };
     };
+    // The socket takes moves only from a context that can also delete.
+    const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>();
+    context.deletePath = deletePath;
     const started = performance.now();
     try {
       expect(await invoke("fileMove", { cwd: workspaceRoot, actor: "agent", requestId: "slow-catch-up", fromPath: "a.txt", toPath: "b.txt" }))
         .toMatchObject({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
       expect(performance.now() - started).toBeGreaterThanOrEqual(MOVE_ACCEPTED_EDITS_WAIT_MS - 50);
+      expect(deletePath).not.toHaveBeenCalled();
     } finally { owner.resolve(false); }
   }, 20_000);
 

@@ -3168,7 +3168,8 @@ describe("the move guard over a real relay and live host", () => {
         expect(fixture.ownerAccepted("refused").cursor).toBeGreaterThanOrEqual(cursor);
         await fixture.waitPublished("refused", cursor);
       } finally { fixture.refuseLogPulls(false); }
-      expect(String(ipcWireError(failure))).toBe(`Error: dohc could not move ${refused.path}. This action is unavailable for shared live files. Continue editing at the current location.`);
+      // The engine's refusal reaches the window unmapped, as on main. The move-refusal words follow-up to #3089 changes this line.
+      expect(String(ipcWireError(failure))).toBe("Error: live-document-binding-active dohc put everything back.");
       expect(existsSync(join(owner.rootPath, "notes/refused-moved.md"))).toBe(false);
       expect(await fixture.read(owner, refused.path)).not.toContain(text);
       expect(await owner.refusalNotices()).toEqual(notices);
