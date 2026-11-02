@@ -1206,6 +1206,10 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             );
         }
         let elapsed = began.elapsed();
+        assert!(
+            elapsed < budget,
+            "{label} catch-up exceeded client busy budget"
+        );
         if label == "MAX_TEXT_BYTES" {
             eprintln!(
                 "BUSY_BUDGET {label} catch_up_us={} refusals={refusals} budget_ms={}",
@@ -1296,12 +1300,13 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
     reader.execute_batch("COMMIT").unwrap();
     handoff(&mut store, "MAX_TEXT_BYTES", budget);
     drop(reader);
-    // Catches link batches that grow, not a checkpoint that gets slower per frame.
+    // Catches link batches that grow. Catch-up that slows for any other reason fails only at the 10 s budget.
     const LINK_BATCH_FRAME_CEILING: i64 = 64;
     let wal = db.with_file_name("engine.db-wal");
     let mut batch_frames = std::collections::BTreeMap::<&str, Vec<i64>>::new();
-    // Sixteen maximal parser inputs exercise the row, source and time bounds
-    // through the production batch writer, including replacing prior indexes.
+    // Sixteen maximal parser inputs exercise the row and source bounds through
+    // the production batch writer, including replacing prior indexes. The time
+    // bound is lifted so every host writes the same batches.
     let mut text = "[[target]]\n".repeat(4096);
     text.push_str(&"x".repeat(parser::MAX_DOCUMENT_BYTES - text.len()));
     for n in 0..SOURCE_SLICE {
@@ -1314,6 +1319,7 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
         );
     }
     let mut maximum = Duration::ZERO;
+    UNBOUNDED_BATCH_SLICE.set(true);
     for pass in 0..2 {
         if pass == 1 {
             for n in 0..SOURCE_SLICE {
@@ -1349,7 +1355,8 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             (SOURCE_SLICE * 4096 * (pass + 1)) as i64
         );
     }
-    // Maximum literals stress key-row bytes as well as the occurrence count.
+    UNBOUNDED_BATCH_SLICE.set(false);
+    // These literals exceed the parser's 500-unit wikilink span, so they index no occurrences.
     let literal = "a".repeat(2048);
     let mut long_links = format!("[[{literal}]]\n").repeat(parser::MAX_DOCUMENT_BYTES / 2053);
     long_links.push_str(&"x".repeat(parser::MAX_DOCUMENT_BYTES - long_links.len()));
@@ -1374,10 +1381,7 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             .collect();
         while !staged.is_empty() {
             handoff(&mut store, "before_long_literal_batch", budget);
-            batch_frames
-                .entry("long_literals")
-                .or_default()
-                .push(stage_counted(&mut store, &wal, &mut staged));
+            stage_batch(&mut staged, &mut store, &NoFaults).unwrap();
             maximum = maximum.max(handoff(&mut store, "long_literal_batch", budget));
         }
     }
