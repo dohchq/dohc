@@ -119,7 +119,7 @@ describe("History paused words", () => {
 
   it("names the page whose live editing stopped when Try again leaves History paused", async () => {
     const { toast, row } = await failedRetryWords(acrossIpc(new HistoryStillPausedError(["notes/plan.md"])));
-    const body = 'History is still paused because live editing on "notes/plan.md" stopped. Close and reopen that page, then try again.';
+    const body = 'History is still paused because live editing on "notes/plan.md" stopped. Close every tab showing that page, then reopen it and try again.';
     expect(toast).toContain(body);
     expect(row).toContain(body);
   });

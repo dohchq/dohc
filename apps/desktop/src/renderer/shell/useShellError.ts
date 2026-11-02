@@ -573,7 +573,7 @@ export function useShellError(workspaceId: string) {
             : stopped.length === 0
               ? "History is still paused. Restart dohc to try again."
               : stopped.length === 1
-                ? `History is still paused because live editing on "${stopped[0]}" stopped. Close and reopen that page, then try again.`
+                ? `History is still paused because live editing on "${stopped[0]}" stopped. Close every tab showing that page, then reopen it and try again.`
                 : `History is still paused because live editing stopped on ${stopped.length} pages. Restart dohc to try again.`,
         ...(details.length ? { details } : {}),
         retry: notice.retry,
