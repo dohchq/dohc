@@ -1,6 +1,6 @@
 use dohc_engine_domain::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, DeleteTextFile,
-    DomainError, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
+    DomainError, NoFaults, ResolveConflictKind, ResolveTextConflict, RevivalAction, TextConflict,
     VersionedTextStore, WriteText, insert_text_conflict_if_absent, write_history_text_in_tx,
 };
 use dohc_engine_storage::EngineStore;
@@ -423,4 +423,23 @@ fn deletion_evidence_is_scoped_to_sync_version_and_object() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn apply_incoming_after_a_deletion_keeps_the_incoming_object_id() {
+    dohc_engine_domain::lift_revival_refusal_for_test(RevivalAction::ConflictChoice);
+    let dir = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
+    let conflict = setup(&mut store, true);
+    resolve(&mut store, ResolveConflictKind::ApplyIncoming).unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .read_text("ws", "main", "trip.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.text, "Tokyo");
+    assert_eq!(
+        head.object_id,
+        conflict.incoming.snapshot.unwrap().object_id,
+        "the other machine's copy must come back as the same object"
+    );
 }
