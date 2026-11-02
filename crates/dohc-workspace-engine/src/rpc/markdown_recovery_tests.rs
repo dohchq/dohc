@@ -8,6 +8,7 @@ use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tokio::sync::mpsc::UnboundedReceiver;
 use yrs::{Map, ReadTxn, Transact, updates::decoder::Decode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1287,166 +1288,253 @@ async fn preparation_exhaustion_without_session(queued: bool, restart: bool) {
     service.workspace_close(Some(handle)).await.unwrap();
 }
 
+/// A workspace in which each object owes a save that only the Markdown reader
+/// can make, with a reader that crashes on every request. Capture is shut
+/// down, so only recovery works on the saves.
+struct CrashingReaderSaves {
+    scratch: ScratchDir,
+    service: EngineService,
+    handle: WorkspaceHandle,
+    open: Arc<OpenWorkspace>,
+    reader: Arc<dohc_engine_reader::Reader>,
+    source: String,
+    saves: Vec<(DocKey, Option<String>)>,
+}
+
+impl CrashingReaderSaves {
+    async fn new(objects: &[&str]) -> Self {
+        let scratch = ScratchDir::new().unwrap();
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let data: Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/reader-resolver.json"
+        ))
+        .unwrap();
+        let source = data["source"].as_str().unwrap().to_owned();
+        let wire = yrs::Doc::new();
+        wire.transact_mut()
+            .apply_update(
+                yrs::Update::decode_v1(
+                    &STANDARD
+                        .decode(data["checkpoint"].as_str().unwrap())
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        wire.get_or_insert_map("meta")
+            .remove(&mut wire.transact_mut(), "dohcLineageEpoch");
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        store.bind_root_token(token, &NoFaults).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute_batch(
+            "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
+             INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
+        ).map_err(StorageError::persist_public)).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("w", "main", 1, &NoFaults)
+            .unwrap();
+        let mut saves = Vec::new();
+        for object in objects {
+            let key = DocKey::new("w", "main", *object).unwrap();
+            let path = format!("{object}.md");
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "w".into(),
+                        version_id: "main".into(),
+                        object_id: (*object).into(),
+                        path: path.clone(),
+                        text: source.clone(),
+                        moment_id: format!("source-{object}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            dohc_engine_collab::claim_base(
+                &mut store,
+                &key,
+                ContentKind::Richdoc,
+                &wire
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default()),
+                &NoFaults,
+                3,
+            )
+            .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET path=?1 WHERE object_id=?2",
+                        [path.as_str(), *object],
+                    )
+                    .map_err(StorageError::persist_public)
+                })
+                .unwrap();
+            let original = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc;
+            let doc = Ydoc::wire();
+            doc.apply(&original.encode_full_state()).unwrap();
+            doc.richdoc_append_paragraph("Accepted edit awaiting the reader");
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::record_update_in_tx(
+                        tx,
+                        &key,
+                        &doc.encode_full_state(),
+                        None,
+                        None,
+                        4,
+                    )
+                })
+                .unwrap();
+            let marker = dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap();
+            std::fs::write(scratch.path().join(&path), &source).unwrap();
+            saves.push((key, marker.lineage_claim_id));
+        }
+        drop(store);
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        open.shutdown_capture().await;
+        let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(
+            &scratch,
+            "startup-crash",
+        ))));
+        open.actor
+            .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+                reader.clone(),
+            )))
+            .await
+            .unwrap();
+        Self {
+            scratch,
+            service,
+            handle,
+            open,
+            reader,
+            source,
+            saves,
+        }
+    }
+
+    /// The session of the save at `index` closes with the save owed: the
+    /// reader crashed on its first request and on the immediate retry, and
+    /// the proof asks for a backoff.
+    async fn close_session(&self, index: usize) {
+        let (key, lineage) = &self.saves[index];
+        let result = self
+            .open
+            .actor
+            .ydoc_settle(
+                self.scratch.path().to_owned(),
+                key.clone(),
+                format!("{}.md", key.object_id),
+                ContentKind::Richdoc,
+                lineage.clone(),
+                Some(hex_sha256(self.source.as_bytes())),
+                "closed-owner".into(),
+                Arc::new(()),
+                10,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(&result, Err(error) if super::super::error::reader_retryable(error)));
+    }
+
+    /// Starts recovery and wakes it. Each pass sends the saves it attempted.
+    fn recover(
+        &self,
+    ) -> (
+        CancellationToken,
+        UnboundedReceiver<Vec<DocKey>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let cancel = CancellationToken::new();
+        let (send, passes) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(run(
+            Arc::downgrade(&self.open),
+            self.handle.clone(),
+            self.service.sessions.clone(),
+            self.service.leases.clone(),
+            self.service.self_writes.scoped(&self.open.root),
+            self.service.events.clone(),
+            cancel.clone(),
+            Some(send),
+        ));
+        self.open.actor.markdown_recovery_wake().notify_one();
+        (cancel, passes, task)
+    }
+
+    /// Recovery stops on its own: a wake after the reader's last answer
+    /// attempts nothing, and every save stays owed.
+    async fn assert_recovery_stopped(&self, passes: &mut UnboundedReceiver<Vec<DocKey>>) {
+        let dispatched = self.reader.dispatch_count();
+        self.open.actor.markdown_recovery_wake().notify_one();
+        let attempts = tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.is_empty(), "{attempts:?}");
+        assert_eq!(self.reader.dispatch_count(), dispatched);
+        assert_eq!(
+            self.open
+                .actor
+                .markdown_recovery_candidates("w".into())
+                .await
+                .unwrap()
+                .len(),
+            self.saves.len()
+        );
+    }
+
+    async fn close(self) {
+        self.service
+            .workspace_close(Some(self.handle))
+            .await
+            .unwrap();
+    }
+}
+
+async fn next_pass(passes: &mut UnboundedReceiver<Vec<DocKey>>) -> Vec<DocKey> {
+    tokio::time::timeout(std::time::Duration::from_secs(60), passes.recv())
+        .await
+        .expect("recovery asks the reader again after a backoff")
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn markdown_recovery_asks_a_crashing_reader_again_until_the_resolver_gives_up() {
-    let scratch = ScratchDir::new().unwrap();
-    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let data: Value = serde_json::from_str(include_str!(
-        "../../../dohc-engine-collab/tests/reader-resolver.json"
-    ))
-    .unwrap();
-    let source = data["source"].as_str().unwrap().to_owned();
-    let key = DocKey::new("w", "main", "note").unwrap();
-    let wire = yrs::Doc::new();
-    wire.transact_mut()
-        .apply_update(
-            yrs::Update::decode_v1(
-                &STANDARD
-                    .decode(data["checkpoint"].as_str().unwrap())
-                    .unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    wire.get_or_insert_map("meta")
-        .remove(&mut wire.transact_mut(), "dohcLineageEpoch");
-    let mut store = EngineStore::open(&db, 1).unwrap();
-    store.bind_root_token(token, &NoFaults).unwrap();
-    store.write_with(&NoFaults, |tx| tx.execute_batch(
-        "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('w','origin','epoch','stream',1);
-         INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('w','origin',0);"
-    ).map_err(StorageError::persist_public)).unwrap();
-    VersionedTextStore::new(&mut store)
-        .ensure_main_version("w", "main", 1, &NoFaults)
-        .unwrap();
-    VersionedTextStore::new(&mut store)
-        .write_text(
-            &WriteText {
-                workspace_id: "w".into(),
-                version_id: "main".into(),
-                object_id: "note".into(),
-                path: "note.md".into(),
-                text: source.clone(),
-                moment_id: "source".into(),
-                metadata_origin: "test".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 2,
-                request_id: None,
-            },
-            &NoFaults,
-        )
-        .unwrap();
-    dohc_engine_collab::claim_base(
-        &mut store,
-        &key,
-        ContentKind::Richdoc,
-        &wire
-            .transact()
-            .encode_state_as_update_v1(&yrs::StateVector::default()),
-        &NoFaults,
-        3,
-    )
-    .unwrap();
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE ydoc_docs SET path='note.md'", [])
-                .map_err(StorageError::persist_public)
-        })
-        .unwrap();
-    let original = dohc_engine_collab::load_persisted(&store, &key)
-        .unwrap()
-        .unwrap()
-        .doc;
-    let doc = Ydoc::wire();
-    doc.apply(&original.encode_full_state()).unwrap();
-    doc.richdoc_append_paragraph("Accepted edit awaiting the reader");
-    store
-        .write_with(&NoFaults, |tx| {
-            dohc_engine_collab::record_update_in_tx(
-                tx,
-                &key,
-                &doc.encode_full_state(),
-                None,
-                None,
-                4,
-            )
-        })
-        .unwrap();
-    let marker = dohc_engine_collab::read_marker(&store, &key)
-        .unwrap()
-        .unwrap();
-    drop(store);
-    std::fs::write(scratch.path().join("note.md"), &source).unwrap();
-    let service = EngineService::new();
-    let opened = service
-        .workspace_open(
-            &RequestContext::unbounded(),
-            json!({"rootDir":scratch.path(),"workspaceId":"w","captureMode":"none"}),
-        )
-        .await
-        .unwrap();
-    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
-    let open = service.open(Some(&handle)).unwrap();
-    // Only the loop below works on the save.
-    open.shutdown_capture().await;
-    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(witness_reader(
-        &scratch,
-        "startup-crash",
-    ))));
-    open.actor
-        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
-            reader.clone(),
-        )))
-        .await
-        .unwrap();
-    // The session closes with its save owed: the reader crashed on its first
-    // request and on the immediate retry, and the proof asks for a backoff.
-    let result = open
-        .actor
-        .ydoc_settle(
-            scratch.path().to_owned(),
-            key.clone(),
-            "note.md".into(),
-            ContentKind::Richdoc,
-            marker.lineage_claim_id.clone(),
-            Some(hex_sha256(source.as_bytes())),
-            "closed-owner".into(),
-            Arc::new(()),
-            10,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await;
-    assert!(matches!(&result, Err(error) if super::super::error::reader_retryable(error)));
-    assert_eq!(reader.dispatch_count(), 2);
-    let cancel = CancellationToken::new();
-    let (send, mut passes) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(run(
-        Arc::downgrade(&open),
-        handle.clone(),
-        service.sessions.clone(),
-        service.leases.clone(),
-        service.self_writes.scoped(&open.root),
-        service.events.clone(),
-        cancel.clone(),
-        Some(send),
-    ));
-    let wake = open.actor.markdown_recovery_wake();
-    wake.notify_one();
+    let fixture = CrashingReaderSaves::new(&["note"]).await;
+    let key = fixture.saves[0].0.clone();
+    fixture.close_session(0).await;
+    assert_eq!(fixture.reader.dispatch_count(), 2);
+    let (cancel, mut passes, task) = fixture.recover();
     // Without an edit, recovery asks the reader once per attempt until the
     // resolver's six retries are spent: five more requests.
     let mut attempted = 0;
     while attempted < 5 {
-        let attempts = tokio::time::timeout(std::time::Duration::from_secs(60), passes.recv())
-            .await
-            .expect("recovery asks the reader again after a backoff")
-            .unwrap();
+        let attempts = next_pass(&mut passes).await;
         assert!(
             attempts.iter().all(|attempt| attempt == &key),
             "{attempts:?}"
@@ -1454,26 +1542,46 @@ async fn markdown_recovery_asks_a_crashing_reader_again_until_the_resolver_gives
         attempted += attempts.len();
     }
     assert_eq!(attempted, 5);
-    assert_eq!(reader.dispatch_count(), 7);
+    assert_eq!(fixture.reader.dispatch_count(), 7);
     // The last answer is unavailable, so no backoff asks again.
-    wake.notify_one();
-    let attempts = tokio::time::timeout(std::time::Duration::from_secs(10), passes.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(attempts.is_empty(), "{attempts:?}");
-    assert_eq!(reader.dispatch_count(), 7);
-    assert_eq!(
-        open.actor
-            .markdown_recovery_candidates("w".into())
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    fixture.assert_recovery_stopped(&mut passes).await;
     cancel.cancel();
     task.await.unwrap();
-    service.workspace_close(Some(handle)).await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn markdown_recovery_retrying_one_save_does_not_restart_a_save_the_reader_gave_up_on() {
+    let fixture = CrashingReaderSaves::new(&["first", "second"]).await;
+    let keys = [&fixture.saves[0].0, &fixture.saves[1].0];
+    // After the two requests of its session's settle, each proof has five
+    // recovery attempts before the resolver gives up on it.
+    let mut attempted = [0; 2];
+    let mut count = |attempts: Vec<DocKey>| {
+        for attempt in &attempts {
+            let index = keys.iter().position(|key| *key == attempt).unwrap();
+            attempted[index] += 1;
+            assert!(
+                attempted[index] <= 5,
+                "{attempt:?} was attempted after the reader gave up on it"
+            );
+        }
+        attempted
+    };
+    fixture.close_session(0).await;
+    let (cancel, mut passes, task) = fixture.recover();
+    while count(next_pass(&mut passes).await)[0] == 0 {}
+    // The second session closes between passes, so the first save runs out
+    // of retries while the second still has some.
+    let between_passes = fixture.open.session_ops.clone().lock_owned().await;
+    fixture.close_session(1).await;
+    drop(between_passes);
+    while count(next_pass(&mut passes).await) != [5, 5] {}
+    assert_eq!(fixture.reader.dispatch_count(), 14);
+    fixture.assert_recovery_stopped(&mut passes).await;
+    cancel.cancel();
+    task.await.unwrap();
+    fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
