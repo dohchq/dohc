@@ -79,6 +79,8 @@ interface Attempt {
 export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private active?: Attempt;
   private disposed = false;
+  /** An opening sync from the owner feed was installed during this delivery's life. */
+  synchronized = false;
   private readonly options: OwnerYDocFrameDeliveryOptions;
 
   constructor(options: OwnerYDocFrameDeliveryOptions) {
@@ -248,6 +250,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             const applied = await abortable(this.options.acceptedState.applyInitialSync({...sync, appliedThroughJournalCursor: begin.appliedThroughJournalCursor}, attempt.signal), attempt.signal); this.check(attempt);
             if (applied !== "applied") {this.stop(attempt); return;}
             attempt.cursor = begin.appliedThroughJournalCursor;
+            this.synchronized = true;
             attempt.controls.push({kind: "sync-applied", appliedThroughJournalCursor: attempt.cursor});
             attempt.ready.resolve({kind: "authority", authority: attempt.authority!});
           } else if (begin.purpose === "applied-update") {

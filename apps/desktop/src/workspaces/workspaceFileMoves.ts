@@ -33,6 +33,9 @@ export interface PathChangeOptions {
   trashItem(absolutePath: string): Promise<void>;
   // Tells open editors that the documents at or under a path are gone.
   markDeleted(path: string): void;
+  // Runs before a move takes the workspace lock, with the source's stored
+  // spelling. It catches a live page up with the server and never refuses.
+  beforeMove?(path: string): Promise<void>;
 }
 
 // A path as spelled and where it resolves, and for a tree the files in it,
@@ -254,7 +257,15 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
   author: MomentWriteAuthor, options: PathChangeOptions,
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
-  return prepareMoveWorkspacePath(operation, input, author, options);
+  return catchUpBeforeMove(options, () => admitPath(operation.workspace.rootPath, input.fromPath).then(admitted => admitted.physical))
+    .then(() => prepareMoveWorkspacePath(operation, input, author, options));
+}
+
+// A path the move cannot read here skips the wait. The move then reports it.
+async function catchUpBeforeMove(options: Pick<PathChangeOptions, "beforeMove">, storedSpelling: () => Promise<string>): Promise<void> {
+  if (!options.beforeMove) return;
+  const path = await storedSpelling().catch(() => undefined);
+  if (path !== undefined) await options.beforeMove(path);
 }
 
 // A folder move from the app while History is off: without capture, dohc
@@ -270,6 +281,7 @@ export class FolderMoveHistoryOffError extends Error {
 
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
   person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
+  await catchUpBeforeMove(options, async () => (await prepareWorkspaceMove(operation.workspace.rootPath, input.fromPath, input.toPath)).physicalFromPath);
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
     await options.admit?.();
