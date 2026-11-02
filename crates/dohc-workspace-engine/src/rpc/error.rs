@@ -722,6 +722,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         SyncError::InvalidInput { .. }
         | SyncError::MarkdownWriteHeld { .. }
         | SyncError::LiveDocumentBindingActive
+        | SyncError::SyncedDeletionRevivalRefused
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }

@@ -3218,6 +3218,9 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         dohc_engine_sync::SyncError::LiveDocumentBindingActive => {
             dohc_engine_domain::DomainError::LiveDocumentBindingActive
         }
+        dohc_engine_sync::SyncError::SyncedDeletionRevivalRefused => {
+            dohc_engine_domain::DomainError::SyncedDeletionRevivalRefused
+        }
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }
