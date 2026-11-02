@@ -2455,11 +2455,11 @@ impl DriverEnv for RealEnv {
         // while open (lost watch, policy edit) or an unreadable seed only
         // found changes. The first import starts with the pass that finds no
         // record of the workspace and keeps its id across retries, timeouts
-        // and restarts until no file it found is left to record. Only a
-        // readable seed tells which files capture never recorded. A new layer
-        // also performs one collection reconciliation: its in-memory retry
-        // bit cannot preserve a failed request across a daemon restart, and a
-        // rehydrated manifest may make this plan empty.
+        // and restarts until a clean pass ends it (`finish_first_import`).
+        // Only a readable seed tells which files capture never recorded. A
+        // new layer also performs one collection reconciliation: its
+        // in-memory retry bit cannot preserve a failed request across a
+        // daemon restart, and a rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
         self.first_import = if !seed_loaded {
             None
@@ -2467,11 +2467,13 @@ impl DriverEnv for RealEnv {
             self.actor
                 .begin_first_import(self.workspace_id.clone(), pass_correlation_id("reconcile"))
                 .await
+                .inspect_err(|error| eprintln!("engine: first import start failed: {error}"))
                 .ok()
         } else {
             self.actor
                 .unfinished_first_import(self.workspace_id.clone())
                 .await
+                .inspect_err(|error| eprintln!("engine: first import read failed: {error}"))
                 .ok()
                 .flatten()
         };
@@ -2571,8 +2573,14 @@ impl DriverEnv for RealEnv {
         if initial_settle_timed_out {
             settled = false;
         }
-        if settled {
-            finish_first_import(&self.actor, &self.workspace_id, &mut self.first_import).await;
+        if settled && !cancel.is_cancelled() {
+            finish_first_import(
+                &self.actor,
+                &self.workspace_id,
+                &fresh.files.handle(),
+                &mut self.first_import,
+            )
+            .await;
         }
         let fingerprint_after_apply = policy_fingerprint(&self.root);
         let initial_ready = !initial_settle_timed_out
@@ -2687,6 +2695,13 @@ impl DriverEnv for RealEnv {
                 if !applied.clean {
                     return TickIo::Applied { clean: false };
                 }
+                finish_first_import(
+                    &self.actor,
+                    &self.workspace_id,
+                    &files,
+                    &mut self.first_import,
+                )
+                .await;
                 if self.status.degraded() {
                     match layer.files.handle().stats().await {
                         Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },
@@ -2707,6 +2722,15 @@ impl DriverEnv for RealEnv {
                     return TickIo::CollectionBusyExhausted;
                 }
                 let clean = applied.clean;
+                if clean {
+                    finish_first_import(
+                        &self.actor,
+                        &self.workspace_id,
+                        &files,
+                        &mut self.first_import,
+                    )
+                    .await;
+                }
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2735,9 +2759,6 @@ impl DriverEnv for RealEnv {
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
         };
-        if matches!(tick, TickIo::Converged) {
-            finish_first_import(&self.actor, &self.workspace_id, &mut self.first_import).await;
-        }
         self.actor
             .retry_pending_link_rewrites(&self.workspace_id)
             .await;
@@ -2969,19 +2990,24 @@ fn startup_provenance(
     }
 }
 
-/// Mark the first import finished: no file it found is left to record.
+/// Finish the first import after a clean, uncancelled pass. Every file it
+/// found is then recorded, held for a live session, or quarantined after
+/// repeated read failures. A held file keeps the import open. A quarantined
+/// file does not: one unreadable file must not label every later new file as
+/// imported, so a file that stays unreadable through the import lands later
+/// with an ordinary label.
 async fn finish_first_import(
     actor: &ActorHandle,
     workspace_id: &str,
+    files: &FilesHandle,
     first_import: &mut Option<String>,
 ) {
-    if first_import.is_some()
-        && actor
-            .finish_first_import(workspace_id.to_owned())
-            .await
-            .is_ok()
-    {
-        *first_import = None;
+    if first_import.is_none() || !matches!(files.stats().await, Ok(stats) if stats.deferred == 0) {
+        return;
+    }
+    match actor.finish_first_import(workspace_id.to_owned()).await {
+        Ok(()) => *first_import = None,
+        Err(error) => eprintln!("engine: first import finish failed: {error}"),
     }
 }
 

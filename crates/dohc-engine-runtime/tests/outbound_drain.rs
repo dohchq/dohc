@@ -1478,6 +1478,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 path: ".capture.env".to_owned(),
                 text: "CAPTURE=sealed".to_owned(),
                 metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 220,
                 claim_foreign_head: true,

@@ -97,7 +97,9 @@ pub(crate) const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
 
 impl CaptureProvenance {
     /// What a capture of a path records. An `Added` path has no manifest
-    /// entry, so capture never recorded it.
+    /// entry, so capture never recorded it. Nothing stored tells a file the
+    /// import found from one created while it runs, so a file created while
+    /// the import is unfinished also gets the import label.
     fn for_ingest(&self, reason: IngestReason) -> Self {
         match (&self.first_import, reason) {
             (Some(import), IngestReason::Added) => Self {
@@ -826,7 +828,7 @@ impl StoreCaptureSink {
         path: &str,
         claim_foreign_head: bool,
         suppress_self_write: bool,
-        correlation_id: Option<String>,
+        provenance: CaptureProvenance,
     ) -> Result<IngestOutcome, CaptureError> {
         let content = self.read_current_secret(path)?;
         self.ingest_secret_content(
@@ -834,7 +836,7 @@ impl StoreCaptureSink {
             claim_foreign_head,
             suppress_self_write,
             content,
-            correlation_id,
+            provenance,
         )
     }
 
@@ -844,7 +846,7 @@ impl StoreCaptureSink {
         claim_foreign_head: bool,
         suppress_self_write: bool,
         content: SecretContent,
-        correlation_id: Option<String>,
+        provenance: CaptureProvenance,
     ) -> Result<IngestOutcome, CaptureError> {
         self.require_captured_root()?;
         match content {
@@ -865,7 +867,8 @@ impl StoreCaptureSink {
                     path: path.to_owned(),
                     text,
                     metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
-                    metadata_correlation_id: correlation_id,
+                    metadata_summary: provenance.summary,
+                    metadata_correlation_id: provenance.correlation_id,
                     now_ms: self.now_ms,
                     claim_foreign_head,
                 });
@@ -1609,11 +1612,19 @@ impl CaptureSink for StoreCaptureSink {
                 // ordinary projections. Consume it before entering the
                 // encrypted capture path, where an equal-content dedupe would
                 // otherwise stamp the API tip as capture-owned.
+                // A secret keeps its per-file label, except in the first
+                // import.
+                let summary = provenance
+                    .summary
+                    .filter(|summary| summary == FIRST_IMPORT_SUMMARY);
                 return self.ingest_secret(
                     path,
                     claim_foreign_head,
                     claim_foreign_head,
-                    provenance.correlation_id,
+                    CaptureProvenance {
+                        summary,
+                        ..provenance
+                    },
                 );
             }
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,

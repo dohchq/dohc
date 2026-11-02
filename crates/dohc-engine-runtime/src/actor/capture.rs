@@ -3678,6 +3678,7 @@ mod capture_secret_root_guard_tests {
                     path: SECRET_PATH.to_owned(),
                     text: "TOKEN=original".to_owned(),
                     metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 2,
                     claim_foreign_head: true,

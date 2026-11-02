@@ -5593,7 +5593,7 @@ mod tests {
             ),
             (
                 "v2-capture-first-imports",
-                "6965b1ed342d1016642fd1373b982b5f87d86c8ae92b89967ecb199ec09e0c34",
+                "c6b0c309e5dd16fe6ba196efaa0b4afb91719d1f099ef53aabc513c906c60657",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

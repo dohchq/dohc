@@ -1,5 +1,6 @@
-//! A workspace's first import, from its first capture pass until no file it
-//! found is left to record. No row means no import is running.
+//! A workspace's first import, from its first capture pass until a pass
+//! leaves nothing to record but files that keep failing to read. No row means
+//! no import is running.
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
