@@ -7835,6 +7835,138 @@ mod tests {
         assert_eq!(status, "open");
     }
 
+    fn open_deletion_conflict(
+        store: &mut EngineStore,
+        current: Option<TextSnapshot>,
+        incoming: Option<TextSnapshot>,
+    ) {
+        let conflict = TextConflict {
+            conflict_id: "conflict-1".to_owned(),
+            workspace_id: "ws".to_owned(),
+            path: "doc.md".to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            created_at_ms: 15,
+            updated_at_ms: 15,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base: ConflictFileState::text("doc.md", None),
+            current: ConflictFileState::text("doc.md", current),
+            incoming: ConflictFileState::text("doc.md", incoming),
+        };
+        store
+            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &conflict))
+            .unwrap();
+    }
+
+    /// One machine deleted `doc.md` and the other edited it. The deleting
+    /// machine keeps the other copy through the runtime's prepare and commit
+    /// hooks, and the editing machine closes its conflict on import.
+    #[test]
+    fn keeping_the_other_copy_after_a_deletion_commits_and_closes_on_the_editor() {
+        dohc_engine_domain::lift_revival_refusal_for_test(
+            dohc_engine_domain::RevivalAction::ConflictChoice,
+        );
+        let (_editor_scratch, mut editor, _, _) = receiver_fixture();
+        let edited = text_keep_head(&mut editor);
+        let deleter_scratch = ScratchDir::new().unwrap();
+        let mut deleter = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&deleter_scratch).unwrap(),
+            1_000,
+        )
+        .unwrap();
+        {
+            let mut files = VersionedTextStore::new(&mut deleter);
+            files
+                .ensure_main_version("ws", "main", 1_000, &NoFaults)
+                .unwrap();
+            files
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-a".to_owned(),
+                        path: "doc.md".to_owned(),
+                        text: "base text".to_owned(),
+                        moment_id: "moment-base".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            files
+                .delete_text_file(
+                    &DeleteTextFile {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        path: "doc.md".to_owned(),
+                        moment_id: "moment-deleted".to_owned(),
+                        request_id: None,
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 12,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        open_deletion_conflict(&mut deleter, None, Some(edited.clone()));
+        open_deletion_conflict(&mut editor, Some(edited), None);
+
+        let mut input = text_keep_input(ResolveConflictKind::ApplyIncoming, "kept-other-copy");
+        input.object_id = "fresh-object".to_owned();
+        let built = RefCell::new(None);
+        VersionedTextStore::new(&mut deleter)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    let prepared = prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict)
+                        .map_err(sync_as_domain)?;
+                    prepared
+                        .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
+                        .map_err(sync_as_domain)?;
+                    Ok(prepared)
+                },
+                |tx, result, prepared| {
+                    *built.borrow_mut() = Some(prepared.built.clone());
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .expect("the deleting machine keeps the other copy");
+        let built = built.into_inner().unwrap();
+        let kept = text_keep_head(&mut deleter);
+        assert_eq!(
+            (kept.object_id.as_str(), kept.text.as_str()),
+            ("object-a", "current text")
+        );
+        let payload = &built.validated.payload;
+        assert_eq!(
+            payload.result.present().map(|head| head.object_id.as_str()),
+            Some("object-a")
+        );
+        assert_eq!(payload.effect_context.result_object_created_at_ms, Some(10));
+
+        copy_resolution_roots(&deleter, &mut editor, &built);
+        import_text_keep(&mut editor, &built);
+        assert_eq!(text_keep_open_rows(&editor), 0);
+        let head = text_keep_head(&mut editor);
+        assert_eq!(
+            (head.object_id.as_str(), head.text.as_str()),
+            ("object-a", "current text")
+        );
+    }
+
     fn projected_ydoc_text(store: &mut EngineStore, key: &DocKey) -> String {
         let marker = dohc_engine_collab::read_marker(store, key)
             .expect("read receiver marker")
