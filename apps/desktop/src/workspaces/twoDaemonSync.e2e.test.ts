@@ -2592,8 +2592,8 @@ async function openEditor(daemon: Pick<LiveDaemonCapture, "capture">, path: stri
   return { session, doc };
 }
 
-// H2b: B keeps the deletion. H2c: B keeps its copy, then A keeps B's copy.
-// H2d: A keeps B's copy while B's conflict is still open.
+// H2b: B keeps the deletion. H2c: B keeps its copy and types again, and A takes
+// both up with no choice. H2d: A keeps B's copy while B's conflict is still open.
 it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
   "settles a synced deletion in fresh %s and keeps notes syncing both ways",
   async scenario => {
@@ -2661,10 +2661,17 @@ it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
       await rounds();
       const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
       expect(reviewB).toMatchObject({current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}});
+      let kept = "Paris\nTokyo\n";
       if (scenario === "H2d") {
         await keepOtherCopyOnA();
       } else {
         await b.capture.resolveConflict(reviewB.id, {kind: scenario === "H2b" ? "apply-incoming" : "keep-current"});
+        if (scenario === "H2c") {
+          const editorB = await openEditor(b, path);
+          try { await typeAtEnd(editorB, "Rome\n"); }
+          finally { await editorB.session.close(); }
+          kept += "Rome\n";
+        }
         await rounds();
       }
       if (scenario === "H2b") {
@@ -2675,7 +2682,8 @@ it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
         await expect(readFile(join(rootB, path))).rejects.toMatchObject({code: "ENOENT"});
         await expect(readFile(join(rootA, path))).rejects.toMatchObject({code: "ENOENT"});
       } else if (scenario === "H2c") {
-        await keepOtherCopyOnA();
+        expect(await readFile(join(rootA, path), "utf8")).toBe(kept);
+        for (const device of [a, b]) expect(await device.capture.countOpenConflicts()).toBe(0);
       }
       await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
       await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
@@ -2683,7 +2691,7 @@ it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
       expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
       expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
       if (scenario !== "H2b") {
-        let expected = "Paris\nTokyo\n";
+        let expected = kept;
         for (const [writer, writerRoot, readerRoot, line] of [[a, rootA, rootB, "A by hand\n"], [b, rootB, rootA, "B by hand\n"]] as const) {
           expected += line;
           await writeAndCapture(writer, writerRoot, path, expected);
