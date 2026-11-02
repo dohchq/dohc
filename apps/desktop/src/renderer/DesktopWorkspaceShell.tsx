@@ -5215,6 +5215,8 @@ export function DesktopWorkspaceShell(props: {
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
   // History stopped recording, so the panel says so in place of taking in changes.
   const historyPaused = isHistoryPaused(syncStatus);
+  const historyPausedRef = useRef(historyPaused);
+  historyPausedRef.current = historyPaused;
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -5723,7 +5725,8 @@ export function DesktopWorkspaceShell(props: {
       if (workspaceIdRef.current !== askedFor) return;
       showHistoryPaused(null);
     }, (error: unknown) => {
-      if (workspaceIdRef.current !== askedFor) return;
+      // A healthy status that arrived first already cleared the row.
+      if (workspaceIdRef.current !== askedFor || !historyPausedRef.current) return;
       const { cause } = readError(error);
       showHistoryPaused({ retry: retryHistoryCapture, openHistory: openHistoryView, toast: true, ...(cause ? { cause } : {}) });
     });

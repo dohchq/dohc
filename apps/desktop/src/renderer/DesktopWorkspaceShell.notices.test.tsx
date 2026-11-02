@@ -41,7 +41,7 @@ it("keeps a failed document Stop in Notices with Try again and Copy details",asy
 
 // History that stopped recording is one workspace error: a toast and a
 // Notices row, each with Try again, and the row goes once capture runs.
-it("says History paused with Try again, restarts capture from the row, and clears the row once capture runs", async () => {
+it("says History paused with Try again, restarts capture from the row, and keeps the row cleared once capture runs", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   let status: SyncStatusResult = { ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null };
   bridge.openWorkspace = vi.fn(async () => status);
@@ -68,9 +68,10 @@ it("says History paused with Try again, restarts capture from the row, and clear
   status = SYNC_STATUS;
   act(() => bridge.emitWorkspaceActivity());
   await waitFor(() => expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull());
+  // A restart that answers late with a failure must not bring the row back.
   await act(async () => {
-    restart.resolve();
-    await restart.promise;
+    restart.reject(new Error("History is still paused."));
+    await restart.promise.catch(() => undefined);
   });
   expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
 });

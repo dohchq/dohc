@@ -681,7 +681,11 @@ impl EngineService {
         } else {
             false
         };
-        let mut response = self.capture_flush_after(ctx, handle, None).await?;
+        // The new driver's first pass scans the whole folder. As after a
+        // landed retryHeld, answer by the deadline with the flush still
+        // queued; the caller follows an unsettled answer with capture.flush.
+        let landed = restarted.then(|| landed_wait_until(ctx));
+        let mut response = self.capture_flush_after(ctx, handle, landed).await?;
         response["restarted"] = json!(restarted);
         Ok(response)
     }
@@ -1037,10 +1041,27 @@ mod tests {
     ) {
         let driver = lock(&open.capture).take().unwrap();
         probe.stop_task_for_test(false);
-        while !driver.is_finished() {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !driver.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capture task finishes");
+        *lock(&open.capture) = Some(driver);
+    }
+
+    async fn flush_until_settled(service: &EngineService, handle: &WorkspaceHandle) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .unwrap()["settled"]
+            != json!(true)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "capture settles");
             tokio::task::yield_now().await;
         }
-        *lock(&open.capture) = Some(driver);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1080,6 +1101,7 @@ mod tests {
             [&json!(true), &json!(false), &json!(false), &json!("ready")],
             "{status}"
         );
+        flush_until_settled(&service, &handle).await;
         let after = service
             .versioned_text_read(
                 &ctx,
@@ -1097,6 +1119,51 @@ mod tests {
             .unwrap();
         assert_eq!(again["restarted"], json!(false));
         assert_eq!(probe.layer_start_count(), starts);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_retry_answers_while_the_first_scan_is_held() {
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("seed.md"), b"seed").unwrap();
+        let probe = capture_driver::CaptureApplyProbe::default();
+        let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+        let ctx = RequestContext::unbounded();
+        let handle = open_retry_workspace(&service, &scratch, "retry-held-scan").await;
+        let open = service.open(Some(&handle)).unwrap();
+        stop_capture_task(&open, &probe).await;
+        std::fs::write(scratch.path().join("after.md"), b"written while paused").unwrap();
+        probe.pause_next_apply();
+
+        let retried = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.capture_retry(&ctx, Some(handle.clone())),
+        )
+        .await
+        .expect("capture.retry answers while the first scan is held")
+        .unwrap();
+
+        assert_eq!(
+            [&retried["restarted"], &retried["settled"]],
+            [&json!(true), &json!(false)]
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            probe.wait_until_paused(),
+        )
+        .await
+        .expect("the first scan reached the held apply");
+        probe.release();
+        flush_until_settled(&service, &handle).await;
+        let after = service
+            .versioned_text_read(
+                &ctx,
+                Some(handle.clone()),
+                json!({"versionId": "main", "path": "after.md"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after["text"], json!("written while paused"));
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
