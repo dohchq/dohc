@@ -88,6 +88,30 @@ use busy_retry::CaptureBatchRetry;
 pub struct CaptureProvenance {
     pub summary: Option<String>,
     pub correlation_id: Option<String>,
+    /// The correlation id of the workspace's unfinished first import. A path
+    /// capture has never recorded joins it instead of this pass.
+    pub first_import: Option<String>,
+}
+
+pub(crate) const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+
+impl CaptureProvenance {
+    /// What a capture of a path records. An `Added` path has no manifest
+    /// entry, so capture never recorded it.
+    fn for_ingest(&self, reason: IngestReason) -> Self {
+        match (&self.first_import, reason) {
+            (Some(import), IngestReason::Added) => Self {
+                summary: Some(FIRST_IMPORT_SUMMARY.to_owned()),
+                correlation_id: Some(import.clone()),
+                first_import: None,
+            },
+            _ => Self {
+                summary: self.summary.clone(),
+                correlation_id: self.correlation_id.clone(),
+                first_import: None,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -658,6 +682,7 @@ impl StoreCaptureSink {
         text: String,
         sha256: &str,
         claim_foreign_head: bool,
+        provenance: CaptureProvenance,
     ) -> Result<DomainIngest, CaptureError> {
         let captured_root = self.captured_root()?;
         let input = CaptureIngest {
@@ -666,8 +691,8 @@ impl StoreCaptureSink {
             path: path.to_owned(),
             text,
             metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-            metadata_summary: self.provenance.summary.clone(),
-            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            metadata_summary: provenance.summary,
+            metadata_correlation_id: provenance.correlation_id,
             author_json: self.author_for_write(path, sha256),
             now_ms: self.now_ms,
             request_id: None,
@@ -732,6 +757,7 @@ impl StoreCaptureSink {
         bytes: Vec<u8>,
         sha256: &str,
         claim_foreign_head: bool,
+        provenance: CaptureProvenance,
     ) -> Result<DomainIngest, CaptureError> {
         let input = Arc::new(CaptureIngestBinary {
             workspace_id: self.workspace_id.clone(),
@@ -739,8 +765,8 @@ impl StoreCaptureSink {
             path: path.to_owned(),
             bytes,
             metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-            metadata_summary: self.provenance.summary.clone(),
-            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            metadata_summary: provenance.summary,
+            metadata_correlation_id: provenance.correlation_id,
             author_json: self.author_for_write(path, sha256),
             now_ms: self.now_ms,
             request_id: None,
@@ -800,9 +826,16 @@ impl StoreCaptureSink {
         path: &str,
         claim_foreign_head: bool,
         suppress_self_write: bool,
+        correlation_id: Option<String>,
     ) -> Result<IngestOutcome, CaptureError> {
         let content = self.read_current_secret(path)?;
-        self.ingest_secret_content(path, claim_foreign_head, suppress_self_write, content)
+        self.ingest_secret_content(
+            path,
+            claim_foreign_head,
+            suppress_self_write,
+            content,
+            correlation_id,
+        )
     }
 
     fn ingest_secret_content(
@@ -811,6 +844,7 @@ impl StoreCaptureSink {
         claim_foreign_head: bool,
         suppress_self_write: bool,
         content: SecretContent,
+        correlation_id: Option<String>,
     ) -> Result<IngestOutcome, CaptureError> {
         self.require_captured_root()?;
         match content {
@@ -831,7 +865,7 @@ impl StoreCaptureSink {
                     path: path.to_owned(),
                     text,
                     metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
-                    metadata_correlation_id: self.provenance.correlation_id.clone(),
+                    metadata_correlation_id: correlation_id,
                     now_ms: self.now_ms,
                     claim_foreign_head,
                 });
@@ -1296,6 +1330,8 @@ impl StoreCaptureSink {
         candidate: AddedTextCandidate<'_>,
         prepared: PreparedTextContent,
     ) -> PreparedTextCapture {
+        // The batch path takes only `Added` ingests.
+        let provenance = self.provenance.for_ingest(IngestReason::Added);
         PreparedTextCapture {
             input: CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
@@ -1303,8 +1339,8 @@ impl StoreCaptureSink {
                 path: candidate.path.to_owned(),
                 text: prepared.text,
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-                metadata_summary: self.provenance.summary.clone(),
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
+                metadata_summary: provenance.summary,
+                metadata_correlation_id: provenance.correlation_id,
                 author_json: self.author_for_write(candidate.path, &prepared.sha256),
                 now_ms: self.now_ms,
                 request_id: None,
@@ -1555,6 +1591,7 @@ impl CaptureSink for StoreCaptureSink {
         // intact — the path is still tracked (so the next real edit is seen
         // as `Changed` and captured), just not overwritten now.
         let claim_foreign_head = matches!(reason, IngestReason::Changed);
+        let provenance = self.provenance.for_ingest(reason);
         // Plan hashes and sizes describe the scan observation only. Re-read the
         // path so settled rapid writes coalesce to the latest disk state.
         let normalized = match classify_engine_file_path_normalized(path) {
@@ -1572,7 +1609,12 @@ impl CaptureSink for StoreCaptureSink {
                 // ordinary projections. Consume it before entering the
                 // encrypted capture path, where an equal-content dedupe would
                 // otherwise stamp the API tip as capture-owned.
-                return self.ingest_secret(path, claim_foreign_head, claim_foreign_head);
+                return self.ingest_secret(
+                    path,
+                    claim_foreign_head,
+                    claim_foreign_head,
+                    provenance.correlation_id,
+                );
             }
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };
@@ -1621,7 +1663,8 @@ impl CaptureSink for StoreCaptureSink {
                 if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
-                let disposition = self.ingest_text(path, text, &sha256, claim_foreign_head)?;
+                let disposition =
+                    self.ingest_text(path, text, &sha256, claim_foreign_head, provenance)?;
                 if matches!(disposition, DomainIngest::WriteDeferred)
                     || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
                 {
@@ -1704,7 +1747,8 @@ impl CaptureSink for StoreCaptureSink {
                 // same file bytes.
                 let size = bytes.len() as u64;
                 let sha256 = hex_sha256(&bytes);
-                let disposition = self.ingest_binary(path, bytes, &sha256, claim_foreign_head)?;
+                let disposition =
+                    self.ingest_binary(path, bytes, &sha256, claim_foreign_head, provenance)?;
                 if matches!(disposition, DomainIngest::WriteDeferred)
                     || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
                 {

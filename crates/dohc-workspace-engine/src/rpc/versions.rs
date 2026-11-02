@@ -905,6 +905,7 @@ impl VersionFence {
                 VersionFenceIntent::Switch { .. } => "version-switch",
                 VersionFenceIntent::Undo { .. } => "history-undo",
             })),
+            first_import: None,
         };
         let probe = self.capture_apply_probe.clone();
         let undo = matches!(&intent, VersionFenceIntent::Undo { .. });

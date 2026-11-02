@@ -61,6 +61,7 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
         provenance: CaptureProvenance {
             summary: Some("Reconciled offline edits".to_owned()),
             correlation_id: Some("reconcile-test-pass".to_owned()),
+            first_import: None,
         },
         ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
     });

@@ -133,6 +133,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
                 provenance: CaptureProvenance {
                     summary: Some("Reconciled offline edits".to_owned()),
                     correlation_id: Some("policy-recovery-pass".to_owned()),
+                    first_import: None,
                 },
                 events: events.clone(),
                 apply_probe: None,

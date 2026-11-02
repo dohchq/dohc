@@ -139,6 +139,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         scan: ScanGauge::default(),
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
+        first_import: None,
     };
     let cancel = CancellationToken::new();
     env.observation.start(env.root.clone()).unwrap();
@@ -280,6 +281,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         scan: ScanGauge::default(),
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
+        first_import: None,
     };
     assert!(env.start_layer(&CancellationToken::new()).await.is_err());
     assert_eq!(env.status.snapshot().phase, CapturePhase::Degraded);
