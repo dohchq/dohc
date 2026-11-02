@@ -262,7 +262,14 @@ pub(crate) fn retain(
     ops: &[&ReplicationEnvelope],
     faults: &dyn FaultInjector,
 ) -> Result<BTreeSet<String>, RelayError> {
-    retain_waiting(store, identity, relay_namespace, ops, &BTreeMap::new(), faults)
+    retain_waiting(
+        store,
+        identity,
+        relay_namespace,
+        ops,
+        &BTreeMap::new(),
+        faults,
+    )
 }
 
 /// The stable code of an ordinary origin that passed the retention limit

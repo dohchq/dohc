@@ -1103,7 +1103,10 @@ fn apply_moment_append(
         // content as the head, or keep a projection the head cannot show as a
         // recovery copy, and the file meets the head in a conflict below. A
         // file the head already holds leaves the lineage's later edits alone.
-        if !matches!(decision, ImportedTextHead::Settle | ImportedTextHead::Retire) {
+        if !matches!(
+            decision,
+            ImportedTextHead::Settle | ImportedTextHead::Retire
+        ) {
             if same_branch.is_none() {
                 match decision {
                     ImportedTextHead::Conflict(Some(content)) => {

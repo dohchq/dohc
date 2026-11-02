@@ -4228,8 +4228,8 @@ fn disposable_seed_in_tx(
     if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Unclaimed {
         return Ok(false);
     }
-    let seed = dohc_engine_collab::pristine_seed_lineage_source(tx, key)
-        .map_err(map_collab_hard_error)?;
+    let seed =
+        dohc_engine_collab::pristine_seed_lineage_source(tx, key).map_err(map_collab_hard_error)?;
     if seed.as_deref() != Some(head_sha256) {
         return Ok(false);
     }
@@ -5827,7 +5827,10 @@ fn conflict_replaced_lineage_in_tx(
         key,
         path,
         local_content,
-        format!("{}-local", ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
+        format!(
+            "{}-local",
+            ydoc_apply_moment_id(key, path, origin_id, origin_seq)
+        ),
         author_json.map(str::to_owned),
         now_ms,
         search_policy,
@@ -5930,7 +5933,10 @@ pub(crate) fn record_lineage_side_in_tx(
         key,
         path,
         content,
-        format!("{}-local", ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
+        format!(
+            "{}-local",
+            ydoc_apply_moment_id(key, path, origin_id, origin_seq)
+        ),
         authors,
         now_ms,
         search_policy,

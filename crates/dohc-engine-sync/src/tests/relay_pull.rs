@@ -6849,9 +6849,9 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
     let error = crate::deferred::retain(&mut engine, &identity, None, &[&next], &NoFaults)
         .expect_err("the work passes the limit");
     assert!(
-        error
-            .to_string()
-            .ends_with("deferred relay work limit reached; close the conflicting editor to resume sync"),
+        error.to_string().ends_with(
+            "deferred relay work limit reached; close the conflicting editor to resume sync"
+        ),
         "an origin no conflict holds keeps the editor words: {error}"
     );
     let (pending, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();

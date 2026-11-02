@@ -142,7 +142,14 @@ fn a_saves(
 /// A creates the Collection and Apollo holding `apollo`.
 fn a_creates_apollo(a: &mut EngineStore, apollo: &str) -> Vec<ReplicationEnvelope> {
     vec![
-        a_saves(a, "missions-schema", SCHEMA_PATH, SCHEMA, "schema-saved", 10),
+        a_saves(
+            a,
+            "missions-schema",
+            SCHEMA_PATH,
+            SCHEMA,
+            "schema-saved",
+            10,
+        ),
         a_saves(a, RECORD, RECORD_PATH, apollo, "apollo-planned", 20),
     ]
 }
@@ -165,7 +172,14 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
     let client = RelaySyncClient::new(relay);
     let leases = LeaseRegistry::new();
     let result = client
-        .pull_chat_workspace(b, &mut WriterDocCache::new(), "ws", &NoFaults, &leases, 2_100)
+        .pull_chat_workspace(
+            b,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            2_100,
+        )
         .expect("pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(cursor),
@@ -227,13 +241,7 @@ fn b_opens(b: &mut EngineStore, doc: &Ydoc, file: &str, typing: &[&str]) {
     b_types(b, &mut cache, doc, typing, 2_001);
 }
 
-fn b_types(
-    b: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    doc: &Ydoc,
-    typing: &[&str],
-    at: i64,
-) {
+fn b_types(b: &mut EngineStore, cache: &mut WriterDocCache, doc: &Ydoc, typing: &[&str], at: i64) {
     let attribution = ChangeAttribution {
         actor_kind: ChangeActorKind::Human,
         on_behalf_of: None,
@@ -303,7 +311,9 @@ fn b_settles(b: &mut EngineStore, text: &str) {
 
 /// Another device's Y.Doc base for Apollo, which claims B's lineage.
 fn device_c_base(b: &mut EngineStore, doc: &Ydoc) -> String {
-    let sha = b.put_binary_blob(&doc.encode_full_state()).expect("base blob");
+    let sha = b
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("base blob");
     let mut base = envelope(
         "device-c",
         0,
@@ -316,9 +326,15 @@ fn device_c_base(b: &mut EngineStore, doc: &Ydoc) -> String {
     );
     base.relay_seq = Some(10);
     assert!(matches!(
-        apply_ydoc_envelope(b, &mut WriterDocCache::new(), &base, &NoFaults, &NoLiveLeases)
-            .expect("apply the base")
-            .primary,
+        apply_ydoc_envelope(
+            b,
+            &mut WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        )
+        .expect("apply the base")
+        .primary,
         ApplyDisposition::Applied(_)
     ));
     sha
@@ -531,7 +547,10 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
     assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
     assert_eq!(indexed_status(&b), Some(json!("Flown")));
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
+        count(
+            &b,
+            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"
+        ),
         1,
         "History holds A's edit"
     );
@@ -607,12 +626,18 @@ fn record_file_edit_meets_unsettled_record_edits_in_a_conflict_holding_both() {
         "History names who typed B's edit"
     );
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
+        count(
+            &b,
+            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"
+        ),
         1,
         "History holds A's edit"
     );
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"),
+        count(
+            &b,
+            "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"
+        ),
         2,
         "B keeps its updates"
     );
@@ -659,12 +684,18 @@ fn record_file_edit_meets_a_lossy_note_in_a_conflict_holding_its_exact_source() 
         "the copy consumed its authors, so no later projection credits them again"
     );
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"),
+        count(
+            &b,
+            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"
+        ),
         1,
         "History holds A's edit"
     );
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"),
+        count(
+            &b,
+            "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"
+        ),
         2,
         "B keeps its typing"
     );
@@ -786,7 +817,11 @@ fn lossy_record_conflict_keeps_its_exact_source_under_a_later_replica_edit() {
     );
     assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
     local.apply(&delta).expect("merge the replica's edit");
-    assert_eq!(lineage_text(&b), projected(&local), "the lineage keeps the edit");
+    assert_eq!(
+        lineage_text(&b),
+        projected(&local),
+        "the lineage keeps the edit"
+    );
     assert_eq!(recovered(&b, &draft), 1);
 }
 
@@ -907,8 +942,14 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
                 }
                 assert_eq!(head_text(b, RECORD), Some(chosen.clone()), "{label}");
                 assert!(open_conflicts(b).is_empty(), "{label}");
-                assert!(history_holds(b, &draft) >= 1, "History keeps B's side: {label}");
-                assert!(history_holds(b, &planned) >= 1, "History keeps A's side: {label}");
+                assert!(
+                    history_holds(b, &draft) >= 1,
+                    "History keeps B's side: {label}"
+                );
+                assert!(
+                    history_holds(b, &planned) >= 1,
+                    "History keeps A's side: {label}"
+                );
             };
             check(&b);
             drop(b);
@@ -972,7 +1013,11 @@ fn typing_after_a_record_conflict_opens_outlives_the_resolution() {
 
     resolve(&mut b, ResolveConflictKind::ApplyIncoming);
     assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
-    assert_eq!(recovered(&b, &later), 1, "B's later typing outlives the choice");
+    assert_eq!(
+        recovered(&b, &later),
+        1,
+        "B's later typing outlives the choice"
+    );
 
     drop(b);
     let b = EngineStore::open(&b_path, 3_000).expect("restart B");
@@ -1026,7 +1071,14 @@ fn record_file_edit_on_another_branch_waits_for_the_open_conflict() {
     );
     assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&landed))]);
 
-    let splashed_op = a_saves(&mut d, RECORD, RECORD_PATH, &splashed, "apollo-splashed", 50);
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
     assert!(
         matches!(
             deliver(&mut b, &splashed_op, &NoLiveLeases),
@@ -1106,7 +1158,14 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
 
     // D's file comes from another branch. More unrelated work than one pass
     // fetches arrives behind it, over two pulls.
-    let splashed_op = a_saves(&mut d, RECORD, RECORD_PATH, &splashed, "apollo-splashed", 50);
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
     let limit = crate::model::MAX_PULL_OPS_PER_PASS as i64;
     let reactions = (0..=limit)
         .map(|seq| {
@@ -1126,14 +1185,16 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
             .expect("B has a cursor")
             .cursor
     };
-    let ack = |b: &EngineStore, origin: &str| {
-        read_replication_acked_seq(b, "ws", origin).expect("ack")
-    };
+    let ack =
+        |b: &EngineStore, origin: &str| read_replication_acked_seq(b, "ws", origin).expect("ack");
     let retained = |b: &EngineStore| count(b, "SELECT COUNT(*) FROM relay_deferred_ops");
     pull(&mut b, 3, &first, &[&splashed]);
     assert_eq!(cursor(&b), 3 + limit);
     assert_eq!(ack(&b, "device-e"), limit - 2, "unrelated work applies");
-    assert!(ack(&b, "device-d") < splashed_op.origin_seq, "D's file waits");
+    assert!(
+        ack(&b, "device-d") < splashed_op.origin_seq,
+        "D's file waits"
+    );
     assert_eq!(retained(&b), 1);
 
     pull(&mut b, 3 + limit, &reactions[limit as usize - 1..], &[]);
@@ -1147,9 +1208,16 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
     drop(b);
     let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
     pull(&mut b, 5 + limit, &[], &[]);
-    assert_eq!(ack(&b, "device-d"), splashed_op.origin_seq, "D's file applies");
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-splashed'"),
+        ack(&b, "device-d"),
+        splashed_op.origin_seq,
+        "D's file applies"
+    );
+    assert_eq!(
+        count(
+            &b,
+            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-splashed'"
+        ),
         1,
         "History holds D's edit"
     );
@@ -1179,7 +1247,14 @@ fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
     b_opens(&mut b, &doc, &planned, &[NOTES]);
     let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
     pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
-    let splashed_op = a_saves(&mut d, RECORD, RECORD_PATH, &splashed, "apollo-splashed", 50);
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
     pull(&mut b, 3, std::slice::from_ref(&splashed_op), &[&splashed]);
     assert_eq!(count(&b, "SELECT COUNT(*) FROM relay_deferred_ops"), 1);
 
@@ -1219,7 +1294,10 @@ fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
         )),
         "{detail}"
     );
-    assert!(detail.ends_with("retained ops 1, retained bytes 536870912)"), "{detail}");
+    assert!(
+        detail.ends_with("retained ops 1, retained bytes 536870912)"),
+        "{detail}"
+    );
     assert_eq!(head_text(&b, "gemini"), None);
 }
 
@@ -1247,7 +1325,10 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
             (
                 open_conflicts(b),
                 count(b, "SELECT COUNT(*) FROM moments"),
-                count(b, "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"),
+                count(
+                    b,
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'",
+                ),
                 side_records(b),
                 head_text(b, RECORD),
             )

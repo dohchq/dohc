@@ -2934,9 +2934,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let conflict_waits: BTreeMap<String, Option<String>> = p
                     .retryable_refusals
                     .iter()
-                    .filter(|(_, reason)| {
-                        *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT
-                    })
+                    .filter(|(_, reason)| *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT)
                     .map(|&(index, _)| {
                         let op = &ordered[index];
                         let path = op.payload["beforePath"]
