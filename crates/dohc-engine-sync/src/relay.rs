@@ -7362,8 +7362,8 @@ fn local(error: SyncError) -> RelayError {
 fn retryable_refusal<'a>(
     refusals: impl IntoIterator<Item = (&'a ReplicationEnvelope, &'static str)>,
 ) -> RelayError {
-    let mut refusals = refusals.into_iter();
-    let Some((op, reason)) = refusals.next() else {
+    let refusals: Vec<_> = refusals.into_iter().collect();
+    let Some(&(op, reason)) = refusals.first() else {
         return RelayError::Local("retryable-state".to_owned());
     };
     let object = crate::hosted::hosted_document(op)
@@ -7375,11 +7375,25 @@ fn retryable_refusal<'a>(
         op.origin_id,
         op.origin_seq,
     );
-    let remaining = refusals.count();
+    let remaining = refusals.len() - 1;
     if remaining > 0 {
         detail.push_str(&format!("; and {remaining} more"));
     }
-    RelayError::Local(detail)
+    // The relay served the update to this replica, and this replica holds a
+    // file at its path, so the replica's owner can already see that path.
+    let occupied = refusals
+        .iter()
+        .filter(|&&(op, reason)| {
+            reason == crate::ydoc_apply::PATH_OCCUPIED && op.op_kind == "ydoc.update"
+        })
+        .find_map(|&(op, _)| op.payload["path"].as_str());
+    match occupied {
+        Some(path) => RelayError::PathOccupied {
+            path: path.to_owned(),
+            detail,
+        },
+        None => RelayError::Local(detail),
+    }
 }
 
 /// A hosted feed request on a transport built for an ordinary replica.
