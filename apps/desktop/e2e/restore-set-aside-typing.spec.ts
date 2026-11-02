@@ -2,7 +2,7 @@ import {randomUUID} from "node:crypto";
 import {readFile} from "node:fs/promises";
 import {join} from "node:path";
 import {isDeepStrictEqual} from "node:util";
-import {expect, test, type BrowserContext, type Page, type TestInfo} from "@playwright/test";
+import {expect, test, type BrowserContext, type Locator, type Page, type TestInfo} from "@playwright/test";
 import type {DohcDesktopBridge} from "../src/ipc/bridgeContract";
 import {activityPin, editorTabTestId, settingsNavPin} from "../src/testPins";
 import {parseLiveRecoveryPackage} from "../src/workspaces/ownerLiveRecoveryCopy";
@@ -156,6 +156,45 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect(editor(page)).toContainText(R1, {timeout: 60_000});
       await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), {timeout: 60_000}).toContain(R1);
     });
+
+    await test.step("History offers no Restore shared file for the shared note (#3090)", async () => {
+      await openHistoryView(page);
+      const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();
+      await expect(moment).toBeVisible({timeout: 60_000});
+      await moment.click();
+      await page.getByTestId("engine-diff-more").click();
+      await expect(page.getByTestId("engine-diff-open-file")).toBeVisible();
+      await expect(page.getByTestId("engine-diff-shared-restore")).toHaveCount(0);
+      await info.attach("History More menu", {contentType: "image/png", body: await page.screenshot()});
+      await page.keyboard.press("Escape");
+    });
+    await test.step("Restore earlier state on the shared note says where its text is, with no Try again", async () => {
+      const title = `dohc can't restore "${PATH}" because it has been shared live`;
+      const body = "Copy the text you want from History into the file.";
+      // The title and body both show whole, with no Show more and no Try again.
+      const expectRefusal = async (shown: Locator) => {
+        await expect(shown.locator("[id$='-title']")).toHaveText(title);
+        await expect(shown.locator("[id$='-body']")).toHaveText(body);
+        await expect(shown.locator("[data-testid$='-more']")).toHaveCount(0);
+        await expect(shown.getByRole("button", {name: "Try again"})).toHaveCount(0);
+      };
+      await page.getByTestId("engine-diff-restore-file").click();
+      const refusal = page.getByTestId("workspace-shell-error");
+      await expect(refusal).toContainText(title, {timeout: 30_000});
+      await expectRefusal(refusal);
+      await info.attach("Restore refusal toast", {contentType: "image/png", body: await page.screenshot()});
+      await page.getByTestId("notice-center-toggle").click();
+      const row = page.getByTestId("notice-center").locator("[data-notice-row]").filter({has: page.getByText(title, {exact: true})});
+      await expect(row).toHaveCount(1);
+      await expectRefusal(row);
+      await info.attach("Restore refusal in Notices", {contentType: "image/png", body: await page.screenshot()});
+      await page.getByTestId("notice-center-toggle").click();
+      await expect.poll(async () => normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8"))).toContain(R1);
+    });
+    // A restore that stops a note's last Edit access can leave it and other
+    // shared notes stuck, so History no longer offers it. The rest of this
+    // test restores through it.
+    test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
 
     const restored = await test.step("the owner stops the recipient's access and restores to before R1", async () => {
       await openHistoryView(page);
