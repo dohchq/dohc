@@ -8,7 +8,8 @@ use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
     hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
     validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
-    validate_path, validate_write_input, version_is_active, write_text_in_tx,
+    validate_path, validate_write_input, version_is_active, write_revived_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
@@ -978,15 +979,27 @@ impl VersionedTextStore<'_> {
                                 moment_id: input.write_moment_id.clone(),
                             });
                         } else if let Some(incoming) = &conflict.incoming.snapshot {
-                            let write_input = write_input(
+                            let mut write_input = write_input(
                                 input,
                                 &conflict.target_version_id,
                                 &destination,
                                 &incoming.text,
                                 &input.write_moment_id,
                             );
+                            // The other machine's copy of a file this machine
+                            // deleted comes back as the same file, so both
+                            // machines close the conflict on one object.
+                            let revived = conflict.metadata.origin == "sync"
+                                && !conflict.current.is_present();
+                            if revived {
+                                write_input.object_id = incoming.object_id.clone();
+                            }
                             validate_write_input(&write_input)?;
-                            let result = write_text_in_tx(tx, &write_input)?;
+                            let result = if revived {
+                                write_revived_text_in_tx(tx, &write_input)?
+                            } else {
+                                write_text_in_tx(tx, &write_input)?
+                            };
                             let preimage = if destination == conflict.path {
                                 conflict_state_preimage(&conflict.current)
                             } else {
