@@ -977,9 +977,21 @@ mod capture_file_hold_tests {
                 .map_err(StorageError::persist_public)
             })
             .unwrap();
-        // A document settle whose write failed leaves the same pending write.
+        // A document settle whose write failed leaves its moment's write pending.
+        let order: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.moment_order FROM snapshots s JOIN moments m \
+                     ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id \
+                     WHERE s.workspace_id='hold-proof' AND s.path='placed.md'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
         let settle = MaterializationJobSpec {
             job_id: "ydoc-mat_settle".into(),
+            target_generation: order,
             ..spec
         };
         store
@@ -2956,9 +2968,11 @@ pub(super) fn ensure_no_pending_undo_placement(
 }
 
 /// A write that failed to place the active head stays pending, so its file is
-/// missing until replay lands it. This covers a version switch and a document
-/// settle alike. Retiring that head would discard the file instead of waiting
-/// for it.
+/// missing until replay lands it. Retiring that head would discard the file
+/// instead of waiting for it. The write is a version switch's, or the one that
+/// records the head's latest moment, as for a document settle. Another
+/// version's pending write with the same bytes does not count: replay skips it
+/// while that version is inactive.
 fn ensure_no_pending_head_placement(
     conn: &Connection,
     workspace: &str,
@@ -2975,7 +2989,10 @@ fn ensure_no_pending_head_placement(
              AND s.object_id=a.object_id
          WHERE j.workspace_id IN (?1,'') AND j.target_path=?2 AND j.status='pending'
              AND j.operation='write'
-             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256)",
+             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
+             AND (j.job_id GLOB 'version-switch-mat_*' OR EXISTS(SELECT 1 FROM moments m
+                 WHERE m.workspace_id=a.workspace_id AND m.moment_id=s.latest_moment_id
+                     AND m.moment_order=j.target_generation)))",
         )
         .map_err(StorageError::corrupt_public)?
         .query_row(params![workspace, path], |r| r.get(0))
