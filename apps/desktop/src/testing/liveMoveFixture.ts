@@ -339,6 +339,9 @@ export async function openLiveMoveFixture(input: {
       /** Saves the owner pulled and parked until its accepted state catches up. */
       ownerPendingSettlements: (name: string) => readDb(ownerDb, db => numberOf(db.prepare(
         "SELECT COUNT(*) AS n FROM owner_pending_settlements WHERE workspace_id=? AND object_id=? AND applied=0").get(workspaceId, page(name).objectId)?.n)),
+      /** Whether a device's engine holds an owner binding for the page. A move never makes one. */
+      ownerBound: (device: MoveDevice, name: string) => readDb(join(device.rootPath, SECRET_FILE_STORE_RELATIVE_PATH), db => numberOf(db.prepare(
+        "SELECT COUNT(*) AS n FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?").get(workspaceId, page(name).objectId)?.n) > 0),
       /** The owner's durable accepted state for the page: its cursor and checkpoint. */
       ownerAccepted: (name: string) => readDb(ownerDb, db => {
         const row = db.prepare("SELECT accepted_cursor AS cursor, checkpoint_digest AS digest FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?")
@@ -358,17 +361,21 @@ export async function openLiveMoveFixture(input: {
 export type LiveMoveFixture = Awaited<ReturnType<typeof openLiveMoveFixture>>;
 
 export interface GuardTiming {
+  name: string;
   route: "bound" | "unbound";
   guard: "on" | "off";
   proxyDelayMs: number;
   elapsedMs: number;
+  // A refused move is timed until the engine refused it.
+  outcome: "moved" | "refused";
 }
 
 /** Prints the timings, and writes them as JSON when `DOHC_GUARD_TIMINGS_DIR` is set. */
 export async function recordGuardTimings(name: string, timings: readonly GuardTiming[]) {
-  const guardedOver3s = timings.filter(timing => timing.guard === "on" && timing.elapsedMs > 3_000).length;
-  const report = { name, timings, guardedOver3s };
-  console.log(`guard timings ${JSON.stringify(report)}`);
+  const guarded = timings.filter(timing => timing.guard === "on");
+  const guardedOver3s = guarded.filter(timing => timing.elapsedMs > 3_000).length;
+  const report = { name, timings, guardedOver3s, guardedMoves: guarded.length };
+  console.log(`guard timings: ${guardedOver3s} of ${guarded.length} guarded moves took over 3 s. ${JSON.stringify(report)}`);
   const directory = process.env.DOHC_GUARD_TIMINGS_DIR;
   if (directory) await writeFile(join(directory, `guard-timings-${name}.json`), `${JSON.stringify(report, null, 2)}\n`);
 }

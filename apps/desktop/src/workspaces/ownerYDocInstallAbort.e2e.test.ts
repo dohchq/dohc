@@ -58,7 +58,8 @@ function observedClient(real: EngineClient, install?: (commit: () => ReturnType<
 
 // #3089: the move guard's deadline can abandon an owner sync. Whether or not
 // the native install committed, the durable accepted state stays one matched
-// pair, a rename never enrolls a page, and the next pass starts from that pair.
+// pair, and the next pass starts from that pair. The owner here is already
+// bound, so these cases can't enroll; T7's unbound peer covers that.
 it.skipIf(engine.missing).each([
   { name: "abort before the native call", commit: false },
   { name: "a committed install whose answer is abandoned", commit: true },
@@ -86,10 +87,12 @@ it.skipIf(engine.missing).each([
     expect(abandoned.calls.installs).toHaveLength(1);
     const installed = abandoned.calls.installs[0]!;
     expect(installed).toBeGreaterThanOrEqual(cursor);
+    // Each case lands on its own side: an install that threw before it
+    // committed would leave the old pair and fail the committed case.
     const after = fixture.ownerAccepted("page");
-    const matched = (after.cursor === old.cursor && after.digest === old.digest)
-      || (after.cursor === installed && after.digest !== old.digest);
-    expect(matched, JSON.stringify({ old, after, installed })).toBe(true);
+    const pair = JSON.stringify({ old, after, installed });
+    expect(after.cursor, pair).toBe(commit ? installed : old.cursor);
+    expect(after.digest === old.digest, pair).toBe(!commit);
     expect(abandoned.calls.enroll).toBe(0);
 
     // The next pass reads the durable state again and starts from it.

@@ -3125,7 +3125,8 @@ describe("the move guard over a real relay and live host", () => {
       expect(device.targetedPasses()).toBe(requested);
       expect(await fixture.read(device, destination)).toBe(unchanged);
     }
-    return { route: input.route, guard: input.guarded ? "on" : "off", proxyDelayMs: input.proxyDelayMs, elapsedMs } satisfies GuardTiming;
+    return { name: input.name, route: input.route, guard: input.guarded ? "on" : "off", proxyDelayMs: input.proxyDelayMs, elapsedMs,
+      outcome: "moved" } satisfies GuardTiming;
   }
 
   afterAll(async () => {
@@ -3137,13 +3138,13 @@ describe("the move guard over a real relay and live host", () => {
       pages: ["pending", "unpulled", "slow", "refused", "peer", "peer-slow"], peer: true });
     try {
       const { owner, peer } = fixture;
-      // Bound, S already pending: an earlier pull parked the save, and the file holds the page as it was.
-      await editThenMove(fixture, owner, { name: "pending", route: "bound", guarded: true, proxyDelayMs: 0, before: async () => {
-        await owner.pull();
-        expect(fixture.ownerPendingSettlements("pending")).toBeGreaterThan(0);
-      } });
-      // Bound, S not yet pulled.
-      const found = [
+      const found: GuardTiming[] = [
+        // Bound, S already pending: an earlier pull parked the save, and the file holds the page as it was.
+        await editThenMove(fixture, owner, { name: "pending", route: "bound", guarded: true, proxyDelayMs: 0, before: async () => {
+          await owner.pull();
+          expect(fixture.ownerPendingSettlements("pending")).toBeGreaterThan(0);
+        } }),
+        // Bound, S not yet pulled.
         await editThenMove(fixture, owner, { name: "unpulled", route: "bound", guarded: true, proxyDelayMs: 0 }),
         await editThenMove(fixture, owner, { name: "slow", route: "bound", guarded: true, proxyDelayMs: PROXY_DELAY_MS }),
       ];
@@ -3158,7 +3159,9 @@ describe("the move guard over a real relay and live host", () => {
       try {
         const cursor = await fixture.edit("refused", text);
         const requested = owner.targetedPasses();
+        const started = performance.now();
         failure = await owner.move(refused.path, "notes/refused-moved.md", { guarded: true }).then(() => undefined, (error: unknown) => error);
+        found.push({ name: "refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs: performance.now() - started, outcome: "refused" });
         expect(owner.targetedPasses()).toBe(requested + 1);
         expect(fixture.ownerAccepted("refused").cursor).toBeGreaterThanOrEqual(cursor);
         await fixture.waitPublished("refused", cursor);
@@ -3170,7 +3173,8 @@ describe("the move guard over a real relay and live host", () => {
       // Once the save is pulled into the page, the same move succeeds.
       await owner.pull();
       expect(await fixture.read(owner, refused.path)).toContain(text);
-      await owner.move(refused.path, "notes/refused-moved.md", { guarded: true });
+      found.push({ name: "refused-retry", route: "bound", guard: "on", proxyDelayMs: 0,
+        elapsedMs: await owner.move(refused.path, "notes/refused-moved.md", { guarded: true }), outcome: "moved" });
       expect(await fixture.read(owner, "notes/refused-moved.md")).toContain(text);
 
       // Unbound: the peer never enrolls, so the pull alone carries the save.
@@ -3179,6 +3183,44 @@ describe("the move guard over a real relay and live host", () => {
         await editThenMove(fixture, peer, { name: "peer-slow", route: "unbound", guarded: true, proxyDelayMs: PROXY_DELAY_MS }),
       );
       timings.push(...found);
+      // The peer's guard ran owner syncs, and none of them made the peer an owner.
+      expect(fixture.ownerBound(owner, "slow")).toBe(true);
+      expect(fixture.ownerBound(peer, "peer")).toBe(false);
+      expect(fixture.ownerBound(peer, "peer-slow")).toBe(false);
+    } finally {
+      await fixture.close();
+    }
+  }, 600_000);
+
+  // A folder that holds a page whose newer edit is installed but not saved
+  // into the file. The engine refuses the folder's move too, and keeps the edit.
+  it.skipIf(engine.missing)("refuses a folder move over an installed, unsaved edit, and moves the folder once it is pulled", async () => {
+    const fixture = await openLiveMoveFixture({ workspaceId: "guard-folder-refused", compiledRelayMain, engineExecutable: engine.require(),
+      pages: ["box/refused"] });
+    try {
+      const { owner } = fixture;
+      const page = fixture.page("box/refused");
+      const text = marker("box-refused");
+      fixture.refuseLogPulls(true);
+      let failure: unknown;
+      try {
+        const cursor = await fixture.edit("box/refused", text);
+        const requested = owner.targetedPasses();
+        const started = performance.now();
+        failure = await owner.move("notes/box", "notes/box-moved", { guarded: true }).then(() => undefined, (error: unknown) => error);
+        timings.push({ name: "folder-refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs: performance.now() - started, outcome: "refused" });
+        expect(owner.targetedPasses()).toBe(requested + 1);
+        expect(fixture.ownerAccepted("box/refused").cursor).toBeGreaterThanOrEqual(cursor);
+        await fixture.waitPublished("box/refused", cursor);
+      } finally { fixture.refuseLogPulls(false); }
+      expect(failure).toBeInstanceOf(Error);
+      expect(existsSync(join(owner.rootPath, "notes/box-moved"))).toBe(false);
+      expect(await fixture.read(owner, page.path)).not.toContain(text);
+      await owner.pull();
+      expect(await fixture.read(owner, page.path)).toContain(text);
+      timings.push({ name: "folder-retry", route: "bound", guard: "on", proxyDelayMs: 0,
+        elapsedMs: await owner.move("notes/box", "notes/box-moved", { guarded: true }), outcome: "moved" });
+      expect(await fixture.read(owner, "notes/box-moved/refused.md")).toContain(text);
     } finally {
       await fixture.close();
     }
