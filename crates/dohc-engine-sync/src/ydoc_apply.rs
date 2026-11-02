@@ -3466,6 +3466,100 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     Ok(())
 }
 
+/// Take up the lineage this machine retired when it deleted a note the other
+/// machine kept editing. The claim its waiting updates name is rebuilt from
+/// the base and every update this machine logged for it, and must show
+/// `text`. Any gap refuses, so a partial lineage is never installed.
+pub(crate) fn revive_retired_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    text: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let incomplete = || SyncError::RetryableState {
+        reason: "ydoc-retired-lineage-incomplete",
+    };
+    let (claims, claim, unlogged): (i64, Option<String>, bool) = tx
+        .query_row(
+            "SELECT COUNT(DISTINCT lineage_claim_id),MIN(lineage_claim_id), \
+             COALESCE(MAX(ingress_kind!='local' OR lineage_replacement_json IS NOT NULL \
+               OR NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=d.workspace_id \
+                 AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
+                 AND r.op_kind='ydoc.update' AND r.apply_disposition='applied')),0) \
+             FROM ydoc_deferred_updates d WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(SyncError::corrupt)?;
+    let Some(claim) = claim.filter(|_| claims == 1 && !unlogged) else {
+        return Err(incomplete());
+    };
+    if inactive_lineage_exists(tx, key, &claim)? {
+        return Err(incomplete());
+    }
+    let mut statement = tx
+        .prepare(
+            "SELECT origin_id,origin_seq,payload_json FROM replication_log \
+             WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
+               AND json_extract(payload_json,'$.versionId')=?2 \
+               AND json_extract(payload_json,'$.objectId')=?3 \
+               AND json_extract(payload_json,'$.lineageClaimId')=?4 ORDER BY rowid",
+        )
+        .map_err(SyncError::corrupt)?;
+    let rows = statement
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id, claim],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<(String, i64, String)>, _>>()
+        .map_err(SyncError::corrupt)?;
+    let mut base = None;
+    let mut updates = Vec::new();
+    for (origin_id, origin_seq, payload_json) in rows {
+        let payload: YdocUpdatePayload =
+            serde_json::from_str(&payload_json).map_err(SyncError::corrupt)?;
+        let bytes = get_binary_blob(tx, &payload.update_blob_sha256)
+            .map_err(SyncError::Storage)?
+            .filter(|bytes| hex_sha256(bytes) == payload.update_blob_sha256)
+            .ok_or_else(incomplete)?;
+        if !payload.is_base_state {
+            updates.push((payload.actor_origin_id, payload.attribution, bytes));
+        } else if payload.update_blob_sha256 != claim {
+            return Err(incomplete());
+        } else if base.is_none() {
+            base = Some((origin_id, origin_seq, payload.content_kind, bytes));
+        }
+    }
+    let Some((origin_id, origin_seq, content_kind, base)) = base else {
+        return Err(incomplete());
+    };
+    dohc_engine_collab::reinstall_lineage_in_tx(
+        tx,
+        key,
+        ContentKind::parse(&content_kind).map_err(map_collab_hard_error)?,
+        &base,
+        (&origin_id, origin_seq),
+        &updates,
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)?;
+    tx.execute(
+        "DELETE FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
+    reconcile_imported_resulting_head_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        ResultingHead::Text { path, text },
+        now_ms,
+    )
+}
+
 /// Drop the local bases still waiting to learn their relay position.
 ///
 /// Called once the lineage's position is known from a pulled base, or when the

@@ -2455,6 +2455,70 @@ pub(crate) fn record_credited_updates_in_tx(
     Ok(facts)
 }
 
+/// One received update a lineage replays: its author credit and bytes.
+pub type LoggedUpdate = (Option<String>, Option<ChangeAttribution>, Vec<u8>);
+
+/// Install a lineage this machine retired again, from its base and the
+/// updates it received for it, in replay order. Fails without writing
+/// anything the caller keeps unless the base claims an absent marker and
+/// every update applies with no missing dependency.
+pub fn reinstall_lineage_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &[u8],
+    base_origin: (&str, i64),
+    updates: &[LoggedUpdate],
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let doc = Ydoc::wire();
+    doc.apply(base)?;
+    let state_vector = doc.encode_state_vector();
+    let claim = claim_base_in_tx(tx, key, content_kind, base, &state_vector, now_ms)?;
+    let ClaimOutcome::Claimed { base_snapshot_sha } = claim else {
+        return Err(CollabError::Corrupt {
+            reason: "a retired Y.Doc lineage is already active".into(),
+        });
+    };
+    record_base_coordinate_in_tx(
+        tx,
+        BaseCoordinateRecord {
+            key,
+            lineage_claim_id: &base_snapshot_sha,
+            origin_id: base_origin.0,
+            origin_seq: base_origin.1,
+            relay_seq: None,
+            now_ms,
+        },
+    )?;
+    let entries: Vec<_> = updates.iter().map(|(_, _, bytes)| bytes.clone()).collect();
+    for outcome in crate::replay_parity::replay_validated_batch(base, &entries, true)?.outcomes {
+        outcome?;
+    }
+    for (actor, attribution, update) in updates {
+        validate_update_bytes(update)?;
+        if let Some(actor) = actor {
+            crate::validate_actor_origin_id(actor)?;
+        }
+        validate_attribution(attribution.as_ref())?;
+        let sha = crate::hex_sha256(update);
+        if blob_seq_in_log(tx, key, &sha, update)?.is_some() {
+            continue;
+        }
+        put_binary_blob_with_sha(tx, update, &sha)?;
+        append_row(
+            tx,
+            key,
+            &sha,
+            actor.as_deref(),
+            attribution.as_ref(),
+            false,
+            now_ms,
+        )?;
+    }
+    Ok(())
+}
+
 /// The receipt application owner has checked its full binding in this transaction.
 /// `authors_admitted` skips native admission when accepted snapshot coverage owns it.
 #[allow(clippy::too_many_arguments)]

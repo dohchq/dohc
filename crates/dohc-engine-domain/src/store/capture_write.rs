@@ -1689,7 +1689,6 @@ fn write_normalized_text_in_tx(
                         if dormant_history_object && history_source.is_some() {
                             crate::synced_deletion::refuse_synced_deletion_revival(
                                 tx,
-                                crate::RevivalAction::HistoryWrite,
                                 ws,
                                 input.version_id,
                                 input.object_id,

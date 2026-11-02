@@ -1,48 +1,14 @@
 use crate::{DomainError, TextConflict};
 use rusqlite::{Transaction, params};
 
-/// An action that can bring back a file a synced deletion removed. Each one
-/// stays refused until it converges on every machine (#2699).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RevivalAction {
-    /// A choice in the conflict view.
-    ConflictChoice,
-    /// A History write: Restore, Undo, or Stop and restore.
-    HistoryWrite,
-}
-
-#[cfg(feature = "fault-injection")]
-thread_local! {
-    static LIFTED_FOR_TEST: std::cell::Cell<Option<RevivalAction>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Lets a test on this thread run `action` before its refusal is lifted.
-#[cfg(feature = "fault-injection")]
-#[doc(hidden)]
-pub fn lift_revival_refusal_for_test(action: RevivalAction) {
-    LIFTED_FOR_TEST.with(|lifted| lifted.set(Some(action)));
-}
-
-fn refused(action: RevivalAction) -> bool {
-    #[cfg(feature = "fault-injection")]
-    if LIFTED_FOR_TEST.with(std::cell::Cell::get) == Some(action) {
-        return false;
-    }
-    match action {
-        RevivalAction::ConflictChoice | RevivalAction::HistoryWrite => true,
-    }
-}
-
 pub(crate) fn refuse_synced_deletion_revival(
     tx: &Transaction<'_>,
-    action: RevivalAction,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
     choice: Option<&TextConflict>,
 ) -> Result<(), DomainError> {
-    if !refused(action) || choice.is_some_and(|conflict| conflict.metadata.origin != "sync") {
+    if choice.is_some_and(|conflict| conflict.metadata.origin != "sync") {
         return Ok(());
     }
     if choice.is_some_and(|conflict| {
