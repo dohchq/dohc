@@ -297,3 +297,27 @@ describe("History Restore on a shared live file", () => {
     }
   });
 });
+
+describe("Unfinished shared restores", () => {
+  // Retry on an unfinished shared restore says "File restored" but never
+  // reaches the file, and Decline doesn't bring live editing back, so the
+  // shell lists none and files no row (#3090).
+  it("lists no unfinished shared restore and files no Notices row for one", async () => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const ownerRestore = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
+      if (input.action === "unfinished") {
+        return { restores: [{ operationId: "restore-old", path: PATH, phase: "native-fenced", proposalDigest: null }], unreadable: 0, nextCursor: null };
+      }
+      throw new Error(`Unexpected owner restore action ${input.action}.`);
+    });
+    Object.assign(bridge, { ownerRestore });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalled());
+    await act(async () => {});
+    expect(ownerRestore).not.toHaveBeenCalled();
+    expect(screen.queryByText("Restore waiting")).toBeNull();
+    expect(await noticeRows(user)).toEqual([]);
+  });
+});

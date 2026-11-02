@@ -3312,7 +3312,10 @@ export function DesktopWorkspaceShell(props: {
   const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
   const sharedRestore = useSharedRestore({
     workspaceId,
-    enabled: workspaceIsReady && !shareView && workspaceSynced,
+    // Unfinished shared restores get no Notices row. Retry on one says "File
+    // restored" but never reaches the file, and Decline doesn't bring live
+    // editing back (#3090).
+    enabled: false,
     onBeforeRestore: beginLineageOperation,
     onRestored: onHistoryRestored,
     openChange: openMomentDiffTab,
