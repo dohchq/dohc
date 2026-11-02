@@ -2529,9 +2529,11 @@ async fn a_reopen_finishes_an_interrupted_first_import_under_its_id() {
 }
 
 /// A file that keeps failing to read must not hold the first import open:
-/// once the controller quarantines it, the import finishes and a file created
-/// afterwards is a live change. The unreadable file is a share-locked handle,
-/// as in `a_quarantined_path_keeps_capture_flush_unsettled`, so this test is
+/// once the controller quarantines it, a live tick finishes the import and a
+/// file created afterwards is a live change. The import runs past its
+/// deadline, so startup can't finish it and only the live ticks can. The
+/// unreadable file is a share-locked handle, as in
+/// `a_quarantined_path_keeps_capture_flush_unsettled`, so this test is
 /// Windows-only.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2540,8 +2542,6 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    write_file(scratch.path(), "healthy.md", b"imported");
     let mut lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -2552,13 +2552,16 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     lock.write_all(b"unreadable through the import")
         .expect("locked write");
     lock.flush().expect("locked flush");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    probe.release_import_commit();
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let handle = open_workspace(&transport, &scratch, 1).await;
-    wait_for_text(&transport, &handle, "healthy.md", Some("imported")).await;
-
-    // Each flush drives up to MAX_FLUSH_CYCLES passes, so the controller
-    // quarantines the locked file and then reports nothing dirty.
+    // Each flush drives up to MAX_FLUSH_CYCLES passes, so live ticks record
+    // the rest of the import, the controller quarantines the locked file, and
+    // then reports nothing dirty.
     for id in 2..5 {
         let flush = transport
             .call(
@@ -2576,8 +2579,9 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     close_workspace(&transport, handle, 9_100).await;
 
     let db = scratch.path().join(".dohc/engine/engine.db");
-    let (summary, _) = moment_metadata(&db, "healthy.md");
-    assert_eq!(summary.as_deref(), Some(FIRST_IMPORT_SUMMARY));
+    let moments = bulk_moments(&db);
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
     assert_eq!(
         moment_metadata(&db, "live.md"),
         (None, None),

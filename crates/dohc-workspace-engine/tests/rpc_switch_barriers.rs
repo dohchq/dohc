@@ -528,6 +528,9 @@ async fn set_active_forced_scan_keeps_an_unfinished_first_import() {
     let store = rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db"))
         .expect("open store");
     store
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .expect("busy timeout");
+    store
         .execute(
             "UPDATE capture_first_imports SET finished = 0 WHERE workspace_id = ?1",
             [&workspace_id],
