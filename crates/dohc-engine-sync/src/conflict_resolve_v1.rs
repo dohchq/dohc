@@ -240,9 +240,6 @@ enum LocalLineagePlan {
         key: DocKey,
         path: String,
         text: String,
-        /// The successor the other machine installed when it kept its copy
-        /// first, and the review its import opened here.
-        successor: Option<(String, String)>,
     },
 }
 
@@ -1500,11 +1497,15 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     } else {
         false
     };
+    let mut retired = None;
     if disposition != ImportedHeadDisposition::Diverged {
         if let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition) {
             match error {
                 SyncError::RetryableState { .. } => {
-                    disposition = ImportedHeadDisposition::Diverged;
+                    retired = retired_kept_predecessor(tx, payload, key.as_ref(), disposition)?;
+                    if retired.is_none() {
+                        disposition = ImportedHeadDisposition::Diverged;
+                    }
                 }
                 error => return Err(error),
             }
@@ -1547,8 +1548,24 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     true,
                 )?,
             );
+            let revived = retired.is_some();
+            if let (Some(lineage), Some(key)) = (retired, key.as_ref()) {
+                lineage.reinstall_in_tx(tx, key, envelope.recorded_at_ms)?;
+            }
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
-            close_imported_conflict(tx, payload)?;
+            if revived && payload.chosen_from == ResolveChoiceV1::Current {
+                // This machine's conflict holds the kept copy as its incoming side.
+                close_imported_conflict(
+                    tx,
+                    &ConflictResolveV1 {
+                        chosen_from: ResolveChoiceV1::Incoming,
+                        resolution: ResolutionV1::AppliedIncoming,
+                        ..payload.clone()
+                    },
+                )?;
+            } else {
+                close_imported_conflict(tx, payload)?;
+            }
         }
         ImportedHeadDisposition::AlreadyResult => {
             for shadow in &validated.shadows {
@@ -2190,6 +2207,51 @@ fn preflight_imported_lineage(
         });
     }
     Ok(())
+}
+
+/// The other machine kept its copy over this machine's deletion, which
+/// retired the lineage its resolution replaces. Rebuild that lineage, as a
+/// machine that kept the note holds it, so the import installs the successor
+/// and closes this machine's open conflict. None leaves a review to open.
+fn retired_kept_predecessor(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    key: Option<&DocKey>,
+    disposition: ImportedHeadDisposition,
+) -> Result<Option<crate::ydoc_apply::RetiredLineage>, SyncError> {
+    let (Some(key), Some(transition)) = (key, payload.lineage_transition.as_ref()) else {
+        return Ok(None);
+    };
+    let deletion_open: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2 \
+               AND status='open' AND current_exists=0 AND incoming_object_id=?3)",
+            params![payload.workspace_id, payload.conflict_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if disposition != ImportedHeadDisposition::ReviewedSide
+        || transition.successor.is_none()
+        || payload.incoming.present().is_some()
+        || !deletion_open
+        || dohc_engine_collab::read_marker_in(tx, key)
+            .map_err(map_local_collab_error)?
+            .is_some()
+        || live_document_bound(tx, key)?
+    {
+        return Ok(None);
+    }
+    let claim = Some(transition.predecessor_claim_id.as_str());
+    let lineage = match crate::ydoc_apply::retired_lineage_in_tx(tx, key, claim) {
+        Err(SyncError::SyncedDeletionRevivalRefused) => return Ok(None),
+        Err(SyncError::RetryableState { .. }) => return Ok(None),
+        rebuilt => rebuilt?,
+    };
+    let replaced = lineage.has_state(
+        &transition.predecessor_state_vector_sha256,
+        &transition.predecessor_delete_set_sha256,
+    );
+    Ok(replaced.then_some(lineage))
 }
 
 struct RivalSuccessor {
@@ -3165,18 +3227,10 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 result.conflict.updated_at_ms,
             )?;
         }
-        LocalLineagePlan::RetiredIncoming {
-            key,
-            path,
-            text,
-            successor,
-        } => {
+        LocalLineagePlan::RetiredIncoming { key, path, text } => {
             let now_ms = result.conflict.updated_at_ms;
-            if let Some((claim, review)) = successor {
-                take_up_kept_successor_in_tx(tx, key, claim, review, now_ms)?;
-            } else {
-                crate::ydoc_apply::revive_retired_lineage_in_tx(tx, key, None, now_ms)?;
-            }
+            crate::ydoc_apply::retired_lineage_in_tx(tx, key, None)?
+                .reinstall_in_tx(tx, key, now_ms)?;
             crate::reconcile_imported_resulting_head_in_tx(
                 tx,
                 &key.workspace_id,
@@ -3628,87 +3682,13 @@ fn prepare_retired_incoming_lineage_in_tx(
     {
         return Ok(LocalLineagePlan::None);
     }
-    let successor = tx
-        .query_row(
-            "SELECT l.lineage_claim_id,l.open_conflict_id FROM ydoc_inactive_lineages l \
-             JOIN conflicts c ON c.workspace_id=l.workspace_id \
-               AND c.conflict_id=l.open_conflict_id \
-             WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
-               AND l.disposition='conflicting-successor' AND c.status='open' \
-             ORDER BY l.recorded_at_ms DESC LIMIT 1",
-            params![key.workspace_id, key.version_id, key.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
     Ok(LocalLineagePlan::RetiredIncoming {
         key,
         path: payload.paths[result.path_ref].clone(),
         text: result_text
             .ok_or_else(|| corrupt_local("kept text has no canonical body"))?
             .to_owned(),
-        successor,
     })
-}
-
-/// Keep the other machine's copy after that machine kept it first: take up
-/// the history this machine retired, then the successor the other machine
-/// installed over it, which the import here archived beside `review`.
-fn take_up_kept_successor_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    claim: &str,
-    review: &str,
-    now_ms: i64,
-) -> Result<(), SyncError> {
-    let refused = |error: SyncError| match error {
-        SyncError::Storage(_) => error,
-        _ => SyncError::SyncedDeletionRevivalRefused,
-    };
-    let (value, recorded_at_ms): (String, i64) = tx
-        .query_row(
-            "SELECT payload_json,recorded_at_ms FROM replication_log \
-             WHERE workspace_id=?1 AND op_kind='conflict.resolve' AND apply_disposition='applied' \
-               AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?2 \
-             ORDER BY rowid LIMIT 1",
-            params![key.workspace_id, claim],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?
-        .ok_or(SyncError::SyncedDeletionRevivalRefused)?;
-    let value: Value = serde_json::from_str(&value).map_err(SyncError::corrupt)?;
-    let context = ConflictResolveEnvelopeContext {
-        workspace_id: &key.workspace_id,
-        recorded_at_ms,
-    };
-    let payload = validate_conflict_resolve_v1(&value, context)
-        .map_err(refused)?
-        .payload;
-    let transition = payload
-        .lineage_transition
-        .as_ref()
-        .ok_or(SyncError::SyncedDeletionRevivalRefused)?;
-    let predecessor = Some(transition.predecessor_claim_id.as_str());
-    crate::ydoc_apply::revive_retired_lineage_in_tx(tx, key, predecessor, now_ms)?;
-    tx.execute(
-        "DELETE FROM ydoc_inactive_lineages \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-        params![key.workspace_id, key.version_id, key.object_id, claim],
-    )
-    .map_err(SyncError::persist)?;
-    let installed = commit_imported_lineage(tx, &payload, Some(key), now_ms);
-    installed.map_err(refused)?;
-    crate::ydoc_apply::take_up_logged_updates_in_tx(tx, key, claim, now_ms)?;
-    crate::refusal_notices::clear_conflict_in_tx(tx, &key.workspace_id, review)?;
-    tx.execute(
-        "UPDATE conflicts SET status='resolved',chosen_from='incoming', \
-         resolution='applied-incoming',updated_at_ms=?3 \
-         WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-        params![key.workspace_id, review, now_ms],
-    )
-    .map_err(SyncError::persist)?;
-    Ok(())
 }
 
 fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitionV1>, SyncError> {

@@ -2470,6 +2470,14 @@ pub(crate) fn record_credited_updates_in_tx(
 /// One received update a lineage replays: its author credit and bytes.
 pub type LoggedUpdate = (Option<String>, Option<ChangeAttribution>, Vec<u8>);
 
+/// Where a reinstalled lineage's base came from.
+pub enum LoggedBaseOrigin {
+    /// A base update this machine logged.
+    Update { origin_id: String, origin_seq: i64 },
+    /// The successor a logged resolution installed over `parent_claim_id`.
+    Successor { parent_claim_id: String },
+}
+
 /// Install a lineage this machine retired again, from its base and the
 /// updates it received for it. The caller has replayed `updates` over `base`
 /// and found every dependency met. Fails unless the base claims an absent
@@ -2479,7 +2487,7 @@ pub fn reinstall_lineage_in_tx(
     key: &DocKey,
     content_kind: ContentKind,
     base: &[u8],
-    base_origin: (&str, i64),
+    base_origin: &LoggedBaseOrigin,
     updates: &[LoggedUpdate],
     now_ms: i64,
 ) -> Result<(), CollabError> {
@@ -2492,23 +2500,42 @@ pub fn reinstall_lineage_in_tx(
             reason: "a retired Y.Doc lineage is already active".into(),
         });
     };
-    record_base_coordinate_in_tx(
-        tx,
-        BaseCoordinateRecord {
-            key,
-            lineage_claim_id: &base_snapshot_sha,
-            origin_id: base_origin.0,
-            origin_seq: base_origin.1,
-            relay_seq: None,
-            now_ms,
-        },
-    )?;
+    match base_origin {
+        LoggedBaseOrigin::Update {
+            origin_id,
+            origin_seq,
+        } => record_base_coordinate_in_tx(
+            tx,
+            BaseCoordinateRecord {
+                key,
+                lineage_claim_id: &base_snapshot_sha,
+                origin_id,
+                origin_seq: *origin_seq,
+                relay_seq: None,
+                now_ms,
+            },
+        )?,
+        LoggedBaseOrigin::Successor { parent_claim_id } => {
+            tx.execute(
+                "UPDATE ydoc_docs SET lineage_parent_claim_id=?4, lineage_epoch_tag=?5 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    parent_claim_id,
+                    doc.lineage_epoch_tag(),
+                ],
+            )
+            .map_err(map_sql)?;
+        }
+    }
     append_logged_updates_in_tx(tx, key, updates, now_ms)
 }
 
 /// Append updates received for `key`'s active lineage, skipping any it has
 /// already logged. The caller has replayed them over that lineage.
-pub fn append_logged_updates_in_tx(
+fn append_logged_updates_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     updates: &[LoggedUpdate],

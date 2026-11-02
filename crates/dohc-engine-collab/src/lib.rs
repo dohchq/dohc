@@ -47,7 +47,6 @@ mod scene_lifecycle;
 pub mod ydoc;
 
 pub use doc_cache::{CacheStats, RemoteAppendProbe, WriterDocCache};
-pub use durable::append_logged_updates_in_tx;
 pub use durable::{
     archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker, load_doc_in,
@@ -58,8 +57,8 @@ pub use durable::{
     replace_lineage_with_successor_in_tx, replace_reviewed_lineage_with_successor_in_tx,
     rewrite_bare_marker_content_kind, settle, validate_remote_update, AppendOutcome,
     BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CloseProjection,
-    CompactOutcome, FileExportLane, LineageClaimStatus, LineageGuard, LocalAppend, LoggedUpdate,
-    Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome,
+    CompactOutcome, FileExportLane, LineageClaimStatus, LineageGuard, LocalAppend, LoggedBaseOrigin,
+    LoggedUpdate, Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome,
     SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
