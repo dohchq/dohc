@@ -7756,6 +7756,122 @@ mod tests {
         assert_eq!(projected_ydoc_text(&mut store, &derived_key), "orphan edit");
     }
 
+    /// The machine that deleted `doc.md` kept this receiver's copy. Its
+    /// resolution has no current side and no lineage transition, and its result
+    /// is the receiver's own object and bytes.
+    fn peer_kept_receiver_copy() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        let (scratch, mut store, key, built) = receiver_fixture();
+        let mut payload = built.validated.payload;
+        let receiver_side = payload.current.clone();
+        let HeadV1::Present(mut result) = receiver_side.clone() else {
+            panic!("the fixture's current side is present");
+        };
+        result.latest_moment_id = "moment-result".to_owned();
+        result.updated_at_ms = 21;
+        payload.current = HeadV1::Absent { path_ref: 0 };
+        payload.incoming = receiver_side;
+        payload.result = HeadV1::Present(result);
+        payload.effect_context.current_object_created_at_ms = None;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload).expect("kept receiver copy carrier");
+        store
+            .write_with(&NoFaults, |tx| {
+                let payload = &built.validated.payload;
+                let conflict = TextConflict {
+                    conflict_id: payload.conflict_id.clone(),
+                    workspace_id: "ws".to_owned(),
+                    path: "doc.md".to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "peer".to_owned(),
+                    created_at_ms: 15,
+                    updated_at_ms: 15,
+                    status: ConflictStatus::Open,
+                    chosen_from: ConflictChoice::Current,
+                    resolution: None,
+                    metadata: ConflictMetadata::origin("sync"),
+                    base: ConflictFileState::text("doc.md", None),
+                    current: conflict_state_from_head(tx, payload, &payload.incoming)?,
+                    incoming: ConflictFileState::text("doc.md", None),
+                };
+                insert_text_conflict_if_absent(tx, &conflict).map_err(map_local_domain_error)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("receiver's own conflict row");
+        (scratch, store, key, built)
+    }
+
+    #[test]
+    fn receiver_with_editor_history_closes_an_applied_incoming_resolution_of_its_own_side() {
+        let (_scratch, mut store, key, built) = peer_kept_receiver_copy();
+        let claim = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id;
+        assert!(claim.is_some());
+        import_text_keep(&mut store, &built);
+        assert_eq!(text_keep_open_rows(&store), 0);
+        assert_eq!(text_keep_head(&mut store).text, "current text");
+        assert_eq!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id,
+            claim
+        );
+        assert_eq!(projected_ydoc_text(&mut store, &key), "current text");
+    }
+
+    #[test]
+    fn receiver_with_different_editor_bytes_does_not_close_an_applied_incoming_resolution() {
+        let (_scratch, mut store, key, built) = peer_kept_receiver_copy();
+        let doc = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        let update = doc.plaintext_insert(0, "extra ");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            20,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(projected_ydoc_text(&mut store, &key), "extra current text");
+        store
+            .write_with(&NoFaults, |tx| {
+                assert!(!unbound_receiver_lineages_match_reviewed_sides(
+                    tx,
+                    &built.validated.payload
+                )?);
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.recorded_at_ms = built.validated.payload.effect_context.recorded_at_ms;
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let status: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status FROM conflicts WHERE conflict_id='conflict-1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "open");
+    }
+
     fn projected_ydoc_text(store: &mut EngineStore, key: &DocKey) -> String {
         let marker = dohc_engine_collab::read_marker(store, key)
             .expect("read receiver marker")
