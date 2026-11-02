@@ -5333,6 +5333,7 @@ export function DesktopWorkspaceShell(props: {
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onError={reportFailureMessage}
+        onChangeSucceeded={clearIdentity}
         onNewCollection={setNewCollectionFolder}
       />
     </>
