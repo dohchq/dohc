@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isLiveFolderMoveRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import { isFolderMoveRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -394,7 +394,7 @@ export function useShellError(workspaceId: string) {
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
-      const title = failure.title ?? (isLiveFolderMoveRefusal(failure.cause) ? readError(failure.cause).title : undefined);
+      const title = failure.title ?? (isFolderMoveRefusal(failure.cause) ? readError(failure.cause).title : undefined);
       const action = failure.action ??
         (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
       const details: ReadonlyArray<ErrorDetailField> = [

@@ -345,7 +345,7 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
-  if (name === "LiveFolderMoveError") {
+  if (name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError") {
     const [title = "", ...body] = message.split("\n");
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
@@ -559,6 +559,12 @@ export function isRestorePolicyRefusal(error: unknown): boolean {
 /** A folder move refused while a page in it has live editing on. Try again reruns the move. */
 export function isLiveFolderMoveRefusal(error: unknown): boolean {
   return parse(error).name === "LiveFolderMoveError";
+}
+
+/** Any refused folder move, live or with History off. Both carry a title and a body. */
+export function isFolderMoveRefusal(error: unknown): boolean {
+  const { name } = parse(error);
+  return name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
