@@ -40,6 +40,8 @@ import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   createWorkspaceEngineCapture,
+  LIVE_FOLDER_MOVE_BODY,
+  LiveFolderMoveError,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -66,6 +68,7 @@ import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
 import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
+import {openLiveFolderMoveFixture} from "../testing/liveFolderMoveFixture";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -3055,3 +3058,34 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
     try { await capture?.stop().catch(() => undefined); } finally { await owner?.close(); await relayServer.stop(); }
   }
 }, 120_000);
+
+describe.skipIf(engine.missing)("a folder move over a page the owner has live", () => {
+  const page = "box/inner/page";
+  const refused = async (fixture: Awaited<ReturnType<typeof openLiveFolderMoveFixture>>) => {
+    const before = fixture.outbound(page);
+    const moving = fixture.moveByHand("notes/box", "notes/moved");
+    await expect(moving).rejects.toBeInstanceOf(LiveFolderMoveError);
+    await expect(moving).rejects.toThrow(LIVE_FOLDER_MOVE_BODY);
+    expect(await fixture.read(`notes/${page}.md`)).toContain(`Page ${page} body.`);
+    await expect(stat(join(fixture.rootPath, "notes", "moved"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fixture.outbound(page)).toBe(before);
+  };
+
+  it("refuses the move while the page has no edit", async () => {
+    const fixture = await openLiveFolderMoveFixture({ workspaceId: `folder-owned-${randomUUID()}`, compiledRelayMain,
+      engineExecutable: engine.require(), pages: [page] });
+    try { await refused(fixture); } finally { await fixture.close(); }
+  }, 240_000);
+
+  it("refuses the move while an accepted edit has not reached the owner", async () => {
+    const fixture = await openLiveFolderMoveFixture({ workspaceId: `folder-in-flight-${randomUUID()}`, compiledRelayMain,
+      engineExecutable: engine.require(), pages: [page] });
+    try {
+      const owned = fixture.ownerAccepted(page);
+      fixture.refuseLogPulls(true);
+      await fixture.edit(page, " in flight");
+      expect(fixture.ownerAccepted(page)).toBe(owned);
+      await refused(fixture);
+    } finally { await fixture.close(); }
+  }, 240_000);
+});
