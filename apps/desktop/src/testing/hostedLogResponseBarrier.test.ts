@@ -1,7 +1,7 @@
-import { createServer, get, request, type RequestListener } from "node:http";
+import { createServer, get, type RequestListener } from "node:http";
 import { createConnection } from "node:net";
 import { once } from "node:events";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 
 async function withProxy(
@@ -150,37 +150,66 @@ it("reports an abandoned captured client and serves its retry through the next b
 });
 
 // #3089: T7 reads `delayMs` as one delay each way. A request body that
-// arrives with its headers must not wait a second time.
+// arrives with its headers must not wait a second time. The proxy's clock is
+// faked, so each leg is checked at its deadline and one millisecond before,
+// and only loopback I/O runs for real.
 it("delays a buffered POST once each way and keeps its chunks in order", async () => {
   const delayMs = 500;
-  let received: { body: string; at: number } | undefined;
+  const ioTurn = () => new Promise<void>(resolve => setImmediate(resolve));
+  const until = async (ready: () => boolean) => { while (!ready()) await ioTurn(); };
+  const upstreamHeads: string[] = [];
+  let received: string | undefined;
+  let answer: (() => void) | undefined;
   await withProxy((incoming, response) => {
+    upstreamHeads.push(`${incoming.method} ${incoming.url}`);
     const chunks: Buffer[] = [];
     incoming.on("data", chunk => chunks.push(Buffer.from(chunk)));
     incoming.once("end", () => {
-      received = { body: Buffer.concat(chunks).toString("utf8"), at: performance.now() };
-      response.end("answered");
+      received = Buffer.concat(chunks).toString("utf8");
+      answer = () => response.end("answered");
     });
   }, async proxy => {
     proxy.setDelayMs(delayMs);
-    const sent = performance.now();
-    const answered = new Promise<{ body: string; at: number }>((resolve, reject) => {
-      const post = request(`${proxy.origin}/sync/workspace/push`, { method: "POST" }, response => {
-        const chunks: Buffer[] = [];
-        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
-        response.once("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), at: performance.now() }));
-      });
-      post.once("error", reject);
-      for (const chunk of ["one,", "two,", "three"]) post.write(chunk);
-      post.end();
-    });
-    const answer = await answered;
-    expect(received?.body).toBe("one,two,three");
-    expect(answer.body).toBe("answered");
-    const upstream = received!.at - sent, downstream = answer.at - received!.at;
-    expect(upstream).toBeGreaterThanOrEqual(delayMs - 5);
-    expect(upstream).toBeLessThan(delayMs * 1.5);
-    expect(downstream).toBeGreaterThanOrEqual(delayMs - 5);
-    expect(downstream).toBeLessThan(delayMs * 1.5);
+    const client = createConnection(Number(new URL(proxy.origin).port), "127.0.0.1");
+    const replied: Buffer[] = [];
+    let closed = false;
+    client.on("data", chunk => replied.push(Buffer.from(chunk)));
+    client.once("close", () => { closed = true; });
+    await once(client, "connect");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      // Headers and three body chunks reach the proxy in one write.
+      client.write("POST /sync/workspace/push HTTP/1.1\r\nHost: proxy.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        + "4\r\none,\r\n4\r\ntwo,\r\n5\r\nthree\r\n0\r\n\r\n");
+      // The write arrives in one read, so its headers and body set their
+      // timers together. A body delayed only after the headers go has none yet.
+      await until(() => vi.getTimerCount() > 0);
+      expect(vi.getTimerCount()).toBe(2);
+      vi.advanceTimersByTime(delayMs - 1);
+      expect(vi.getTimerCount()).toBe(2);
+      expect(upstreamHeads).toEqual([]);
+      vi.advanceTimersByTime(1);
+      // At the deadline both leave together: no timer is left, and the
+      // upstream gets the headers and the whole body.
+      await until(() => received !== undefined || vi.getTimerCount() > 0);
+      expect(received).toBe("one,two,three");
+      expect(upstreamHeads).toEqual(["POST /sync/workspace/push"]);
+      expect(vi.getTimerCount()).toBe(0);
+
+      answer!();
+      await until(() => vi.getTimerCount() === 2);
+      vi.advanceTimersByTime(delayMs - 1);
+      expect(vi.getTimerCount()).toBe(2);
+      expect(replied).toEqual([]);
+      vi.advanceTimersByTime(1);
+      await until(() => closed || vi.getTimerCount() > 0);
+      expect(closed).toBe(true);
+      const reply = Buffer.concat(replied).toString("utf8");
+      expect(reply).toMatch(/^HTTP\/1\.1 200 OK\r\n/u);
+      expect(reply.slice(reply.indexOf("\r\n\r\n") + 4)).toBe("answered");
+    } finally {
+      vi.useRealTimers();
+      client.destroy();
+    }
   });
 });
