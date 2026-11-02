@@ -516,6 +516,85 @@ async fn set_active_forced_scan_stamps_fence_provenance() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_active_forced_scan_keeps_an_unfinished_first_import() {
+    // A switch queued behind a timed-out first import can take the capture
+    // gate before live capture records the rest of the import. The forced
+    // scan must record those files under the import, not the fence.
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (scratch, transport, handle, workspace_id) = fixture("first-import", service).await;
+    let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
+    let store = rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db"))
+        .expect("open store");
+    store
+        .execute(
+            "UPDATE capture_first_imports SET finished = 0 WHERE workspace_id = ?1",
+            [&workspace_id],
+        )
+        .expect("leave the first import unfinished");
+    let import_id: String = store
+        .query_row(
+            "SELECT correlation_id FROM capture_first_imports WHERE workspace_id = ?1",
+            [&workspace_id],
+            |row| row.get(0),
+        )
+        .expect("first import id");
+    drop(store);
+
+    probe.pause_next_version_fence();
+    let switch_transport = Arc::clone(&transport);
+    let switch_handle = handle.clone();
+    let switch_workspace = workspace_id.clone();
+    let switch_feature = feature.clone();
+    let switching = tokio::spawn(async move {
+        switch_to(
+            &switch_transport,
+            &switch_handle,
+            &switch_workspace,
+            &switch_feature,
+            3,
+        )
+        .await
+    });
+    bounded(
+        "setActive pre-scan probe",
+        probe.wait_until_version_fence_paused(),
+    )
+    .await;
+    std::fs::write(scratch.path().join("imported.md"), "left by the import").expect("new file");
+    std::fs::write(scratch.path().join("notes.md"), "pre-switch edit").expect("external edit");
+    probe.release_version_fence();
+    bounded("setActive task", switching)
+        .await
+        .expect("switch task")
+        .expect("switch");
+
+    let listed = call(
+        &transport,
+        &handle,
+        4,
+        "moments.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
+    let moments = listed["moments"].as_array().expect("moments page");
+    let moment = |path: &str, text: &str| {
+        moments
+            .iter()
+            .find(|moment| moment["path"] == path && moment["afterText"] == text)
+            .unwrap_or_else(|| panic!("the fence captured {path}"))
+    };
+    let imported = moment("imported.md", "left by the import");
+    assert_eq!(imported["metadataSummary"], "Added existing files");
+    assert_eq!(imported["metadataCorrelationId"], import_id.as_str());
+    assert_eq!(
+        moment("notes.md", "pre-switch edit")["metadataSummary"],
+        "Saved latest edits before switching versions",
+        "a recorded file keeps the fence's own label"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_fails_closed_when_the_forced_scan_is_degraded() {
