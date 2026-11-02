@@ -35,6 +35,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::PostCommitMaterializeOutcome;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_sync::LivePageUnderFolder;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -197,6 +198,9 @@ struct VersionedTextCheckMoveParams {
     path: String,
     #[serde(default)]
     author: Option<Value>,
+    /// A folder move also waits for a page under it that this computer owns.
+    #[serde(default)]
+    folder: bool,
 }
 
 #[derive(Deserialize)]
@@ -722,6 +726,29 @@ impl EngineService {
         validated_author(params.author.as_ref())?;
         let open = self.open(request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        if params.folder {
+            let live = Self::read_under_ctx(
+                &cancellation,
+                "versionedText.checkMove",
+                open.actor.live_page_under_folder(
+                    open.workspace_id.clone(),
+                    params.version_id,
+                    params.path,
+                ),
+            )
+            .await?;
+            return match live {
+                None => Ok(json!({"allowed":true})),
+                Some(LivePageUnderFolder::Hosted) => Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "live-document-binding-active",
+                )),
+                Some(LivePageUnderFolder::Owned) => Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "live-folder-page-owned",
+                )),
+            };
+        }
         Self::read_under_ctx(
             &cancellation,
             "versionedText.checkMove",

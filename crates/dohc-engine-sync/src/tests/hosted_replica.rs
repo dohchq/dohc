@@ -5954,6 +5954,32 @@ fn a_released_activation_no_longer_holds_a_folder_move() {
     );
 }
 
+/// A page this computer hosts refuses a move of the folder it is in, and the
+/// folder check names it hosted, not owned.
+#[test]
+fn a_hosted_page_refuses_a_move_of_its_folder() {
+    let (_scratch, _path, mut store, _client) = departing_b();
+    let lineage = activate(&mut store, "doc-b");
+    adopt_activation(&mut store, "doc-b", &lineage, "relay");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_owner_activations SET binding_json=json_object('currentPath','notes/a.md')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let check = |folder: &str| {
+        store
+            .read_with(|conn| crate::live_page_under_folder(conn, "ws", "main", folder))
+            .unwrap()
+    };
+    assert_eq!(check("notes"), Some(crate::LivePageUnderFolder::Hosted));
+    assert_eq!(check("note"), None);
+}
+
 /// Parking keeps the existing restore check: a document whose restore has
 /// not resumed stays departed.
 #[test]

@@ -211,7 +211,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { folderMoveIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -3862,6 +3862,10 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
+      // A folder move that succeeds takes back its earlier refusal.
+      for (const change of changes) {
+        if (change.kind === "folder") clearIdentity(folderMoveIdentity(workspaceId, change));
+      }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
       // notice on the old path while the tab remaps to the new one.
@@ -3887,7 +3891,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [mutateWb, workspaceId],
+    [clearIdentity, mutateWb, workspaceId],
   );
 
   const {

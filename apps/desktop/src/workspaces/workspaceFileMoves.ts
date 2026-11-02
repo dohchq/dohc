@@ -257,6 +257,17 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
   return prepareMoveWorkspacePath(operation, input, author, options);
 }
 
+// A folder move from the app while History is off: without capture, dohc
+// can't check the folder for live pages. The message is the title, a line
+// break, then the body.
+export const FOLDER_MOVE_HISTORY_OFF_BODY = "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
+export function folderMoveHistoryOffTitle(folder: string): string {
+  return `dohc can't move "${folder}" while History is off`;
+}
+export class FolderMoveHistoryOffError extends Error {
+  override name = "FolderMoveHistoryOffError";
+}
+
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
   person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
@@ -266,16 +277,19 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     const destinationError = workspaceDestinationError(prepared.physicalToPath, process.platform);
     if (destinationError) throw new Error(destinationError);
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
-      if (options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
-      const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath);
+      if (!options.capture) {
+        throw new FolderMoveHistoryOffError(`${folderMoveHistoryOffTitle(prepared.physicalFromPath)}\n${FOLDER_MOVE_HISTORY_OFF_BODY}`);
+      }
+      assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
+      const finishRename = await options.capture.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath, true);
       try {
         await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
         markChanged();
-        await finishRename?.(true);
+        await finishRename(true);
         return { path: prepared.visibleResultPath, undo: { available: false,
           reason: folderMoveReason(prepared.physicalFromPath, prepared.physicalToPath), paths: [] } };
       } catch (error) {
-        await finishRename?.(false);
+        await finishRename(false);
         throw error;
       }
     }
@@ -442,8 +456,10 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
         try { const changed = await work(null); ok = "done" in changed; return changed; }
         finally { await finish?.(ok); }
       };
+      // A folder's pages are refused while any is live on this computer.
+      const folder = await lstat(join(rootPath, endpoints[0]!)).then(entry => entry.isDirectory(), () => false);
       const changed = await (options.capture && endpoints.every(engineAddresses)
-        ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId }, work, () => gone)
+        ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId, ...(folder ? { folder } : {}) }, work, () => gone)
         : fallback());
       if ("failed" in changed) return changed;
       const { recovery, from, to, overwritten, ...done } = changed.done;

@@ -4484,3 +4484,43 @@ describe("documents too large for live editing", () => {
     expect(await screen.findByTestId("tab-notes/large.md")).toBeTruthy();
   });
 });
+
+describe("a refused folder move", () => {
+  const TITLE = `dohc can't move "box" while a page in it has live editing on`;
+  const BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
+  it("goes away when the same move later succeeds by hand", async () => {
+    const refusal = new Error(`Error invoking remote method 'desktop:move-workspace-path': LiveFolderMoveError: ${TITLE}\n${BODY}`);
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn().mockRejectedValueOnce(refusal).mockResolvedValueOnce({ path: "moved", undo: { available: false, reason: "", paths: [] } }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "box/page.md", kind: "file" as const }], folders: ["box"] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const rename = async () => {
+      const row = (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "box")!;
+      await user.click(row);
+      await user.keyboard("{F2}");
+      const input = await screen.findByTestId("tree-edit-input");
+      await user.clear(input);
+      await user.type(input, "moved{Enter}");
+    };
+    await rename();
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(TITLE);
+    expect(toast.textContent).toContain(BODY);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = (await within(notices).findByText(TITLE)).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    // The person stops live editing, then renames the folder again.
+    await rename();
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "box", toPath: "moved" });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const reopened = await screen.findByTestId("notice-center");
+    expect(within(reopened).queryByText(TITLE)).toBeNull();
+  });
+});

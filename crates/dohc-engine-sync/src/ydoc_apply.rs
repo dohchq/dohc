@@ -3363,6 +3363,45 @@ pub fn ensure_no_adopted_owner_under_path(
     Ok(())
 }
 
+/// Why a folder move must wait: a page under the folder is live on this
+/// computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivePageUnderFolder {
+    /// This computer hosts the page: its activation is current.
+    Hosted,
+    /// This computer owns the page: it has an owner binding.
+    Owned,
+}
+
+/// The live page a move of `folder` would split, if any. A folder move
+/// changes no Y.Doc, so nothing refuses it later: the watcher then retires
+/// the moved page, deleting its Y.Doc and sending a delete. An owned page
+/// is found by its head's path, which a rename keeps current, and only
+/// strictly under the folder.
+pub fn live_page_under_folder(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    folder: &str,
+) -> Result<Option<LivePageUnderFolder>, SyncError> {
+    match ensure_no_adopted_owner_under_path(conn, workspace_id, version_id, folder) {
+        Err(SyncError::LiveDocumentBindingActive) => return Ok(Some(LivePageUnderFolder::Hosted)),
+        other => other?,
+    }
+    let owned: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings b
+               JOIN snapshots s ON s.workspace_id=b.workspace_id
+                 AND s.version_id=b.main_version_id AND s.object_id=b.object_id
+             WHERE b.workspace_id=?1 AND b.main_version_id=?2
+               AND substr(s.path,1,length(?3)+1)=?3||'/')",
+            params![workspace_id, version_id, folder],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(owned.then_some(LivePageUnderFolder::Owned))
+}
+
 fn ensure_adopted_owner_binding_unchanged(
     conn: &Connection,
     key: &DocKey,

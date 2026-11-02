@@ -164,6 +164,25 @@ export class LiveDocumentMutationError extends Error {
   override name = "LiveDocumentMutationError";
 }
 
+export const LIVE_FOLDER_MOVE_BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
+
+export function liveFolderMoveTitle(folder: string): string {
+  return `dohc can't move "${folder}" while a page in it has live editing on`;
+}
+
+// A folder move the engine refuses because a page under the folder is live on
+// this computer. The message is the title, a line break, then the body.
+export class LiveFolderMoveError extends LiveDocumentMutationError {
+  override name = "LiveFolderMoveError";
+}
+
+function liveFolderMoveRefusal(error: unknown, folder: string): Error | null {
+  if (!(error instanceof DaemonRefusalError)) return null;
+  // A hosted page and an owned page read the same.
+  if (error.message !== "live-document-binding-active" && error.message !== "live-folder-page-owned") return null;
+  return new LiveFolderMoveError(`${liveFolderMoveTitle(folder)}\n${LIVE_FOLDER_MOVE_BODY}`, { cause: error });
+}
+
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export async function probeEngineStoreRefusal(
@@ -771,7 +790,8 @@ export interface WorkspaceEngineCapture {
   // linked-chat rail keys on — and registers the expected watcher
   // observations. All other shapes (folders, binary, untracked) return a
   // no-op finisher and are captured as delete+write by the normal path.
-  beginFileRename(fromPath: string, toPath: string): Promise<WorkspaceEngineRenameFinisher>;
+  // `folder`: the source is a folder, so a page this computer owns under it refuses the move too.
+  beginFileRename(fromPath: string, toPath: string, folder?: boolean): Promise<WorkspaceEngineRenameFinisher>;
   // Runs an author's move or delete of `paths` while capture records nothing,
   // so the rows `work` records are the only rows the change leaves. Live
   // documents at or under the paths settle and close first. A move first
@@ -782,7 +802,7 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string },
+    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string; folder?: boolean },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
@@ -6366,10 +6386,11 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureAllowed = async (author?: MomentWriteAuthor) => {
           for (const [index, path] of paths.entries()) {
+            const folder = index === 0 && authored.operation === "move" && authored.folder === true;
             try {
-              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}) });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(folder ? { folder } : {}) });
             } catch (error) {
-              throw liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
+              throw (folder ? liveFolderMoveRefusal(error, path) : null) ?? liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
             }
           }
         };
@@ -7862,7 +7883,7 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    beginFileRename(fromPath, toPath) {
+    beginFileRename(fromPath, toPath, folder = false) {
       // Held from the vacate until the finisher reports the outcome, so a debt
       // registered inside the window cannot settle an endpoint mid-move.
       // Opened after the drain below, never before: the drain's own
@@ -7873,9 +7894,9 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureMoveAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: fromPath });
+            await engine.checkMove({ workspaceId, versionId, path: fromPath, ...(folder ? { folder } : {}) });
           } catch (error) {
-            throw liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
+            throw (folder ? liveFolderMoveRefusal(error, fromPath) : null) ?? liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
           }
         };
         await ensureMoveAllowed();

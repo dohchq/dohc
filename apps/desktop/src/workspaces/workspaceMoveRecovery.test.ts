@@ -557,7 +557,7 @@ it.each([false, true])("keeps a person's folder on the base capture path with un
   const moved = await f.move("folder", renameOnly ? "renamed" : "archive/folder");
   expect(moved).toEqual({ path: renameOnly ? "renamed" : "archive/folder", undo: { available: false, paths: [],
     reason: `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.` } });
-  expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder");
+  expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder", true);
   expect(finished).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
   await expect(readdir(join(f.rootPath, ".dohc/local/trash"))).rejects.toMatchObject({ code: "ENOENT" });
 });

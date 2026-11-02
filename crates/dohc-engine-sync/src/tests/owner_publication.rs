@@ -9,6 +9,11 @@ use dohc_engine_collab::{
 };
 
 pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+    fixture_at("owner.md")
+}
+
+/// The owner fixture with its page at `path`.
+fn fixture_at(path: &str) -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let (dir, _, mut store) = open_store();
     seed_identity(&mut store);
     VersionedTextStore::new(&mut store)
@@ -22,7 +27,7 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     seed_text_head(
         &mut store,
         "owner",
-        "owner.md",
+        path,
         fixture["markdown"].as_str().unwrap(),
     );
     let key = DocKey::new("ws", "main", "owner").unwrap();
@@ -49,8 +54,8 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
             main_version_id: "main".into(),
             object_id: "owner".into(),
             lineage_claim_id: dohc_engine_storage::hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -65,8 +70,7 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     };
     store
         .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
-                .unwrap();
+            tx.execute("UPDATE ydoc_docs SET path=?1", [path]).unwrap();
             install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
         })
         .unwrap();
@@ -786,6 +790,115 @@ fn reused_accepted_state_charges_a_fresh_read_and_drops_refused_bytes() {
             // The next proof reads afresh and charges what the first one did.
             assert_eq!(read(&observed.checkpoint_digest), first);
             Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+fn folder_check(store: &EngineStore, folder: &str) -> Option<crate::LivePageUnderFolder> {
+    store
+        .read_with(|conn| crate::live_page_under_folder(conn, "ws", "main", folder))
+        .unwrap()
+}
+
+/// A page this computer owns refuses a move of any folder above it, before
+/// any edit arrives, but not a move of the page itself or of a sibling that
+/// shares the folder's name as a prefix.
+#[test]
+fn an_owned_page_refuses_a_move_of_each_folder_above_it() {
+    let (_dir, store, _, _) = fixture_at("notes/box/inner/owner.md");
+    for folder in ["notes/box/inner", "notes/box", "notes"] {
+        assert_eq!(
+            folder_check(&store, folder),
+            Some(crate::LivePageUnderFolder::Owned),
+            "{folder}"
+        );
+    }
+    for path in [
+        "notes/box/inner/owner.md",
+        "notes/bo",
+        "notes/box/in",
+        "other",
+    ] {
+        assert_eq!(folder_check(&store, path), None, "{path}");
+    }
+    let (_dir, store, _, _) = fixture_at("notes/box2/owner.md");
+    assert_eq!(folder_check(&store, "notes/box"), None);
+}
+
+/// The page's head is where the folder check looks, so a binding's stale
+/// `currentPath` neither hides the page nor refuses a folder it left.
+#[test]
+fn an_owned_page_is_found_by_its_head_not_its_binding_path() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','elsewhere/owner.md')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+    assert_eq!(folder_check(&store, "elsewhere"), None);
+}
+
+/// An accepted edit installed in the owned page, but not yet settled into
+/// its file, leaves the folder move refused.
+#[test]
+fn an_owned_page_with_an_unsaved_accepted_edit_refuses_a_folder_move() {
+    let (_dir, mut store, observed, checkpoint) = fixture_at("notes/box/owner.md");
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("collaborator edit");
+    store
+        .write_with(&NoFaults, |tx| {
+            apply_frame_in_tx(
+                tx,
+                "ws",
+                &OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: 1,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: 0,
+                    journal_cursor: 1,
+                    update_bytes: update,
+                },
+                3,
+            )
+        })
+        .unwrap();
+    let accepted: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT accepted_cursor FROM ydoc_owner_bindings",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(accepted, 1, "the edit is installed");
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+}
+
+/// A folder with no live page moves, and a single-path move of the owned page
+/// keeps its own check, which reads only the host's activations.
+#[test]
+fn a_folder_without_a_live_page_moves_and_the_page_check_is_unchanged() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    seed_text_head(&mut store, "plain", "drafts/plain.md", "plain");
+    assert_eq!(folder_check(&store, "drafts"), None);
+    store
+        .read_with(|conn| {
+            crate::ensure_no_adopted_owner_under_path(conn, "ws", "main", "notes/box/owner.md")
         })
         .unwrap();
 }

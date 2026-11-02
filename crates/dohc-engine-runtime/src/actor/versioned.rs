@@ -135,6 +135,29 @@ impl ActorHandle {
         .await
     }
 
+    /// The live page on this computer that a move of `folder` would split.
+    pub async fn live_page_under_folder(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        folder: String,
+    ) -> Result<Option<dohc_engine_sync::LivePageUnderFolder>, RuntimeError> {
+        self.run(move |store, _| {
+            let folder = dohc_engine_domain::validate_addressable_plaintext_path(&folder)?;
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::live_page_under_folder(
+                        conn,
+                        &workspace_id,
+                        &version_id,
+                        &folder,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// Execute a versioned-text write on the actor's single writer thread.
     pub async fn versioned_text_write(
         &self,
