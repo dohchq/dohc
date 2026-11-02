@@ -7839,6 +7839,28 @@ mod tests {
         assert_eq!(status, "open");
     }
 
+    /// A live editor binding owns the receiver's lineage, as it does for a
+    /// local resolution, so a received resolution of it opens a review.
+    #[test]
+    fn receiver_with_a_live_document_binding_does_not_close_an_applied_incoming_resolution() {
+        let (_scratch, mut store, key, built) = peer_kept_receiver_copy();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO live_device_application_bindings VALUES \
+                     ('relay',?1,?2,?3,'lineage','doc.md','[]',0,'host',1,'instance','connection',1,NULL)",
+                    params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                assert!(!unbound_receiver_lineages_match_reviewed_sides(
+                    tx,
+                    &built.validated.payload
+                )?);
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    }
+
     fn open_deletion_conflict(
         store: &mut EngineStore,
         current: Option<TextSnapshot>,
