@@ -165,11 +165,12 @@ export function useShellError(workspaceId: string) {
   // "quiet" updates the row it replaces where it stands, with its id, time
   // and toast, so it never takes the toast from a newer row; with no row to
   // replace it files one without a toast.
+  // A row that tests and other surfaces name passes a fixed `id`.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
       if (currentWorkspace.current !== workspaceId) return;
       nextId.current += 1;
-      const id = `shell-error-${nextId.current}`;
+      const id = error.id ?? `shell-error-${nextId.current}`;
       const atMs = Date.now();
       const message =
         error.message.length > SHELL_ERROR_MAX_CHARS
@@ -538,6 +539,35 @@ export function useShellError(workspaceId: string) {
       });
     },
     [clearKind, push],
+  );
+  // History stopped recording for this workspace. Its identity names the
+  // workspace, so a later report replaces the row and a healthy status
+  // clears it; null clears it. `reasons` are extra Copy error details lines,
+  // such as the path a failure names. A report repeated unchanged keeps its
+  // toast closed unless `toast` asks for it again.
+  const showHistoryPaused = useCallback(
+    (notice: {
+      retry: () => void | false; openHistory: () => void; toast?: boolean;
+      cause?: string; reasons?: ReadonlyArray<ErrorDetailField>;
+    } | null) => {
+      const identity = `history-capture:${workspaceId}`;
+      if (notice === null) {
+        clearIdentity(identity);
+        return;
+      }
+      const details: ErrorDetailField[] = [...(notice.reasons ?? []), ...(notice.cause ? [["Cause", notice.cause] as const] : [])];
+      push({
+        id: "history-capture-failed",
+        identity,
+        // Placeholder words, waiting for the design lead.
+        title: "History paused",
+        message: "dohc could not record recent changes. Some changes may be missing from History.",
+        ...(details.length ? { details } : {}),
+        retry: notice.retry,
+        action: { label: "Open History", run: notice.openHistory, reads: true },
+      }, notice.toast ? false : "repeat");
+    },
+    [clearIdentity, push, workspaceId],
   );
   // An import that skipped sources: a title, then a line for each one. dohc
   // wrote every line, so the lines are shown as they are.
@@ -956,6 +986,7 @@ export function useShellError(workspaceId: string) {
     showRetainedCopies,
     showSavedTabsNotice,
     reportRecoveryUnavailable,
+    showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,

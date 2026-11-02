@@ -908,6 +908,7 @@ export function DesktopWorkspaceShell(props: {
     showRetainedCopies,
     showSavedTabsNotice,
     reportRecoveryUnavailable,
+    showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -5712,6 +5713,25 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  // History stopped recording. Try again keeps its row, busy, until the
+  // restart answers: one that runs again clears the row, and a failure shows
+  // it again with its toast.
+  const retryHistoryCapture = useCallback((): false => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor || !setShellRetryBusy(`history-capture:${askedFor}`, true)) return false;
+    void bridge().retryHistoryCapture({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      showHistoryPaused(null);
+    }, (error: unknown) => {
+      if (workspaceIdRef.current !== askedFor) return;
+      const { cause } = readError(error);
+      showHistoryPaused({ retry: retryHistoryCapture, openHistory: openHistoryView, toast: true, ...(cause ? { cause } : {}) });
+    });
+    return false;
+  }, [workspaceId, setShellRetryBusy, showHistoryPaused, openHistoryView]);
+  useEffect(() => {
+    showHistoryPaused(historyPaused ? { retry: retryHistoryCapture, openHistory: openHistoryView } : null);
+  }, [historyPaused, showHistoryPaused, retryHistoryCapture, openHistoryView]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
   useEffect(() => {
     if (syncStatus?.outsideWriteCopies === undefined) return;

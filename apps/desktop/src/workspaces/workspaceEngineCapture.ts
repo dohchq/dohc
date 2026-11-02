@@ -563,6 +563,9 @@ export interface WorkspaceEngineCapture {
   observeFileEvents(events: readonly WatcherEvent[]): void;
   resyncFileObservation(): Promise<void>;
   observationDrainFailed(): void;
+  // Restarts daemon capture that stopped and publishes a healthy outcome
+  // only once capture runs again. Rejects while History is still paused.
+  retryHistoryCapture(): Promise<void>;
   // Updates the daemon capture owner's live authorship state. Starting a run
   // is ordered before the caller launches agent work; clearing first flushes
   // the daemon so every write observed during the run retains its author.
@@ -6258,6 +6261,25 @@ export function createWorkspaceEngineCapture(
     },
 
     observationDrainFailed() { observationDrainUnavailable = true; },
+
+    async retryHistoryCapture() {
+      const engine = await engineStore();
+      if (!engine.retryCapture) throw new Error("This workspace cannot restart History.");
+      // Off the capture chain: the restart scans the whole folder, and
+      // document opens wait on the chain.
+      await engine.retryCapture();
+      // On the chain, so a health poll that started before the restart
+      // cannot publish its stale failure after this outcome.
+      await enqueueResult("history capture retry", async () => {
+        let healthy = false;
+        await reportCaptureOutcome(async () => {
+          const status = await engine.watcherStatus?.();
+          healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
+          return healthy;
+        });
+        if (!healthy || deadYDocSessions.size > 0) throw new Error("History is still paused.");
+      });
+    },
 
     async saveDeletedFileAgain(path) {
       // On the chain, so no version operation moves the session between the

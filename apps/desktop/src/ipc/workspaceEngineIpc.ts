@@ -67,7 +67,7 @@ export function createWorkspaceEngineIpc<
     work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery" | "retryHeldCapture">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
+    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment" | "retryHistoryCapture">;
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
@@ -553,6 +553,25 @@ export function createWorkspaceEngineIpc<
         if (!recovered) throw new Error("The workspace engine is not running.");
         notifyRenderer({ workspaceId: operation.workspace.workspaceId });
       });
+    });
+    // The restart starts inside the workspace operation and is awaited
+    // outside it, so its folder scan does not hold the workspace open.
+    registerHandler(CHANNELS.retryHistoryCapture, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = WorkspaceIdPayload.parse(payload);
+      const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+        assertWritableWorkspace(operation.workspace);
+        const { capture } = await requireEngineCapture(operation.workspace.workspaceId, "Engine history");
+        const retry = capture.retryHistoryCapture();
+        // Observe rejection while the workspace operation is still completing.
+        void retry.catch(() => {});
+        return { workspaceId: operation.workspace.workspaceId, retry };
+      });
+      try {
+        await started.retry;
+      } finally {
+        notifyRenderer({ workspaceId: started.workspaceId });
+      }
     });
     registerHandler(CHANNELS.retryOwnerLiveDelivery, async (event, payload) => {
       assertTrustedSender(event);

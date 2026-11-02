@@ -509,7 +509,10 @@ describe("history page", () => {
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = screen.getByRole("dialog", { name: "Notices" });
       expect(notices.textContent).toContain("dohc could not check whether open files changed.");
-      await userEvent.click(within(notices).getByRole("button", { name: "Try again" }));
+      // The paused capture files its own row with its own Try again.
+      const paused = within(notices).getByTestId("notice-history-capture-failed");
+      const retry = within(notices).getAllByRole("button", { name: "Try again" }).find(button => !paused.contains(button));
+      await userEvent.click(retry!);
       await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
     } finally {
       vi.useRealTimers();
@@ -574,7 +577,8 @@ describe("history page", () => {
       vi.useRealTimers();
     }
     expect(readsOfA).toBe(readsOfABeforeAnswer);
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    // B's own paused capture may toast; A's failure may not.
+    expect(screen.queryByTestId("workspace-shell-error")?.textContent ?? "").not.toContain("dohc could not check whether open files changed.");
     expect(bridge.readWorkspaceText.mock.calls.length).toBe(readsInB);
   });
 
@@ -838,7 +842,8 @@ describe("history page", () => {
       const line = await screen.findByTestId("history-paused");
       expect(line.textContent).toBe("History paused");
       expect(screen.queryByTestId("history-updating")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      // The panel's line offers no Try again; the paused capture's toast does.
+      expect(screen.queryAllByRole("button", { name: "Try again" }).filter(button => button.closest("[data-dohc-toasts]") === null)).toHaveLength(0);
 
       bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
       act(() => bridge.emitWorkspaceActivity());

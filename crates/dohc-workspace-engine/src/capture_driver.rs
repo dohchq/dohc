@@ -1212,6 +1212,15 @@ impl CaptureDriver {
     /// called after `bind_root` succeeded: the sink writes through the bound
     /// store actor, and an unbound root must never spawn a watcher.
     pub(crate) fn spawn(params: CaptureDriverSpawnParams) -> CaptureDriver {
+        Self::spawn_in_phase(params, CapturePhase::Starting)
+    }
+
+    /// Spawn a driver that starts in `phase`. A replacement for a stopped
+    /// driver passes that driver's [`CaptureDriver::replacement_phase`].
+    pub(crate) fn spawn_in_phase(
+        params: CaptureDriverSpawnParams,
+        phase: CapturePhase,
+    ) -> CaptureDriver {
         let CaptureDriverSpawnParams {
             observation,
             root,
@@ -1228,6 +1237,7 @@ impl CaptureDriver {
         let initial_links_hold = actor.hold_link_drain();
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
+        status.set_initial_phase(phase);
         let author_json = Arc::new(Mutex::new(initial_author_json));
         let (open_ready_tx, open_ready) = tokio::sync::watch::channel(false);
         #[cfg(feature = "harness")]
@@ -1398,6 +1408,27 @@ impl CaptureDriver {
         }
     }
 
+    /// Capture stopped, and only a new driver can resume it: the task ended,
+    /// or it reports degraded or terminal. A driver still importing, or one
+    /// still running a replacement's first scan, has not stopped.
+    pub(crate) fn stopped(&self) -> bool {
+        let snapshot = self.status_snapshot();
+        snapshot.degraded || snapshot.terminal
+    }
+
+    /// The phase a replacement for this driver starts in. A workspace that
+    /// reached `Ready` never goes back behind the startup fence. Any other
+    /// phase means the first import never finished, so the replacement
+    /// reports `Degraded` until its own first scan settles.
+    pub(crate) fn replacement_phase(&self) -> CapturePhase {
+        match self.status.snapshot().phase {
+            CapturePhase::Ready => CapturePhase::Ready,
+            CapturePhase::Starting | CapturePhase::Importing | CapturePhase::Degraded => {
+                CapturePhase::Degraded
+            }
+        }
+    }
+
     /// Ask a running fresh import to capture `path` next. It does nothing
     /// once the import is over.
     pub(crate) fn request_import_priority(&self, path: &str) {
@@ -1419,6 +1450,11 @@ impl CaptureDriver {
     /// and joins the driver after it acquires that same gate.
     pub(crate) fn request_shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Close asked this driver to stop and will take it next.
+    pub(crate) fn shutdown_requested(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 
     /// Cancel the loop synchronously and hand back the join handle; the

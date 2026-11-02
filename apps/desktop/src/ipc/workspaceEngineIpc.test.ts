@@ -169,6 +169,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
       moments: [], nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     })),
     readMoment: vi.fn<WorkspaceEngineCapture["readMoment"]>(async () => null),
+    retryHistoryCapture: vi.fn<WorkspaceEngineCapture["retryHistoryCapture"]>(async () => undefined),
     restoreFileToBeforeMoment: vi.fn<WorkspaceEngineCapture["restoreFileToBeforeMoment"]>(async () => {
       events.push("restore");
       return { restored: "text", restoredMomentId: "restored", path: "notes/a.md" };
@@ -297,7 +298,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryHistoryCapture, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -410,6 +411,20 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => { throw new Error("readonly"); });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("readonly");
     expect(h.adapter.reconcileCapture).toHaveBeenCalledOnce();
+  });
+  it("restarts History capture only for the writable workspace this renderer shows", async () => {
+    const h = await harness();
+    await h.invoke(CHANNELS.retryHistoryCapture);
+    expect(h.capture.retryHistoryCapture).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    await expect(h.invoke(CHANNELS.retryHistoryCapture, { workspaceId: "other" })).rejects.toThrow();
+    h.writable.mockImplementation(() => { throw new Error("readonly"); });
+    await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("readonly");
+    h.writable.mockImplementation(() => undefined);
+    h.capture.retryHistoryCapture.mockRejectedValueOnce(new Error("History is still paused."));
+    await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("History is still paused.");
+    expect(h.capture.retryHistoryCapture).toHaveBeenCalledTimes(2);
+    expect(h.notify).toHaveBeenCalledTimes(2);
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();

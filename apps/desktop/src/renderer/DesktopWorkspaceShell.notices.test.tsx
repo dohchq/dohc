@@ -39,6 +39,42 @@ it("keeps a failed document Stop in Notices with Try again and Copy details",asy
   expect(within(notices).queryByText("corrupt")).toBeNull();
 });
 
+// History that stopped recording is one workspace error: a toast and a
+// Notices row, each with Try again, and the row goes once capture runs.
+it("says History paused with Try again, restarts capture from the row, and clears the row once capture runs", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  let status: SyncStatusResult = { ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null };
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  const restart = deferred<void>();
+  bridge.retryHistoryCapture.mockReturnValueOnce(restart.promise);
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  const toast = await screen.findByTestId("workspace-shell-error");
+  expect(toast.textContent).toContain("History paused");
+  expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+  expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices = await screen.findByTestId("notice-center");
+  const row = await within(notices).findByTestId("notice-history-capture-failed");
+  expect(within(row).getByRole("button", { name: "Open History" })).toBeTruthy();
+  await user.click(within(row).getByRole("button", { name: "Try again" }));
+  expect(bridge.retryHistoryCapture).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
+  // The row waits for the restart's answer.
+  expect(within(notices).getByTestId("notice-history-capture-failed")).toBeTruthy();
+
+  status = SYNC_STATUS;
+  act(() => bridge.emitWorkspaceActivity());
+  await waitFor(() => expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull());
+  await act(async () => {
+    restart.resolve();
+    await restart.promise;
+  });
+  expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+});
+
 // Edits the server refused for good wait in a queue on this computer. Each
 // document gets its own notice, which names it and says where its edits are.
 describe("edits the server refused", () => {

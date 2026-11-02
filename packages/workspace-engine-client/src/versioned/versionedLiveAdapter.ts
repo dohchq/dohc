@@ -1716,6 +1716,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
   }
 
+  /** Restart capture that stopped, then flush once. */
+  async retryCapture() {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureRetry, {});
+  }
+
   async retryHeldCapture(path: string) {
     return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
   }

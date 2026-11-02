@@ -164,6 +164,38 @@ fn expire_capture_hold(holds: CaptureHolds, hold_id: String, first: Instant) {
     });
 }
 
+/// Swap the stopped driver in `slot` for a new one under the apply gate, as
+/// close takes a driver, so no capture pass, version fence, or hold spans the
+/// swap. The new driver keeps the old author and scans the whole folder.
+/// Answers false, changing nothing, when close emptied the slot or asked the
+/// driver to stop, or when the driver recovered or was already replaced.
+async fn replace_stopped_capture(
+    slot: Arc<std::sync::Mutex<Option<capture_driver::CaptureDriver>>>,
+    mut params: capture_driver::CaptureDriverSpawnParams,
+) -> bool {
+    let _gate = Arc::clone(&params.apply_gate).lock_owned().await;
+    let (stopped, phase) = {
+        let mut slot = lock(&slot);
+        if !slot
+            .as_ref()
+            .is_some_and(|driver| driver.stopped() && !driver.shutdown_requested())
+        {
+            return false;
+        }
+        let Some(stopped) = slot.take() else {
+            return false;
+        };
+        let phase = stopped.replacement_phase();
+        params.initial_author_json = stopped.author_json();
+        (stopped, phase)
+    };
+    if let Some(task) = stopped.begin_shutdown() {
+        let _ = task.await;
+    }
+    *lock(&slot) = Some(capture_driver::CaptureDriver::spawn_in_phase(params, phase));
+    true
+}
+
 fn tracked_relative_path(path: &str) -> Result<String, WireError> {
     match classify_engine_file_path_normalized(path) {
         (PathClassification::Tracked, Some(normalized)) if normalized == path => Ok(normalized),
@@ -603,6 +635,57 @@ impl EngineService {
         self.capture_flush_after(ctx, handle, landed).await
     }
 
+    /// Replace a capture driver that stopped, then flush once. A stopped
+    /// driver cannot resume on its own, and `capture.reconcile` only asks a
+    /// running one to rescan; its callers poll it, so it must never restart
+    /// capture. A running driver is left alone and this answers like
+    /// `capture.flush`. Sessions, leases, and the handle are untouched.
+    pub(super) async fn capture_retry(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "capture.retry needs the workspace's owning handle",
+            ));
+        }
+        let stopped = lock(&open.capture)
+            .as_ref()
+            .is_some_and(capture_driver::CaptureDriver::stopped);
+        let restarted = if stopped {
+            // Detached, so a caller that gives up cannot strand the slot empty.
+            let replace = tokio::spawn(replace_stopped_capture(
+                Arc::clone(&open.capture),
+                capture_driver::CaptureDriverSpawnParams {
+                    observation: Arc::clone(&open.observation),
+                    root: open.root.clone(),
+                    actor: open.actor.clone(),
+                    workspace_id: open.workspace_id.clone(),
+                    leases: self.leases.scoped(&open.root),
+                    self_writes: self.self_writes.scoped(&open.root),
+                    apply_gate: Arc::clone(&open.capture_apply_gate),
+                    store_freshly_created: false,
+                    initial_author_json: None,
+                    events: self.events.clone(),
+                    apply_probe: self.capture_apply_probe.clone(),
+                },
+            ));
+            let cancellation = OperationCancellation::new(ctx);
+            tokio::select! {
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("capture.retry")),
+                joined = replace => joined.map_err(|_| WireError::new(ErrorCode::Internal, "capture.retry worker failed"))?,
+            }
+        } else {
+            false
+        };
+        let mut response = self.capture_flush_after(ctx, handle, None).await?;
+        response["restarted"] = json!(restarted);
+        Ok(response)
+    }
+
     pub(super) async fn capture_set_author(
         &self,
         ctx: &RequestContext,
@@ -931,6 +1014,167 @@ mod tests {
                         == crate::rpc::error::initial_capture_degraded().message),
             "status={status}; versions={versions:?}; history={history:?}; history dispatch={history_dispatch:?}; ydoc={ydoc:?}"
         );
+    }
+
+    async fn open_retry_workspace(
+        service: &EngineService,
+        scratch: &ScratchDir,
+        workspace_id: &str,
+    ) -> WorkspaceHandle {
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": workspace_id}),
+            )
+            .await
+            .unwrap();
+        serde_json::from_value(opened["workspace"].clone()).unwrap()
+    }
+
+    async fn stop_capture_task(
+        open: &crate::rpc::workspace::OpenWorkspace,
+        probe: &capture_driver::CaptureApplyProbe,
+    ) {
+        let driver = lock(&open.capture).take().unwrap();
+        probe.stop_task_for_test(false);
+        while !driver.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *lock(&open.capture) = Some(driver);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_retry_replaces_a_finished_capture_task() {
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("seed.md"), b"seed").unwrap();
+        let probe = capture_driver::CaptureApplyProbe::default();
+        let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+        let ctx = RequestContext::unbounded();
+        let handle = open_retry_workspace(&service, &scratch, "retry-finished").await;
+        let open = service.open(Some(&handle)).unwrap();
+        stop_capture_task(&open, &probe).await;
+        let paused = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(
+            [&paused["running"], &paused["terminal"]],
+            [&json!(false), &json!(true)]
+        );
+        let starts = probe.layer_start_count();
+        std::fs::write(scratch.path().join("after.md"), b"written while paused").unwrap();
+
+        let retried = service
+            .capture_retry(&ctx, Some(handle.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(retried["restarted"], json!(true));
+        assert!(probe.layer_start_count() > starts);
+        assert!(!lock(&open.capture).as_ref().unwrap().is_finished());
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(
+            [
+                &status["running"],
+                &status["degraded"],
+                &status["terminal"],
+                &status["phase"]
+            ],
+            [&json!(true), &json!(false), &json!(false), &json!("ready")],
+            "{status}"
+        );
+        let after = service
+            .versioned_text_read(
+                &ctx,
+                Some(handle.clone()),
+                json!({"versionId": "main", "path": "after.md"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after["text"], json!("written while paused"));
+        // Capture runs again, so a second retry only flushes.
+        let starts = probe.layer_start_count();
+        let again = service
+            .capture_retry(&ctx, Some(handle.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again["restarted"], json!(false));
+        assert_eq!(probe.layer_start_count(), starts);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_retry_keeps_live_document_sessions_settling() {
+        use base64::Engine as _;
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("live.md"), b"before").unwrap();
+        let probe = capture_driver::CaptureApplyProbe::default();
+        let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+        let ctx = RequestContext::unbounded();
+        let handle = open_retry_workspace(&service, &scratch, "retry-live-session").await;
+        let open = service.open(Some(&handle)).unwrap();
+        let (session, blob) = service
+            .ydoc_open(
+                &ctx,
+                Some(handle.clone()),
+                json!({"versionId": "main", "path": "live.md", "contentKind": "plaintext"}),
+                1,
+            )
+            .await
+            .unwrap();
+        let session_id = session["sessionId"].as_str().unwrap().to_owned();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&blob.bytes).unwrap();
+        drop(blob);
+        let first = service
+            .ydoc_record_update(
+                &ctx,
+                Some(handle.clone()),
+                Some("before-retry".into()),
+                json!({
+                    "sessionId": session_id, "expectedLineageClaimId": null,
+                    "updateBase64": base64::engine::general_purpose::STANDARD
+                        .encode(doc.plaintext_insert(0, "one")),
+                }),
+            )
+            .await
+            .unwrap();
+        service
+            .ydoc_settle(&ctx, Some(handle.clone()), json!({"sessionId": session_id}))
+            .await
+            .unwrap();
+        stop_capture_task(&open, &probe).await;
+
+        let retried = service
+            .capture_retry(&ctx, Some(handle.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(retried["restarted"], json!(true));
+        assert!(lock(&service.sessions).contains_key(&session_id));
+        service
+            .ydoc_record_update(
+                &ctx,
+                Some(handle.clone()),
+                Some("after-retry".into()),
+                json!({
+                    "sessionId": session_id,
+                    "expectedLineageClaimId": first["lineageClaimId"],
+                    "updateBase64": base64::engine::general_purpose::STANDARD
+                        .encode(doc.plaintext_insert(3, " two")),
+                }),
+            )
+            .await
+            .unwrap();
+        service
+            .ydoc_settle(&ctx, Some(handle.clone()), json!({"sessionId": session_id}))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("live.md")).unwrap(),
+            "one two"
+        );
+        assert!(lock(&service.sessions).contains_key(&session_id));
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(status["degraded"], json!(false), "{status}");
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

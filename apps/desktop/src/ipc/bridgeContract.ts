@@ -7518,6 +7518,8 @@ export interface DohcDesktopBridge
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
+  // Restarts History recording that stopped. Rejects while it is still paused.
+  retryHistoryCapture(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
