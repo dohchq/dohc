@@ -7913,9 +7913,6 @@ mod tests {
     /// hooks, and the editing machine closes its conflict on import.
     #[test]
     fn keeping_the_other_copy_after_a_deletion_commits_and_closes_on_the_editor() {
-        dohc_engine_domain::lift_revival_refusal_for_test(
-            dohc_engine_domain::RevivalAction::ConflictChoice,
-        );
         let (_editor_scratch, mut editor, _, _) = receiver_fixture();
         let edited = text_keep_head(&mut editor);
         let deleter_scratch = ScratchDir::new().unwrap();
