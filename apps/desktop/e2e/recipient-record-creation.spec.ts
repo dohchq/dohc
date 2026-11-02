@@ -44,6 +44,18 @@ async function records(page: Page) {
     return (await api.queryCollectionRecords({ workspaceId, collectionPath, limit: 100 })).records;
   }, COLLECTION);
 }
+// The engine reports a creation's status only while the snapshot is the recipient's own write. A refresh that swaps in
+// the relay's copy clears it, so a sent record shows as accepted or with no status, and has no draft row.
+async function expectSent(page: Page, id: string) {
+  await expect.poll(async () => (await records(page)).map(record => ({ id: record.id,
+    sent: record.creationDelivery === undefined || record.creationDelivery === "accepted" })), { timeout: 120_000 }).toEqual([{ id, sent: true }]);
+  await expect(page.getByTestId("collection-record-drafts")).toHaveCount(0);
+}
+async function expectWaitingDraft(page: Page) {
+  const drafts = page.getByTestId("collection-record-drafts");
+  await expect(drafts).toContainText("Saved on this computer. Waiting to send");
+  await expect(drafts.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+}
 const creationOps = (ops: Op[]) => ops.filter(op => op.originId.startsWith("relay:collection-file:") && op.opKind === "moment.append");
 function acceptedLiveEdits(relay: SyncRelayHandle, path: string) {
   const db = new DatabaseSync(relay.dbPath, { readOnly: true });
@@ -89,9 +101,10 @@ async function withSharedCollection(
     restartOwner(): Promise<LaunchedDesktopApp>;
     relay: SyncRelayHandle;
     ownerText(path: string): Promise<string>;
+    recipientText(path: string): Promise<string>;
     ownerLiveState(path: string): Record<string, unknown>;
   }) => Promise<void>,
-  ownerEnv: Record<string, string> = {},
+  { ownerEnv = {}, refuse }: { ownerEnv?: Record<string, string>; refuse?(method: string, path: string): boolean } = {},
 ) {
   const ownerTemp = await createTempWorkspace(), recipientTemp = await createTempWorkspace();
   let relay: SyncRelayHandle | undefined;
@@ -105,7 +118,7 @@ async function withSharedCollection(
     const env = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
       DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
       DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
-    proxy = await startServerProxy(ca, { collectionWriteResponse: response });
+    proxy = await startServerProxy(ca, { collectionWriteResponse: response, refuse });
     relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
       editLinks: { engineExecutable: resolveEngineBinary(), publicOrigin: proxy.origin, trustEnv: env },
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: randomBytes(32).toString("base64url"),
@@ -154,6 +167,9 @@ async function withSharedCollection(
       ownerText: async path => {
         await writeFile(join(ownerTemp.rootPath, `nudge-${++nudge}.txt`), `${nudge}\n`);
         try { return await readFile(join(ownerTemp.rootPath, path), "utf8"); } catch { return "missing"; }
+      },
+      recipientText: async path => {
+        try { return await readFile(join(recipientTemp.rootPath, path), "utf8"); } catch { return "missing"; }
       },
       ownerLiveState: path => {
         const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), { readOnly: true });
@@ -333,7 +349,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     { workspaceId: OWNER_ID, ids: result.status === "restored" ? result.restored.map(file => file.restoredMomentId) : [] });
     expect(undo.files).toMatchObject([{ kind: "restored" }]);
     await expect.poll(() => fixture.ownerText(created[1]!.path), { timeout: 120_000 }).toContain("Recipient only");
-  }, { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" });
+  }, { ownerEnv: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" } });
 });
 
 }
@@ -361,25 +377,76 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
     await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
     page = (await fixture.restartRecipient()).page;
-    await expect.poll(async () => (await records(page)).map(record => ({ id: record.id, delivery: record.creationDelivery })),
-      { timeout: 120_000 }).toEqual([{ id: created!.id, delivery: "pending" }]);
-    await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
-    await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
-    drop = false;
-    await page.getByTestId("collection-record-drafts").getByRole("button", { name: "Try again", exact: true }).click();
-    await expect.poll(() => responses.some(response => !response.dropped && response.receipt.created === false),
-      { timeout: 120_000 }).toBe(true);
-    const replay = responses.find(response => !response.dropped && response.receipt.created === false)!;
+    // The restart's refresh can swap in the relay's copy before anything reads the status. See expectSent.
+    await expect.poll(async () => (await records(page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
+    expect(["pending", undefined]).toContain((await records(page))[0]!.creationDelivery);
+    await expect.poll(() => responses.some(response => response.receipt.created === false), { timeout: 120_000 }).toBe(true);
+    const replay = responses.find(response => response.receipt.created === false)!;
     expect(replay.request).toEqual(original.request);
     expect(replay.receipt).toEqual({ ...original.receipt, created: false });
-    await expect.poll(async () => (await records(page)).map(record => ({ id: record.id, delivery: record.creationDelivery })),
-      { timeout: 120_000 }).toEqual([{ id: created!.id, delivery: "accepted" }]);
-    await expect(page.getByTestId("collection-record-drafts")).toHaveCount(0);
-    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000 }).toContain(`id: ${created!.id}`);
+    await expectSent(page, created!.id);
+    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain(`id: ${created!.id}`);
+    expect(await fixture.ownerText(created!.path)).toBe(await fixture.recipientText(created!.path));
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
+    expect(responses.filter(response => response.receipt.created === true)).toHaveLength(1);
+    drop = false;
+    await page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
+    await page.getByTestId("property-add").click();
+    await page.getByTestId("property-key").last().fill("Task");
+    await page.getByLabel("Property Task value", { exact: true }).fill("Edited after restart");
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved-to-host", { timeout: 120_000 });
+    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Edited after restart");
+    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
+    expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     await test.info().attach("lost acknowledgement and relay replay", { contentType: "application/json", body: JSON.stringify(responses, null, 2) });
+  });
+});
+
+test("@two-client a recipient's record survives a restart while the relay is unreachable, and Try again sends it once", async () => {
+  test.setTimeout(420_000);
+  let unreachable = true;
+  let refusedWrites = 0;
+  const receipts: Record<string, unknown>[] = [];
+  await withSharedCollection(result => {
+    if (result.status === 200) receipts.push(JSON.parse(result.body) as Record<string, unknown>);
+  }, async fixture => {
+    let page = fixture.recipient().page;
+    await page.getByTestId("collection-new-record").click();
+    await expect(page.getByTestId(`tab-${COLLECTION}/Untitled.md`)).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(0);
+    const [created] = await records(page);
+    expect(created).toMatchObject({ creationDelivery: "pending" });
+    await openCollection(page);
+    await expectWaitingDraft(page);
+    const refusedBeforeRestart = refusedWrites;
+    page = (await fixture.restartRecipient()).page;
+    // The restarted app tries to send the draft once its view is ready. The draft stays after that try fails.
+    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(refusedBeforeRestart);
+    await expect.poll(async () => (await records(page)).map(record => ({ id: record.id, delivery: record.creationDelivery })),
+      { timeout: 120_000 }).toEqual([{ id: created!.id, delivery: "pending" }]);
+    await expectWaitingDraft(page);
+    expect(receipts).toEqual([]);
+    expect(creationOps(await log(fixture.relay))).toHaveLength(0);
+    unreachable = false;
+    await page.getByTestId("collection-record-drafts").getByRole("button", { name: "Try again", exact: true }).click();
+    await expect.poll(() => receipts.some(receipt => receipt.created === true), { timeout: 120_000 }).toBe(true);
+    expect(receipts.find(receipt => receipt.created === true)).toMatchObject({ paths: [created!.path] });
+    await expectSent(page, created!.id);
+    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain(`id: ${created!.id}`);
+    expect(await fixture.ownerText(created!.path)).toBe(await fixture.recipientText(created!.path));
+    await openCollection(fixture.owner.page);
+    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
+    expect(creationOps(await log(fixture.relay))).toHaveLength(1);
+    expect(receipts.filter(receipt => receipt.created === true)).toHaveLength(1);
+  }, {
+    refuse: (method, path) => {
+      const refused = unreachable && method === "POST" && /^\/sync\/shares\/[^/?]+\/collection-writes(?:\?|$)/u.test(path);
+      if (refused) refusedWrites++;
+      return refused;
+    },
   });
 });
 
