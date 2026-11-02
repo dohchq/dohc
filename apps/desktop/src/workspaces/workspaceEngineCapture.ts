@@ -6278,11 +6278,11 @@ export function createWorkspaceEngineCapture(
           healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
           return healthy;
         });
-        if (!healthy) throw new HistoryStillPausedError(null);
-        // Closing the page releases its dead session, so name one, the same
-        // one each time.
-        const [stopped] = [...deadYDocSessions.values()].sort();
-        if (stopped !== undefined) throw new HistoryStillPausedError(stopped);
+        if (!healthy) throw new HistoryStillPausedError([]);
+        // Closing a page releases its dead session, so name each page once,
+        // in the same order each time.
+        const stopped = [...new Set(deadYDocSessions.values())].sort();
+        if (stopped.length > 0) throw new HistoryStillPausedError(stopped);
       });
     },
 

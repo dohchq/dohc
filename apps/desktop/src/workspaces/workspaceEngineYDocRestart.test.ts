@@ -157,10 +157,13 @@ async function reconnectFailureCapture(prefix: string) {
   const sessions = new EngineWorkspaceSessions({
     currentClient: () => daemonClient,
   });
+  // The daemon leases each path to one session.
+  const leased = new Set<string>();
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
-    if (state.leaseActive) throw new Error("ydoc-session-busy");
+    if (leased.has(options.path)) throw new Error("ydoc-session-busy");
+    leased.add(options.path);
     state.leaseActive = true;
     const openedGeneration = ++state.generation;
     const doc = new Y.Doc();
@@ -201,7 +204,8 @@ async function reconnectFailureCapture(prefix: string) {
             ? { settle: closeOptions.settle }
             : {}),
         });
-        state.leaseActive = false;
+        leased.delete(options.path);
+        state.leaseActive = leased.size > 0;
       },
     };
   };
@@ -539,24 +543,35 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
 });
 
 // A dead live session keeps History paused past Try again, so Try again names
-// its page; closing that page releases the session and lets History run.
-it("names the page whose live editing stopped when Try again leaves History paused, until that page closes", async () => {
+// the page of each one; closing a page releases its session, and History runs
+// once none is left.
+it("names every page whose live editing stopped when Try again leaves History paused, until those pages close", async () => {
   const { capture, outcomes } = await reconnectFailureCapture(
     "dohc-ydoc-history-retry-dead-",
   );
-  const session = await capture.openYDocSession({
+  const plan = await capture.openYDocSession({
     path: "notes/plan.md",
     onRemoteUpdate: () => undefined,
   });
-  await failRendererUpdate(session);
+  await failRendererUpdate(plan);
+  const agenda = await capture.openYDocSession({
+    path: "notes/agenda.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(agenda);
   expect(outcomes.at(-1)).toBe(false);
 
   const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
   expect(refused).toBeInstanceOf(HistoryStillPausedError);
-  expect(refused).toMatchObject({ code: "live-editing-stopped", path: "notes/plan.md" });
+  expect(refused).toMatchObject({ code: "live-editing-stopped", paths: ["notes/agenda.md", "notes/plan.md"] });
   expect(outcomes.at(-1)).toBe(false);
 
-  await session.close({ settle: false });
+  // Close each page as the renderer's release does
+  // (engineYDocSessionOwner.ts), which tries to revive a dead session first.
+  await plan.close(undefined);
+  await expect(capture.retryHistoryCapture()).rejects.toMatchObject({ paths: ["notes/agenda.md"] });
+  expect(outcomes.at(-1)).toBe(false);
+  await agenda.close(undefined);
   expect(outcomes.at(-1)).toBe(true);
   await expect(capture.retryHistoryCapture()).resolves.toBeUndefined();
   await capture.stop();

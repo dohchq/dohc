@@ -102,7 +102,7 @@ describe("History paused words", () => {
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const row = await within(await screen.findByTestId("notice-center")).findByTestId("notice-history-capture-failed");
     expect(row.textContent).toContain("History paused");
-    return { toast, row: row.textContent };
+    return { toast, row: row.textContent, user };
   }
 
   it("says in the toast and the Notices row that files still save", async () => {
@@ -118,14 +118,36 @@ describe("History paused words", () => {
   });
 
   it("names the page whose live editing stopped when Try again leaves History paused", async () => {
-    const { toast, row } = await failedRetryWords(acrossIpc(new HistoryStillPausedError("notes/plan.md")));
+    const { toast, row } = await failedRetryWords(acrossIpc(new HistoryStillPausedError(["notes/plan.md"])));
     const body = 'History is still paused because live editing on "notes/plan.md" stopped. Close and reopen that page, then try again.';
     expect(toast).toContain(body);
     expect(row).toContain(body);
   });
 
+  it("counts the pages whose live editing stopped, and lists each in Copy error details", async () => {
+    const paths = ["notes/a, b.md", "notes/12:30 \"call\".md", "notes/plan.md"];
+    const { toast, row, user } = await failedRetryWords(acrossIpc(new HistoryStillPausedError(paths)));
+    const body = "History is still paused because live editing stopped on 3 pages. Restart dohc to try again.";
+    expect(toast).toContain(body);
+    expect(row).toContain(body);
+    const notice = within(screen.getByTestId("notice-center")).getByTestId("notice-history-capture-failed");
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.filter(line => line.startsWith("File: "))).toEqual(paths.map(path => `File: ${path}`));
+  });
+
   it.each([
-    ["capture still fails", acrossIpc(new HistoryStillPausedError(null))],
+    ["the engine is still reading the folder", new Error("Error invoking remote method 'desktop:retry-history-capture': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.")],
+    ["capture did not settle in time", new Error("Error invoking remote method 'desktop:retry-history-capture': EngineCaptureNotSettledError: Engine capture for workspace-1 did not settle.")],
+  ])("says History is still catching up when Try again finds %s", async (_reason, failure) => {
+    const { toast, row } = await failedRetryWords(failure);
+    const body = "History is still catching up. Try again in a few minutes.";
+    expect(toast).toContain(body);
+    expect(row).toContain(body);
+  });
+
+  it.each([
+    ["capture still fails", acrossIpc(new HistoryStillPausedError([]))],
     ["the engine refused the restart", new Error("Error invoking remote method 'desktop:retry-history-capture': DaemonRefusalError [WORKSPACE_UNAVAILABLE]: workspace handle is unavailable")],
   ])("asks for a restart when Try again leaves History paused because %s", async (_reason, failure) => {
     const { toast, row } = await failedRetryWords(failure);

@@ -545,12 +545,13 @@ export function useShellError(workspaceId: string) {
   // clears it; null clears it. `reasons` are extra Copy error details lines,
   // such as the path a failure names. A report repeated unchanged keeps its
   // toast closed unless `toast` asks for it again. `stillPaused` reports a
-  // Try again that failed: `path` names the page whose live editing stopped,
-  // or is null when something else keeps History paused.
+  // Try again that failed: "catching-up" while History still takes in
+  // files, or `paths`, the pages whose live editing stopped, empty when
+  // something else keeps History paused.
   const showHistoryPaused = useCallback(
     (notice: {
       retry: () => void | false; openHistory: () => void; toast?: boolean;
-      stillPaused?: { path: string | null };
+      stillPaused?: "catching-up" | { paths: readonly string[] };
       cause?: string; reasons?: ReadonlyArray<ErrorDetailField>;
     } | null) => {
       const identity = `history-capture:${workspaceId}`;
@@ -559,15 +560,21 @@ export function useShellError(workspaceId: string) {
         return;
       }
       const details: ErrorDetailField[] = [...(notice.reasons ?? []), ...(notice.cause ? [["Cause", notice.cause] as const] : [])];
+      const paused = notice.stillPaused;
+      const stopped = paused === undefined || paused === "catching-up" ? [] : paused.paths;
       push({
         id: "history-capture-failed",
         identity,
         title: "History paused",
-        message: notice.stillPaused === undefined
+        message: paused === undefined
           ? "dohc could not record recent changes in History. Your files still save normally."
-          : notice.stillPaused.path === null
-            ? "History is still paused. Restart dohc to try again."
-            : `History is still paused because live editing on "${notice.stillPaused.path}" stopped. Close and reopen that page, then try again.`,
+          : paused === "catching-up"
+            ? "History is still catching up. Try again in a few minutes."
+            : stopped.length === 0
+              ? "History is still paused. Restart dohc to try again."
+              : stopped.length === 1
+                ? `History is still paused because live editing on "${stopped[0]}" stopped. Close and reopen that page, then try again.`
+                : `History is still paused because live editing stopped on ${stopped.length} pages. Restart dohc to try again.`,
         ...(details.length ? { details } : {}),
         retry: notice.retry,
         action: { label: "Open History", run: notice.openHistory, reads: true },
