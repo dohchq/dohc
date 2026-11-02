@@ -39,6 +39,7 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
+  folderMoveIdentity,
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
@@ -56,7 +57,7 @@ import { ExplorerHome } from "./ExplorerHome";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { isLiveFolderMoveRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isFolderMoveRefusal, isLiveFolderMoveRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
@@ -173,7 +174,7 @@ export interface ExplorerProps {
   onShare: (path: string) => void;
   onRefresh: () => void;
   // Failed tree operations go to the shell's error toast and Notices row.
-  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -889,7 +890,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const again = isLiveFolderMoveRefusal(cause)
               ? () => void runChanges([{ ...change, id: nextChangeId() }], run)
               : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again);
+            const identity = change.kind === "folder" && isFolderMoveRefusal(cause)
+              ? folderMoveIdentity(workspaceId, change)
+              : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, identity);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -912,7 +916,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation?.release();
       }
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh],
+    [onBeginChanges, onError, onPathsChanged, onRefresh, workspaceId],
   );
 
   const performMoves = useCallback(

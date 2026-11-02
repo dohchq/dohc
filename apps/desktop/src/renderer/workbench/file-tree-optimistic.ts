@@ -12,6 +12,12 @@ export type PendingTreeMove = {
   toPath: string
 }
 
+// One refused folder move in the shell's Notices: a later success of the same
+// move removes it.
+export function folderMoveIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
+  return `folder-move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
+}
+
 export type PendingTreeChange =
   | PendingTreeMove
   | { id: string; kind: 'create-folder'; path: string }
