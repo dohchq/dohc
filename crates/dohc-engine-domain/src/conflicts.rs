@@ -1003,16 +1003,12 @@ impl VersionedTextStore<'_> {
                                 &incoming.text,
                                 &input.write_moment_id,
                             );
-                            // The other machine's copy of a file this machine
-                            // deleted comes back as the same file, so both
-                            // machines close the conflict on one object.
-                            let revived = conflict.metadata.origin == "sync"
-                                && !conflict.current.is_present();
-                            if revived {
-                                write_input.object_id = incoming.object_id.clone();
+                            let revived = revived_incoming_object_id(&conflict);
+                            if let Some(object_id) = revived {
+                                object_id.clone_into(&mut write_input.object_id);
                             }
                             validate_write_input(&write_input)?;
-                            let result = if revived {
+                            let result = if revived.is_some() {
                                 write_revived_text_in_tx(tx, &write_input)?
                             } else {
                                 write_text_in_tx(tx, &write_input)?
@@ -1097,6 +1093,21 @@ impl VersionedTextStore<'_> {
         })?;
         committed(outcome)
     }
+}
+
+/// The object "apply incoming" writes under when this machine deleted its
+/// side of a sync conflict: the other machine's own object, so both machines
+/// close the conflict on one object. `None` means the request's new object.
+#[doc(hidden)]
+pub fn revived_incoming_object_id(conflict: &TextConflict) -> Option<&str> {
+    if conflict.metadata.origin != "sync" || conflict.current.is_present() {
+        return None;
+    }
+    conflict
+        .incoming
+        .snapshot
+        .as_ref()
+        .map(|incoming| incoming.object_id.as_str())
 }
 
 /// A kept text resolution needs a durable head that every peer can adopt.

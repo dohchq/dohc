@@ -3276,7 +3276,11 @@ fn planned_result(
         }
         ResolveConflictKind::ApplyIncoming => {
             let side = &conflict.incoming;
-            let object_id = if side.path == conflict.current.path {
+            let object_id = if let Some(object_id) =
+                dohc_engine_domain::conflicts::revived_incoming_object_id(conflict)
+            {
+                object_id.to_owned()
+            } else if side.path == conflict.current.path {
                 current
                     .present()
                     .map_or_else(|| input.object_id.clone(), |head| head.object_id.clone())
