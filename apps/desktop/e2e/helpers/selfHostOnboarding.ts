@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { Duplex } from "node:stream";
+import { Transform, type Duplex } from "node:stream";
 import { createRequire } from "node:module";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { join } from "node:path";
@@ -127,10 +127,36 @@ interface PendingHostedLogResponse extends HostedLogResponseBarrier {
   fail(error: Error): void;
 }
 
+// Passes each chunk on `delayMs` after it arrived, in order.
+function delayedStream(delayMs: number): Transform {
+  const queue: Array<{ chunk: Buffer; due: number }> = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let flushed: (() => void) | undefined;
+  const stream: Transform = new Transform({
+    transform(chunk: Buffer, _encoding, done) { queue.push({ chunk, due: performance.now() + delayMs }); schedule(); done(); },
+    flush(done) { flushed = done; schedule(); },
+    destroy(error, done) { clearTimeout(timer); queue.length = 0; done(error); },
+  });
+  function schedule() {
+    if (timer !== undefined) return;
+    if (!queue.length) { flushed?.(); flushed = undefined; return; }
+    timer = setTimeout(() => {
+      timer = undefined;
+      const now = performance.now();
+      while (queue.length && queue[0]!.due <= now) stream.push(queue.shift()!.chunk);
+      schedule();
+    }, Math.max(0, queue[0]!.due - performance.now()));
+  }
+  return stream;
+}
+
+/** `delayMs` delays every request, response, upgrade and socket chunk by that much each way. */
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
   refuse?(method: string, path: string): boolean;
+  delayMs?: number;
 } = {}) {
+  let delayMs = options.delayMs ?? 0;
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
   let nextHostedLog: PendingHostedLogResponse | undefined;
@@ -141,7 +167,12 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
-  const forward: RequestListener = (incoming, outgoing) => {
+  const delayed: RequestListener = (incoming, outgoing) => {
+    const wait = delayMs;
+    if (wait > 0) setTimeout(() => forward(incoming, outgoing, wait), wait);
+    else forward(incoming, outgoing, 0);
+  };
+  const forward = (incoming: IncomingMessage, outgoing: ServerResponse, wait: number) => {
     if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
     if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
@@ -181,9 +212,15 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
         });
         return;
       }
+      response.on("error", () => outgoing.destroy());
+      if (wait > 0) {
+        const later = delayedStream(wait);
+        setTimeout(() => { outgoing.writeHead(response.statusCode ?? 502, response.headers); later.pipe(outgoing); }, wait);
+        response.pipe(later);
+        return;
+      }
       outgoing.writeHead(response.statusCode ?? 502, response.headers);
       response.pipe(outgoing);
-      response.on("error", () => outgoing.destroy());
     });
     upstreams.add(upstream);
     upstream.once("close", () => upstreams.delete(upstream));
@@ -196,10 +233,19 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       upstream.destroy();
     });
     incoming.on("error", error => { barrier?.fail(error); upstream.destroy(); });
-    incoming.pipe(upstream);
+    if (wait > 0) incoming.pipe(delayedStream(wait)).pipe(upstream);
+    else incoming.pipe(upstream);
   };
-  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, forward) : createHttpServer(forward);
+  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, delayed) : createHttpServer(delayed);
   server.on("upgrade", (incoming, socket, head) => {
+    const wait = delayMs;
+    if (wait > 0) {
+      // The client may send its first frames before the delayed upgrade starts.
+      socket.pause();
+      setTimeout(() => upgrade(incoming, socket, head, wait), wait);
+    } else upgrade(incoming, socket, head, 0);
+  });
+  const upgrade = (incoming: IncomingMessage, socket: Duplex, head: Buffer, wait: number) => {
     if (paused) { refusedUpgrades++; socket.destroy(); return; }
     const target = route(incoming.url ?? "/");
     if (!target) { socket.destroy(); return; }
@@ -219,6 +265,16 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       relaySocket.once("close", () => { upgraded.delete(relaySocket); socket.destroy(); });
       socket.once("close", () => relaySocket.destroy());
       relaySocket.on("error", () => relaySocket.destroy());
+      if (wait > 0) {
+        const down = delayedStream(wait), up = delayedStream(wait);
+        down.write(Buffer.from(answer(response)));
+        down.write(relayHead);
+        up.write(head);
+        relaySocket.pipe(down).pipe(socket);
+        socket.pipe(up).pipe(relaySocket);
+        socket.resume();
+        return;
+      }
       socket.write(answer(response));
       socket.write(relayHead);
       relaySocket.write(head);
@@ -229,7 +285,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
     upstream.end();
-  });
+  };
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const address = server.address();
   assert.ok(address && typeof address !== "string");
@@ -244,6 +300,8 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       server.closeAllConnections();
     },
     resume() { paused = false; },
+    /** Applies to requests and upgrades that start after the call. */
+    setDelayMs(value: number) { delayMs = value; },
     outageState() { return { paused, refusedRequests, refusedUpgrades, upstreams: upstreams.size, upgraded: upgraded.size }; },
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
@@ -304,7 +362,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
             outgoing = undefined;
           }
           for (const request of held.splice(0)) {
-            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing);
+            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing, 0);
           }
         },
         fail(error) {
