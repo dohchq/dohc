@@ -17,7 +17,10 @@ function harness(options: {live?: readonly LiveDocumentPath[]; offline?: boolean
   const relay: Array<{workspaceId: string; signal: AbortSignal; reply: Deferred<void>}> = [];
   const live = options.live === undefined ? pages : options.live;
   const offline = vi.fn(() => options.offline ?? false);
+  // Moves the guard's clock without running any timer.
+  let skew = 0;
   const guard = createMoveAcceptedEditsGuard({
+    now: () => Date.now() + skew,
     liveDocuments: id => id === "workspace" ? live : undefined,
     offline,
     ownerCatchUp(workspaceId, objectIds, signal) {
@@ -37,7 +40,8 @@ function harness(options: {live?: readonly LiveDocumentPath[]; offline?: boolean
     const wait = guard.beforeMove(workspaceId, path).then(() => {state.done = true;});
     return Object.assign(state, {wait});
   };
-  return {owner, relay, offline, move, settle: () => vi.advanceTimersByTimeAsync(0), at: (ms: number) => vi.advanceTimersByTimeAsync(ms)};
+  return {owner, relay, offline, move, settle: () => vi.advanceTimersByTimeAsync(0), at: (ms: number) => vi.advanceTimersByTimeAsync(ms),
+    jump: (ms: number) => {skew += ms;}};
 }
 
 it("runs nothing for a path that is not live, or before the first live list", async () => {
@@ -225,4 +229,46 @@ it("a later move that joins a pending attempt keeps it alive only for itself", a
   await h.at(1);
   expect(third.done).toBe(true);
   expect(h.owner[1]!.signal.aborted).toBe(true);
+});
+
+// The event loop can be busy past a deadline, so promises settle before the
+// timer that aborts the attempt runs.
+it("starts no pull for an owner answer that arrives after the deadline, before its timer runs", async () => {
+  const h = harness();
+  const moved = h.move("Notes/Page.md");
+  await h.settle();
+  h.jump(MOVE_ACCEPTED_EDITS_WAIT_MS);
+  h.owner[0]!.reply.resolve(true);
+  await h.settle();
+  expect(h.relay).toEqual([]);
+  expect(moved.done).toBe(true);
+});
+
+it("never starts a pending attempt whose deadline passed before the held one finished, and releases its move", async () => {
+  const h = harness();
+  h.move("Notes/Page.md");
+  await h.at(1000);
+  const second = h.move("Plans/Trip.md");
+  await h.settle();
+  h.jump(MOVE_ACCEPTED_EDITS_WAIT_MS);
+  h.owner[0]!.reply.resolve(false);
+  await h.settle();
+  expect(h.owner).toHaveLength(1);
+  expect(second.done).toBe(true);
+});
+
+it("keeps an attempt open until the deadline of the last move that joined it", async () => {
+  const h = harness();
+  const first = h.move("Notes/Page.md");
+  await h.at(2000);
+  const second = h.move("Notes/Page.md");
+  await h.settle();
+  // Past the first move's deadline, before the second's.
+  h.jump(1500);
+  h.owner[0]!.reply.resolve(true);
+  await h.settle();
+  expect(h.relay).toHaveLength(1);
+  h.relay[0]!.reply.resolve();
+  await h.settle();
+  expect(first.done && second.done).toBe(true);
 });

@@ -22,6 +22,8 @@ export interface MoveAcceptedEditsGuardOptions {
   relayCatchUp(workspaceId: string, signal: AbortSignal): Promise<void>;
   // How long each move waits, from its arrival.
   waitMs?: number;
+  // A monotonic clock in milliseconds. Tests replace it.
+  now?(): number;
 }
 
 export const MOVE_ACCEPTED_EDITS_WAIT_MS = 3_000;
@@ -29,6 +31,8 @@ export const MOVE_ACCEPTED_EDITS_WAIT_MS = 3_000;
 interface Attempt {
   targets: Set<string>;
   waiting: number;
+  // The latest deadline of the moves that joined it. Nothing starts after it.
+  expiresAt: number;
   controller: AbortController;
   done: Promise<void>;
   settle(): void;
@@ -37,7 +41,7 @@ interface Attempt {
 function newAttempt(): Attempt {
   let settle!: () => void;
   const done = new Promise<void>(resolve => { settle = resolve; });
-  return { targets: new Set(), waiting: 0, controller: new AbortController(), done, settle };
+  return { targets: new Set(), waiting: 0, expiresAt: -Infinity, controller: new AbortController(), done, settle };
 }
 
 // Each workspace has at most one active attempt, already sent, and one
@@ -45,14 +49,18 @@ function newAttempt(): Attempt {
 // cover every page it needs.
 export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOptions) {
   const waitMs = options.waitMs ?? MOVE_ACCEPTED_EDITS_WAIT_MS;
+  const now = options.now ?? (() => performance.now());
   const active = new Map<string, Attempt>();
   const pending = new Map<string, Attempt>();
 
+  // A deadline can pass before its timer runs, so each phase checks the clock too.
+  const expired = (attempt: Attempt) => attempt.controller.signal.aborted || now() >= attempt.expiresAt;
+
   async function run(workspaceId: string, attempt: Attempt): Promise<void> {
     const { signal } = attempt.controller;
-    if (signal.aborted || options.offline(workspaceId)) return;
+    if (expired(attempt) || options.offline(workspaceId)) return;
     const answered = await options.ownerCatchUp(workspaceId, [...attempt.targets], signal);
-    if (!answered || signal.aborted) return;
+    if (!answered || expired(attempt)) return;
     await options.relayCatchUp(workspaceId, signal);
   }
 
@@ -63,11 +71,13 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
     void run(workspaceId, attempt).catch(() => undefined).finally(() => {
       attempt.settle();
       if (active.get(workspaceId) === attempt) active.delete(workspaceId);
-      // A settled attempt never runs again. Only a pending, unexpired one starts.
+      // A settled attempt never runs again. Only a pending, unexpired one
+      // starts. An expired one releases its moves at once.
       const next = pending.get(workspaceId);
       if (!next) return;
       pending.delete(workspaceId);
-      if (!next.controller.signal.aborted) start(workspaceId, next);
+      if (!expired(next)) start(workspaceId, next);
+      else {next.controller.abort(); next.settle();}
     });
   }
 
@@ -80,15 +90,19 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
     if (pending.get(workspaceId) === attempt) pending.delete(workspaceId);
   }
 
-  function join(workspaceId: string, objectIds: readonly string[]): Attempt {
+  function join(workspaceId: string, objectIds: readonly string[], deadline: number): Attempt {
     const current = active.get(workspaceId);
-    if (current && !current.controller.signal.aborted && objectIds.every(id => current.targets.has(id))) return current;
+    if (current && !current.controller.signal.aborted && objectIds.every(id => current.targets.has(id))) {
+      current.expiresAt = Math.max(current.expiresAt, deadline);
+      return current;
+    }
     let attempt = current ? pending.get(workspaceId) : undefined;
     if (!attempt) {
       attempt = newAttempt();
       if (current) pending.set(workspaceId, attempt);
     }
     for (const id of objectIds) attempt.targets.add(id);
+    attempt.expiresAt = Math.max(attempt.expiresAt, deadline);
     if (!current) start(workspaceId, attempt);
     return attempt;
   }
@@ -106,7 +120,7 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
         return;
       }
       if (!objectIds.length) return;
-      const attempt = join(workspaceId, objectIds);
+      const attempt = join(workspaceId, objectIds, now() + waitMs);
       attempt.waiting += 1;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expired = new Promise<void>(resolve => { timer = setTimeout(resolve, waitMs); });
