@@ -190,3 +190,94 @@ it("retains an abort-ignoring pass after its deadline until both stop calls fini
   expect(stopped).toHaveBeenCalledTimes(2);
   expect(runPass).toHaveBeenCalledTimes(1);
 });
+
+// #3089: the move guard's targeted slot.
+type Pass = {documentCount: number; acknowledged: boolean};
+
+it("runs a targeted turn only between ordinary passes, and answers it", async () => {
+  vi.useFakeTimers();
+  const ordinary = deferred<Pass>();
+  const events: string[] = [];
+  const runPass = vi.fn().mockImplementationOnce(async () => {events.push("ordinary start"); const result = await ordinary.promise; events.push("ordinary end"); return result;})
+    .mockResolvedValue({documentCount: 1, acknowledged: false});
+  const targeted = deferred<boolean>();
+  const runTargetedPass = vi.fn(async (_id: string, objectIds: readonly string[]) => {events.push(`targeted ${objectIds.join()}`); return targeted.promise;});
+  const owner = startServerOwnerDelivery({workspaceIds: () => ["one"], attemptTimeoutMs: 5000, retryDelayMs: 1000, runPass, runTargetedPass, onError: vi.fn()});
+  await vi.advanceTimersByTimeAsync(0);
+  const answer = owner.catchUp("one", ["a", "b"], new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(runTargetedPass).not.toHaveBeenCalled();
+  ordinary.resolve({documentCount: 1, acknowledged: false});
+  await vi.advanceTimersByTimeAsync(0);
+  expect(events).toEqual(["ordinary start", "ordinary end", "targeted a,b"]);
+  // No ordinary pass starts while the targeted one runs.
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(runPass).toHaveBeenCalledTimes(1);
+  targeted.resolve(true);
+  await expect(answer).resolves.toBe(true);
+  // The ordinary schedule resumes where it was.
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(runPass).toHaveBeenCalledTimes(2);
+  await owner.stop();
+});
+
+it("drops a request whose move stopped waiting before its turn, and answers it false", async () => {
+  vi.useFakeTimers();
+  const ordinary = deferred<Pass>();
+  const runPass = vi.fn().mockImplementationOnce(() => ordinary.promise).mockResolvedValue({documentCount: 1, acknowledged: false});
+  const runTargetedPass = vi.fn(async () => true);
+  const owner = startServerOwnerDelivery({workspaceIds: () => ["one"], attemptTimeoutMs: 5000, retryDelayMs: 1000, runPass, runTargetedPass, onError: vi.fn()});
+  await vi.advanceTimersByTimeAsync(0);
+  const move = new AbortController();
+  const answer = owner.catchUp("one", ["a"], move.signal);
+  move.abort();
+  ordinary.resolve({documentCount: 1, acknowledged: false});
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(answer).resolves.toBe(false);
+  expect(runTargetedPass).not.toHaveBeenCalled();
+  await expect(owner.catchUp("one", ["a"], move.signal)).resolves.toBe(false);
+  await owner.stop();
+});
+
+it("answers false for a targeted pass that throws, and for requests still waiting or running at stop", async () => {
+  vi.useFakeTimers();
+  const runPass = vi.fn().mockResolvedValue({documentCount: 1, acknowledged: false});
+  const runTargetedPass = vi.fn().mockRejectedValueOnce(new Error("socket closed"))
+    .mockImplementation((_id: string, _ids: readonly string[], signal: AbortSignal) =>
+      new Promise<boolean>(resolve => signal.addEventListener("abort", () => resolve(true), {once: true})));
+  const onError = vi.fn();
+  const owner = startServerOwnerDelivery({workspaceIds: () => ["one"], attemptTimeoutMs: 5000, retryDelayMs: 1000, runPass, runTargetedPass, onError});
+  await vi.advanceTimersByTimeAsync(0);
+  const failed = owner.catchUp("one", ["a"], new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(failed).resolves.toBe(false);
+  expect(onError).not.toHaveBeenCalled();
+  const running = owner.catchUp("one", ["a"], new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(runTargetedPass).toHaveBeenCalledTimes(2);
+  const waiting = owner.catchUp("one", ["b"], new AbortController().signal);
+  await owner.stop();
+  // A pass that only answers once stop aborts it still counts as unanswered.
+  await expect(running).resolves.toBe(false);
+  await expect(waiting).resolves.toBe(false);
+  expect(runTargetedPass).toHaveBeenCalledTimes(2);
+});
+
+it("lets other workspaces' ordinary documents advance under repeated targeted requests, with the ordinary order unchanged", async () => {
+  vi.useFakeTimers();
+  const ordinary: Array<[string, number]> = [];
+  const turns: string[] = [];
+  let owner!: ReturnType<typeof startServerOwnerDelivery>;
+  // Each answer asks again at once, as a stream of moves in "one" would.
+  let asks = 4;
+  const ask = () => {if (asks-- > 0) void owner.catchUp("one", ["a"], new AbortController().signal).then(ask);};
+  const runTargetedPass = vi.fn(async () => {turns.push("targeted"); return true;});
+  owner = startServerOwnerDelivery({workspaceIds: () => ["one", "two"], attemptTimeoutMs: 5000, retryDelayMs: 100,
+    runPass: async (id, index) => {turns.push("ordinary"); ordinary.push([id, index]); return {documentCount: 2, acknowledged: true};},
+    runTargetedPass, onError: vi.fn()});
+  ask();
+  await vi.advanceTimersByTimeAsync(250);
+  await owner.stop();
+  expect(turns.slice(0, 9)).toEqual(["targeted", "ordinary", "targeted", "ordinary", "targeted", "ordinary", "targeted", "ordinary", "ordinary"]);
+  expect(ordinary.slice(0, 5)).toEqual([["one", 0], ["two", 0], ["one", 1], ["two", 1], ["one", 0]]);
+});

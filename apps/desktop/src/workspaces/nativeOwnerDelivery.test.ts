@@ -9,11 +9,12 @@ import type {OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
 import {runNativeOwnerDeliveryPass} from "./nativeOwnerDelivery";
 import {parseDesktopOwnerDeliveryConfig} from "./desktopOwnerDelivery";
 
-const mock = vi.hoisted(() => ({options: undefined as unknown, drain: vi.fn(), dispose: vi.fn(), authority: vi.fn()}));
+const mock = vi.hoisted(() => ({options: undefined as unknown, drain: vi.fn(), dispose: vi.fn(), authority: vi.fn(), synchronized: false}));
 vi.mock("./ownerYDocFrameDelivery", () => ({OwnerYDocFrameDelivery: class {
   constructor(options: unknown) {mock.options = options;}
   dispose = mock.dispose;
   freshOwnerAuthority = mock.authority;
+  get synchronized() {return mock.synchronized;}
 }}));
 vi.mock("./ownerYDocOutbox", () => ({OwnerYDocOutboxDrainer: class {drainOnce = mock.drain; dispose() {}}}));
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
@@ -21,7 +22,7 @@ const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: re
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]});
-afterEach(() => {vi.clearAllMocks(); vi.useRealTimers();});
+afterEach(() => {vi.clearAllMocks(); vi.useRealTimers(); mock.synchronized = false;});
 
 it("keeps a known-document preparation overload on the work retry cadence", async () => {
   vi.useFakeTimers();
@@ -129,4 +130,33 @@ it("persists a fenced idle outbox instead of requesting it again indefinitely", 
     document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: "owner", assertCurrent() {}})).toBe("frozen");
   expect(sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "ydoc.ownerOutbox.quarantine", workspace: "handle",
     params: {outboxId: "outbox", reason: "binding changed", observedBinding: binding}}), expect.any(AbortSignal));
+});
+
+// #3089: a move's owner sync never enrolls, and answers only after an opening sync installed.
+const observedPass = (client: unknown) => runNativeOwnerDeliveryPass({client: client as EngineClient, workspaceHandle: "handle", config,
+  refusals: new OwnerKnownRefusals(), document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential",
+  accountId: "owner", assertCurrent() {}, observedOnly: true});
+
+it("answers unbound for a page this device has not enrolled, without asking the host or enrolling", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "capture", captured: {nativeHeadSequence: 2, localStateDigest: "c".repeat(64)}})),
+    ownerYDocEnroll: vi.fn()};
+  expect(await observedPass(client)).toBe("unbound");
+  expect(mock.authority).not.toHaveBeenCalled();
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  {name: "no outbox", outboxId: null, drained: undefined, synchronized: false, expected: "retry"},
+  {name: "no outbox", outboxId: null, drained: undefined, synchronized: true, expected: "empty"},
+  {name: "a drained outbox", outboxId: "outbox", drained: "acknowledged", synchronized: false, expected: "retry"},
+  {name: "a drained outbox", outboxId: "outbox", drained: "acknowledged", synchronized: true, expected: "acknowledged"},
+  {name: "an empty outbox", outboxId: "outbox", drained: "empty", synchronized: false, expected: "retry"},
+  {name: "an empty outbox", outboxId: "outbox", drained: "empty", synchronized: true, expected: "empty"},
+])("answers $expected for $name when the opening sync installed is $synchronized", async ({outboxId, drained, synchronized, expected}) => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId}})), ownerYDocEnroll: vi.fn()};
+  mock.authority.mockImplementation(async () => {mock.synchronized = synchronized; return {kind: "authority", authority: {}};});
+  mock.drain.mockImplementation(async () => {mock.synchronized = synchronized; return drained;});
+  expect(await observedPass(client)).toBe(expected);
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
 });
