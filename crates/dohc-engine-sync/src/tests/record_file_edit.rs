@@ -1161,6 +1161,68 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
     assert_eq!(cursor(&b), 5 + limit);
 }
 
+/// Work held behind a conflict that passes the retention limit says which
+/// conflict to resolve, under its own code.
+#[test]
+fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let splashed = format!("{flown}\nSplashed down.\n");
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_d_scratch, mut d) = device("device-d");
+    hydrate(&mut d, &[SCHEMA, &planned]);
+    for op in &created {
+        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
+    }
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let doc = richdoc(&planned);
+    b_opens(&mut b, &doc, &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
+    let splashed_op = a_saves(&mut d, RECORD, RECORD_PATH, &splashed, "apollo-splashed", 50);
+    pull(&mut b, 3, std::slice::from_ref(&splashed_op), &[&splashed]);
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM relay_deferred_ops"), 1);
+
+    // The retained work fills the limit, and D sends one more file.
+    b.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])
+            .map_err(SyncError::persist)
+    })
+    .expect("fill the retention limit");
+    let gemini = a_saves(&mut d, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 60);
+    hydrate(&mut b, &[GEMINI]);
+    let mut relay = PagedRelay::new([(
+        4,
+        PullResponse {
+            ops: vec![gemini],
+            next_cursor: 5,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha(GEMINI), GEMINI.as_bytes().to_vec());
+    let result = RelaySyncClient::new(relay).pull_chat_workspace(
+        &mut b,
+        &mut WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &LeaseRegistry::new(),
+        2_200,
+    );
+    let Err(RelayError::Local(detail)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(
+        detail.starts_with(&format!(
+            "conflict-wait-limit: Changes from another computer are waiting on the conflict in \
+             {RECORD_PATH}. They reached a limit, so dohc stopped receiving changes. Resolve the \
+             conflict to receive changes again. (path {RECORD_PATH}, origin device-d seq "
+        )),
+        "{detail}"
+    );
+    assert!(detail.ends_with("1 retained ops, 536870912 retained bytes)"), "{detail}");
+    assert_eq!(head_text(&b, "gemini"), None);
+}
+
 #[test]
 fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));

@@ -266,6 +266,24 @@ pub(crate) fn retain(
     ops: &[&ReplicationEnvelope],
     faults: &dyn FaultInjector,
 ) -> Result<BTreeSet<String>, RelayError> {
+    retain_waiting(store, identity, relay_namespace, ops, &BTreeMap::new(), faults)
+}
+
+/// The stable code of an ordinary origin that passed the retention limit
+/// while it waits on a conflict.
+pub(crate) const CONFLICT_WAIT_LIMIT: &str = "conflict-wait-limit";
+
+/// [`retain`], where `conflict_waits` names each origin held by a conflict
+/// with the conflict's path, so passing the limit says what to resolve.
+pub(crate) fn retain_waiting(
+    store: &mut EngineStore,
+    identity: &SyncIdentity,
+    relay_namespace: Option<&str>,
+    ops: &[&ReplicationEnvelope],
+    conflict_waits: &BTreeMap<String, Option<String>>,
+    faults: &dyn FaultInjector,
+) -> Result<BTreeSet<String>, RelayError> {
+    let mut limit_detail = None;
     let relay_namespace = relay_namespace.filter(|namespace| !namespace.is_empty());
     if ops.is_empty() {
         return Ok(BTreeSet::new());
@@ -338,7 +356,21 @@ pub(crate) fn retain(
                         unretained.insert(object_id.to_owned());
                         continue;
                     }
-                    None => return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" }),
+                    None => {
+                        let Some(path) = conflict_waits.get(&op.origin_id) else {
+                            return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" });
+                        };
+                        let sentence = match path {
+                            Some(path) => format!("Changes from another computer are waiting on the conflict in {path}. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again."),
+                            None => "Changes from another computer are waiting on a conflict. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.".to_owned(),
+                        };
+                        let path = path.as_ref().map(|path| format!("path {path}, ")).unwrap_or_default();
+                        limit_detail = Some(format!(
+                            "{CONFLICT_WAIT_LIMIT}: {sentence} ({path}origin {} seq {}, {count} retained ops, {bytes} retained bytes)",
+                            op.origin_id, op.origin_seq,
+                        ));
+                        return Err(SyncError::RetryableState { reason: CONFLICT_WAIT_LIMIT });
+                    }
                 }
             }
             // It waits its turn with the rest of its document's work or, on an
@@ -383,7 +415,7 @@ pub(crate) fn retain(
             bytes += cost;
         }
         Ok::<_,SyncError>(unretained)
-    }).map_err(local)?;
+    }).map_err(|error| limit_detail.take().map_or_else(|| local(error), RelayError::Local))?;
     match outcome {
         TxnOutcome::Committed(unretained) => Ok(unretained),
         TxnOutcome::Crashed { .. } => Err(local("injected-crash")),

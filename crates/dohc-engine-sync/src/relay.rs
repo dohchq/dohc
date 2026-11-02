@@ -2929,8 +2929,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                let unretained =
-                    crate::deferred::retain(store, identity, relay_namespace, &retained, faults)?;
+                // An origin a conflict holds says which conflict to resolve
+                // if its work passes the limit.
+                let conflict_waits: BTreeMap<String, Option<String>> = p
+                    .retryable_refusals
+                    .iter()
+                    .filter(|(_, reason)| {
+                        *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT
+                    })
+                    .map(|&(index, _)| {
+                        let op = &ordered[index];
+                        let path = op.payload["beforePath"]
+                            .as_str()
+                            .or(op.payload["path"].as_str());
+                        (op.origin_id.clone(), path.map(str::to_owned))
+                    })
+                    .collect();
+                let unretained = crate::deferred::retain_waiting(
+                    store,
+                    identity,
+                    relay_namespace,
+                    &retained,
+                    &conflict_waits,
+                    faults,
+                )?;
                 for op in retained {
                     if let Some(object_id) = crate::hosted::hosted_document(op)
                         .filter(|object_id| unretained.contains(*object_id))
