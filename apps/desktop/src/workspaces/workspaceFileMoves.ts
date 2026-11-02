@@ -10,7 +10,7 @@ import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { workspaceDestinationError, workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { LiveDocumentMutationError, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { assertMoveParentCase, checkCaseRename, deleteIdentityUnavailable, deletePath, moveIdentityUnavailable, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
@@ -260,12 +260,37 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
   author: MomentWriteAuthor, options: PathChangeOptions,
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   // The source's spelling on disk, read before the lock only if the guard needs it.
-  const rootPath = operation.workspace.rootPath;
+  const rootPath = operation.workspace.rootPath, folder = folderPreCheck(options.capture);
   return Promise.resolve(options.beforeMove?.(async () => {
     const { physical } = await admitPath(rootPath, input.fromPath);
-    if (await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false)) await options.capture.checkFolderMove?.(physical);
+    if (await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false)) await folder.check(physical);
     return physical;
-  })).then(() => prepareMoveWorkspacePath(operation, input, author, options));
+  })).then(() => {
+    folder.settle();
+    return prepareMoveWorkspacePath(operation, input, author, options);
+  });
+}
+
+// The guard's folder check before the lock. Only a refusal skips the guard's
+// catch-up, and it is the move's answer, so a refusal that clears before the
+// lock can't let the folder move without one. Any other error leaves the
+// guard to catch up and the check inside the lock to decide.
+function folderPreCheck(capture: Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null) {
+  let refusal: LiveDocumentMutationError | undefined;
+  return {
+    async check(folder: string): Promise<void> {
+      try {
+        await capture?.checkFolderMove?.(folder);
+      } catch (error) {
+        if (!(error instanceof LiveDocumentMutationError)) return;
+        refusal = error;
+        throw error;
+      }
+    },
+    settle(): void {
+      if (refusal) throw refusal;
+    },
+  };
 }
 
 // A folder move from the app while History is off: without capture, dohc
@@ -282,15 +307,16 @@ export class FolderMoveHistoryOffError extends Error {
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
   person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
   // The app's own source check, which accepts names admitPath refuses.
-  const rootPath = operation.workspace.rootPath;
+  const rootPath = operation.workspace.rootPath, folder = folderPreCheck(options.capture);
   await options.beforeMove?.(async () => {
     const { physicalFromPath } = await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath);
     if ((await stat(join(rootPath, physicalFromPath))).isDirectory()) {
       if (!options.capture) throw new FolderMoveHistoryOffError(`${folderMoveHistoryOffTitle(physicalFromPath)}\n${FOLDER_MOVE_HISTORY_OFF_BODY}`);
-      await options.capture.checkFolderMove?.(physicalFromPath);
+      await folder.check(physicalFromPath);
     }
     return physicalFromPath;
   });
+  folder.settle();
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
     await options.admit?.();

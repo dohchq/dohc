@@ -6,6 +6,7 @@ import { deferred } from "../testing/deferred";
 import { createMoveAcceptedEditsGuard, type LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import { LiveFolderMoveError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
 // #3089: every route that renames or moves a live page waits for the move
@@ -149,35 +150,40 @@ it.each([
   expect(calls[2]).toBeGreaterThan(calls[0]!);
 });
 
-// A folder move refused for a page live on this computer is refused before
-// the guard catches anything up. A folder whose listed page is live only
-// elsewhere, and a single page, still wait for it.
+// A folder move refused for a page live on this computer catches nothing up,
+// and that refusal is the move's answer: it never reaches the capture, whose
+// own check might pass once the page stops. A folder whose listed page is live
+// only elsewhere, a folder whose check failed for another reason, and a single
+// page still wait for the guard, then reach the capture.
 it.each([
   { route: "app", move: (f: MoveFixture, options: Guarded, from: string, to: string) =>
     moveWorkspacePathByHand(f.operation, { fromPath: from, toPath: to }, person, { ...base(f), ...options }) },
   { route: "agent", move: async (f: MoveFixture, options: Guarded, from: string, to: string) => (await prepareMoveWorkspacePathAs(f.operation,
     { fromPath: from, toPath: to }, { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId }, { ...base(f), ...options }))() },
-])("an $route folder move over a page live here catches nothing up; other moves still do", async ({ move }) => {
-  for (const { from, to, liveHere, checked } of [
-    { from: "Notes", to: "Archive", liveHere: true, checked: true },
-    { from: "Notes", to: "Archive", liveHere: false, checked: true },
-    { from: "Notes/Page.md", to: "Notes/Renamed.md", liveHere: true, checked: false },
+])("an $route folder move over a page live here catches nothing up and is refused; other moves still catch up", async ({ move }) => {
+  const refusal = new LiveFolderMoveError("refused for a page live here");
+  for (const { from, to, check, checked } of [
+    { from: "Notes", to: "Archive", check: refusal, checked: true },
+    { from: "Notes", to: "Archive", check: null, checked: true },
+    { from: "Notes", to: "Archive", check: new Error("engine read failed"), checked: true },
+    { from: "Notes/Page.md", to: "Notes/Renamed.md", check: refusal, checked: false },
   ]) {
     const f = await workspace(["Notes/Page.md"]);
-    const checkFolderMove = vi.fn(async () => { if (liveHere) throw new Error("refused for a page live here"); });
+    const checkFolderMove = vi.fn(async () => { if (check) throw check; });
     const ownerCatchUp = vi.fn(async () => true);
     const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "Notes/Page.md", objectId: "page" }], offline: () => false,
       ownerCatchUp, relayCatchUp: async () => undefined });
     Object.assign(f.capture, { checkFolderMove });
-    await move(f, { beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) }, from, to)
-      .catch(() => undefined);
+    const outcome = await move(f, { beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) }, from, to)
+      .then(() => "moved", (error: unknown) => error);
     expect(checkFolderMove.mock.calls).toEqual(checked ? [[from]] : []);
-    const caughtUp = !(checked && liveHere);
-    expect(ownerCatchUp.mock.calls).toEqual(caughtUp ? [["workspace", ["page"], expect.any(AbortSignal)]] : []);
-    // The move still reaches the capture, whose own check refuses it there.
-    expect(f.order).toEqual(["capture"]);
+    const refused = checked && check === refusal;
+    expect(ownerCatchUp.mock.calls).toEqual(refused ? [] : [["workspace", ["page"], expect.any(AbortSignal)]]);
+    expect(f.order).toEqual(refused ? [] : ["capture"]);
+    if (refused) expect(outcome).toBe(refusal);
+    else expect(outcome).not.toBe(refusal);
     const captured = [...f.capture.changePathsAs.mock.invocationCallOrder, ...f.capture.beginFileRename.mock.invocationCallOrder];
-    if (caughtUp) expect(ownerCatchUp.mock.invocationCallOrder[0]).toBeLessThan(captured[0]!);
+    if (!refused) expect(ownerCatchUp.mock.invocationCallOrder[0]).toBeLessThan(captured[0]!);
     expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(true);
   }
 });
