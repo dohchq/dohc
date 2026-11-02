@@ -421,7 +421,7 @@ pub fn capture_imported_owner_activation(
                     moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
                 }, resolver) {
                 Ok(text) => Some(text),
-                Err(CollabError::MarkdownReaderUnavailable) => None,
+                Err(CollabError::MarkdownReaderUnavailable | CollabError::MarkdownReaderRetryable) => None,
                 Err(error) => return Err(error.into()),
             }
         } else { Some(local

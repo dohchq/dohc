@@ -35,3 +35,10 @@ it("retries only the pending settlement discriminator", () => {
   expect(isTransientEngineRefusal(pending)).toBe(true);
   expect(isTransientEngineRefusal(other)).toBe(false);
 });
+
+it("retries a reader with retries left and not one the engine gave up on", () => {
+  const retryable = new DaemonRefusalError({code: "OVERLOADED", message: "markdown-reader-retryable", retry: "afterBackoff"}, null);
+  const exhausted = new DaemonRefusalError({code: "INTERNAL", message: "workspace operation failed", retry: "no"}, null);
+  expect(isTransientEngineRefusal(retryable)).toBe(true);
+  expect(isTransientEngineRefusal(exhausted)).toBe(false);
+});

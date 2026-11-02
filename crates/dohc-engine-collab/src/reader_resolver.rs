@@ -204,10 +204,18 @@ impl PendingProof {
     }
 }
 
+/// Reader requests a proof may make after its first transient failure. The
+/// first retry runs at once; each later one waits for the caller's backoff.
+/// When they are used up, the lookup answers unavailable and forgets the
+/// proof, so only a later action starts a new count.
+const MAX_TRANSIENT_RETRIES: u8 = 6;
+
 struct Entry {
     key: Key,
     pending: Arc<PendingProof>,
     retries: u8,
+    /// This failure was answered retryable; the next lookup asks the reader again.
+    backed_off: bool,
 }
 
 fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reader::Proof) -> bool {
@@ -392,6 +400,18 @@ impl ReaderResolver {
                     return Ok(fresh);
                 }
                 Some(Err(failure)) if transient(failure) && entry.retries == 0 => retries = 1,
+                Some(Err(failure))
+                    if transient(failure) && entry.retries < MAX_TRANSIENT_RETRIES =>
+                {
+                    if !entry.backed_off {
+                        entries.push_back(Entry {
+                            backed_off: true,
+                            ..entry
+                        });
+                        return Err(CollabError::MarkdownReaderRetryable);
+                    }
+                    retries = entry.retries + 1;
+                }
                 Some(Err(failure)) => {
                     if !transient(failure) {
                         entries.push_back(entry);
@@ -428,6 +448,7 @@ impl ReaderResolver {
             key,
             pending: pending.clone(),
             retries,
+            backed_off: false,
         });
         Err(CollabError::MarkdownReaderPending(pending))
     }

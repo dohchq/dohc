@@ -343,6 +343,14 @@ fn expired_proofs_must_match_the_engine_projection() {
         "{:?}",
         proof.result.get()
     );
+    drop(proof);
+    // An invalid proof is not retried after a backoff.
+    for _ in 0..2 {
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+    }
 }
 fn lookup(
     conn: &Connection,
@@ -573,27 +581,213 @@ fn pending_entries_are_bounded_and_restart_has_no_proofs() {
     pending(lookup(&conn, &key, &doc, &restarted));
 }
 
+const TRANSIENT: [Failure; 4] = [
+    Failure::Crashed,
+    Failure::TimedOut,
+    Failure::Overloaded,
+    Failure::Superseded,
+];
+
+fn fail_next_request(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &Ydoc,
+    resolver: &ReaderResolver,
+    failure: Failure,
+) {
+    pending(lookup(conn, key, doc, resolver))
+        .result
+        .set(Err(failure))
+        .unwrap();
+}
+
 #[test]
-fn transient_failures_retry_once_then_hold_and_allow_a_later_action() {
-    for failure in [
-        Failure::Crashed,
-        Failure::TimedOut,
-        Failure::Overloaded,
-        Failure::Superseded,
-    ] {
+fn exhausted_transient_proof_remains_retryable() {
+    for failure in TRANSIENT {
+        let (conn, key, doc, source, resolver) = fixture();
+        // The first request and its immediate retry both fail.
+        fail_next_request(&conn, &key, &doc, &resolver, failure);
+        fail_next_request(&conn, &key, &doc, &resolver, failure);
+        assert!(
+            matches!(
+                lookup(&conn, &key, &doc, &resolver),
+                Err(CollabError::MarkdownReaderRetryable)
+            ),
+            "{failure:?}"
+        );
+        // The reader recovers before the caller's backoff ends. Nothing about
+        // the note changed, and the retry still proves it.
+        pending(lookup(&conn, &key, &doc, &resolver))
+            .result
+            .set(Ok(true))
+            .unwrap();
+        assert_eq!(
+            lookup(&conn, &key, &doc, &resolver).unwrap(),
+            Some(source),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn transient_retries_are_bounded_then_allow_a_later_action() {
+    for failure in TRANSIENT {
         let (conn, key, doc, _, resolver) = fixture();
-        let first = pending(lookup(&conn, &key, &doc, &resolver));
-        first.result.set(Err(failure)).unwrap();
-        drop(first);
-        let second = pending(lookup(&conn, &key, &doc, &resolver));
-        second.result.set(Err(failure)).unwrap();
-        drop(second);
-        assert!(matches!(
-            lookup(&conn, &key, &doc, &resolver),
-            Err(CollabError::MarkdownReaderUnavailable)
-        ));
+        let (mut requests, mut backoffs, mut ended) = (0, 0, false);
+        for _ in 0..4 * usize::from(MAX_TRANSIENT_RETRIES) {
+            match lookup(&conn, &key, &doc, &resolver) {
+                Err(CollabError::MarkdownReaderPending(proof)) => {
+                    requests += 1;
+                    proof.result.set(Err(failure)).unwrap();
+                }
+                Err(CollabError::MarkdownReaderRetryable) => backoffs += 1,
+                Err(CollabError::MarkdownReaderUnavailable) => {
+                    ended = true;
+                    break;
+                }
+                other => panic!("{failure:?}: {other:?}"),
+            }
+        }
+        assert!(ended, "{failure:?} kept retrying");
+        assert_eq!(
+            requests,
+            usize::from(MAX_TRANSIENT_RETRIES) + 1,
+            "{failure:?}"
+        );
+        // The first retry is immediate; every later one waited for a backoff.
+        assert_eq!(
+            backoffs,
+            usize::from(MAX_TRANSIENT_RETRIES) - 1,
+            "{failure:?}"
+        );
+        assert!(resolver.entries.lock().unwrap().is_empty());
+        // Try again, or the next edit, starts a new count.
         pending(lookup(&conn, &key, &doc, &resolver));
     }
+}
+
+/// A terminal failure ends the proof at once, whether it is the first answer
+/// or comes after a backoff, and the cached failure answers every later lookup
+/// without asking the reader again.
+fn assert_terminal(failure: Failure) {
+    for after_backoff in [false, true] {
+        let (conn, key, doc, _, resolver) = fixture();
+        if after_backoff {
+            fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+            fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+            assert!(matches!(
+                lookup(&conn, &key, &doc, &resolver),
+                Err(CollabError::MarkdownReaderRetryable)
+            ));
+        }
+        fail_next_request(&conn, &key, &doc, &resolver, failure);
+        let failed = Arc::as_ptr(&resolver.entries.lock().unwrap()[0].pending);
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    lookup(&conn, &key, &doc, &resolver),
+                    Err(CollabError::MarkdownReaderUnavailable)
+                ),
+                "{failure:?} after_backoff={after_backoff}"
+            );
+            let entries = resolver.entries.lock().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(Arc::as_ptr(&entries[0].pending), failed);
+            assert!(
+                matches!(entries[0].pending.result.get(), Some(Err(cached)) if *cached == failure)
+            );
+        }
+    }
+}
+
+// A reader asset that changed after it was checked: process.rs `check_assets`,
+// the hash cap in `file_sha`, and a runtime or bundle digest that no longer
+// matches. The reader answers Unavailable and closes
+// (`post_hello_asset_replacement_is_unavailable`,
+// `replacement_after_hash_is_blocked_or_refused_before_spawn`,
+// `identity_mismatch_stays_unavailable_without_rehashing`).
+#[test]
+fn changed_reader_assets_stay_terminal() {
+    assert_terminal(Failure::Unavailable);
+}
+
+// `platform::open_asset` refuses an asset another user can write or a linked
+// ancestor; `Worker::start` answers Unavailable
+// (`writable_ancestor_is_refused_even_with_a_protected_generation`,
+// `closure_rejects_untrusted_writers_before_spawn`).
+#[test]
+fn reader_permission_refusals_stay_terminal() {
+    assert_terminal(Failure::Unavailable);
+}
+
+// A deleted runtime, bundle or manifest fails `open_asset` at start or in
+// `check_assets`; the reader answers Unavailable
+// (`closure_rejects_directory_and_missing_assets_before_spawn`, and the
+// "runtime", "bundle" and "manifest" cases of
+// `invalid_configuration_or_identity_is_unavailable`).
+#[test]
+fn deleted_reader_files_stay_terminal() {
+    assert_terminal(Failure::Unavailable);
+}
+
+// An answer that does not prove these exact inputs becomes Unavailable in
+// `PendingProof::resolve`; `expired_proofs_must_match_the_engine_projection`
+// drives it through a real reader.
+#[test]
+fn invalid_proofs_stay_terminal() {
+    assert_terminal(Failure::Unavailable);
+}
+
+#[test]
+fn oversized_reader_requests_stay_terminal() {
+    assert_terminal(Failure::TooLarge);
+}
+
+// A retry proves the note's current state, never the one that failed. A note
+// whose file or lineage no longer matches is refused before any request, and
+// an edit is a new proof with its own count. Superseded only ever names the
+// older of two requests, so it stays transient.
+#[test]
+fn stale_targets_stay_terminal_after_a_backoff() {
+    for sql in [
+        "DELETE FROM snapshots",
+        "UPDATE snapshots SET path='other.md'",
+        "UPDATE ydoc_docs SET lineage_epoch_tag='other-epoch'",
+        "UPDATE blobs SET text='forged'",
+    ] {
+        let (conn, key, doc, _, resolver) = fixture();
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderRetryable)
+        ));
+        conn.execute(sql, []).unwrap();
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    lookup(&conn, &key, &doc, &resolver),
+                    Err(CollabError::MarkdownReaderUnavailable)
+                ),
+                "{sql}"
+            );
+        }
+    }
+    let (conn, key, doc, _, resolver) = fixture();
+    fail_next_request(&conn, &key, &doc, &resolver, Failure::Superseded);
+    fail_next_request(&conn, &key, &doc, &resolver, Failure::Superseded);
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::MarkdownReaderRetryable)
+    ));
+    doc.richdoc_append_paragraph("A later edit");
+    let edited = pending(lookup(&conn, &key, &doc, &resolver));
+    let entries = resolver.entries.lock().unwrap();
+    let current = entries
+        .iter()
+        .find(|entry| Arc::ptr_eq(&entry.pending, &edited))
+        .unwrap();
+    assert_eq!(current.retries, 0);
 }
 
 #[test]

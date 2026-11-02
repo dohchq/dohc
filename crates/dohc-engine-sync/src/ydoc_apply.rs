@@ -8234,6 +8234,9 @@ pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
         CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
             reason: "dohc could not verify this file. Try again.",
         },
+        CollabError::MarkdownReaderRetryable => SyncError::RetryableState {
+            reason: "markdown-reader-retryable",
+        },
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",

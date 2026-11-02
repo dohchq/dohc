@@ -18,6 +18,10 @@ pub enum CollabError {
     MarkdownReaderPending(std::sync::Arc<crate::reader_resolver::PendingProof>),
     #[error("dohc could not verify this file. Try again.")]
     MarkdownReaderUnavailable,
+    /// The reader failed in a way that clears on its own, and this proof still
+    /// has retries left. Asking again after a backoff starts the next one.
+    #[error("dohc could not verify this file. Try again.")]
+    MarkdownReaderRetryable,
     #[error(
         "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
     )]
@@ -237,6 +241,7 @@ impl CollabError {
             CollabError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             CollabError::MarkdownReaderPending(_) => "markdown-reader-pending",
             CollabError::MarkdownReaderUnavailable => "markdown-reader-unavailable",
+            CollabError::MarkdownReaderRetryable => "markdown-reader-retryable",
             CollabError::FrontmatterEditRefused => "frontmatter-edit-refused",
             CollabError::MalformedUpdate { .. } => "malformed-update",
             CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
