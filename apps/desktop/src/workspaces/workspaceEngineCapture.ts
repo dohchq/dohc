@@ -165,8 +165,6 @@ export class LiveDocumentMutationError extends Error {
 }
 
 export const LIVE_FOLDER_MOVE_BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
-// The design lead's body for a page this computer hosts. Until it is written, a hosted page reads like an owned one.
-const LIVE_FOLDER_MOVE_HOSTED_BODY: string | null = null;
 
 export function liveFolderMoveTitle(folder: string): string {
   return `dohc can't move "${folder}" while a page in it has live editing on`;
@@ -180,10 +178,9 @@ export class LiveFolderMoveError extends LiveDocumentMutationError {
 
 function liveFolderMoveRefusal(error: unknown, folder: string): Error | null {
   if (!(error instanceof DaemonRefusalError)) return null;
-  const hosted = error.message === "live-document-binding-active";
-  if (!hosted && error.message !== "live-folder-page-owned") return null;
-  const body = hosted ? LIVE_FOLDER_MOVE_HOSTED_BODY ?? LIVE_FOLDER_MOVE_BODY : LIVE_FOLDER_MOVE_BODY;
-  return new LiveFolderMoveError(`${liveFolderMoveTitle(folder)}\n${body}`, { cause: error });
+  // A hosted page and an owned page read the same.
+  if (error.message !== "live-document-binding-active" && error.message !== "live-folder-page-owned") return null;
+  return new LiveFolderMoveError(`${liveFolderMoveTitle(folder)}\n${LIVE_FOLDER_MOVE_BODY}`, { cause: error });
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;

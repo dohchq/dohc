@@ -298,6 +298,16 @@ it("refuses a folder move over an owned page with the folder words, before anyth
   await capture.stop();
 });
 
+it("words a folder move over a hosted page like one over an owned page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-hosted-folder-move-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.moveRefusalAt = "preflight";
+  await expect(capture.beginFileRename("notes", "moved", true)).rejects.toMatchObject({ name: "LiveFolderMoveError", message: FOLDER_REFUSAL });
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
 it("moves a folder with no live page, and keeps a page's own move check as it was", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-plain-folder-move-");
   await mkdir(join(rootPath, "drafts"));
