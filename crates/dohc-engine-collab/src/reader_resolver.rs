@@ -212,7 +212,8 @@ const MAX_TRANSIENT_RETRIES: u8 = 6;
 
 /// Retry state of transiently failed proofs the cache dropped to make room,
 /// so a proof that comes back resumes its count and backoff instead of
-/// starting over. The oldest state goes first when this is full.
+/// starting over. The oldest state goes first when this is full, so the bound
+/// holds for up to `MAX_ENTRIES + MAX_SAVED_RETRIES` proofs failing at once.
 const MAX_SAVED_RETRIES: usize = 4 * MAX_ENTRIES;
 
 struct Entry {
