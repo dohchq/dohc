@@ -2371,6 +2371,203 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
         .expect("final close");
 }
 
+const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+
+type BulkMoment = (String, Option<String>, Option<String>);
+
+/// Every `bulk/` moment, oldest first: (path, summary, correlation id).
+fn bulk_moments(db: &Path) -> Vec<BulkMoment> {
+    let store = EngineStore::open(db, 100).expect("reopen store");
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT path, metadata_summary, metadata_correlation_id FROM moments \
+                 WHERE workspace_id = ?1 AND path LIKE 'bulk/%' ORDER BY moment_order",
+            )?;
+            let rows = statement.query_map([WORKSPACE_ID], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("bulk moments")
+}
+
+/// The one correlation id that every moment carries under the import label.
+fn single_import_id(moments: &[BulkMoment]) -> String {
+    let ids: std::collections::BTreeSet<_> = moments
+        .iter()
+        .map(|(path, summary, id)| {
+            assert_eq!(
+                summary.as_deref(),
+                Some(FIRST_IMPORT_SUMMARY),
+                "{path} left the first import"
+            );
+            id.clone().expect("import moments carry a correlation id")
+        })
+        .collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "one first import, one correlation id: {ids:?}"
+    );
+    ids.into_iter().next().expect("one id")
+}
+
+/// Open a new workspace over a fresh import's worth of files and pause the
+/// import after its first committed unit.
+async fn open_paused_import(
+    scratch: &ScratchDir,
+    probe: &CaptureApplyProbe,
+) -> (
+    Arc<InProcessTransport<EngineService>>,
+    WorkspaceHandle,
+    tokio::sync::mpsc::Receiver<EngineEventNotice>,
+) {
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
+    probe.pause_after_next_import_commit();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let events = service.events().subscribe();
+    let transport = Arc::new(InProcessTransport::new(service));
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, scratch, 1))
+        .await
+        .expect("a fresh open must not wait for its import");
+    tokio::time::timeout(WAIT, probe.wait_until_import_commit_paused())
+        .await
+        .expect("the first import unit commits");
+    (transport, handle, events)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timed_out_first_import_keeps_its_import_provenance() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+
+    // Past the deadline, live ticks record the rest of the import.
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    probe.release_import_commit();
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    let moments = bulk_moments(&scratch.path().join(".dohc/engine/engine.db"));
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopen_finishes_an_interrupted_first_import_under_its_id() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    let (transport, handle, _events) = open_paused_import(&scratch, &probe).await;
+
+    // Quit after the first committed unit: close cancels the import, then
+    // waits for its worker.
+    let closing = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { close_workspace(&transport, handle, 2).await }
+    });
+    tokio::time::timeout(WAIT, probe.wait_until_close_gate_waiting())
+        .await
+        .expect("close waits for the paused import");
+    probe.release_import_commit();
+    tokio::time::timeout(WAIT, closing)
+        .await
+        .expect("close ends the import")
+        .expect("close task");
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let prefix = bulk_moments(&db);
+    assert!(
+        !prefix.is_empty() && prefix.len() < EARLY_IMPORT_MIN_ADDED_FILES,
+        "close must leave the import unfinished; it recorded {} files",
+        prefix.len()
+    );
+    let import_id = single_import_id(&prefix);
+
+    let reopened = open_workspace(&transport, &scratch, 3).await;
+    wait_until_capture_ready(&transport, &reopened, 4).await;
+    close_workspace(&transport, reopened, 9_100).await;
+
+    let moments = bulk_moments(&db);
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    assert_eq!(single_import_id(&moments), import_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_during_an_unfinished_first_import_is_a_live_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    // The first committed unit starts with the first path in sort order.
+    write_file(scratch.path(), "bulk/seed-0000.md", b"edited during import");
+    probe.release_import_commit();
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "bulk/seed-0000.md",
+        Some("edited during import"),
+    )
+    .await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    let mut moments = bulk_moments(&scratch.path().join(".dohc/engine/engine.db"));
+    let edit = moments
+        .iter()
+        .rposition(|(path, ..)| path == "bulk/seed-0000.md")
+        .expect("the edit is recorded");
+    let (_, summary, correlation) = moments.remove(edit);
+    assert_eq!(
+        (summary, correlation),
+        (None, None),
+        "an edit to an imported file keeps the live Edited label"
+    );
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_from_before_import_tracking_counts_its_import_finished() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let (transport, handle, _events) = open_over_existing_files(&scratch).await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    // Roll the store back to before the import table existed.
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    rusqlite::Connection::open(&db)
+        .expect("open store")
+        .execute_batch(
+            "DROP TABLE capture_first_imports; \
+             DELETE FROM engine_migrations WHERE id = 'v2-capture-first-imports';",
+        )
+        .expect("roll back the import migration");
+
+    write_file(scratch.path(), "added-while-closed.md", b"new offline");
+    let handle = open_workspace(&transport, &scratch, 2_000).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "added-while-closed.md",
+        Some("new offline"),
+    )
+    .await;
+    close_workspace(&transport, handle, 9_101).await;
+
+    let (summary, _) = moment_metadata(&db, "added-while-closed.md");
+    assert_eq!(summary.as_deref(), Some("Changed while dohc was closed"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_reconcile_forces_a_full_manifest_rebuild() {
     let scratch = ScratchDir::new().expect("scratch");
