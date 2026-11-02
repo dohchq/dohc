@@ -6271,13 +6271,13 @@ export function createWorkspaceEngineCapture(
       try {
         await engine.retryCapture();
       } catch (error) {
-        // A pass that outlasts the settle budget is still catching up only
-        // while capture starts, imports or runs healthy. A driver that
-        // stopped or degraded again keeps History paused.
+        // A pass that outlasts the settle budget is still catching up unless
+        // capture stopped again, judged as the daemon judges a stopped driver
+        // (degraded or terminal). A replacement still on its first scan is
+        // neither, and reports not running until that scan ends.
         if (!(error instanceof EngineCaptureNotSettledError)) throw error;
         const status = await engine.watcherStatus?.();
-        if (status === undefined || status.phase === "starting" || status.phase === "importing"
-          || (status.running && !status.degraded && !status.terminal)) throw error;
+        if (status === undefined || (!status.degraded && !status.terminal)) throw error;
         throw new HistoryStillPausedError([]);
       }
       // On the chain, so a health poll that started before the restart

@@ -107,8 +107,9 @@ async function reconnectFailureCapture(prefix: string) {
     ownedPage: null as string | null,
     checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
-    // Capture that never settles: "stopped" also answers a stopped driver.
-    captureAnswer: null as "unsettled" | "stopped" | null,
+    // Capture that never settles: "unsettled" runs healthy, "scanning" is a
+    // replacement still on its first scan, "stopped" a driver that stopped.
+    captureAnswer: null as "unsettled" | "scanning" | "stopped" | null,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -153,13 +154,14 @@ async function reconnectFailureCapture(prefix: string) {
           );
         }
       }
-      const stopped = state.captureAnswer === "stopped";
+      const answer = state.captureAnswer;
       const lifecycle = daemonCaptureLifecycleAnswer(request, () => ({
         deferredWrites: [], heldFiles: [], degraded: false,
-        settled: state.captureAnswer === null, running: !stopped,
+        settled: answer === null, running: answer === null || answer === "unsettled",
       }));
-      if (lifecycle && stopped && request.method === "watcher.status") {
-        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }), running: false, degraded: true, phase: "degraded" } };
+      if (lifecycle && (answer === "scanning" || answer === "stopped") && request.method === "watcher.status") {
+        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }),
+          running: false, degraded: answer === "stopped", phase: "degraded" } };
       }
       if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
@@ -588,11 +590,16 @@ it("names every page whose live editing stopped when Try again leaves History pa
   await capture.stop();
 });
 
-// Try again that outlasts the settle budget reads as catching up only while
-// capture still runs; a driver that stopped again keeps History paused.
+// Try again that outlasts the settle budget reads as catching up while
+// capture runs or a replacement is still on its first scan; a driver that
+// stopped again keeps History paused.
 it("keeps History paused when Try again finds capture stopped again, and catching up while it still runs", async () => {
   const { capture, state } = await reconnectFailureCapture("dohc-ydoc-history-retry-unsettled-");
   state.captureAnswer = "unsettled";
+  await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
+  // Not running and phase "degraded" until its first scan ends, but neither
+  // degraded nor terminal (capture_driver.rs replacement_phase, stopped).
+  state.captureAnswer = "scanning";
   await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
   state.captureAnswer = "stopped";
   const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
