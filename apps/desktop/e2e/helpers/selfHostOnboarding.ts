@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { Transform, type Duplex } from "node:stream";
+import { Transform, type Duplex, type Readable } from "node:stream";
 import { createRequire } from "node:module";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { join } from "node:path";
@@ -121,7 +121,7 @@ export class HostedLogClientClosedError extends Error {
 
 interface PendingHostedLogResponse extends HostedLogResponseBarrier {
   workspaceId: string;
-  hold(incoming: IncomingMessage, outgoing: ServerResponse): void;
+  hold(incoming: IncomingMessage, outgoing: ServerResponse, body: Readable): void;
   attach(outgoing: ServerResponse): void;
   receive(response: IncomingMessage): void;
   fail(error: Error): void;
@@ -169,10 +169,13 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
   const delayed: RequestListener = (incoming, outgoing) => {
     const wait = delayMs;
-    if (wait > 0) setTimeout(() => forward(incoming, outgoing, wait), wait);
-    else forward(incoming, outgoing, 0);
+    if (wait <= 0) { forward(incoming, outgoing, incoming, 0); return; }
+    // The body's delay runs from its arrival, alongside the headers', so a
+    // buffered body crosses once.
+    const body = incoming.pipe(delayedStream(wait));
+    setTimeout(() => forward(incoming, outgoing, body, wait), wait);
   };
-  const forward = (incoming: IncomingMessage, outgoing: ServerResponse, wait: number) => {
+  const forward = (incoming: IncomingMessage, outgoing: ServerResponse, body: Readable, wait: number) => {
     if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
     if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
@@ -180,7 +183,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
     const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
       ? holdingHostedLog : undefined;
-    if (holding) { holding.hold(incoming, outgoing); return; }
+    if (holding) { holding.hold(incoming, outgoing, body); return; }
     const barrier = nextHostedLog && encodeURIComponent(nextHostedLog.workspaceId) === hostedWorkspace
       ? nextHostedLog : undefined;
     if (barrier) { nextHostedLog = undefined; barrier.attach(outgoing); }
@@ -193,7 +196,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     const intercept = options.collectionWriteResponse && incoming.method === "POST"
       && /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
     const requestChunks: Buffer[] = [];
-    if (intercept) incoming.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
+    if (intercept) body.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
     const upstream = requestHttp(new URL(path, target), { method: incoming.method, headers: incoming.headers }, (response) => {
       if (barrier) { barrier.receive(response); return; }
       if (intercept) {
@@ -233,8 +236,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       upstream.destroy();
     });
     incoming.on("error", error => { barrier?.fail(error); upstream.destroy(); });
-    if (wait > 0) incoming.pipe(delayedStream(wait)).pipe(upstream);
-    else incoming.pipe(upstream);
+    body.pipe(upstream);
   };
   const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, delayed) : createHttpServer(delayed);
   server.on("upgrade", (incoming, socket, head) => {
@@ -320,10 +322,10 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       let outgoing: ServerResponse | undefined;
       let buffered: ProxiedHostedLogResponse | undefined;
       let released = false;
-      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse }> = [];
+      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse; body: Readable }> = [];
       const barrier: PendingHostedLogResponse = {
         workspaceId, captured, delivered,
-        hold(incoming, outgoing) { held.push({ incoming, outgoing }); },
+        hold(incoming, outgoing, body) { held.push({ incoming, outgoing, body }); },
         attach(destination) {
           outgoing = destination;
           if (!released) holdingHostedLog = barrier;
@@ -362,7 +364,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
             outgoing = undefined;
           }
           for (const request of held.splice(0)) {
-            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing, 0);
+            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing, request.body, 0);
           }
         },
         fail(error) {

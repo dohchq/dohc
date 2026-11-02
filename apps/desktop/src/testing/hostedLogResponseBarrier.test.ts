@@ -1,4 +1,4 @@
-import { createServer, get, type RequestListener } from "node:http";
+import { createServer, get, request, type RequestListener } from "node:http";
 import { createConnection } from "node:net";
 import { once } from "node:events";
 import { expect, it } from "vitest";
@@ -146,5 +146,41 @@ it("reports an abandoned captured client and serves its retry through the next b
       await next.delivered;
       expect(await (await retry).text()).toBe("2");
     } finally { request.destroy(); first.destroy(); next?.destroy(); }
+  });
+});
+
+// #3089: T7 reads `delayMs` as one delay each way. A request body that
+// arrives with its headers must not wait a second time.
+it("delays a buffered POST once each way and keeps its chunks in order", async () => {
+  const delayMs = 500;
+  let received: { body: string; at: number } | undefined;
+  await withProxy((incoming, response) => {
+    const chunks: Buffer[] = [];
+    incoming.on("data", chunk => chunks.push(Buffer.from(chunk)));
+    incoming.once("end", () => {
+      received = { body: Buffer.concat(chunks).toString("utf8"), at: performance.now() };
+      response.end("answered");
+    });
+  }, async proxy => {
+    proxy.setDelayMs(delayMs);
+    const sent = performance.now();
+    const answered = new Promise<{ body: string; at: number }>((resolve, reject) => {
+      const post = request(`${proxy.origin}/sync/workspace/push`, { method: "POST" }, response => {
+        const chunks: Buffer[] = [];
+        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+        response.once("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), at: performance.now() }));
+      });
+      post.once("error", reject);
+      for (const chunk of ["one,", "two,", "three"]) post.write(chunk);
+      post.end();
+    });
+    const answer = await answered;
+    expect(received?.body).toBe("one,two,three");
+    expect(answer.body).toBe("answered");
+    const upstream = received!.at - sent, downstream = answer.at - received!.at;
+    expect(upstream).toBeGreaterThanOrEqual(delayMs - 5);
+    expect(upstream).toBeLessThan(delayMs * 1.5);
+    expect(downstream).toBeGreaterThanOrEqual(delayMs - 5);
+    expect(downstream).toBeLessThan(delayMs * 1.5);
   });
 });
