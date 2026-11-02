@@ -10,7 +10,7 @@ import * as Y from "yjs";
 import * as shellError from "./shell/useShellError";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
-import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
+import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
@@ -74,6 +74,65 @@ it("says History paused with Try again, restarts capture from the row, and keeps
     await restart.promise.catch(() => undefined);
   });
   expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+});
+
+describe("History paused words", () => {
+  function pausedBridge() {
+    const bridge = makeBridge(Promise.resolve(null));
+    const status: SyncStatusResult = { ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    return bridge;
+  }
+  // What the renderer receives when Try again's handler rejects.
+  const acrossIpc = (error: Error) =>
+    new Error(`Error invoking remote method 'desktop:retry-history-capture': ${String(ipcWireError(error))}`);
+  // Try again from the toast, then the words its failure shows in the toast
+  // and in the Notices row.
+  async function failedRetryWords(failure: Error) {
+    const bridge = pausedBridge();
+    bridge.retryHistoryCapture.mockRejectedValueOnce(failure);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryHistoryCapture).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).not.toContain("Your files still save normally."));
+    const toast = screen.getByTestId("workspace-shell-error").textContent;
+    expect(toast).toContain("History paused");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await within(await screen.findByTestId("notice-center")).findByTestId("notice-history-capture-failed");
+    expect(row.textContent).toContain("History paused");
+    return { toast, row: row.textContent };
+  }
+
+  it("says in the toast and the Notices row that files still save", async () => {
+    renderShell(pausedBridge());
+    const body = "dohc could not record recent changes in History. Your files still save normally.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("History paused");
+    expect(toast.textContent).toContain(body);
+    await userEvent.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await within(await screen.findByTestId("notice-center")).findByTestId("notice-history-capture-failed");
+    expect(row.textContent).toContain("History paused");
+    expect(row.textContent).toContain(body);
+  });
+
+  it("names the page whose live editing stopped when Try again leaves History paused", async () => {
+    const { toast, row } = await failedRetryWords(acrossIpc(new HistoryStillPausedError("notes/plan.md")));
+    const body = 'History is still paused because live editing on "notes/plan.md" stopped. Close and reopen that page, then try again.';
+    expect(toast).toContain(body);
+    expect(row).toContain(body);
+  });
+
+  it.each([
+    ["capture still fails", acrossIpc(new HistoryStillPausedError(null))],
+    ["the engine refused the restart", new Error("Error invoking remote method 'desktop:retry-history-capture': DaemonRefusalError [WORKSPACE_UNAVAILABLE]: workspace handle is unavailable")],
+  ])("asks for a restart when Try again leaves History paused because %s", async (_reason, failure) => {
+    const { toast, row } = await failedRetryWords(failure);
+    const body = "History is still paused. Restart dohc to try again.";
+    expect(toast).toContain(body);
+    expect(row).toContain(body);
+  });
 });
 
 // Edits the server refused for good wait in a queue on this computer. Each

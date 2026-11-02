@@ -544,10 +544,13 @@ export function useShellError(workspaceId: string) {
   // workspace, so a later report replaces the row and a healthy status
   // clears it; null clears it. `reasons` are extra Copy error details lines,
   // such as the path a failure names. A report repeated unchanged keeps its
-  // toast closed unless `toast` asks for it again.
+  // toast closed unless `toast` asks for it again. `stillPaused` reports a
+  // Try again that failed: `path` names the page whose live editing stopped,
+  // or is null when something else keeps History paused.
   const showHistoryPaused = useCallback(
     (notice: {
       retry: () => void | false; openHistory: () => void; toast?: boolean;
+      stillPaused?: { path: string | null };
       cause?: string; reasons?: ReadonlyArray<ErrorDetailField>;
     } | null) => {
       const identity = `history-capture:${workspaceId}`;
@@ -559,9 +562,12 @@ export function useShellError(workspaceId: string) {
       push({
         id: "history-capture-failed",
         identity,
-        // Placeholder words, waiting for the design lead.
         title: "History paused",
-        message: "dohc could not record recent changes. Some changes may be missing from History.",
+        message: notice.stillPaused === undefined
+          ? "dohc could not record recent changes in History. Your files still save normally."
+          : notice.stillPaused.path === null
+            ? "History is still paused. Restart dohc to try again."
+            : `History is still paused because live editing on "${notice.stillPaused.path}" stopped. Close and reopen that page, then try again.`,
         ...(details.length ? { details } : {}),
         retry: notice.retry,
         action: { label: "Open History", run: notice.openHistory, reads: true },

@@ -35,6 +35,7 @@ import {
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import { HistoryStillPausedError } from "../ipc/errorWords";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { createWorkspaceActivity, settleYDocsAfterFileObservation, WorkspaceActivityState } from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
@@ -534,6 +535,30 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
   });
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
+  await capture.stop();
+});
+
+// A dead live session keeps History paused past Try again, so Try again names
+// its page; closing that page releases the session and lets History run.
+it("names the page whose live editing stopped when Try again leaves History paused, until that page closes", async () => {
+  const { capture, outcomes } = await reconnectFailureCapture(
+    "dohc-ydoc-history-retry-dead-",
+  );
+  const session = await capture.openYDocSession({
+    path: "notes/plan.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(session);
+  expect(outcomes.at(-1)).toBe(false);
+
+  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  expect(refused).toBeInstanceOf(HistoryStillPausedError);
+  expect(refused).toMatchObject({ code: "live-editing-stopped", path: "notes/plan.md" });
+  expect(outcomes.at(-1)).toBe(false);
+
+  await session.close({ settle: false });
+  expect(outcomes.at(-1)).toBe(true);
+  await expect(capture.retryHistoryCapture()).resolves.toBeUndefined();
   await capture.stop();
 });
 

@@ -7,7 +7,7 @@ import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryS
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
-import { livePageBody, livePageTitle, type LivePageAction } from "../ipc/errorWords";
+import { HistoryStillPausedError, livePageBody, livePageTitle, type LivePageAction } from "../ipc/errorWords";
 import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -564,7 +564,8 @@ export interface WorkspaceEngineCapture {
   resyncFileObservation(): Promise<void>;
   observationDrainFailed(): void;
   // Restarts daemon capture that stopped and publishes a healthy outcome
-  // only once capture runs again. Rejects while History is still paused.
+  // only once capture runs again. Rejects with HistoryStillPausedError while
+  // History is still paused.
   retryHistoryCapture(): Promise<void>;
   // Updates the daemon capture owner's live authorship state. Starting a run
   // is ordered before the caller launches agent work; clearing first flushes
@@ -1950,8 +1951,8 @@ export function createWorkspaceEngineCapture(
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
-  // editor session is still rejecting the user's edits.
-  const deadYDocSessions = new Set<object>();
+  // editor session is still rejecting the user's edits. Each names its path.
+  const deadYDocSessions = new Map<object, string>();
   // Dead-session failures are an independent penalty, so retain the latest
   // watcher/health result when that penalty is added and later removed.
   let backgroundCaptureHealthy = true;
@@ -2705,7 +2706,7 @@ export function createWorkspaceEngineCapture(
       input.onDead();
       if (dead) return;
       dead = true;
-      deadYDocSessions.add(deadSessionToken);
+      deadYDocSessions.set(deadSessionToken, input.path);
       publishCaptureOutcome();
     };
 
@@ -6277,7 +6278,11 @@ export function createWorkspaceEngineCapture(
           healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
           return healthy;
         });
-        if (!healthy || deadYDocSessions.size > 0) throw new Error("History is still paused.");
+        if (!healthy) throw new HistoryStillPausedError(null);
+        // Closing the page releases its dead session, so name one, the same
+        // one each time.
+        const [stopped] = [...deadYDocSessions.values()].sort();
+        if (stopped !== undefined) throw new HistoryStillPausedError(stopped);
       });
     },
 

@@ -13,6 +13,7 @@ import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
+import { HistoryStillPausedError, ipcWireError, liveEditingStoppedPath, readError } from "./errorWords";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
 import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { GetCollectionRecordHistoryResult, historyOperations, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
@@ -421,10 +422,28 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => { throw new Error("readonly"); });
     await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("readonly");
     h.writable.mockImplementation(() => undefined);
-    h.capture.retryHistoryCapture.mockRejectedValueOnce(new Error("History is still paused."));
+    h.capture.retryHistoryCapture.mockRejectedValueOnce(new HistoryStillPausedError(null));
     await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("History is still paused.");
     expect(h.capture.retryHistoryCapture).toHaveBeenCalledTimes(2);
     expect(h.notify).toHaveBeenCalledTimes(2);
+  });
+  // Electron sends a rejected handler's error as one string. Why History is
+  // still paused, and the page it names, must reach the renderer in it.
+  it("carries why Try again left History paused, and the page whose live editing stopped, to the renderer", async () => {
+    const h = await harness();
+    const received = async (refusal: HistoryStillPausedError): Promise<string> => {
+      h.capture.retryHistoryCapture.mockRejectedValueOnce(refusal);
+      const refused = await Promise.resolve(h.invoke(CHANNELS.retryHistoryCapture)).then(() => null, (error: unknown) => error);
+      expect(refused).toBe(refusal);
+      return `Error invoking remote method '${CHANNELS.retryHistoryCapture}': ${String(ipcWireError(refused))}`;
+    };
+    const stopped = await received(new HistoryStillPausedError("notes/plan.md"));
+    expect(stopped).toContain("HistoryStillPausedError [live-editing-stopped]: ");
+    expect(liveEditingStoppedPath(stopped)).toBe("notes/plan.md");
+    expect(readError(stopped).cause).toBe("HistoryStillPausedError [live-editing-stopped]: History is still paused. Live editing stopped on notes/plan.md");
+    const other = await received(new HistoryStillPausedError(null));
+    expect(liveEditingStoppedPath(other)).toBeNull();
+    expect(readError(other).cause).toBe("HistoryStillPausedError: History is still paused.");
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();

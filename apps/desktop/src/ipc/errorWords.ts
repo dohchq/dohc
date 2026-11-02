@@ -509,6 +509,30 @@ export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
     computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
 }
 
+const LIVE_EDITING_STOPPED = "live-editing-stopped";
+const LIVE_EDITING_STOPPED_LEAD = "History is still paused. Live editing stopped on ";
+
+/**
+ * Try again on History that stopped recording, refused because it is still
+ * paused. `path`: the page whose live editing stopped, which keeps History
+ * paused until that page closes; null when something else keeps it paused.
+ */
+export class HistoryStillPausedError extends Error {
+  override name = "HistoryStillPausedError";
+  readonly code: typeof LIVE_EDITING_STOPPED | undefined;
+  constructor(readonly path: string | null) {
+    super(path === null ? "History is still paused." : `${LIVE_EDITING_STOPPED_LEAD}${path}`);
+    this.code = path === null ? undefined : LIVE_EDITING_STOPPED;
+  }
+}
+
+/** The page whose live editing stopped, when that is what kept History paused after Try again. */
+export function liveEditingStoppedPath(error: unknown): string | null {
+  const { name, code, message } = parse(error);
+  if (name !== "HistoryStillPausedError" || code !== LIVE_EDITING_STOPPED || !message.startsWith(LIVE_EDITING_STOPPED_LEAD)) return null;
+  return message.slice(LIVE_EDITING_STOPPED_LEAD.length) || null;
+}
+
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {
   return readError(error).words === PRIVACY_DENIED_WORDS;

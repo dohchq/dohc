@@ -24,6 +24,7 @@ import {
   CollectionMoveUnfinishedError,
   collectionsRefusalError,
   ERROR_WORDS,
+  HistoryStillPausedError,
   ipcWireError,
   isChatMentionPageChanged,
   isPrivacyDenied,
@@ -34,6 +35,7 @@ import {
   livePageTitle,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
+  liveEditingStoppedPath,
   namingCollectionMove,
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
@@ -641,6 +643,15 @@ describe("error words", () => {
     expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
       .toBe("Could not share. Sync this workspace before sharing.");
   });
+});
+
+it("reads the page whose live editing stopped from Try again on History, whole, and from nothing else", () => {
+  const stopped = new HistoryStillPausedError("notes/Q&A: plan [draft].md");
+  expect(liveEditingStoppedPath(stopped)).toBe("notes/Q&A: plan [draft].md");
+  expect(liveEditingStoppedPath(acrossIpc(stopped, "desktop:retry-history-capture"))).toBe("notes/Q&A: plan [draft].md");
+  expect(liveEditingStoppedPath(acrossIpc(new HistoryStillPausedError(null), "desktop:retry-history-capture"))).toBeNull();
+  // The same words from another error name no page.
+  expect(liveEditingStoppedPath(acrossIpc(new Error(stopped.message), "desktop:retry-history-capture"))).toBeNull();
 });
 
 it("names the Collection in a stopped move's words, as written, and leaves any other error as it is", () => {

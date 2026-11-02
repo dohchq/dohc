@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPath, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -5728,7 +5728,10 @@ export function DesktopWorkspaceShell(props: {
       // A healthy status that arrived first already cleared the row.
       if (workspaceIdRef.current !== askedFor || !historyPausedRef.current) return;
       const { cause } = readError(error);
-      showHistoryPaused({ retry: retryHistoryCapture, openHistory: openHistoryView, toast: true, ...(cause ? { cause } : {}) });
+      showHistoryPaused({
+        retry: retryHistoryCapture, openHistory: openHistoryView, toast: true,
+        stillPaused: { path: liveEditingStoppedPath(error) }, ...(cause ? { cause } : {}),
+      });
     });
     return false;
   }, [workspaceId, setShellRetryBusy, showHistoryPaused, openHistoryView]);
