@@ -43,6 +43,7 @@ import {
   createWorkspaceEngineCapture,
   LIVE_FOLDER_MOVE_BODY,
   LiveFolderMoveError,
+  liveFolderMoveTitle,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -3198,35 +3199,51 @@ describe("the move guard over a real relay and live host", () => {
     }
   }, 600_000);
 
-  // A folder that holds a page whose newer edit is installed but not saved
-  // into the file. The engine refuses the folder's move too, and keeps the edit.
-  it.skipIf(engine.missing)("refuses a folder move over an installed, unsaved edit, and moves the folder once it is pulled", async () => {
+  // A folder that holds a page this computer owns, whose newer edit is
+  // installed but not yet saved into the file. The live-folder refusal comes
+  // before the guard catches anything up, and the next pull saves the edit
+  // into the page where it is. The live-folder suite covers an edit that
+  // hasn't reached the owner; this one covers an installed one, with the
+  // guard wired.
+  it.skipIf(engine.missing)("refuses a folder move over an installed, unsaved edit before catching up, and keeps the edit", async () => {
     const fixture = await openLiveMoveFixture({ workspaceId: "guard-folder-refused", compiledRelayMain, engineExecutable: engine.require(),
       pages: ["box/refused"] });
     try {
       const { owner } = fixture;
       const page = fixture.page("box/refused");
       const text = marker("box-refused");
+      const recorded = timings.length;
+      const files = async () => (await readdir(join(owner.rootPath, "notes"), { recursive: true })).map(String).sort();
       fixture.refuseLogPulls(true);
       let failure: unknown;
+      let accepted: ReturnType<LiveMoveFixture["ownerAccepted"]>;
       try {
         const cursor = await fixture.edit("box/refused", text);
-        const requested = owner.targetedPasses();
+        await fixture.ownerSync("box/refused");
+        accepted = fixture.ownerAccepted("box/refused");
+        expect(accepted.cursor).toBeGreaterThanOrEqual(cursor);
+        await fixture.waitPublished("box/refused", cursor);
+        expect(await fixture.read(owner, page.path)).not.toContain(text);
+        const before = { files: await files(), outbound: fixture.outbound("box/refused"), notices: await owner.refusalNotices(),
+          requested: owner.targetedPasses() };
         const started = performance.now();
         failure = await owner.move("notes/box", "notes/box-moved", { guarded: true }).then(() => undefined, (error: unknown) => error);
         timings.push({ name: "folder-refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs: performance.now() - started, outcome: "refused" });
-        expect(owner.targetedPasses()).toBe(requested + 1);
-        expect(fixture.ownerAccepted("box/refused").cursor).toBeGreaterThanOrEqual(cursor);
-        await fixture.waitPublished("box/refused", cursor);
+        expect(failure).toBeInstanceOf(LiveFolderMoveError);
+        expect((failure as Error).message).toBe(`${liveFolderMoveTitle("notes/box")}\n${LIVE_FOLDER_MOVE_BODY}`);
+        // The guard caught nothing up, and the refused move changed nothing.
+        expect(owner.targetedPasses()).toBe(before.requested);
+        expect(await files()).toEqual(before.files);
+        expect(existsSync(join(owner.rootPath, "notes/box-moved"))).toBe(false);
+        expect(fixture.outbound("box/refused")).toBe(before.outbound);
+        expect(await owner.refusalNotices()).toEqual(before.notices);
+        expect(fixture.ownerAccepted("box/refused")).toEqual(accepted);
+        expect(await fixture.read(owner, page.path)).not.toContain(text);
       } finally { fixture.refuseLogPulls(false); }
-      expect(failure).toBeInstanceOf(Error);
-      expect(existsSync(join(owner.rootPath, "notes/box-moved"))).toBe(false);
-      expect(await fixture.read(owner, page.path)).not.toContain(text);
+      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual(["folder-refused on refused"]);
+      // The next pull saves the kept edit into the page at its old path.
       await owner.pull();
       expect(await fixture.read(owner, page.path)).toContain(text);
-      timings.push({ name: "folder-retry", route: "bound", guard: "on", proxyDelayMs: 0,
-        elapsedMs: await owner.move("notes/box", "notes/box-moved", { guarded: true }), outcome: "moved" });
-      expect(await fixture.read(owner, "notes/box-moved/refused.md")).toContain(text);
     } finally {
       await fixture.close();
     }

@@ -342,6 +342,18 @@ export async function openLiveMoveFixture(input: {
       /** Whether a device's engine holds an owner binding for the page. A move never makes one. */
       ownerBound: (device: MoveDevice, name: string) => readDb(join(device.rootPath, SECRET_FILE_STORE_RELATIVE_PATH), db => numberOf(db.prepare(
         "SELECT COUNT(*) AS n FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?").get(workspaceId, page(name).objectId)?.n) > 0),
+      /**
+       * One owner pass for the page, without the guard: it installs what the
+       * live host accepted. Only a pull saves that into the file.
+       */
+      ownerSync: (name: string) => owner.sessions.run(owner.workspace, ({ workspace }) => runNativeOwnerDeliveryPass({ client: owner.nativeClient(),
+        workspaceHandle: workspace, document: page(name).document, config: configFor(page(name).document), refusals,
+        signal: AbortSignal.timeout(60_000), bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}, observedOnly: true })),
+      /** The owner's rows for the page in its replication log. A refused move adds none. */
+      outbound: (name: string) => readDb(ownerDb, db => numberOf(db.prepare(
+        `SELECT COUNT(*) AS n FROM replication_log WHERE workspace_id=? AND imported=0
+           AND (json_extract(payload_json,'$.objectId')=? OR json_extract(payload_json,'$.path')=?)`)
+        .get(workspaceId, page(name).objectId, page(name).path)?.n)),
       /** The owner's durable accepted state for the page: its cursor and checkpoint. */
       ownerAccepted: (name: string) => readDb(ownerDb, db => {
         const row = db.prepare("SELECT accepted_cursor AS cursor, checkpoint_digest AS digest FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?")
