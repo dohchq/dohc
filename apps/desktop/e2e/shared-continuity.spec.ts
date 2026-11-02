@@ -142,7 +142,7 @@ async function openDocument(page: Page, path = PATH): Promise<void> {
 
 async function typeAfter(page: Page, anchor: string, text: string): Promise<void> {
   await editor(page).getByText(anchor).click();
-  await page.keyboard.press("End");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
   await page.keyboard.type(text);
 }
 

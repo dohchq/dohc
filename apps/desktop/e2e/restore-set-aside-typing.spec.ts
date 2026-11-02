@@ -37,7 +37,7 @@ async function openNote(page: Page, path = PATH): Promise<void> {
 
 async function typeAfter(page: Page, text: string, expectedState: "saved" | "pending-share" = "saved"): Promise<void> {
   await editor(page).getByText(ANCHOR).click();
-  await page.keyboard.press("End");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
   await page.keyboard.type(` ${text}`);
   await expect(editor(page)).toContainText(text);
   await expect(saveState(page)).toHaveAttribute("data-state", expectedState === "pending-share" ? expectedState : /^(saved|saved-to-host)$/, {timeout: 60_000});
