@@ -2678,7 +2678,7 @@ pub fn current_ydoc_content_matches_in_tx(
 
 pub(crate) struct CompleteYdocLineage {
     key: DocKey,
-    state: Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>,
+    pub(crate) state: Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>,
 }
 
 /// A complete lineage and its pre-mutation projection, reused by capture's fold
