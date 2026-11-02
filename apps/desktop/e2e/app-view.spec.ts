@@ -163,7 +163,11 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await ready(page);
     await expect.poll(async () => (await guestIds(electronApp)).length).toBe(1);
     const guestId = (await guestIds(electronApp))[0]!;
-    await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe("App isolation fixture");
+    // A throw ends a poll at once, and the app's frame can attach after the guest does.
+    await expect.poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent").catch(() => null)).toBe("App isolation fixture");
+    // The app fills the tab from its top edge, and the page around it doesn't scroll.
+    expect(await inFrame(electronApp, guestId,
+      "[document.querySelector('iframe').getBoundingClientRect().top, document.documentElement.scrollHeight <= innerHeight]", false)).toEqual([0, true]);
     // The approved app's address admits one guest, in the app's own partition. A second guest at the same address is
     // refused. Only the injected element asks for its own partition, so that refusal isn't dohc's webview attaching
     // again. The page drops the address's fragment once it loads, so the address comes from main's record.
