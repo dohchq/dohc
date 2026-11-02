@@ -666,6 +666,43 @@ fn transient_retries_are_bounded_then_allow_a_later_action() {
     }
 }
 
+#[test]
+fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
+    // One more failing proof than the cache holds, asked for in turn, so each
+    // lookup evicts the proof asked for next.
+    let (conn, key, doc, _, resolver) = fixture();
+    let mut requests = [0; MAX_ENTRIES + 1];
+    let mut ended = [false; MAX_ENTRIES + 1];
+    for _ in 0..8 * usize::from(MAX_TRANSIENT_RETRIES) {
+        for index in 0..=MAX_ENTRIES {
+            if ended[index] {
+                continue;
+            }
+            conn.execute(
+                "UPDATE snapshots SET latest_moment_id=?1",
+                [index.to_string()],
+            )
+            .unwrap();
+            match lookup(&conn, &key, &doc, &resolver) {
+                Err(CollabError::MarkdownReaderPending(proof)) => {
+                    requests[index] += 1;
+                    proof.result.set(Err(Failure::Crashed)).unwrap();
+                }
+                Err(CollabError::MarkdownReaderRetryable) => {}
+                Err(CollabError::MarkdownReaderUnavailable) => ended[index] = true,
+                other => panic!("proof {index}: {other:?}"),
+            }
+        }
+    }
+    assert_eq!(ended, [true; MAX_ENTRIES + 1], "a proof kept retrying");
+    assert_eq!(
+        requests,
+        [usize::from(MAX_TRANSIENT_RETRIES) + 1; MAX_ENTRIES + 1]
+    );
+    assert!(resolver.entries.lock().unwrap().is_empty());
+    assert!(resolver.saved_retries.lock().unwrap().is_empty());
+}
+
 /// A terminal failure ends the proof at once, whether it is the first answer
 /// or comes after a backoff, and the cached failure answers every later lookup
 /// without asking the reader again.

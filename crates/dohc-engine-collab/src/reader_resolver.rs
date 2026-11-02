@@ -210,6 +210,11 @@ impl PendingProof {
 /// proof, so only a later action starts a new count.
 const MAX_TRANSIENT_RETRIES: u8 = 6;
 
+/// Retry counts of transiently failed proofs the cache dropped to make room,
+/// so a proof that comes back resumes its count instead of starting over.
+/// The oldest count goes first when this is full.
+const MAX_SAVED_RETRIES: usize = 4 * MAX_ENTRIES;
+
 struct Entry {
     key: Key,
     pending: Arc<PendingProof>,
@@ -243,6 +248,9 @@ fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reade
 pub struct ReaderResolver {
     reader: Arc<Reader>,
     entries: Mutex<VecDeque<Entry>>,
+    /// Each evicted proof's key and the retry count its next request carries.
+    /// Locked only while `entries` is held.
+    saved_retries: Mutex<VecDeque<(Key, u8)>>,
     witness_checks: crate::markdown_write_safety::WitnessChecks,
 }
 impl ReaderResolver {
@@ -278,6 +286,7 @@ impl ReaderResolver {
         Self {
             reader,
             entries: Mutex::new(VecDeque::new()),
+            saved_retries: Mutex::new(VecDeque::new()),
             witness_checks: Default::default(),
         }
     }
@@ -379,6 +388,12 @@ impl ReaderResolver {
         Ok(fresh)
     }
 
+    fn take_saved_retries(&self, key: &Key) -> Option<u8> {
+        let mut saved = self.saved_retries.lock().unwrap();
+        let index = saved.iter().position(|(saved, _)| saved == key)?;
+        saved.remove(index).map(|(_, next)| next)
+    }
+
     fn lookup(
         &self,
         key: Key,
@@ -424,6 +439,12 @@ impl ReaderResolver {
                     return Err(CollabError::MarkdownReaderPending(pending));
                 }
             }
+        } else if let Some(next) = self.take_saved_retries(&key) {
+            // An evicted proof whose retries are used up ends as it would have in the cache.
+            if next > MAX_TRANSIENT_RETRIES {
+                return Err(CollabError::MarkdownReaderUnavailable);
+            }
+            retries = next;
         }
         while entries.len() >= MAX_ENTRIES {
             let Some(index) = entries
@@ -432,7 +453,14 @@ impl ReaderResolver {
             else {
                 return Err(CollabError::MarkdownReaderUnavailable);
             };
-            entries.remove(index);
+            let evicted = entries.remove(index).unwrap();
+            if matches!(evicted.pending.result.get(), Some(Err(failure)) if transient(failure)) {
+                let mut saved = self.saved_retries.lock().unwrap();
+                if saved.len() >= MAX_SAVED_RETRIES {
+                    saved.pop_front();
+                }
+                saved.push_back((evicted.key, evicted.retries + 1));
+            }
         }
         let pending = Arc::new(PendingProof {
             reader: self.reader.clone(),
