@@ -8,6 +8,14 @@ use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
+/// How long recovery waits before asking again after a reader failure that
+/// clears on its own. Each ask uses one of the resolver's bounded retries, so
+/// its final, unavailable answer ends them.
+#[cfg(not(test))]
+const READER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(4);
+#[cfg(test)]
+const READER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::ZERO;
+
 pub(super) struct MarkdownRecovery {
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -151,6 +159,7 @@ async fn run(
         #[cfg(test)]
         let mut pass_attempts = Vec::new();
         let mut blocked = HashSet::new();
+        let mut reader_retry = false;
         for candidate in &candidates {
             if cancel.is_cancelled() {
                 return;
@@ -341,12 +350,26 @@ async fn run(
                     blocked.insert(document);
                 }
                 Err(error) => {
+                    reader_retry |= super::error::reader_retryable(&error);
                     if !matches!(error, RuntimeError::MarkdownWriteHeld { .. }) {
                         eprintln!("engine: Markdown recovery retained: {error}");
                     }
                     blocked.insert(document);
                 }
             }
+        }
+        if reader_retry {
+            let (open, cancel) = (Arc::downgrade(&open), cancel.clone());
+            tokio::spawn(async move {
+                tokio::select! { biased;
+                    () = cancel.cancelled() => {}
+                    () = tokio::time::sleep(READER_RETRY_BACKOFF) => {
+                        if let Some(open) = open.upgrade() {
+                            open.actor.request_markdown_recovery();
+                        }
+                    }
+                }
+            });
         }
         #[cfg(test)]
         if let Some(passes) = &passes {

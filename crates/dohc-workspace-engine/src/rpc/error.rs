@@ -155,6 +155,22 @@ fn engine_folder_not_private(refused: &dohc_macos_files::NotPrivate) -> WireErro
     )
 }
 
+/// The reader failed in a way that clears on its own and the proof has
+/// retries left, so the caller asks again after a backoff. The resolver
+/// bounds those retries and then answers `markdown-reader-unavailable`.
+pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Collab(CollabError::MarkdownReaderRetryable)
+            | RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderRetryable
+            ))
+            | RuntimeError::Sync(SyncError::RetryableState {
+                reason: "markdown-reader-retryable"
+            })
+    )
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // The volume keeps ACL entries on the engine's folder or store, or what is
     // at one of their paths can't be kept private.
@@ -221,16 +237,7 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     ) {
         return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
     }
-    // The reader failed in a way that clears on its own and the proof has
-    // retries left, so the caller asks again after a backoff. The resolver
-    // bounds those retries and then answers `markdown-reader-unavailable`.
-    if matches!(
-        error,
-        RuntimeError::Collab(CollabError::MarkdownReaderRetryable)
-            | RuntimeError::Sync(SyncError::RetryableState {
-                reason: "markdown-reader-retryable"
-            })
-    ) {
+    if reader_retryable(error) {
         return WireError::new(ErrorCode::Overloaded, "markdown-reader-retryable");
     }
     if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = error {
