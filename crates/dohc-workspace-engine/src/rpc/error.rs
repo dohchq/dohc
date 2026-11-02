@@ -364,6 +364,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
             return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
         }
+        // The desktop matches the code prefix and names the file. The engine
+        // still logs it as an internal refusal, and that line names no path.
+        RuntimeError::Relay(RelayError::PathOccupied { path, .. }) => {
+            return WireError::new(ErrorCode::Internal, format!("sync-path-occupied: {path}"));
+        }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
             let mut wire = map_runtime_inner(&RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
@@ -572,7 +577,8 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
         | RelayError::Local(_)
-        | RelayError::RepairPending => ErrorCode::Internal,
+        | RelayError::RepairPending
+        | RelayError::PathOccupied { .. } => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }

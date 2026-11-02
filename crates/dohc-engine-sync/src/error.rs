@@ -389,7 +389,8 @@ impl RelayError {
             | RelayError::HostedRefusal(_)
             | RelayError::ValidationPending(_)
             | RelayError::Local(_)
-            | RelayError::RepairPending => None,
+            | RelayError::RepairPending
+            | RelayError::PathOccupied { .. } => None,
         }
     }
 }
@@ -585,4 +586,10 @@ pub enum RelayError {
     Local(String),
     #[error("pull repairs need another fetch")]
     RepairPending,
+    /// A pull stopped because this replica holds another object's file at
+    /// the path a pulled Y.Doc update names. `detail` is what `Local` would
+    /// carry. The path stays out of the message, so the engine's log names
+    /// no file.
+    #[error("local sync state failed: {detail}")]
+    PathOccupied { path: String, detail: String },
 }
