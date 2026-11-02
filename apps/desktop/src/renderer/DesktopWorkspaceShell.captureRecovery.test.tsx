@@ -256,3 +256,44 @@ describe("text kept in History", () => {
     expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
   });
 });
+
+describe("History Restore on a shared live file", () => {
+  // With no kept typing to take it, the refusal gets its own row. It says
+  // where the text is and offers no Try again, since asking again gets the
+  // same answer. What to do is the body, so a long path's title clamp never
+  // hides it. A second press replaces the row.
+  it.each([PATH, "Projects/Lisbon trip/itinerary.md"])("says where the text is in %s, offers no Try again, and keeps one row per file", async (path) => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const change: EngineMomentRecord = { ...RECOVERY_MOMENT, id: "moment-plan", origin: "local-file", path };
+    bridge.listHistory = vi.fn(async ({ workspaceId }: ListHistoryPayload) => page(workspaceId, [change]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...change, beforeText: "Earlier plan.\n", afterText: "Shared plan.\n" } }));
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => { throw SHARED_REFUSAL; });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    const title = `dohc can't restore "${path}" because it has been shared live`;
+    const body = "Copy the text you want from History into the file.";
+    // The title and body as shown, with no Show more.
+    const expectWords = (notice: HTMLElement) => {
+      expect(notice.querySelector("[id$='-title']")?.textContent).toBe(title);
+      expect(notice.querySelector("[id$='-body']")?.textContent).toBe(body);
+      expect(notice.querySelector("[data-testid$='-more']")).toBeNull();
+    };
+    for (const press of [1, 2]) {
+      await user.click(await screen.findByTestId("engine-diff-restore-file"));
+      await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(press));
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expectWords(toast);
+      expect(toast.textContent).not.toContain("Continue editing at the current location");
+      expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+      const rows = await noticeRows(user);
+      expect(rows).toHaveLength(1);
+      expectWords(rows[0]!);
+      expect(within(rows[0]!).queryByRole("button", { name: "Try again" })).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+    }
+  });
+});

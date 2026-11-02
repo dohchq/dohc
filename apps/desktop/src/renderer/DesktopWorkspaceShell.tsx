@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isSharedLiveFileRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -3279,12 +3279,18 @@ export function DesktopWorkspaceShell(props: {
   }, [captureRecoveries, refreshAfterHistoryRestore]);
   // One row per file in Notices: a newer failure for the file replaces it. A
   // shared live file's refusal goes to its kept typing's row instead, which
-  // then says to replace the file's text with the kept version. A refusal by
-  // History's rules takes the sentence as its title and the rules' words as
-  // its body, so the clamp never hides what to fix.
+  // then says to replace the file's text with the kept version. Any other
+  // shared live file's refusal says where its text is, with no Try again,
+  // since asking again gets the same answer. That refusal, and one by
+  // History's rules, takes the sentence as its title and what to do as its
+  // body, so the clamp never hides what to do.
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
+      if (isSharedLiveFileRefusal(error)) {
+        reportShellFailure({ title: `dohc can't restore "${path}" because it has been shared live`, message: "Copy the text you want from History into the file.", identity });
+        return;
+      }
       if (readError(error).refusal === "synced-deletion") error = new SyncedDeletionRevivalError(path, { cause: error }, true);
       const { words } = readError(error);
       if (words && isRestorePolicyRefusal(error)) {
