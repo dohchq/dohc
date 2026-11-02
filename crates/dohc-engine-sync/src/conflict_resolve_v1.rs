@@ -8285,42 +8285,44 @@ mod tests {
             .unwrap();
         let claim = dohc_engine_storage::hex_sha256(base);
         apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, base, true);
-        let delete = |store: &mut EngineStore| {
-            VersionedTextStore::new(store)
-                .delete_text_file(
-                    &DeleteTextFile {
-                        workspace_id: "ws".to_owned(),
-                        version_id: "main".to_owned(),
-                        path: "doc.md".to_owned(),
-                        moment_id: "moment-deleted".to_owned(),
-                        request_id: None,
-                        metadata_origin: "api".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: 25,
-                    },
-                    &NoFaults,
-                )
-                .unwrap();
-            store
-                .write_with(&NoFaults, |tx| {
-                    crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")
-                })
-                .unwrap();
-        };
         for (index, (origin, seq, update)) in updates.iter().enumerate() {
             if index == applied {
-                delete(&mut store);
+                delete_doc(&mut store);
             }
             let relay = i64::try_from(index).unwrap() + 2;
             apply_peer_ydoc(&mut store, (*origin, *seq, relay), &claim, update, false);
         }
         if applied == updates.len() {
-            delete(&mut store);
+            delete_doc(&mut store);
         }
         let key = DocKey::new("ws", "main", "object-a").unwrap();
         (scratch, store, key)
+    }
+
+    /// This machine deletes `doc.md`, which retires its editor history.
+    fn delete_doc(store: &mut EngineStore) {
+        VersionedTextStore::new(store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "doc.md".to_owned(),
+                    moment_id: "moment-deleted".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 25,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")
+            })
+            .unwrap();
     }
 
     /// The other machine's `text` in `doc.md`, as this machine's conflict
@@ -8475,12 +8477,20 @@ mod tests {
             .unwrap()
     }
 
-    /// H2c on the deleting machine. The other machine kept its copy first.
-    /// This machine had retired the history that resolution replaces, so the
-    /// import opens a review beside the conflict and archives the successor.
-    /// Keeping the other copy then takes up that successor and closes both.
+    fn stored_blob(store: &EngineStore, sha: &str) -> Vec<u8> {
+        let sql = "SELECT bytes FROM binary_blobs WHERE sha256=?1";
+        store
+            .read_with(|conn| conn.query_row(sql, [sha], |row| row.get(0)))
+            .unwrap()
+    }
+
+    /// H2c on the deleting machine. The other machine kept its copy over this
+    /// machine's deletion, then typed again in the history its choice made.
+    /// Both changes arrive here. The import rebuilds the history this machine
+    /// retired and installs the other machine's history over it, as on a
+    /// machine that kept the note, so the typing applies with no choice here.
     #[test]
-    fn keeping_the_other_copy_after_the_peer_kept_it_takes_up_the_peers_successor() {
+    fn the_peers_kept_copy_and_its_next_edit_converge_without_a_choice() {
         let (base, first, _, _) = peer_editor_history();
         let (_scratch, mut store, key) =
             deleter_with_retired_history(&base, &[("peer", 1, &first[..])], 0);
@@ -8491,6 +8501,12 @@ mod tests {
         predecessor.apply(&first).unwrap();
         let claim = dohc_engine_storage::hex_sha256(&base);
         let built = peer_kept_its_copy(&mut store, &key, (&claim, &predecessor), edited);
+        let transition = built.validated.payload.lineage_transition.as_ref();
+        let successor = transition.unwrap().successor.clone().unwrap();
+        let typing = dohc_engine_collab::Ydoc::wire();
+        let successor_base = stored_blob(&store, &successor.update_blob_sha256);
+        typing.apply(&successor_base).unwrap();
+        let later = typing.plaintext_insert(15, "\nLater");
         let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
         envelope.origin_id = "peer-resolver".to_owned();
         envelope.recorded_at_ms = 26;
@@ -8502,19 +8518,74 @@ mod tests {
             &crate::NoLiveLeases,
         )
         .unwrap();
-        assert_eq!(text_keep_open_rows(&store), 2);
-        assert_eq!(deferred_rows(&store), 1);
+        let successor_claim = successor.lineage_claim_id;
+        let typed = ("peer-resolver", 1, 11);
+        apply_peer_ydoc(&mut store, typed, &successor_claim, &later, false);
+
+        let text = "base text\nTokyo\nLater";
+        assert_eq!(active_claim(&store, &key), Some(successor_claim));
+        assert_eq!(projected_ydoc_text(&mut store, &key), text);
+        assert_eq!(text_keep_head(&mut store).text, text);
+        assert_eq!(text_keep_open_rows(&store), 0);
+        assert_eq!(deferred_rows(&store), 0);
+        let sql = "SELECT chosen_from FROM conflicts WHERE conflict_id='conflict-1'";
+        let chosen: String = store
+            .read_with(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(chosen, "incoming");
+    }
+
+    /// The note's history came from an earlier resolution, so its base
+    /// travels in that logged resolution rather than in an editor change.
+    /// Keeping the other copy after a deletion still rebuilds it.
+    #[test]
+    fn keeping_the_other_copy_rebuilds_history_an_earlier_resolution_made() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value.clone()),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let transition = built.validated.payload.lineage_transition.as_ref();
+        let successor = transition.unwrap().successor.clone().unwrap();
+        let claim = successor.lineage_claim_id;
+        assert_eq!(active_claim(&store, &key), Some(claim.clone()));
+        let peer = dohc_engine_collab::Ydoc::wire();
+        let successor_base = stored_blob(&store, &successor.update_blob_sha256);
+        peer.apply(&successor_base).unwrap();
+        let edit = peer.plaintext_insert(13, "\nTokyo");
+        delete_doc(&mut store);
+        apply_peer_ydoc(&mut store, ("peer", 1, 3), &claim, &edit, false);
+        let edited = "resolved text\nTokyo";
+        open_deletion_conflict(&mut store, None, Some(peer_snapshot(edited)));
 
         keep_other_copy(&mut store).unwrap();
-        let payload = &built.validated.payload;
-        let transition = payload.lineage_transition.as_ref().unwrap();
-        let successor = transition.successor.as_ref().unwrap();
-        let claim = Some(successor.lineage_claim_id.clone());
-        assert_eq!(active_claim(&store, &key), claim);
+        assert_eq!(active_claim(&store, &key), Some(claim));
         assert_eq!(projected_ydoc_text(&mut store, &key), edited);
         assert_eq!(text_keep_head(&mut store).text, edited);
         assert_eq!(text_keep_open_rows(&store), 0);
         assert_eq!(deferred_rows(&store), 0);
+    }
+
+    /// Editor changes for another history still wait here. Keeping the other
+    /// copy can be tried again once they drain, so it is not refused for good.
+    #[test]
+    fn keeping_the_other_copy_waits_for_another_historys_changes() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, _) =
+            deleter_with_retired_history(&base, &[("peer", 1, &first[..])], 0);
+        let other = dohc_engine_collab::Ydoc::wire();
+        other.plaintext_insert(0, "other history");
+        let other_claim = dohc_engine_storage::hex_sha256(&other.encode_full_state());
+        let edit = other.plaintext_insert(13, "!");
+        apply_peer_ydoc(&mut store, ("peer-2", 0, 9), &other_claim, &edit, false);
+        open_deletion_conflict(&mut store, None, Some(peer_snapshot("base text\nTokyo")));
+        assert_eq!(keep_other_copy(&mut store), Err("retryable-state"));
+        assert_eq!(text_keep_open_rows(&store), 1);
+        assert_eq!(deferred_rows(&store), 2);
     }
 
     /// The other machine's edit applied here before this machine deleted the
