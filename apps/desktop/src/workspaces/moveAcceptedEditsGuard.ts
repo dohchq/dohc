@@ -107,18 +107,27 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
     return attempt;
   }
 
+  const livePaths = (workspaceId: string) => {
+    try {
+      return options.liveDocuments(workspaceId) ?? [];
+    } catch {
+      return [];
+    }
+  };
+
   return {
-    // `path` is the source's stored spelling. Paths are compared as stored,
-    // at or under, so a case alias of a page or of its folder still matches.
-    async beforeMove(workspaceId: string, path: string): Promise<void> {
-      let objectIds: string[];
-      try {
-        objectIds = (options.liveDocuments(workspaceId) ?? [])
-          .filter(document => document.path === path || document.path.startsWith(`${path}/`))
-          .map(document => document.objectId);
-      } catch {
-        return;
-      }
+    // `storedSpelling` reads the source's spelling on disk. A workspace with
+    // no live page never reads it. Otherwise every move reads it: a case or
+    // Unicode alias, a Windows short name or a folder link can reach a live
+    // page under another spelling. Paths are compared as stored, at or under.
+    // A source the move cannot read here skips the wait; the move reports it.
+    async beforeMove(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void> {
+      if (!livePaths(workspaceId).length) return;
+      const path = await storedSpelling().catch(() => undefined);
+      if (path === undefined) return;
+      const objectIds = livePaths(workspaceId)
+        .filter(document => document.path === path || document.path.startsWith(`${path}/`))
+        .map(document => document.objectId);
       if (!objectIds.length) return;
       const attempt = join(workspaceId, objectIds, now() + waitMs);
       attempt.waiting += 1;

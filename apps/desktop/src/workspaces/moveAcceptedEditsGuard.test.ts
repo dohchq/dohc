@@ -35,12 +35,13 @@ function harness(options: {live?: readonly LiveDocumentPath[]; offline?: boolean
     },
   });
   // A move's wait, with whether it has gone ahead yet.
+  const reads: string[] = [];
   const move = (path: string, workspaceId = "workspace") => {
     const state = {done: false};
-    const wait = guard.beforeMove(workspaceId, path).then(() => {state.done = true;});
+    const wait = guard.beforeMove(workspaceId, async () => {reads.push(path); return path;}).then(() => {state.done = true;});
     return Object.assign(state, {wait});
   };
-  return {owner, relay, offline, move, settle: () => vi.advanceTimersByTimeAsync(0), at: (ms: number) => vi.advanceTimersByTimeAsync(ms),
+  return {owner, relay, offline, move, reads, settle: () => vi.advanceTimersByTimeAsync(0), at: (ms: number) => vi.advanceTimersByTimeAsync(ms),
     jump: (ms: number) => {skew += ms;}};
 }
 
@@ -50,6 +51,8 @@ it("runs nothing for a path that is not live, or before the first live list", as
   const unknown = h.move("Notes/Page.md", "elsewhere");
   await h.settle();
   expect(plain.done && unknown.done).toBe(true);
+  // With live pages, the path is read; with no list, nothing is.
+  expect(h.reads).toEqual(["Notes/Plain.md"]);
   expect(h.owner).toEqual([]);
   expect(h.relay).toEqual([]);
   expect(h.offline).not.toHaveBeenCalled();
@@ -271,4 +274,15 @@ it("keeps an attempt open until the deadline of the last move that joined it", a
   h.relay[0]!.reply.resolve();
   await h.settle();
   expect(first.done && second.done).toBe(true);
+});
+
+it("reads no spelling for a workspace with no live page, and goes ahead when the read fails", async () => {
+  const h = harness({live: []});
+  const moved = h.move("Notes/Page.md");
+  await h.settle();
+  expect(moved.done).toBe(true);
+  expect(h.reads).toEqual([]);
+  const guard = createMoveAcceptedEditsGuard({liveDocuments: () => pages, offline: () => false,
+    ownerCatchUp: vi.fn(async () => true), relayCatchUp: vi.fn(async () => undefined)});
+  await guard.beforeMove("workspace", async () => {throw new Error("Nothing is at Notes/Page.md.");});
 });

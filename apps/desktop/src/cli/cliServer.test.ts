@@ -1014,7 +1014,7 @@ describe("CLI socket server", () => {
     const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "a.txt", objectId: "page" }], offline: () => false,
       ownerCatchUp: () => owner.promise, relayCatchUp: async () => undefined });
     context.movePath = async input => {
-      await guard.beforeMove(WORKSPACE_ID, input.fromPath);
+      await guard.beforeMove(WORKSPACE_ID, async () => input.fromPath);
       return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, ...input };
     };
     const started = performance.now();

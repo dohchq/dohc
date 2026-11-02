@@ -3,13 +3,21 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
-import { createMoveAcceptedEditsGuard } from "./moveAcceptedEditsGuard";
+import { createMoveAcceptedEditsGuard, type LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
 // #3089: every route that renames or moves a live page waits for the move
 // guard first, before it takes the workspace lock or calls the capture.
+
+// Counts every node:fs/promises call, to price a move's disk work.
+const fsCalls = vi.hoisted(() => ({ count: 0 }));
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return Object.fromEntries(Object.entries(actual).map(([name, value]) => [name, name !== "default" && typeof value === "function"
+    ? (...args: unknown[]) => { fsCalls.count += 1; return (value as (...args: unknown[]) => unknown)(...args); } : value]));
+});
 
 const person = { kind: "human" as const, humanId: "local:installation" };
 
@@ -21,7 +29,9 @@ async function workspace(files: string[]) {
   }
   const order: string[] = [];
   const gate = deferred();
-  const beforeMove = vi.fn(async (path: string) => { order.push(`before ${path}`); await gate.promise; order.push("released"); });
+  const beforeMove = vi.fn(async (storedSpelling: () => Promise<string>) => {
+    order.push(`before ${await storedSpelling()}`); await gate.promise; order.push("released");
+  });
   // The capture stops each move as it starts: these tests only check what ran first.
   const capture = {
     changePathsAs: vi.fn(async () => { order.push("capture"); throw new Error("stopped at capture"); }),
@@ -42,7 +52,7 @@ it.each([
   const f = await workspace(["Notes/Page.md", "Plans/Other.md"]);
   const moving = moveWorkspacePathByHand(f.operation, { fromPath: from, toPath: to }, person,
     { capture: f.capture, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined, beforeMove: f.beforeMove }).catch(() => undefined);
-  await vi.waitFor(() => expect(f.beforeMove).toHaveBeenCalledWith(expected));
+  await vi.waitFor(() => expect(f.order).toContain(`before ${expected}`));
   await f.lockIsFree();
   f.gate.resolve();
   await moving;
@@ -54,14 +64,14 @@ it.skipIf(process.platform === "linux")("the guard sees the stored spelling when
   f.gate.resolve();
   await moveWorkspacePathByHand(f.operation, { fromPath: "notes/page.md", toPath: "notes/renamed.md" }, person,
     { capture: f.capture, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined, beforeMove: f.beforeMove }).catch(() => undefined);
-  expect(f.beforeMove).toHaveBeenCalledWith("Notes/Page.md");
+  expect(f.order).toContain("before Notes/Page.md");
 });
 
 it("the app's move without a capture still waits for the guard before the disk changes", async () => {
   const f = await workspace(["Notes/Page.md"]);
   const moving = moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person,
     { capture: null, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined, beforeMove: f.beforeMove });
-  await vi.waitFor(() => expect(f.beforeMove).toHaveBeenCalledWith("Notes/Page.md"));
+  await vi.waitFor(() => expect(f.order).toContain("before Notes/Page.md"));
   await f.lockIsFree();
   expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(true);
   f.gate.resolve();
@@ -77,7 +87,7 @@ it.each([
   const preparing = prepareMoveWorkspacePathAs(f.operation, { fromPath: from, toPath: to },
     { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId },
     { capture: f.capture, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined, beforeMove: f.beforeMove });
-  await vi.waitFor(() => expect(f.beforeMove).toHaveBeenCalledWith(from));
+  await vi.waitFor(() => expect(f.order).toContain(`before ${from}`));
   await f.lockIsFree();
   f.gate.resolve();
   const finish = await preparing;
@@ -102,7 +112,7 @@ it.each([
   try {
     const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person,
       { capture: null, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined,
-        beforeMove: path => guard.beforeMove("workspace", path) });
+        beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) });
     expect(moved.path).toBe("Notes/Renamed.md");
     expect(existsSync(join(f.rootPath, "Notes/Renamed.md"))).toBe(true);
     expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(false);
@@ -110,4 +120,31 @@ it.each([
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(unhandled).not.toHaveBeenCalled();
   } finally { process.off("unhandledRejection", unhandled); }
+});
+
+type MoveFixture = Awaited<ReturnType<typeof workspace>>;
+type Guarded = { beforeMove?(storedSpelling: () => Promise<string>): Promise<void> };
+const base = (f: MoveFixture) => ({ capture: f.capture, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined });
+it.each([
+  { route: "app", move: (f: MoveFixture, guarded: Guarded) => moveWorkspacePathByHand(f.operation,
+    { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person, { ...base(f), ...guarded }).catch(() => undefined) },
+  { route: "agent", move: async (f: MoveFixture, guarded: Guarded) => (await prepareMoveWorkspacePathAs(f.operation,
+    { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId },
+    { ...base(f), ...guarded }))().catch(() => undefined) },
+])("an $route rename in a workspace with no live page does no more disk work than with no guard", async ({ move }) => {
+  const guarded = (live: LiveDocumentPath[]): Guarded => {
+    const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => live, offline: () => false,
+      ownerCatchUp: async () => true, relayCatchUp: async () => undefined });
+    return { beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) };
+  };
+  const calls: number[] = [];
+  for (const options of [{}, guarded([]), guarded([{ path: "Plans/Trip.md", objectId: "trip" }])]) {
+    const f = await workspace(["Notes/Page.md"]);
+    fsCalls.count = 0;
+    await move(f, options);
+    calls.push(fsCalls.count);
+  }
+  expect(calls[1]).toBe(calls[0]);
+  // With a live page elsewhere, the guard reads the source's spelling.
+  expect(calls[2]).toBeGreaterThan(calls[0]!);
 });

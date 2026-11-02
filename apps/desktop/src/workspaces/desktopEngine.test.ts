@@ -1186,14 +1186,14 @@ describe("server owner peer lifecycle", () => {
         const relayCatchUp = vi.fn(async () => undefined);
         const guard = createMoveAcceptedEditsGuard({liveDocuments: id => f.engine.liveDocumentPaths(id), offline: () => false, ownerCatchUp, relayCatchUp});
         // A move of the folder that holds a preparing page: no answer, so no pull.
-        await guard.beforeMove("owner", "Notes");
+        await guard.beforeMove("owner", async () => "Notes");
         expect(ownerCatchUp).toHaveBeenLastCalledWith("owner", ["page", "other", "draft"], expect.any(AbortSignal));
         await expect(ownerCatchUp.mock.results[0]!.value).resolves.toBe(false);
         expect(observed()).toEqual(["page", "other", "page", "other"]);
         expect(relayCatchUp).not.toHaveBeenCalled();
         // The server makes it ready before this device lists it again.
         draft = ready("Notes/Draft.md", "draft");
-        await guard.beforeMove("owner", "Notes");
+        await guard.beforeMove("owner", async () => "Notes");
         await expect(ownerCatchUp.mock.results[1]!.value).resolves.toBe(true);
         expect(observed().slice(4)).toEqual(["page", "other", "draft"]);
         expect(relayCatchUp).toHaveBeenCalledOnce();

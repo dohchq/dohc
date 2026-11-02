@@ -214,7 +214,7 @@ export async function openLiveMoveFixture(input: {
           const started = performance.now();
           await moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { capture, requestId: randomUUID(),
             trashItem: async () => { throw new Error("This test trashes nothing."); }, markDeleted: () => undefined,
-            ...(guarded ? { beforeMove: (path: string) => guard.beforeMove(workspaceId, path) } : {}) });
+            ...(guarded ? { beforeMove: (storedSpelling: () => Promise<string>) => guard.beforeMove(workspaceId, storedSpelling) } : {}) });
           return performance.now() - started;
         },
         refusalNotices: () => opened.sessions.run(opened.workspace, ({ client, workspace }) =>

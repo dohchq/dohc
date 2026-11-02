@@ -76,7 +76,7 @@ interface DesktopCliServerDependencies<State> {
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
-  beforeMove?(workspaceId: string, path: string): Promise<void>;
+  beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
@@ -259,7 +259,7 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
-          ...(dependencies.beforeMove ? {beforeMove: (path: string) => dependencies.beforeMove!(workspace.workspaceId, path)} : {}),
+          ...(dependencies.beforeMove ? {beforeMove: (storedSpelling: () => Promise<string>) => dependencies.beforeMove!(workspace.workspaceId, storedSpelling)} : {}),
           linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
             history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
