@@ -176,6 +176,8 @@ export type ShareViewReconcileOutcome =
       repairedPaths: number;
       unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
       collisionRecordQuarantined: boolean;
+      // Paths a best-effort capture gave up on. A store write may have landed first.
+      failedPaths: string[];
     }
   | {
       kind: "refresh";
@@ -930,6 +932,7 @@ export function createShareViewFiles(
         repairedPaths: localChanges,
         unjournalablePaths: recovered.unjournalablePaths,
         collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        failedPaths: recovered.failedPaths ?? [],
       };
     }
 
