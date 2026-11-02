@@ -199,10 +199,9 @@ describe("useBoundNoteCheck", () => {
       doc.getMap("meta").set("dohcMarkdownSource", source);
       doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
       doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const initialProps: { headSha256?: string | null } = { headSha256: sha(source) };
       const view = renderHook((props: { headSha256?: string | null }) =>
-        useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }), {
-        initialProps: { headSha256: sha(source) },
-      });
+        useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }), { initialProps });
       expect(posted).toEqual([expect.objectContaining({ headSha256: sha(source) })]);
       expect(view.result.current).toBe("checking");
 
