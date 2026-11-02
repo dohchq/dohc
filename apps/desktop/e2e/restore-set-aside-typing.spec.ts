@@ -157,6 +157,21 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expect.poll(() => readFile(join(ownerTemp.rootPath, PATH), "utf8"), {timeout: 60_000}).toContain(R1);
     });
 
+    await test.step("History offers no Restore shared file for the shared note (#3090)", async () => {
+      await openHistoryView(page);
+      const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();
+      await expect(moment).toBeVisible({timeout: 60_000});
+      await moment.click();
+      await page.getByTestId("engine-diff-more").click();
+      await expect(page.getByTestId("engine-diff-open-file")).toBeVisible();
+      await expect(page.getByTestId("engine-diff-shared-restore")).toHaveCount(0);
+      await page.keyboard.press("Escape");
+    });
+    // A restore that stops a note's last Edit access can leave it and other
+    // shared notes stuck, so History no longer offers it. The rest of this
+    // test restores through it.
+    test.fixme(true, "Restore shared file is not offered until #3090 is fixed.");
+
     const restored = await test.step("the owner stops the recipient's access and restores to before R1", async () => {
       await openHistoryView(page);
       const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();

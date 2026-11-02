@@ -6233,7 +6233,6 @@ export function DesktopWorkspaceShell(props: {
                     restoreRequest.momentId === groupTab.momentId
                   }
                   onRestoreRequestTaken={takeRestoreRequest}
-                  onOpenSharedRestore={(momentId, path) => sharedRestore.open(path, momentId)}
                   steps={groupTab.momentId === null ? undefined : momentSteps.get(groupTab.momentId)}
                   onOpenMoment={openMomentDiffTab}
                 />

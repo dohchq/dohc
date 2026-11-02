@@ -174,28 +174,12 @@ describe("text kept in History", () => {
   });
 
   // A shared live document's lineage is replicated, so History Restore
-  // refuses it. Restore shared file returns only accepted changes, and kept
-  // typing is in none of them, so the notice says to replace the file's text
-  // with the kept version, and a shared restore leaves the recovery.
-  it("tells a replicated lineage's owner to put the kept version in, on every refusal, and a shared restore keeps it", async () => {
+  // refuses it. Kept typing is in none of the host's accepted changes, so
+  // the notice says to replace the file's text with the kept version.
+  it("tells a replicated lineage's owner to put the kept version in, on every refusal", async () => {
     const { bridge } = recoveryBridge();
-    const documentKey = { workspaceId: WORKSPACE.workspaceId, mainVersionId: "main", objectId: RECOVERY.objectId, lineageClaimId: "lineage" };
-    const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
-    const intent = { deliveryKind: "owner" as const, operationId: "restore", document: documentKey, shareId: "share", grantId: "grant",
-      expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: 1, restorePointCursor: 2, restorePointReceiptDigest: digest };
-    let phase = "native-applied";
-    const status = () => ({ operationId: "restore", document: documentKey, path: PATH, phase, intent, proposalDigest });
     const ownerRestore = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
-      if (input.action === "options") {
-        return { document: documentKey, path: PATH, grants: [], authors: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
-          pendingOperation: { operationId: "restore", phase, proposalDigest } };
-      }
-      if (input.action === "status") return status();
       if (input.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
-      if (input.action === "confirm") {
-        phase = "resumed";
-        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {}, moved: false } };
-      }
       throw new Error(`Unexpected owner restore action ${input.action}.`);
     });
     const restoreEngineMomentFile = vi.fn(async (): Promise<never> => { throw SHARED_REFUSAL; });
@@ -237,22 +221,10 @@ describe("text kept in History", () => {
     expect(await noticeRows(user)).toHaveLength(1);
     await user.click(screen.getByTestId("notice-center-toggle"));
 
-    // A finished Restore shared file leaves the kept typing and its notice.
+    // More offers no Restore shared file (#3090), so the notice's route is the way back.
     await user.click(screen.getByTestId("engine-diff-more"));
-    await user.click(screen.getByTestId("engine-diff-shared-restore"));
-    const dialog = await screen.findByTestId("owner-restore-dialog");
-    expect(ownerRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, action: "options", path: PATH });
-    await user.click(await within(dialog).findByRole("button", { name: "Retry" }));
-    expect(await within(dialog).findByText("File restored")).toBeTruthy();
-    await user.click(within(dialog).getByRole("button", { name: "Close" }));
-    const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
-    act(() => bridge.emitWorkspaceActivity());
-    await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
-    await act(async () => {});
+    expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
     expect(bridge.clearCaptureRecovery).not.toHaveBeenCalled();
-    const kept = await noticeRows(user);
-    expect(kept).toHaveLength(1);
-    expect(kept[0]!.textContent).toContain(captureRecoveryMessage(PATH, true));
   });
 
   it("raises nothing for a status that answers after the window changed workspaces", async () => {
