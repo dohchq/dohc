@@ -23,6 +23,20 @@ pub struct OpenArtifactDrain {
     /// report nothing; once validation completes, recovery runs again and
     /// reports them.
     pub waiting: Option<Box<dohc_engine_collab::live_update_application::PendingValidation>>,
+    /// A document's recovery waits for the reader to check it. In a pass,
+    /// recovery stopped there, and the pass runs it again once the check
+    /// ends.
+    pub check: Option<SyncError>,
+}
+
+/// What a pass's recoveries learned from the reader: the document whose
+/// check the last one waited for, and whether a check the reader was asked
+/// for failed. After that failure, every document still waiting for a check
+/// in the pass fails too.
+#[derive(Default)]
+pub(crate) struct ReaderWait {
+    waited: Option<DocKey>,
+    failed: bool,
 }
 
 pub(super) fn enqueue(
@@ -77,6 +91,10 @@ pub(crate) fn clear_settled_mark_in_tx(
 struct SavedAttempt {
     state: String,
     missing_blob: Option<String>,
+    /// The reader could not check the document. A newly configured reader
+    /// tries it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reader: bool,
 }
 
 fn attempt_is_unchanged(
@@ -101,7 +119,11 @@ fn attempt_is_unchanged(
     Ok(true)
 }
 
-pub(crate) fn remember_attempt_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<(), SyncError> {
+pub(crate) fn remember_attempt_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    reader: bool,
+) -> Result<(), SyncError> {
     let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_pending_artifacts WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
     if pending {
         // Find one missing blob only after a failed/unfinished attempt, never on an unchanged pull.
@@ -116,6 +138,7 @@ pub(crate) fn remember_attempt_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Resu
         let fingerprint = serde_json::to_string(&SavedAttempt {
             state: state(tx, key)?,
             missing_blob,
+            reader,
         })
         .map_err(SyncError::corrupt)?;
         tx.execute("UPDATE ydoc_pending_artifacts SET last_attempt_state=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id,fingerprint]).map_err(SyncError::persist)?;
@@ -136,6 +159,32 @@ pub(crate) fn record_recovery_failure_in_tx(
     Ok(())
 }
 
+/// Let a newly configured reader try again every document whose recovery
+/// failed because the reader could not check it, and clear their Notices
+/// rows.
+pub fn retry_reader_recovery_failures(store: &mut EngineStore) -> Result<(), SyncError> {
+    let cleared = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        tx.execute(
+            "DELETE FROM replication_pending_refusals WHERE reason_code=?1 \
+             AND (workspace_id,origin_id,origin_seq) IN (SELECT workspace_id,origin_id,origin_seq \
+             FROM ydoc_pending_artifacts WHERE json_extract(last_attempt_state,'$.reader'))",
+            [RECOVERY_FAILURE_CODE],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "UPDATE ydoc_pending_artifacts SET last_attempt_state=NULL \
+             WHERE json_extract(last_attempt_state,'$.reader')",
+            [],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })?;
+    match cleared {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
 /// Recover sessions that ended without publishing. Local drafts still require settlement.
 pub fn drain_open_document_artifacts(
     store: &mut EngineStore,
@@ -150,6 +199,7 @@ pub fn drain_open_document_artifacts(
         workspace_id,
         leases,
         DrainReporting::Returned,
+        &mut ReaderWait::default(),
         faults,
     )
 }
@@ -158,12 +208,15 @@ pub fn drain_open_document_artifacts(
 /// a document's queued rows writes what they committed as drain reports, so
 /// a later wait, an abandoned pass or a restart loses none of it. The answer
 /// keeps only refusals, holds, a wait, and a head an earlier attempt wrote
-/// that this one removed no row for.
+/// that this one removed no row for. It stops at the first document that
+/// waits for a check; `reader` carries what the pass's earlier recoveries
+/// learned from the reader.
 pub(crate) fn drain_open_document_artifacts_durably(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     workspace_id: &str,
     leases: &dyn LeaseProbe,
+    reader: &mut ReaderWait,
     faults: &dyn FaultInjector,
 ) -> Result<OpenArtifactDrain, SyncError> {
     recover(
@@ -172,6 +225,7 @@ pub(crate) fn drain_open_document_artifacts_durably(
         workspace_id,
         leases,
         DrainReporting::Durable,
+        reader,
         faults,
     )
 }
@@ -182,6 +236,7 @@ fn recover(
     workspace_id: &str,
     leases: &dyn LeaseProbe,
     reporting: DrainReporting,
+    reader: &mut ReaderWait,
     faults: &dyn FaultInjector,
 ) -> Result<OpenArtifactDrain, SyncError> {
     let keys = store.read_with(|conn| {
@@ -195,7 +250,7 @@ fn recover(
     // document's drain waits: a request that never resumes, or a restart,
     // then leaves them for the next recovery to report.
     let mut completed = Vec::new();
-    let mut pending = None;
+    let waited = reader.waited.take();
     for (version, object) in keys {
         let key = DocKey::new(workspace_id, version, object).map_err(SyncError::corrupt)?;
         if leases.is_live(&key) {
@@ -240,6 +295,7 @@ fn recover(
                 // validation.
                 if drained.waiting.is_some() {
                     result.waiting = drained.waiting;
+                    reader.waited = waited;
                     cache.remove(&key);
                     return Ok(result);
                 }
@@ -262,15 +318,39 @@ fn recover(
             Err(
                 error @ (SyncError::MarkdownWitnessCheckPending { .. }
                 | SyncError::MarkdownReaderPending(_)),
-            ) => {
-                pending.get_or_insert(error);
+            ) if !reader.failed => {
+                if result.check.is_none() {
+                    reader.waited = Some(key.clone());
+                    result.check = Some(error);
+                }
+                if reporting == DrainReporting::Durable {
+                    break;
+                }
                 continue;
             }
-            Err(error) => record_failure(store, &key, leases, faults, error)?,
+            Err(error) => {
+                let pending = matches!(
+                    error,
+                    SyncError::MarkdownWitnessCheckPending { .. }
+                        | SyncError::MarkdownReaderPending(_)
+                );
+                let unavailable = matches!(
+                    &error,
+                    SyncError::RetryableState { reason }
+                        if *reason == crate::ydoc_apply::READER_UNAVAILABLE
+                );
+                if unavailable && waited.as_ref() == Some(&key) {
+                    reader.failed = true;
+                }
+                if pending || unavailable {
+                    record(store, &key, leases, faults, true)?;
+                } else {
+                    record_failure(store, &key, leases, faults, error)?;
+                }
+            }
         }
         cache.remove(&key);
     }
-    let mut completed_rows = false;
     for (key, mut drained, mut cleanup, mut changes) in completed {
         // In a pass, what the rows the cleanup removes committed becomes
         // their drain reports in that transaction; a drain that removes no
@@ -289,7 +369,6 @@ fn recover(
             store, &key, leases, cleanup, faults,
         ) {
             Ok(refusal) => {
-                completed_rows |= consumes_rows;
                 result.changes.extend(changes);
                 result.record_facts.extend(drained.record_facts);
                 result.refusals.extend(drained.refusals);
@@ -302,16 +381,6 @@ fn recover(
                 record_failure(store, &key, leases, faults, error)?;
             }
         }
-    }
-    if let Some(error) = pending
-        && !completed_rows
-        && result.changes.is_empty()
-        && result.record_facts.is_empty()
-        && result.refusals.is_empty()
-        && result.sharing_declined.is_empty()
-        && result.conflicts_opened == 0
-    {
-        return Err(error);
     }
     Ok(result)
 }
@@ -329,11 +398,23 @@ fn record_failure(
     if !isolate_document_failure(error)? {
         return Ok(());
     }
+    record(store, key, leases, faults, false)
+}
+
+/// Keep `key`'s failed recovery and its Notices row until the document
+/// changes, or, for a failure of the reader's, until a new reader.
+fn record(
+    store: &mut EngineStore,
+    key: &DocKey,
+    leases: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+    reader: bool,
+) -> Result<(), SyncError> {
     let recorded = store.write_with(faults, |tx| {
         if leases.is_live(key) {
             return Ok(());
         }
-        remember_attempt_in_tx(tx, key)?;
+        remember_attempt_in_tx(tx, key, reader)?;
         record_recovery_failure_in_tx(tx, key)?;
         Ok::<_, SyncError>(())
     })?;
@@ -661,7 +742,7 @@ mod tests {
                 let mut before = Vec::new();
                 let mut after = Vec::new();
                 let mut unchanged = Vec::new();
-                let previous = serde_json::to_string(&SavedAttempt {state:state(conn,&key).unwrap(),missing_blob:Some("f".repeat(64))}).unwrap();
+                let previous = serde_json::to_string(&SavedAttempt {state:state(conn,&key).unwrap(),missing_blob:Some("f".repeat(64)),reader:false}).unwrap();
                 for sample in 0..110 {
                     for arm in if sample % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] } {
                         let start = std::time::Instant::now();
