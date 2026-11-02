@@ -400,6 +400,7 @@ import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { createMoveAcceptedEditsGuard } from "./workspaces/moveAcceptedEditsGuard";
 import { createRelayLogWait } from "./workspaces/relayLogWait";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
 import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
@@ -2738,6 +2739,10 @@ const activity = {
       workspaceActivity.queueCloudPull(lease.state.activity),
     );
   },
+  cloudSyncOffline: (workspaceId: string): boolean =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.cloudSyncOffline(lease.state.activity)),
+  catchUpCloudSync: (workspaceId: string, signal: AbortSignal): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.catchUpCloudSync(lease.state.activity, signal)),
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.setAgentRun(
@@ -4931,8 +4936,17 @@ const serverAccountDeletion = createServerAccountDeletion({
 
 const documentProjection = createDocumentProjectionWorker();
 
+// One rule for the app, the CLI and MCP: a live page catches up with the server before it moves.
+const moveAcceptedEdits = createMoveAcceptedEditsGuard({
+  liveDocuments: (workspaceId) => desktopEngine.liveDocumentPaths(workspaceId),
+  offline: (workspaceId) => activity.cloudSyncOffline(workspaceId),
+  ownerCatchUp: (workspaceId, objectIds, signal) => desktopEngine.ownerCatchUp(workspaceId, objectIds, signal),
+  relayCatchUp: (workspaceId, signal) => activity.catchUpCloudSync(workspaceId, signal),
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
+  beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
     keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
     save: (workspace, path, incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
@@ -5579,6 +5593,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
   trashItem: (path) => shell.trashItem(path),
   localPerson,
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  beforeMove: moveAcceptedEdits.beforeMove,
   shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),
 });

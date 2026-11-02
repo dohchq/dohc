@@ -854,6 +854,16 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queuePull();
   }
 
+  // The move guard's pull. A workspace without an engine counts as offline,
+  // so the guard skips its catch-up.
+  function cloudSyncOffline(state: WorkspaceActivityState): boolean {
+    const snapshot = state.entry?.engine?.snapshot();
+    return !snapshot || snapshot.syncFailure !== null;
+  }
+  async function catchUpCloudSync(state: WorkspaceActivityState, signal: AbortSignal): Promise<void> {
+    await state.entry?.engine?.catchUp({ signal });
+  }
+
   function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
   function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
     if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
@@ -1043,6 +1053,8 @@ export function createWorkspaceActivity(
     syncNow,
     pushRecorded,
     queueCloudPull,
+    cloudSyncOffline,
+    catchUpCloudSync,
     pullStarting,
     retryFileObservation,
     pullFinished,
