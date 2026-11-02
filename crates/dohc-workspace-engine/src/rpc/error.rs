@@ -1460,6 +1460,30 @@ mod tests {
     }
 
     #[test]
+    fn occupied_path_refusal_names_the_path_on_the_wire() {
+        let detail = "retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)";
+        let (wire, logged) = map_runtime_logged(RuntimeError::Relay(RelayError::PathOccupied {
+            path: "notes/trip.txt".into(),
+            detail: detail.into(),
+        }));
+        assert_eq!(
+            (wire.code, wire.message.as_str()),
+            (ErrorCode::Internal, "sync-path-occupied: notes/trip.txt"),
+        );
+        // It retries as any other failed pass does.
+        let generic = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
+        assert_eq!(generic.message, "workspace operation failed");
+        assert_eq!(wire.retry, generic.retry);
+        // The engine's log keeps today's line, which names no path.
+        assert_eq!(
+            logged.as_deref(),
+            Some(
+                "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)"
+            ),
+        );
+    }
+
+    #[test]
     fn synced_deletion_refusal_preserves_its_domain_code() {
         let error = map_runtime(RuntimeError::Domain(
             DomainError::SyncedDeletionRevivalRefused,
