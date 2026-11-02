@@ -4855,20 +4855,15 @@ fn preserve_incomplete_base_in_tx(
         )?;
         recovered_paths.push(recovery.path);
     }
-    if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
-        // The conflict side the Y.Doc held before this replacement.
-        let side = if ydoc_holds_current_side_in_tx(tx, &conflict_id)? {
-            "current"
-        } else {
-            "incoming"
-        };
+    // A current side the Y.Doc held is already a head moment in History, and
+    // it moves with the head. Only an incoming side needs a copy.
+    if let Some(conflict_id) = open_sync_conflict_id(tx, key)?
+        && !ydoc_holds_current_side_in_tx(tx, &conflict_id)?
+    {
         let prior: Option<String> = tx
             .query_row(
-                &format!(
-                    "SELECT b.sha256 FROM conflicts c \
-                     JOIN blobs b ON b.sha256=c.{side}_blob_sha256 \
-                     WHERE c.workspace_id=?1 AND c.conflict_id=?2"
-                ),
+                "SELECT b.sha256 FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 \
+            WHERE c.workspace_id=?1 AND c.conflict_id=?2",
                 params![key.workspace_id, conflict_id],
                 |row| text::from_row(tx, row, 0),
             )
