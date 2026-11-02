@@ -1093,6 +1093,14 @@ impl PullContinuation {
             .map(|suspended| (suspended.fetched, suspended.progress))
     }
 
+    /// This request's pass stopped and keeps its progress.
+    pub fn is_kept(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
     fn keep(&self, workspace_id: &str, fetched: Fetched, progress: ApplyProgress) {
         *self
             .0
@@ -2549,6 +2557,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .keep(workspace_id, Fetched::Ordinary(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
             }
+            Ok(Applying::Checking(check)) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+                return Err(self.local(check));
+            }
             Err(error) => {
                 if self
                     .pending_preparation
@@ -3163,6 +3176,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .keep(workspace_id, Fetched::Hosted(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
             }
+            Applying::Checking(check) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Hosted(fetch), progress);
+                return Err(self.local(check));
+            }
         };
         let HostedFetch {
             replica,
@@ -3672,6 +3690,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlements: Default::default(),
             archived_protected: Vec::new(),
             unadmitted_bases,
+            reader: Default::default(),
         }
     }
 
@@ -3710,6 +3729,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     cache,
                     workspace_id,
                     leases,
+                    &mut p.reader,
                     faults,
                 )
                 .map_err(|error| self.local(error))?;
@@ -3725,10 +3745,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             p.pass.conflicts_opened += recovered.conflicts_opened;
             p.pass.replace_drain_holds(recovered.holds);
-            match recovered.waiting {
-                Some(pending) => return Ok(Applying::Suspended(pending)),
-                None => p.recovering = false,
+            if let Some(pending) = recovered.waiting {
+                return Ok(Applying::Suspended(pending));
             }
+            if let Some(check) = recovered.check {
+                return Ok(Applying::Checking(check));
+            }
+            p.recovering = false;
         }
         while !p.rounds_done {
             while let Some(&index) = p.round.get(p.next) {
@@ -6276,6 +6299,8 @@ struct ApplyProgress {
     /// The documents whose waiting local base the relay can admit only
     /// after every base this pass holds, as its empty push showed.
     unadmitted_bases: crate::ydoc_apply::UnadmittedBases,
+    /// What the pass's recoveries learned from the reader.
+    reader: crate::moment_apply::open_artifacts::ReaderWait,
 }
 
 /// What applying a pass came to.
@@ -6284,6 +6309,9 @@ enum Applying {
     /// An op or owner settlement waits for released-tail validation; nothing
     /// of it applied.
     Suspended(Box<dohc_engine_collab::live_update_application::PendingValidation>),
+    /// Recovering an open document's artifact waits for the reader to check
+    /// it; the pass recovers again once the check ends.
+    Checking(SyncError),
 }
 
 /// The documents a scope names, each once, with its path.

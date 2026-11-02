@@ -8585,6 +8585,7 @@ fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
             &mut Default::default(),
             "ws",
             &NoLiveLeases,
+            &mut Default::default(),
             &NoFaults,
         )
         .unwrap();
