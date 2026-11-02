@@ -102,8 +102,8 @@ export function startServerOwnerDelivery(options: {
       yield* Queue.clear(retries);
       // A retry wakes the idle wait, but never releases an unfinished pass.
       const result = yield* Effect.uninterruptible(pass);
-      // A targeted turn keeps the ordinary schedule.
-      if ("targeted" in result) {delayMs = targeted.size ? 0 : ordinaryDelayMs; continue;}
+      // A targeted turn keeps the ordinary schedule, and an explicit retry whose wake-up it took.
+      if ("targeted" in result) {delayMs = targeted.size || retryWorkspace ? 0 : ordinaryDelayMs; continue;}
       ordinaryDelayMs = retryWorkspace ? 0 : result.acknowledged ? Math.min(options.retryDelayMs, 200)
         : result.documentCount === 0 ? Math.min(options.retryDelayMs * 5, 60_000) : options.retryDelayMs;
       delayMs = targeted.size ? 0 : ordinaryDelayMs;

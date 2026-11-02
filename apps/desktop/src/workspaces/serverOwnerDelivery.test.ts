@@ -281,3 +281,22 @@ it("lets other workspaces' ordinary documents advance under repeated targeted re
   expect(turns.slice(0, 9)).toEqual(["targeted", "ordinary", "targeted", "ordinary", "targeted", "ordinary", "targeted", "ordinary", "ordinary"]);
   expect(ordinary.slice(0, 5)).toEqual([["one", 0], ["two", 0], ["one", 1], ["two", 1], ["one", 0]]);
 });
+
+it("runs an explicit retry at once when a targeted request took its wake-up", async () => {
+  vi.useFakeTimers();
+  const runPass = vi.fn(async (id: string) => {void id; return {documentCount: 1, acknowledged: false};});
+  const runTargetedPass = vi.fn(async () => true);
+  const owner = startServerOwnerDelivery({workspaceIds: () => ["one", "two"], attemptTimeoutMs: 5000, retryDelayMs: 2000, runPass, runTargetedPass, onError: vi.fn()});
+  await vi.advanceTimersByTimeAsync(0);
+  expect(runPass.mock.calls.map(([id]) => id)).toEqual(["one"]);
+  // Both arrive during the idle wait, on the one wake-up.
+  await vi.advanceTimersByTimeAsync(500);
+  const answer = owner.catchUp("one", ["a"], new AbortController().signal);
+  owner.retry("two");
+  // Well short of the 2 s ordinary delay.
+  await vi.advanceTimersByTimeAsync(100);
+  await expect(answer).resolves.toBe(true);
+  expect(runTargetedPass).toHaveBeenCalledTimes(1);
+  expect(runPass.mock.calls.map(([id]) => id)).toEqual(["one", "two"]);
+  await owner.stop();
+});
