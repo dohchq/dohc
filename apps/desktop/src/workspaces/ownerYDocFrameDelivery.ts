@@ -38,11 +38,11 @@ export interface OwnerYDocFrameDeliveryOptions {
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, {once: true});
     work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
   });
 }
 interface Transfer {begin: LiveFrameBegin; bytes: Uint8Array; begun: boolean; offset: number}
