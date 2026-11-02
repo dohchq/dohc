@@ -880,6 +880,7 @@ impl VersionedTextStore<'_> {
             {
                 crate::synced_deletion::refuse_synced_deletion_revival(
                     tx,
+                    crate::RevivalAction::ConflictChoice,
                     &conflict.workspace_id,
                     &conflict.target_version_id,
                     &text.object_id,

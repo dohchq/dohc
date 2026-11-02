@@ -37,6 +37,10 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 mod synced_deletion;
+pub use synced_deletion::RevivalAction;
+#[cfg(feature = "fault-injection")]
+pub use synced_deletion::lift_revival_refusal_for_test;
+
 pub use store::{
     DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
     duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,
