@@ -1760,10 +1760,16 @@ fn unbound_receiver_lineages_match_reviewed_sides(
         let Some(lineage) = crate::ydoc_apply::complete_ydoc_projection_in_tx(tx, &key)? else {
             continue;
         };
-        if lineage.claim_status.has_claimed_base() {
+        // A claimed lineage matches only when the resolver had no current side
+        // and kept this receiver's own object and bytes.
+        let claimed = lineage.claim_status.has_claimed_base();
+        if claimed && payload.current.present().is_some() {
             return Ok(false);
         }
         let Some(projection) = lineage.content else {
+            if claimed {
+                return Ok(false);
+            }
             continue;
         };
         let projection_sha256 = dohc_engine_storage::hex_sha256(projection.as_bytes());

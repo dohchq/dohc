@@ -638,7 +638,7 @@ where
     let result = write_normalized_text_in_tx(
         tx,
         write,
-        false,
+        ObjectReuse::Refuse,
         None,
         Some(PreparedTextWrite {
             object_id: resolved.object_id.clone(),
@@ -1463,7 +1463,18 @@ pub fn write_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, false, None, None, None)
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Refuse, None, None, None)
+}
+
+/// Bring a deleted text object back under its own object ID, inside the
+/// caller's transaction. No alias or snapshot may bind the object in
+/// `input.version_id`. Otherwise this is [`write_text_in_tx`].
+pub(crate) fn write_revived_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+) -> Result<WriteResult, DomainError> {
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Dormant, None, None, None)
 }
 
 pub fn write_published_text_in_tx(
@@ -1472,7 +1483,7 @@ pub fn write_published_text_in_tx(
     conditions: &str,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, false, None, None, Some(conditions))
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Refuse, None, None, Some(conditions))
 }
 
 /// Copy a stored text preimage forward without changing its object identity.
@@ -1512,8 +1523,14 @@ pub fn write_published_history_text_in_tx(
     }
     let mut normalized = normalized;
     normalized.object_id = &source.object_id;
-    let result =
-        write_normalized_text_in_tx(tx, normalized, false, Some(&source), None, conditions)?;
+    let result = write_normalized_text_in_tx(
+        tx,
+        normalized,
+        ObjectReuse::Refuse,
+        Some(&source),
+        None,
+        conditions,
+    )?;
     super::clear_capture_recovery_in(tx, &input.workspace_id, restore_before_moment_id)?;
     Ok(result)
 }
@@ -1533,18 +1550,29 @@ pub fn write_projected_text_in_tx<'a>(
     tx: &Transaction<'_>,
     input: impl Into<ProjectedWriteText<'a>>,
 ) -> Result<WriteResult, DomainError> {
-    // allow_preallocated_object: the live Y.Doc seed pre-creates the
+    // ObjectReuse::Preallocated: the live Y.Doc seed pre-creates the
     // file_objects row (FK parent for the marker) before any snapshot or
     // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, true, None, None, None)
+    write_normalized_text_in_tx(tx, input, ObjectReuse::Preallocated, None, None, None)
+}
+
+/// Which existing object ID a write to a path with no alias may bind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectReuse {
+    /// An existing object ID is refused.
+    Refuse,
+    /// One that no alias or snapshot binds anywhere in the workspace.
+    Preallocated,
+    /// One that no alias or snapshot binds in the written version.
+    Dormant,
 }
 
 fn write_normalized_text_in_tx(
     tx: &Transaction<'_>,
     input: ProjectedWriteText<'_>,
-    allow_preallocated_object: bool,
+    reuse: ObjectReuse,
     history_source: Option<&MomentRecord>,
     prepared: Option<PreparedTextWrite>,
     conditions: Option<&str>,
@@ -1650,9 +1678,9 @@ fn write_normalized_text_in_tx(
                         });
                     }
                     if object_exists(tx, ws, input.object_id)? {
-                        let bare_preallocation = allow_preallocated_object
+                        let bare_preallocation = reuse == ObjectReuse::Preallocated
                             && !object_has_any_binding(tx, ws, input.object_id)?;
-                        let dormant_history_object = (history_source.is_some() ||
+                        let dormant_history_object = (history_source.is_some() || reuse == ObjectReuse::Dormant ||
                             (input.metadata_origin == "sync" && crate::received_object_token(input.object_id)))
                             && !tx.query_row(
                                 "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
