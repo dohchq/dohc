@@ -194,6 +194,23 @@ it("reports a synced deletion refusal in Undo and retains only the refused recei
   expect(f.shell().receipts.get(WORKSPACE, ANA.target).map(file => file.restoredMomentId)).toEqual(["trip"]);
 });
 
+it.each([["a person", ANA, "person:user_ana"], ["a link", LINK, "link:grant-link"]] as const)("opens with the files left to check when Undo puts none back for %s", async (_kind, first, value) => {
+  const words = "Bringing it back could stop sync. Copy its text from its History into a file with a new name.";
+  const f = fixture([{status: "restored", restored: [{path: "trip.md", restoredMomentId: "trip"}],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null}], first);
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null, files: [
+    {kind: "refused", momentId: "trip", detail: words, refusal: "synced-deletion"},
+  ]});
+  expect(((await screen.findByRole("combobox", {name: "Who to stop"})) as HTMLSelectElement).value).toBe(value);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText(`dohc could not restore it. ${words}`)).toBeTruthy();
+  const outcome = screen.getByTestId("stop-and-restore-outcome");
+  expect(within(outcome).getByRole("button", {name: "trip.md"})).toBeTruthy();
+  expect(within(outcome).queryByText(/^Put back/)).toBeNull();
+});
+
 it("recovers unfinished runs after relaunch and opens Try again from the Notice", async () => {
   const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 1, runsLeft: 0,
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false,
