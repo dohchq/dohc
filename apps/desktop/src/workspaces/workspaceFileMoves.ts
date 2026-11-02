@@ -27,7 +27,7 @@ import { WORKSPACE_TRASH } from "./workspaceTrash";
 type PathChangeWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol; readOnly?: boolean; shareView?: unknown };
 
 export interface PathChangeOptions {
-  capture: Pick<WorkspaceEngineCapture, "changePathsAs">;
+  capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">>;
   requestId: string;
   linkRewrites?: LinkRewriteContext;
   trashItem(absolutePath: string): Promise<void>;
@@ -35,7 +35,8 @@ export interface PathChangeOptions {
   markDeleted(path: string): void;
   // Runs before a move takes the workspace lock. It catches a live page up
   // with the server and never refuses. It reads the source's stored spelling
-  // only when it needs it.
+  // only when it needs it. A folder the move refuses for a live page rejects
+  // that read, so nothing is caught up and the move reports the refusal.
   beforeMove?(storedSpelling: () => Promise<string>): Promise<void>;
 }
 
@@ -252,15 +253,19 @@ export function assertMoveDocumentKind(from: string, to: string, word: "move" | 
     `A ${word} cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename" | "checkFolderMove">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
   author: MomentWriteAuthor, options: PathChangeOptions,
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   // The source's spelling on disk, read before the lock only if the guard needs it.
-  return Promise.resolve(options.beforeMove?.(() => admitPath(operation.workspace.rootPath, input.fromPath).then(admitted => admitted.physical)))
-    .then(() => prepareMoveWorkspacePath(operation, input, author, options));
+  const rootPath = operation.workspace.rootPath;
+  return Promise.resolve(options.beforeMove?.(async () => {
+    const { physical } = await admitPath(rootPath, input.fromPath);
+    if (await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false)) await options.capture.checkFolderMove?.(physical);
+    return physical;
+  })).then(() => prepareMoveWorkspacePath(operation, input, author, options));
 }
 
 // A folder move from the app while History is off: without capture, dohc
@@ -275,9 +280,17 @@ export class FolderMoveHistoryOffError extends Error {
 }
 
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
-  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
+  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
   // The app's own source check, which accepts names admitPath refuses.
-  await options.beforeMove?.(async () => (await prepareWorkspaceMove(operation.workspace.rootPath, input.fromPath, input.toPath)).physicalFromPath);
+  const rootPath = operation.workspace.rootPath;
+  await options.beforeMove?.(async () => {
+    const { physicalFromPath } = await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath);
+    if ((await stat(join(rootPath, physicalFromPath))).isDirectory()) {
+      if (!options.capture) throw new FolderMoveHistoryOffError(`${folderMoveHistoryOffTitle(physicalFromPath)}\n${FOLDER_MOVE_HISTORY_OFF_BODY}`);
+      await options.capture.checkFolderMove?.(physicalFromPath);
+    }
+    return physicalFromPath;
+  });
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
     await options.admit?.();

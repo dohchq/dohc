@@ -792,6 +792,9 @@ export interface WorkspaceEngineCapture {
   // no-op finisher and are captured as delete+write by the normal path.
   // `folder`: the source is a folder, so a page this computer owns under it refuses the move too.
   beginFileRename(fromPath: string, toPath: string, folder?: boolean): Promise<WorkspaceEngineRenameFinisher>;
+  // Refuses as the move of `folder` would, while a page under it is live on
+  // this computer. It changes nothing. A move checks this before it catches up.
+  checkFolderMove(folder: string): Promise<void>;
   // Runs an author's move or delete of `paths` while capture records nothing,
   // so the rows `work` records are the only rows the change leaves. Live
   // documents at or under the paths settle and close first. A move first
@@ -7881,6 +7884,16 @@ export function createWorkspaceEngineCapture(
           changed: true,
         };
       });
+    },
+
+    async checkFolderMove(folder) {
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      try {
+        await engine.checkMove({ workspaceId, versionId, path: folder, folder: true });
+      } catch (error) {
+        throw liveFolderMoveRefusal(error, folder) ?? liveDocumentMutationRefusal(error, folder, "move") ?? error;
+      }
     },
 
     beginFileRename(fromPath, toPath, folder = false) {
