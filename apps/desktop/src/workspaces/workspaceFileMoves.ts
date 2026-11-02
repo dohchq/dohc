@@ -266,8 +266,10 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
     if (await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false)) await folder.check(physical);
     return physical;
   })).then(() => {
-    folder.settle();
-    return prepareMoveWorkspacePath(operation, input, author, options);
+    // A refusal is answered as every failed move is, not thrown.
+    const refusal = folder.refusal();
+    return refusal ? async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: refusal.message })
+      : prepareMoveWorkspacePath(operation, input, author, options);
   });
 }
 
@@ -276,20 +278,18 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
 // lock can't let the folder move without one. Any other error leaves the
 // guard to catch up and the check inside the lock to decide.
 function folderPreCheck(capture: Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null) {
-  let refusal: LiveDocumentMutationError | undefined;
+  let refused: LiveDocumentMutationError | undefined;
   return {
     async check(folder: string): Promise<void> {
       try {
         await capture?.checkFolderMove?.(folder);
       } catch (error) {
         if (!(error instanceof LiveDocumentMutationError)) return;
-        refusal = error;
+        refused = error;
         throw error;
       }
     },
-    settle(): void {
-      if (refusal) throw refusal;
-    },
+    refusal: () => refused,
   };
 }
 
@@ -316,7 +316,8 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     }
     return physicalFromPath;
   });
-  folder.settle();
+  const refusal = folder.refusal();
+  if (refusal) throw refusal;
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
     await options.admit?.();

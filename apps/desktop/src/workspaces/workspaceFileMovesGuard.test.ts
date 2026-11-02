@@ -160,7 +160,7 @@ it.each([
     moveWorkspacePathByHand(f.operation, { fromPath: from, toPath: to }, person, { ...base(f), ...options }) },
   { route: "agent", move: async (f: MoveFixture, options: Guarded, from: string, to: string) => (await prepareMoveWorkspacePathAs(f.operation,
     { fromPath: from, toPath: to }, { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId }, { ...base(f), ...options }))() },
-])("an $route folder move over a page live here catches nothing up and is refused; other moves still catch up", async ({ move }) => {
+])("an $route folder move over a page live here catches nothing up and is refused; other moves still catch up", async ({ route, move }) => {
   const refusal = new LiveFolderMoveError("refused for a page live here");
   for (const { from, to, check, checked } of [
     { from: "Notes", to: "Archive", check: refusal, checked: true },
@@ -175,12 +175,14 @@ it.each([
       ownerCatchUp, relayCatchUp: async () => undefined });
     Object.assign(f.capture, { checkFolderMove });
     const outcome = await move(f, { beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) }, from, to)
-      .then(() => "moved", (error: unknown) => error);
+      .then(result => result, (error: unknown) => error);
     expect(checkFolderMove.mock.calls).toEqual(checked ? [[from]] : []);
     const refused = checked && check === refusal;
     expect(ownerCatchUp.mock.calls).toEqual(refused ? [] : [["workspace", ["page"], expect.any(AbortSignal)]]);
     expect(f.order).toEqual(refused ? [] : ["capture"]);
-    if (refused) expect(outcome).toBe(refusal);
+    // The app throws the refusal. The agent gets it as the move's failure.
+    if (refused && route === "app") expect(outcome).toBe(refusal);
+    else if (refused) expect(outcome).toEqual({ ok: false, path: from, reason: refusal.message });
     else expect(outcome).not.toBe(refusal);
     const captured = [...f.capture.changePathsAs.mock.invocationCallOrder, ...f.capture.beginFileRename.mock.invocationCallOrder];
     if (!refused) expect(ownerCatchUp.mock.invocationCallOrder[0]).toBeLessThan(captured[0]!);
