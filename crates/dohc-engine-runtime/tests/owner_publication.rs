@@ -552,8 +552,21 @@ fn large_agent(index: usize) -> AgentDeclaration {
     }
 }
 
-/// A collaborator agent's accepted delivery of `bytes` at `cursor`.
+/// How long the desktop client retries a busy store.
+fn client_busy_budget() -> std::time::Duration {
+    let policy: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
+    ))
+    .unwrap();
+    std::time::Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap())
+}
+
+/// A collaborator agent's accepted delivery of `bytes` at `cursor`. If
+/// write admission refuses it, the delivery goes again once the checkpoint
+/// admission waited on has finished, as the sync server sends a refused
+/// delivery again, within the client's busy budget.
 async fn deliver_declared(
+    actor: &ActorHandle,
     handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
     binding: &dohc_engine_collab::LiveObjectBinding,
     cursor: i64,
@@ -566,40 +579,52 @@ async fn deliver_declared(
         journal_cursor: cursor,
         accepting_host_epoch: 1,
     };
-    let result = handle
-        .apply(
-            AdmittedLiveUpdate {
-                metadata: AdmittedLiveUpdateMetadata {
-                    accepted: RelayAcceptedLiveUpdate {
-                        receipt: receipt.clone(),
-                        binding: binding.clone(),
-                        authority: ServerDerivedLiveUpdateAuthority::Owner {
-                            principal_id: "owner".into(),
-                        },
-                        received_at_ms: 20 + cursor,
-                    },
-                    first_seen: vec![],
-
-                    canonical_version: Some(2),
-
-                    author_snapshot: Some(
-                        (Some(declaration))
-                            .into_iter()
-                            .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
-                            .collect(),
-                    ),
-
-                    first_seen_deletes: Some(vec![]),
-
-                    checkpoint_coverage: None,
+    let update = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
                 },
-                update_bytes: bytes.to_vec(),
+                received_at_ms: 20 + cursor,
             },
-            Arc::new(NoFaults),
-            100_000_000,
-        )
-        .await
-        .unwrap();
+            first_seen: vec![],
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(
+                (Some(declaration))
+                    .into_iter()
+                    .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
+                    .collect(),
+            ),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes.to_vec(),
+    };
+    let result = tokio::time::timeout(client_busy_budget(), async {
+        loop {
+            let completed = actor.checkpoints_completed_for_test().await.unwrap();
+            match handle
+                .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+                .await
+            {
+                Err(dohc_engine_runtime::RuntimeError::LiveApplication(
+                    ApplicationError::Storage(dohc_engine_storage::StorageError::FileLocked),
+                )) => actor
+                    .wait_for_checkpoint_completion_for_test(completed)
+                    .await
+                    .unwrap(),
+                result => return result.unwrap(),
+            }
+        }
+    })
+    .await
+    .expect("write admission resumes within the client's busy budget");
     (receipt, result)
 }
 
@@ -700,8 +725,15 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     const PREFIX: i64 = 200;
     let mut accepted_head = None;
     for cursor in 1..=PREFIX {
-        let (receipt, result) =
-            deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
+        let (receipt, result) = deliver_declared(
+            &actor,
+            &handle,
+            &f.binding,
+            cursor,
+            &remote_bytes,
+            large_agent(999),
+        )
+        .await;
         assert!(matches!(result, ApplicationResult::Applied(..)));
         if cursor % 100 == 0 {
             mark("periodic-settlement-start");
@@ -745,6 +777,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         assert!(admitted < 80, "the author bound never refused");
         let cursor = PREFIX + admitted as i64 + 1;
         let (receipt, result) = deliver_declared(
+            &actor,
             &handle,
             &f.binding,
             cursor,
@@ -899,6 +932,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     mark("ack-replay");
     // The refused delivery applies once the interval is free.
     let (_, retried) = deliver_declared(
+        &actor,
         &handle,
         &f.binding,
         refused,
@@ -2145,6 +2179,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     remote.apply(&f.bytes).unwrap();
     let bytes = remote.richdoc_append_paragraph("Accepted collaborator work");
     let (receipt, _) = deliver_declared(
+        &actor,
         &handle,
         &f.binding,
         1,
@@ -2215,6 +2250,7 @@ async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordin
     );
     let next = remote.richdoc_append_paragraph("Later accepted work");
     let (next_receipt, _) = deliver_declared(
+        &actor,
         &handle,
         &f.binding,
         2,
@@ -2504,6 +2540,7 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     );
     if neutral {
         let (receipt, result) = deliver_declared(
+            &actor,
             &handle,
             &f.binding,
             queued + 1,
@@ -2851,6 +2888,7 @@ async fn unavailable_publication_after_handover(
     let next_update = next_doc.richdoc_append_paragraph("Accepted next content");
     let next_receipt = if terminal_source {
         let (receipt, result) = deliver_declared(
+            &actor,
             &handle,
             &f.binding,
             9,
@@ -4189,8 +4227,15 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
             dohc_engine_storage::get_binary_blob(conn, &digest).map(Option::unwrap)
         })
         .unwrap();
-    let (receipt, _) =
-        deliver_declared(&host_handle, &host.binding, 1, &update, declaration.clone()).await;
+    let (receipt, _) = deliver_declared(
+        &host_actor,
+        &host_handle,
+        &host.binding,
+        1,
+        &update,
+        declaration.clone(),
+    )
+    .await;
     let saved = host.settle(&host_handle, Some(receipt)).await;
     assert_eq!(
         host.moment_authors(&saved.moment_id)[0]["agentId"],
@@ -5444,8 +5489,15 @@ async fn host_application_and_settlement_queue_no_native_update() {
     let mut terminal = None;
     for cursor in 1..=3 {
         let bytes = remote.richdoc_append_paragraph(&format!("Remote paragraph {cursor}"));
-        let (receipt, result) =
-            deliver_declared(&handle, &f.binding, cursor, &bytes, declaration.clone()).await;
+        let (receipt, result) = deliver_declared(
+            &actor,
+            &handle,
+            &f.binding,
+            cursor,
+            &bytes,
+            declaration.clone(),
+        )
+        .await;
         assert!(matches!(result, ApplicationResult::Applied(..)));
         terminal = Some(receipt);
     }
@@ -5492,8 +5544,15 @@ async fn a_retiring_activation_settles_through_its_durable_binding() {
     let mut terminal = None;
     for cursor in 1..=2 {
         let bytes = remote.richdoc_append_paragraph(&format!("Remote paragraph {cursor}"));
-        let (receipt, result) =
-            deliver_declared(&handle, &f.binding, cursor, &bytes, declaration.clone()).await;
+        let (receipt, result) = deliver_declared(
+            &actor,
+            &handle,
+            &f.binding,
+            cursor,
+            &bytes,
+            declaration.clone(),
+        )
+        .await;
         assert!(matches!(result, ApplicationResult::Applied(..)));
         terminal = Some(receipt);
     }

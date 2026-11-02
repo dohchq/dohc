@@ -1646,11 +1646,7 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
 
     // Each write shares the desktop client's store-busy budget across all
     // attempts and checkpoint waits, rather than restarting it on each refusal.
-    let policy: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
-    ))
-    .unwrap();
-    let budget = Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
+    let budget = client_busy_budget();
     const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
         SELECT lower(hex(randomblob(32))),65536,randomblob(65536)";
     let (w, desktop, _client) = held_for_a_queued_fold().await;
