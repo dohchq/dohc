@@ -255,7 +255,7 @@ export async function startServiceLiveHost(options: {
   // `ended` is set once no Try again of its queues stays granted.
   const retained = new Map<string, {target: ServiceActivationTarget; objectId: string; ended?: boolean}>();
   const documentKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify([document.workspaceId, document.objectId]);
-  // Documents an earlier daemon left away from their enrolled path whose activation had a restore and has not retired yet.
+  // Documents an earlier daemon left away from their enrolled path with an open retirement or an unfinished restore.
   // Each keeps its frozen target, by workspace and object, so an unfinished restore continues there and the retirement can end. It
   // never activates and is never settled as an ordinary departure, and a document now at its old path changes nothing.
   const movedRestores = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
@@ -691,7 +691,7 @@ export async function startServiceLiveHost(options: {
     // whatever this daemon loaded, so it never waits on an ordinary unload. Once
     // it retired, its successor activates when its document is hosted again.
     // Null while no retirement is open, or while it departs as an ordinary unload instead.
-    // A moved document whose activation had a restore retires through its frozen target the same way.
+    // A moved document an earlier daemon left retires through its frozen target the same way.
     const retire = async (key: string, joined: AbortSignal): Promise<string | undefined | null> => {
       const row = hosted.get(key) ?? movedRestores.get(key);
       if (!row) return null;
@@ -817,7 +817,7 @@ export async function startServiceLiveHost(options: {
       }
       return gone(key, row, joined);
     };
-    // Resolves to why a moved document whose activation has a restore stays, or undefined once it goes. With no
+    // Resolves to why a moved document an earlier daemon left stays, or undefined once it goes. With no
     // retirement open, as when another Edit grant still covers the document, it stays while that restore is unfinished,
     // even once the document is hosted again, so a restore step still has a route if it moves away again before its
     // target activates. Once the restore ended, one hosted again goes without an unload, since its own target carries
@@ -1197,17 +1197,16 @@ export async function startServiceLiveHost(options: {
       // A fresh daemon has nothing loaded, but an earlier one may have left a
       // departing document's work unsettled in its store. Passes settle each
       // one still at its enrolled path, then publish and unload it. One that
-      // moved is not settled there; it stays only for its owner's recovery
-      // copy, or, whatever document now holds its old path, until the
-      // retirement of an activation that had a restore completes, or, with no
-      // retirement open, until its unfinished restore ends.
+      // moved is not settled there. Whatever document now holds its old path,
+      // it stays until its open retirement completes, or, with none open,
+      // until its unfinished restore ends, or else for its owner's recovery copy.
       if (!updated) {
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
           if (!members.has(workspaceId)) continue;
           if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
             const moved = {workspaceId, objectId: document.objectId}, open = storage.serviceActivationRetirement(moved);
-            if (open ? storage.serviceRetirementHadRestore(open) : storage.serviceRestoreInProgress(moved)) movedRestores.set(movedRestoreKey(moved), document);
+            if (open !== null || storage.serviceRestoreInProgress(moved)) movedRestores.set(movedRestoreKey(moved), document);
             else if (uncopied(document)) retained.set(documentKey(moved), document);
             continue;
           }
