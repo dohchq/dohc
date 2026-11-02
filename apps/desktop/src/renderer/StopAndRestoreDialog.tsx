@@ -472,6 +472,7 @@ function wordsFor({ target, label }: StopTarget) {
       waiting: `Access stopped. dohc has not received all of ${label}'s changes yet. Try again in a moment.`,
       stopped: (files: string) => `Stopped ${label}'s access and restored ${files}.`,
       undone: (files: string) => `Put back ${files} as ${label} left them. Their access stays stopped.`,
+      stays: `${label}'s access stays stopped.`,
       automations: `automations ${label} changed`,
       after: label,
     };
@@ -487,6 +488,7 @@ function wordsFor({ target, label }: StopTarget) {
     waiting: "Link ended. dohc has not received every change made through it yet. Try again in a moment.",
     stopped: (files: string) => `Ended ${label} and restored ${files}.`,
     undone: (files: string) => `Put back ${files} as ${label} left them. The link stays ended.`,
+    stays: "The link stays ended.",
     automations: `automations changed through ${label}`,
     after: "the link",
   };
@@ -521,10 +523,12 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   const files = plural(result.restored.length, "file", "files");
   const fields = result.keptFields.length + result.fieldsMissing;
   const other = otherKept(result);
+  const nothingBack = undone && result.restored.length === 0;
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
-      {/* After an Undo that put nothing back, "Put back 0 files" would be wrong. */}
-      {undone && result.restored.length === 0 ? null : (
+      {/* After an Undo that put nothing back, "Put back 0 files" would be wrong.
+          The access half of that sentence comes last instead. */}
+      {nothingBack ? null : (
         <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
       )}
       {!undone && result.restored.some(file => file.removed) ? <p className="m-0 text-[13px] text-muted">
@@ -620,6 +624,7 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
           </ul>
         </div>
       ) : null}
+      {nothingBack ? <p className="m-0 text-[13px] text-ink">{words.stays}</p> : null}
     </div>
   );
 }

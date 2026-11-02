@@ -194,7 +194,10 @@ it("reports a synced deletion refusal in Undo and retains only the refused recei
   expect(f.shell().receipts.get(WORKSPACE, ANA.target).map(file => file.restoredMomentId)).toEqual(["trip"]);
 });
 
-it.each([["a person", ANA, "person:user_ana"], ["a link", LINK, "link:grant-link"]] as const)("opens with the files left to check when Undo puts none back for %s", async (_kind, first, value) => {
+it.each([
+  ["a person", ANA, "person:user_ana", "ana@example.com's access stays stopped."],
+  ["a link", LINK, "link:grant-link", "The link stays ended."],
+] as const)("opens with the files left to check when Undo puts none back for %s", async (_kind, first, value, stays) => {
   const words = "Bringing it back could stop sync. Copy its text from its History into a file with a new name.";
   const f = fixture([{status: "restored", restored: [{path: "trip.md", restoredMomentId: "trip"}],
     review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
@@ -209,6 +212,8 @@ it.each([["a person", ANA, "person:user_ana"], ["a link", LINK, "link:grant-link
   const outcome = screen.getByTestId("stop-and-restore-outcome");
   expect(within(outcome).getByRole("button", {name: "trip.md"})).toBeTruthy();
   expect(within(outcome).queryByText(/^Put back/)).toBeNull();
+  // The access line comes last, after the files dohc couldn't restore.
+  expect(outcome.lastElementChild?.textContent).toBe(stays);
 });
 
 it("recovers unfinished runs after relaunch and opens Try again from the Notice", async () => {
