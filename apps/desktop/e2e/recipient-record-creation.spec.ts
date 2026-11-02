@@ -96,7 +96,7 @@ async function withSharedCollection(
   run: (fixture: {
     owner: LaunchedDesktopApp;
     recipient(): LaunchedDesktopApp;
-    restartRecipient(): Promise<LaunchedDesktopApp>;
+    restartRecipient(closed?: () => void): Promise<LaunchedDesktopApp>;
     stopOwner(): Promise<void>;
     restartOwner(): Promise<LaunchedDesktopApp>;
     relay: SyncRelayHandle;
@@ -157,8 +157,9 @@ async function withSharedCollection(
         launches.push(owner);
         return owner;
       },
-      restartRecipient: async () => {
+      restartRecipient: async closed => {
         await recipient!.close(); recipient = undefined;
+        closed?.();
         recipient = await launchDesktopApp({ workspace: recipientTemp, env });
         launches.push(recipient);
         await openCollection(recipient.page);
@@ -376,12 +377,14 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await openCollection(page);
     await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
     await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
-    page = (await fixture.restartRecipient()).page;
+    let beforeRelaunch = 0;
+    page = (await fixture.restartRecipient(() => { beforeRelaunch = responses.length; })).page;
     // The restart's refresh can swap in the relay's copy before anything reads the status. See expectSent.
     await expect.poll(async () => (await records(page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(["pending", undefined]).toContain((await records(page))[0]!.creationDelivery);
-    await expect.poll(() => responses.some(response => response.receipt.created === false), { timeout: 120_000 }).toBe(true);
-    const replay = responses.find(response => response.receipt.created === false)!;
+    const relaunched = () => responses.slice(beforeRelaunch);
+    await expect.poll(() => relaunched().some(response => response.receipt.created === false), { timeout: 120_000 }).toBe(true);
+    const replay = relaunched().find(response => response.receipt.created === false)!;
     expect(replay.request).toEqual(original.request);
     expect(replay.receipt).toEqual({ ...original.receipt, created: false });
     await expectSent(page, created!.id);
@@ -421,10 +424,10 @@ test("@two-client a recipient's record survives a restart while the relay is unr
     expect(created).toMatchObject({ creationDelivery: "pending" });
     await openCollection(page);
     await expectWaitingDraft(page);
-    const refusedBeforeRestart = refusedWrites;
-    page = (await fixture.restartRecipient()).page;
+    let refusedBeforeRelaunch = 0;
+    page = (await fixture.restartRecipient(() => { refusedBeforeRelaunch = refusedWrites; })).page;
     // The restarted app tries to send the draft once its view is ready. The draft stays after that try fails.
-    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(refusedBeforeRestart);
+    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(refusedBeforeRelaunch);
     await expect.poll(async () => (await records(page)).map(record => ({ id: record.id, delivery: record.creationDelivery })),
       { timeout: 120_000 }).toEqual([{ id: created!.id, delivery: "pending" }]);
     await expectWaitingDraft(page);
