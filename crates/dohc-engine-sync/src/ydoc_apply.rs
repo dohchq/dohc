@@ -8215,6 +8215,9 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
     }
 }
 
+/// A Y.Doc update names a path where this replica holds another object.
+pub(crate) const PATH_OCCUPIED: &str = "ydoc.update path is occupied by another object";
+
 fn validate_ydoc_identity(
     conn: &rusqlite::Connection,
     key: &DocKey,
@@ -8234,7 +8237,7 @@ fn validate_ydoc_identity(
         && snapshot.object_id != key.object_id
     {
         return Err(SyncError::InvalidInput {
-            reason: "ydoc.update path is occupied by another object",
+            reason: PATH_OCCUPIED,
         });
     }
     let other_alias: Option<String> = conn

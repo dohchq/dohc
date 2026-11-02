@@ -388,7 +388,8 @@ impl RelayError {
             | RelayError::StoreBusy
             | RelayError::HostedRefusal(_)
             | RelayError::ValidationPending(_)
-            | RelayError::Local(_) => None,
+            | RelayError::Local(_)
+            | RelayError::PathOccupied { .. } => None,
         }
     }
 }
@@ -582,4 +583,10 @@ pub enum RelayError {
     ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error("local sync state failed: {0}")]
     Local(String),
+    /// A pull stopped because this replica holds another object's file at
+    /// the path a pulled Y.Doc update names. `detail` is what `Local` would
+    /// carry. The path stays out of the message, so the engine's log names
+    /// no file.
+    #[error("local sync state failed: {detail}")]
+    PathOccupied { path: String, detail: String },
 }
