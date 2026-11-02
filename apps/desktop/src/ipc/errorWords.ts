@@ -345,6 +345,10 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
+  if (name === "LiveFolderMoveError") {
+    const [title = "", ...body] = message.split("\n");
+    return { title, words: body.join("\n"), mapped: false, cause: null };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
@@ -550,6 +554,11 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** History's current rules refused a restore. Its words say why and what to do next. */
 export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
+}
+
+/** A folder move refused while a page in it has live editing on. Try again reruns the move. */
+export function isLiveFolderMoveRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveFolderMoveError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */

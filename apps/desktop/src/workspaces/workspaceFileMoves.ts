@@ -267,7 +267,7 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     if (destinationError) throw new Error(destinationError);
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
       if (options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
-      const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath);
+      const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath, true);
       try {
         await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
         markChanged();
@@ -442,8 +442,10 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
         try { const changed = await work(null); ok = "done" in changed; return changed; }
         finally { await finish?.(ok); }
       };
+      // A folder's pages are refused while any is live on this computer.
+      const folder = await lstat(join(rootPath, endpoints[0]!)).then(entry => entry.isDirectory(), () => false);
       const changed = await (options.capture && endpoints.every(engineAddresses)
-        ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId }, work, () => gone)
+        ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId, ...(folder ? { folder } : {}) }, work, () => gone)
         : fallback());
       if ("failed" in changed) return changed;
       const { recovery, from, to, overwritten, ...done } = changed.done;
