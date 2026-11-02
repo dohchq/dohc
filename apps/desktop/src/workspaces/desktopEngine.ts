@@ -32,7 +32,7 @@ import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOw
 import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
 import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
-import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
+import {catchUpOwnerDocuments, listedOwnerDeliveryPaths, readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
 import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
 import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, readServerKeptEditsQueue, retryOwnerLiveQuarantine, sameGeneration, ServerKeptEditsConflict,
   type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
@@ -381,7 +381,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               } catch (error) {check(); console.error("[desktop] server kept edits list failed:", error);}
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
-              liveDocumentPaths.set(workspaceId, documents.map(({binding}) => ({path: binding.currentPath, objectId: binding.objectId})));
+              liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
               const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
               // The server reports a diverged copy even after its owner stopped every document.
@@ -448,7 +448,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               }
             });} finally {activeOwnerWorkspace = undefined;}
           },
-          // A move's catch-up: one observing owner sync for each listed ready document, in turn.
           runTargetedPass: async (workspaceId, objectIds, lifetime) => {
             if (!workspaceAuthorities.withOperation) return false;
             activeOwnerWorkspace = workspaceId;
@@ -463,27 +462,20 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const documents = readyOwnerDeliveryDocuments(await session.documents(signal), workspaceId);
               check();
               const native = nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
-              for (const objectId of objectIds) {
-                const document = documents.find(row => row.binding.objectId === objectId);
-                if (!document) return false;
-                const outcome = await sessions.run(operation.workspace, async binding => {
-                  const client = daemon.currentClient();
-                  if (!(client instanceof EngineClient)) return "retry";
-                  const assertCurrent = () => {
-                    check(); sessions.assertCurrentBinding(operation.workspace, binding);
-                    if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
-                  };
-                  assertCurrent();
-                  const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
-                    document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                    signal, bearer: session.bearer, accountId: session.accountId, assertCurrent, observedOnly: true});
-                  if (quarantinesMayChange(workspaceId, objectId, result)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
-                  return result;
-                });
-                check();
-                if (outcome !== "acknowledged" && outcome !== "empty" && outcome !== "unbound") return false;
-              }
-              return true;
+              return await catchUpOwnerDocuments(documents, objectIds, document => sessions.run(operation.workspace, async binding => {
+                const client = daemon.currentClient();
+                if (!(client instanceof EngineClient)) return "retry";
+                const assertCurrent = () => {
+                  check(); sessions.assertCurrentBinding(operation.workspace, binding);
+                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
+                };
+                assertCurrent();
+                const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
+                  document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent, observedOnly: true});
+                if (quarantinesMayChange(workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                return result;
+              }), check);
             });} finally {activeOwnerWorkspace = undefined;}
           },
         });

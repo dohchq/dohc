@@ -25,7 +25,7 @@ import { createMoveAcceptedEditsGuard } from "../workspaces/moveAcceptedEditsGua
 import { runNativeOwnerDeliveryPass } from "../workspaces/nativeOwnerDelivery";
 import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
 import { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
-import { readyOwnerDeliveryDocuments, startServerOwnerDelivery } from "../workspaces/serverOwnerDelivery";
+import { catchUpOwnerDocuments, readyOwnerDeliveryDocuments, startServerOwnerDelivery } from "../workspaces/serverOwnerDelivery";
 import { createTestScratch } from "../workspaces/testTemp";
 import { installWorkspaceDataKey, SECRET_FILE_STORE_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
 import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -190,16 +190,11 @@ export async function openLiveMoveFixture(input: {
       let targeted = 0;
       const delivery = startServerOwnerDelivery({ workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 60_000,
         runPass: async () => ({ documentCount: 0, acknowledged: false }),
-        async runTargetedPass(_workspaceId, objectIds, signal) {
+        runTargetedPass(_workspaceId, objectIds, signal) {
           targeted++;
-          for (const objectId of objectIds) {
-            const document = documents.find(row => row.binding.objectId === objectId);
-            if (!document) return false;
-            const result = await runNative((client, handle) => runNativeOwnerDeliveryPass({ client, workspaceHandle: handle, document,
-              config: configFor(document), refusals, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}, observedOnly: true }));
-            if (result !== "acknowledged" && result !== "empty" && result !== "unbound") return false;
-          }
-          return true;
+          return catchUpOwnerDocuments(documents, objectIds, document => runNative((client, handle) => runNativeOwnerDeliveryPass({ client,
+            workspaceHandle: handle, document, config: configFor(document), refusals, signal, bearer: relayConnection.token, accountId: workspaceId,
+            assertCurrent() {}, observedOnly: true })));
         },
         onError: () => undefined });
       const sync = createRelaySyncEngine({ rootDir: rootPath, relay: relayConnection, operations: relay, capture, onChange: () => undefined });

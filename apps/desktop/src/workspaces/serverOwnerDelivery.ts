@@ -1,6 +1,7 @@
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {DesktopOwnerDeliveryDocument} from "./desktopOwnerDelivery";
+import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -28,6 +29,34 @@ export function readyOwnerDeliveryDocuments(value: unknown, workspaceId: string)
       shareId: parseLiveUpdateIdentifier(row.document.shareId)});
   }
   return documents;
+}
+
+/**
+ * Every page a complete list names, ready or not, for the move guard. Call it
+ * after readyOwnerDeliveryDocuments has accepted the same response.
+ */
+export function listedOwnerDeliveryPaths(value: unknown, ready: readonly DesktopOwnerDeliveryDocument[]): LiveDocumentPath[] {
+  const listed = ready.map(({binding}) => ({path: binding.currentPath, objectId: binding.objectId}));
+  for (const row of (value as {documents: {path: string; status: string; objectId?: unknown}[]}).documents) {
+    if (row.status !== "ready" && typeof row.objectId === "string" && row.objectId) listed.push({path: row.path, objectId: row.objectId});
+  }
+  return listed;
+}
+
+/**
+ * A move's catch-up: one observing owner sync for each listed page, in turn.
+ * True only when each one answered. A page that isn't ready answers false.
+ */
+export async function catchUpOwnerDocuments(documents: readonly DesktopOwnerDeliveryDocument[], objectIds: readonly string[],
+  sync: (document: DesktopOwnerDeliveryDocument) => Promise<string>, check: () => void = () => undefined): Promise<boolean> {
+  for (const objectId of objectIds) {
+    const document = documents.find(row => row.binding.objectId === objectId);
+    if (!document) return false;
+    const outcome = await sync(document);
+    check();
+    if (outcome !== "acknowledged" && outcome !== "empty" && outcome !== "unbound") return false;
+  }
+  return true;
 }
 
 /** One workspace and one document per pass, with no unbounded concurrent work. */
