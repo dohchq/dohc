@@ -14,6 +14,7 @@ import {
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
   type EngineTransport,
+  type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
@@ -36,6 +37,7 @@ import {
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
 import { HistoryStillPausedError } from "../ipc/errorWords";
+import { EngineCaptureNotSettledError } from "./workspaceEngineCaptureLiveStore";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { createWorkspaceActivity, settleYDocsAfterFileObservation, WorkspaceActivityState } from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
@@ -105,6 +107,8 @@ async function reconnectFailureCapture(prefix: string) {
     ownedPage: null as string | null,
     checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
+    // Capture that never settles: "stopped" also answers a stopped driver.
+    captureAnswer: null as "unsettled" | "stopped" | null,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -149,7 +153,14 @@ async function reconnectFailureCapture(prefix: string) {
           );
         }
       }
-      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      const stopped = state.captureAnswer === "stopped";
+      const lifecycle = daemonCaptureLifecycleAnswer(request, () => ({
+        deferredWrites: [], heldFiles: [], degraded: false,
+        settled: state.captureAnswer === null, running: !stopped,
+      }));
+      if (lifecycle && stopped && request.method === "watcher.status") {
+        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }), running: false, degraded: true, phase: "degraded" } };
+      }
       if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
@@ -574,6 +585,20 @@ it("names every page whose live editing stopped when Try again leaves History pa
   await agenda.close(undefined);
   expect(outcomes.at(-1)).toBe(true);
   await expect(capture.retryHistoryCapture()).resolves.toBeUndefined();
+  await capture.stop();
+});
+
+// Try again that outlasts the settle budget reads as catching up only while
+// capture still runs; a driver that stopped again keeps History paused.
+it("keeps History paused when Try again finds capture stopped again, and catching up while it still runs", async () => {
+  const { capture, state } = await reconnectFailureCapture("dohc-ydoc-history-retry-unsettled-");
+  state.captureAnswer = "unsettled";
+  await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
+  state.captureAnswer = "stopped";
+  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  expect(refused).toBeInstanceOf(HistoryStillPausedError);
+  expect(refused).toMatchObject({ paths: [] });
+  state.captureAnswer = null;
   await capture.stop();
 });
 

@@ -6268,7 +6268,18 @@ export function createWorkspaceEngineCapture(
       if (!engine.retryCapture) throw new Error("This workspace cannot restart History.");
       // Off the capture chain: the restart scans the whole folder, and
       // document opens wait on the chain.
-      await engine.retryCapture();
+      try {
+        await engine.retryCapture();
+      } catch (error) {
+        // A pass that outlasts the settle budget is still catching up only
+        // while capture starts, imports or runs healthy. A driver that
+        // stopped or degraded again keeps History paused.
+        if (!(error instanceof EngineCaptureNotSettledError)) throw error;
+        const status = await engine.watcherStatus?.();
+        if (status === undefined || status.phase === "starting" || status.phase === "importing"
+          || (status.running && !status.degraded && !status.terminal)) throw error;
+        throw new HistoryStillPausedError([]);
+      }
       // On the chain, so a health poll that started before the restart
       // cannot publish its stale failure after this outcome.
       await enqueueResult("history capture retry", async () => {
