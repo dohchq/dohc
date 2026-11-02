@@ -3,6 +3,7 @@ import "./DesktopWorkspaceShell.testSupport";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
+import { deferred } from "../testing/deferred";
 import { WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
 // #3089: what main sends when the engine refuses a person's move of a shared
@@ -63,4 +64,20 @@ it("a later rename of the same page from the Explorer clears the refused move's 
   await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user)).toEqual([]);
+});
+
+// The timeout path: a move held by a guard that gave up still succeeds, and
+// the guard itself reports nothing.
+it("a move that waited out the guard leaves no toast, Notices row or move identity", async () => {
+  const held = deferred<{ path: string; undo: { available: false; reason: string } }>();
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn(() => held.promise) });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await rename(user);
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+  held.resolve({ path: "renamed.md", undo: { available: false, reason: "" } });
+  await waitFor(() => expect(screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "renamed.md")).toBe(true));
+  expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  expect(shownRows().filter((row) => row.textContent?.includes("a.md"))).toEqual([]);
 });

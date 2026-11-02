@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
+import { createMoveAcceptedEditsGuard } from "./moveAcceptedEditsGuard";
 import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
@@ -83,4 +84,30 @@ it.each([
   expect(f.order.slice(0, 3)).toEqual([`before ${from}`, "lock free", "released"]);
   expect(await finish()).toMatchObject({ ok: false });
   expect(f.order.at(-1)).toBe("capture");
+});
+
+// The timeout path: the guard gives up, reports nothing, and the move lands.
+it.each([
+  { name: "the owner sync never answers", owner: () => new Promise<boolean>(() => {}), relay: async () => undefined },
+  { name: "the guard's pull hangs, then rejects", owner: async () => true,
+    relay: (_id: string, signal: AbortSignal) => new Promise<void>((_resolve, reject) =>
+      signal.addEventListener("abort", () => setImmediate(() => reject(new Error("relay unavailable"))), { once: true })) },
+])("a move goes ahead when $name", async ({ owner, relay }) => {
+  const f = await workspace(["Notes/Page.md"]);
+  const relayCatchUp = vi.fn(relay);
+  const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "Notes/Page.md", objectId: "page" }], offline: () => false,
+    ownerCatchUp: owner, relayCatchUp, waitMs: 50 });
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  try {
+    const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person,
+      { capture: null, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined,
+        beforeMove: path => guard.beforeMove("workspace", path) });
+    expect(moved.path).toBe("Notes/Renamed.md");
+    expect(existsSync(join(f.rootPath, "Notes/Renamed.md"))).toBe(true);
+    expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(false);
+    if (relayCatchUp.mock.calls.length) await vi.waitFor(() => expect(relayCatchUp.mock.results[0]!.value).rejects.toThrow("relay unavailable"));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(unhandled).not.toHaveBeenCalled();
+  } finally { process.off("unhandledRejection", unhandled); }
 });
