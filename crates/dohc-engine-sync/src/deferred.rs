@@ -253,12 +253,8 @@ pub(crate) fn check_redelivery(
     }).map_err(local)
 }
 
-/// Retain `ops` within the workspace's limit. Past it, an ordinary replica
-/// fails and retains nothing. A hosted replica never fails: a document whose
-/// next op would pass it retains no more, and is answered so its read can
-/// stop at that op instead. Each hosted op records the feed it arrived on,
-/// `relay_namespace` as the pull's trusted configuration names it; a hosted
-/// pull it names none for retains nothing and fails.
+/// [`retain_waiting`] with no origin held by a conflict.
+#[cfg(test)]
 pub(crate) fn retain(
     store: &mut EngineStore,
     identity: &SyncIdentity,
@@ -273,8 +269,14 @@ pub(crate) fn retain(
 /// while it waits on a conflict.
 pub(crate) const CONFLICT_WAIT_LIMIT: &str = "conflict-wait-limit";
 
-/// [`retain`], where `conflict_waits` names each origin held by a conflict
-/// with the conflict's path, so passing the limit says what to resolve.
+/// Retain `ops` within the workspace's limit. Past it, an ordinary replica
+/// fails and retains nothing. A hosted replica never fails: a document whose
+/// next op would pass it retains no more, and is answered so its read can
+/// stop at that op instead. Each hosted op records the feed it arrived on,
+/// `relay_namespace` as the pull's trusted configuration names it; a hosted
+/// pull it names none for retains nothing and fails. `conflict_waits` names
+/// each origin held by a conflict with the conflict's path, so passing the
+/// limit says what to resolve.
 pub(crate) fn retain_waiting(
     store: &mut EngineStore,
     identity: &SyncIdentity,
