@@ -1219,7 +1219,7 @@ fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
         )),
         "{detail}"
     );
-    assert!(detail.ends_with("1 retained ops, 536870912 retained bytes)"), "{detail}");
+    assert!(detail.ends_with("retained ops 1, retained bytes 536870912)"), "{detail}");
     assert_eq!(head_text(&b, "gemini"), None);
 }
 

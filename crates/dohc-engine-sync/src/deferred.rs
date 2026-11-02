@@ -366,7 +366,7 @@ pub(crate) fn retain_waiting(
                         };
                         let path = path.as_ref().map(|path| format!("path {path}, ")).unwrap_or_default();
                         limit_detail = Some(format!(
-                            "{CONFLICT_WAIT_LIMIT}: {sentence} ({path}origin {} seq {}, {count} retained ops, {bytes} retained bytes)",
+                            "{CONFLICT_WAIT_LIMIT}: {sentence} ({path}origin {} seq {}, retained ops {count}, retained bytes {bytes})",
                             op.origin_id, op.origin_seq,
                         ));
                         return Err(SyncError::RetryableState { reason: CONFLICT_WAIT_LIMIT });
