@@ -3138,6 +3138,7 @@ describe("the move guard over a real relay and live host", () => {
       pages: ["pending", "unpulled", "slow", "refused", "peer", "peer-slow"], peer: true });
     try {
       const { owner, peer } = fixture;
+      const recorded = timings.length;
       const found: GuardTiming[] = [
         // Bound, S already pending: an earlier pull parked the save, and the file holds the page as it was.
         await editThenMove(fixture, owner, { name: "pending", route: "bound", guarded: true, proxyDelayMs: 0, before: async () => {
@@ -3183,6 +3184,11 @@ describe("the move guard over a real relay and live host", () => {
         await editThenMove(fixture, peer, { name: "peer-slow", route: "unbound", guarded: true, proxyDelayMs: PROXY_DELAY_MS }),
       );
       timings.push(...found);
+      // Every guarded move here reaches the timing record, the refusal and its retry included.
+      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual([
+        "pending on moved", "unpulled on moved", "slow on moved", "refused on refused", "refused-retry on moved",
+        "peer on moved", "peer-slow on moved",
+      ]);
       // The peer's guard ran owner syncs, and none of them made the peer an owner.
       expect(fixture.ownerBound(owner, "slow")).toBe(true);
       expect(fixture.ownerBound(peer, "peer")).toBe(false);
