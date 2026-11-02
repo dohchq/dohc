@@ -1058,11 +1058,6 @@ fn apply_moment_append(
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
         let complete = crate::ydoc_apply::ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
-        // A diverged file waits out an owner restore instead of being refused.
-        if !(head_fast_forward || content_fast_forward) {
-            dohc_engine_collab::live_update_application::require_restore_open(tx, &key)
-                .map_err(crate::ydoc_apply::map_collab_hard_error)?;
-        }
         let decision = crate::ydoc_apply::imported_text_head_in_tx(
             tx,
             &complete,
