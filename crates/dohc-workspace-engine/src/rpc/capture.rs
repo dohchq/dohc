@@ -1123,6 +1123,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_retry_replaces_a_degraded_driver_that_is_still_running() {
+        let scratch = ScratchDir::new().unwrap();
+        std::fs::write(scratch.path().join("seed.md"), b"seed").unwrap();
+        let probe = capture_driver::CaptureApplyProbe::default();
+        let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+        let ctx = RequestContext::unbounded();
+        let handle = open_retry_workspace(&service, &scratch, "retry-degraded").await;
+        let open = service.open(Some(&handle)).unwrap();
+        flush_until_settled(&service, &handle).await;
+        lock(&open.capture)
+            .as_ref()
+            .unwrap()
+            .status()
+            .mark_degraded();
+        let starts = probe.layer_start_count();
+
+        // The old task is still running, so the swap cancels and joins it.
+        let retried = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            service.capture_retry(&ctx, Some(handle.clone())),
+        )
+        .await
+        .expect("capture.retry joins the running task")
+        .unwrap();
+
+        assert_eq!(retried["restarted"], json!(true));
+        assert!(probe.layer_start_count() > starts);
+        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
+        assert_eq!(
+            [&status["running"], &status["degraded"], &status["terminal"]],
+            [&json!(true), &json!(false), &json!(false)],
+            "{status}"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_retry_answers_while_the_first_scan_is_held() {
         let scratch = ScratchDir::new().unwrap();
         std::fs::write(scratch.path().join("seed.md"), b"seed").unwrap();

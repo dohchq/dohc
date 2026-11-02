@@ -1408,9 +1408,10 @@ impl CaptureDriver {
         }
     }
 
-    /// Capture stopped, and only a new driver can resume it: the task ended,
-    /// or it reports degraded or terminal. A driver still importing, or one
-    /// still running a replacement's first scan, has not stopped.
+    /// Capture stopped, and Try again replaces the driver: the task ended, or
+    /// it reports degraded or terminal, in any phase. A degraded import loses
+    /// its import labels to the replacement's rescan, but no changes. A
+    /// replacement's first scan has not stopped, as it starts not degraded.
     pub(crate) fn stopped(&self) -> bool {
         let snapshot = self.status_snapshot();
         snapshot.degraded || snapshot.terminal
