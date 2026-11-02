@@ -513,6 +513,7 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         | SyncError::BlobInvalid
         | SyncError::BlobTooLarge { .. }
         | SyncError::FaultCrash
+        | SyncError::SyncedDeletionRevivalRefused
         | SyncError::Cancelled => None,
     }
 }

@@ -2459,9 +2459,9 @@ pub(crate) fn record_credited_updates_in_tx(
 pub type LoggedUpdate = (Option<String>, Option<ChangeAttribution>, Vec<u8>);
 
 /// Install a lineage this machine retired again, from its base and the
-/// updates it received for it, in replay order. Fails without writing
-/// anything the caller keeps unless the base claims an absent marker and
-/// every update applies with no missing dependency.
+/// updates it received for it. The caller has replayed `updates` over `base`
+/// and found every dependency met. Fails unless the base claims an absent
+/// marker.
 pub fn reinstall_lineage_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
@@ -2491,10 +2491,17 @@ pub fn reinstall_lineage_in_tx(
             now_ms,
         },
     )?;
-    let entries: Vec<_> = updates.iter().map(|(_, _, bytes)| bytes.clone()).collect();
-    for outcome in crate::replay_parity::replay_validated_batch(base, &entries, true)?.outcomes {
-        outcome?;
-    }
+    append_logged_updates_in_tx(tx, key, updates, now_ms)
+}
+
+/// Append updates received for `key`'s active lineage, skipping any it has
+/// already logged. The caller has replayed them over that lineage.
+pub fn append_logged_updates_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    updates: &[LoggedUpdate],
+    now_ms: i64,
+) -> Result<(), CollabError> {
     for (actor, attribution, update) in updates {
         validate_update_bytes(update)?;
         if let Some(actor) = actor {

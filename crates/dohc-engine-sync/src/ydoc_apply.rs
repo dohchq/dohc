@@ -3467,20 +3467,25 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
 }
 
 /// Take up the lineage this machine retired when it deleted a note the other
-/// machine kept editing. The claim its waiting updates name is rebuilt from
-/// the base and every update this machine logged for it, and must show
-/// `text`. Any gap refuses, so a partial lineage is never installed.
+/// machine kept editing: `claim`, else the one its waiting updates name, else
+/// the newest one it logged for the note. The lineage is rebuilt from its
+/// base and every update logged for it, and the waiting updates are dropped.
+/// Any gap refuses for good, so a partial lineage is never installed.
 pub(crate) fn revive_retired_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
-    path: &str,
-    text: &str,
+    claim: Option<&str>,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let incomplete = || SyncError::RetryableState {
-        reason: "ydoc-retired-lineage-incomplete",
-    };
-    let (claims, claim, unlogged): (i64, Option<String>, bool) = tx
+    let refused = || SyncError::SyncedDeletionRevivalRefused;
+    let bound = dohc_engine_domain::is_collection_record_bound_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+    )
+    .map_err(map_domain_hard_error)?;
+    let (claims, waiting, unlogged): (i64, Option<String>, bool) = tx
         .query_row(
             "SELECT COUNT(DISTINCT lineage_claim_id),MIN(lineage_claim_id), \
              COALESCE(MAX(ingress_kind!='local' OR lineage_replacement_json IS NOT NULL \
@@ -3492,12 +3497,99 @@ pub(crate) fn revive_retired_lineage_in_tx(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(SyncError::corrupt)?;
-    let Some(claim) = claim.filter(|_| claims == 1 && !unlogged) else {
-        return Err(incomplete());
+    if bound || claims > 1 || unlogged {
+        return Err(refused());
+    }
+    let claim = match (claim, waiting) {
+        (Some(claim), Some(waiting)) if claim != waiting => return Err(refused()),
+        (Some(claim), _) => claim.to_owned(),
+        (None, Some(waiting)) => waiting,
+        (None, None) => newest_logged_claim(tx, key)?.ok_or_else(refused)?,
     };
     if inactive_lineage_exists(tx, key, &claim)? {
-        return Err(incomplete());
+        return Err(refused());
     }
+    let (base, updates) = logged_lineage(tx, key, &claim)?;
+    let Some((origin_id, origin_seq, content_kind, base)) = base else {
+        return Err(refused());
+    };
+    ensure_complete_replay(&base, &updates)?;
+    dohc_engine_collab::reinstall_lineage_in_tx(
+        tx,
+        key,
+        ContentKind::parse(&content_kind).map_err(|_| refused())?,
+        &base,
+        (&origin_id, origin_seq),
+        &updates,
+        now_ms,
+    )
+    .map_err(map_collab_hard_error)?;
+    tx.execute(
+        "DELETE FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// Append the updates this machine logged for `claim`, the lineage `key` has
+/// just taken up, once they replay completely over it.
+pub(crate) fn take_up_logged_updates_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    claim: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let (_, updates) = logged_lineage(tx, key, claim)?;
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_collab_hard_error)?;
+    ensure_complete_replay(&doc.encode_full_state(), &updates)?;
+    dohc_engine_collab::append_logged_updates_in_tx(tx, key, &updates, now_ms)
+        .map_err(map_collab_hard_error)
+}
+
+fn newest_logged_claim(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT json_extract(payload_json,'$.lineageClaimId') FROM replication_log \
+         WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
+           AND json_extract(payload_json,'$.versionId')=?2 \
+           AND json_extract(payload_json,'$.objectId')=?3 ORDER BY rowid DESC LIMIT 1",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Refuse unless every update applies over `base` and, once all have, none
+/// still waits for a missing dependency. The log may hold an update before
+/// one it builds on.
+fn ensure_complete_replay(base: &[u8], updates: &[LoggedUpdate]) -> Result<(), SyncError> {
+    let entries: Vec<_> = updates.iter().map(|(_, _, bytes)| bytes.clone()).collect();
+    let replay = dohc_engine_collab::apply_replay_validated_batch(base, &entries)
+        .map_err(|_| SyncError::SyncedDeletionRevivalRefused)?;
+    if replay.outcomes.iter().any(Result::is_err) || replay.doc.has_pending_dependencies() {
+        return Err(SyncError::SyncedDeletionRevivalRefused);
+    }
+    Ok(())
+}
+
+type LoggedBase = (String, i64, String, Vec<u8>);
+type LoggedUpdate = dohc_engine_collab::LoggedUpdate;
+
+/// What this machine logged for `claim`: its base, if logged, and every other
+/// update in log order. An entry without its bytes refuses.
+fn logged_lineage(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    claim: &str,
+) -> Result<(Option<LoggedBase>, Vec<LoggedUpdate>), SyncError> {
+    let refused = || SyncError::SyncedDeletionRevivalRefused;
     let mut statement = tx
         .prepare(
             "SELECT origin_id,origin_seq,payload_json FROM replication_log \
@@ -3523,41 +3615,17 @@ pub(crate) fn revive_retired_lineage_in_tx(
         let bytes = get_binary_blob(tx, &payload.update_blob_sha256)
             .map_err(SyncError::Storage)?
             .filter(|bytes| hex_sha256(bytes) == payload.update_blob_sha256)
-            .ok_or_else(incomplete)?;
+            .ok_or_else(refused)?;
         if !payload.is_base_state {
-            updates.push((payload.actor_origin_id, payload.attribution, bytes));
+            let actor = payload.actor_origin_id.or(Some(origin_id));
+            updates.push((actor, payload.attribution, bytes));
         } else if payload.update_blob_sha256 != claim {
-            return Err(incomplete());
+            return Err(refused());
         } else if base.is_none() {
             base = Some((origin_id, origin_seq, payload.content_kind, bytes));
         }
     }
-    let Some((origin_id, origin_seq, content_kind, base)) = base else {
-        return Err(incomplete());
-    };
-    dohc_engine_collab::reinstall_lineage_in_tx(
-        tx,
-        key,
-        ContentKind::parse(&content_kind).map_err(map_collab_hard_error)?,
-        &base,
-        (&origin_id, origin_seq),
-        &updates,
-        now_ms,
-    )
-    .map_err(map_collab_hard_error)?;
-    tx.execute(
-        "DELETE FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id, key.version_id, key.object_id],
-    )
-    .map_err(SyncError::persist)?;
-    reconcile_imported_resulting_head_in_tx(
-        tx,
-        &key.workspace_id,
-        &key.version_id,
-        &key.object_id,
-        ResultingHead::Text { path, text },
-        now_ms,
-    )
+    Ok((base, updates))
 }
 
 /// Drop the local bases still waiting to learn their relay position.

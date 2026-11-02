@@ -47,6 +47,7 @@ mod scene_lifecycle;
 pub mod ydoc;
 
 pub use doc_cache::{CacheStats, RemoteAppendProbe, WriterDocCache};
+pub use durable::append_logged_updates_in_tx;
 pub use durable::{
     archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker, load_doc_in,

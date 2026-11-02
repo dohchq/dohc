@@ -240,6 +240,9 @@ enum LocalLineagePlan {
         key: DocKey,
         path: String,
         text: String,
+        /// The successor the other machine installed when it kept its copy
+        /// first, and the review its import opened here.
+        successor: Option<(String, String)>,
     },
 }
 
@@ -3152,13 +3155,25 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 &key.object_id,
             )?;
         }
-        LocalLineagePlan::RetiredIncoming { key, path, text } => {
-            crate::ydoc_apply::revive_retired_lineage_in_tx(
+        LocalLineagePlan::RetiredIncoming {
+            key,
+            path,
+            text,
+            successor,
+        } => {
+            let now_ms = result.conflict.updated_at_ms;
+            if let Some((claim, review)) = successor {
+                take_up_kept_successor_in_tx(tx, key, claim, review, now_ms)?;
+            } else {
+                crate::ydoc_apply::revive_retired_lineage_in_tx(tx, key, None, now_ms)?;
+            }
+            crate::reconcile_imported_resulting_head_in_tx(
                 tx,
-                key,
-                path,
-                text,
-                result.conflict.updated_at_ms,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                crate::ResultingHead::Text { path, text },
+                now_ms,
             )?;
         }
     }
@@ -3580,27 +3595,106 @@ fn prepare_retired_incoming_lineage_in_tx(
     if live_document_bound(tx, &key)? {
         return Err(SyncError::LiveDocumentBindingActive);
     }
-    let waiting: bool = tx
+    let retired: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+               WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) \
+             OR EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 \
+               AND op_kind='ydoc.update' AND apply_disposition='applied' \
+               AND json_extract(payload_json,'$.versionId')=?2 \
+               AND json_extract(payload_json,'$.objectId')=?3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if !waiting
+    if !retired
         || dohc_engine_collab::read_marker_in(tx, &key)
             .map_err(map_local_collab_error)?
             .is_some()
     {
         return Ok(LocalLineagePlan::None);
     }
+    let successor = tx
+        .query_row(
+            "SELECT l.lineage_claim_id,l.open_conflict_id FROM ydoc_inactive_lineages l \
+             JOIN conflicts c ON c.workspace_id=l.workspace_id \
+               AND c.conflict_id=l.open_conflict_id \
+             WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3 \
+               AND l.disposition='conflicting-successor' AND c.status='open' \
+             ORDER BY l.recorded_at_ms DESC LIMIT 1",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
     Ok(LocalLineagePlan::RetiredIncoming {
         key,
         path: payload.paths[result.path_ref].clone(),
         text: result_text
             .ok_or_else(|| corrupt_local("kept text has no canonical body"))?
             .to_owned(),
+        successor,
     })
+}
+
+/// Keep the other machine's copy after that machine kept it first: take up
+/// the history this machine retired, then the successor the other machine
+/// installed over it, which the import here archived beside `review`.
+fn take_up_kept_successor_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    claim: &str,
+    review: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let refused = |error: SyncError| match error {
+        SyncError::Storage(_) => error,
+        _ => SyncError::SyncedDeletionRevivalRefused,
+    };
+    let (value, recorded_at_ms): (String, i64) = tx
+        .query_row(
+            "SELECT payload_json,recorded_at_ms FROM replication_log \
+             WHERE workspace_id=?1 AND op_kind='conflict.resolve' AND apply_disposition='applied' \
+               AND json_extract(payload_json,'$.lineageTransition.successor.lineageClaimId')=?2 \
+             ORDER BY rowid LIMIT 1",
+            params![key.workspace_id, claim],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .ok_or(SyncError::SyncedDeletionRevivalRefused)?;
+    let value: Value = serde_json::from_str(&value).map_err(SyncError::corrupt)?;
+    let context = ConflictResolveEnvelopeContext {
+        workspace_id: &key.workspace_id,
+        recorded_at_ms,
+    };
+    let payload = validate_conflict_resolve_v1(&value, context)
+        .map_err(refused)?
+        .payload;
+    let transition = payload
+        .lineage_transition
+        .as_ref()
+        .ok_or(SyncError::SyncedDeletionRevivalRefused)?;
+    let predecessor = Some(transition.predecessor_claim_id.as_str());
+    crate::ydoc_apply::revive_retired_lineage_in_tx(tx, key, predecessor, now_ms)?;
+    tx.execute(
+        "DELETE FROM ydoc_inactive_lineages \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        params![key.workspace_id, key.version_id, key.object_id, claim],
+    )
+    .map_err(SyncError::persist)?;
+    let installed = commit_imported_lineage(tx, &payload, Some(key), now_ms);
+    installed.map_err(refused)?;
+    crate::ydoc_apply::take_up_logged_updates_in_tx(tx, key, claim, now_ms)?;
+    crate::refusal_notices::clear_conflict_in_tx(tx, &key.workspace_id, review)?;
+    tx.execute(
+        "UPDATE conflicts SET status='resolved',chosen_from='incoming', \
+         resolution='applied-incoming',updated_at_ms=?3 \
+         WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
+        params![key.workspace_id, review, now_ms],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitionV1>, SyncError> {
