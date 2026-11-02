@@ -98,6 +98,9 @@ async function reconnectFailureCapture(prefix: string) {
     moveRefusalAt: null as "preflight" | "native" | null,
     adoptOnClose: false,
     moveRequests: [] as string[],
+    // A page this computer owns: only a folder check over it refuses.
+    ownedUnder: null as string | null,
+    checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
@@ -109,6 +112,17 @@ async function reconnectFailureCapture(prefix: string) {
       }
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === "versionedText.checkMove") {
+        const params = request.params as { path: string; folder?: boolean };
+        state.checkedFolders.push({ path: params.path, folder: params.folder === true });
+        if (params.folder === true && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+          state.moveRequests.push(request.method);
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
       }
       if (request.method === "versionedText.checkMove" || request.method === "versionedText.rename") {
         state.moveRequests.push(request.method);
@@ -263,6 +277,69 @@ it("refuses a folder move when owner adoption finishes during session teardown",
   expect(await readFile(join(rootPath, "notes/note.md"), "utf8")).toBe("original");
   const reopened = await capture.openYDocSession({ path: "notes/note.md", onRemoteUpdate: () => undefined });
   await reopened.close();
+  await capture.stop();
+});
+
+const FOLDER_REFUSAL = `dohc can't move "notes" while a page in it has live editing on
+In Live documents, stop live editing for every page in this folder, then move the folder again.`;
+
+it("refuses a folder move over an owned page with the folder words, before anything moves", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-move-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.ownedUnder = "notes/box/page.md";
+  const refused = await capture.beginFileRename("notes", "moved", true).catch((error: unknown) => error);
+  expect(refused).toMatchObject({ name: "LiveFolderMoveError", message: FOLDER_REFUSAL });
+  expect(state.checkedFolders).toEqual([{ path: "notes", folder: true }]);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  // Try again before live editing stops gets the same refusal.
+  await expect(capture.beginFileRename("notes", "moved", true)).rejects.toMatchObject({ message: FOLDER_REFUSAL });
+  await capture.stop();
+});
+
+it("moves a folder with no live page, and keeps a page's own move check as it was", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-plain-folder-move-");
+  await mkdir(join(rootPath, "drafts"));
+  await writeFile(join(rootPath, "drafts/plain.md"), "plain");
+  state.ownedUnder = "notes/box2/page.md";
+  const finish = await capture.beginFileRename("notes/box", "moved", true);
+  await finish(false);
+  const page = await capture.beginFileRename("notes/box2/page.md", "notes/box2/renamed.md");
+  await page(false);
+  expect(state.checkedFolders).toEqual([
+    { path: "notes/box", folder: true },
+    { path: "notes/box", folder: true },
+    { path: "notes/box2/page.md", folder: false },
+    { path: "notes/box2/page.md", folder: false },
+  ]);
+  await capture.stop();
+});
+
+it("deletes a folder that holds an owned page as it did before", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-delete-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedUnder = "notes/page.md";
+  const finish = await capture.settleAndCloseLiveSessionsForPath("notes");
+  finish(false);
+  expect(state.checkedFolders.every(check => !check.folder)).toBe(true);
+  await capture.stop();
+});
+
+it("refuses an authored folder move, as the CLI and MCP send it, with the folder words", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-authored-move-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedUnder = "notes/page.md";
+  const work = vi.fn(async () => "moved");
+  const refused = await capture.changePathsAs(["notes", "moved"], {
+    operation: "move", author: { kind: "human", humanId: "local-person" }, operationId: "dohc-operation:44444444-4444-4444-8444-444444444444", folder: true,
+  }, work, () => []).catch((error: unknown) => error);
+  expect(refused).toMatchObject({ name: "LiveFolderMoveError", message: FOLDER_REFUSAL });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.checkedFolders[0]).toEqual({ path: "notes", folder: true });
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
   await capture.stop();
 });
 
