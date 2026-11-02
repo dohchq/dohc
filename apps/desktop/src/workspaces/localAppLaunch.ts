@@ -93,7 +93,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           const lifetime=new AbortController();let frame,proof,stopped=false;
           const readProof=()=>{try{return sessionStorage.getItem(key);}catch{return null;}};
           const saveProof=value=>{try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}};
-          const stop=()=>{if(stopped)return;stopped=true;saveProof(null);if(proof)fetch('/close',{method:'POST',headers:{'x-dohc-app-proof':proof},keepalive:true}).catch(()=>{});lifetime.abort();frame?.remove();document.getElementById('status').textContent='This app session ended. Open the app again in dohc.';};
+          const stop=()=>{if(stopped)return;stopped=true;saveProof(null);if(proof)fetch('/close',{method:'POST',headers:{'x-dohc-app-proof':proof},keepalive:true}).catch(()=>{});lifetime.abort();frame?.remove();const status=document.getElementById('status');status.hidden=false;status.textContent='This app session ended. Open the app again in dohc.';};
           addEventListener('pagehide',()=>{stopped=true;lifetime.abort();frame?.remove();},{once:true});
           addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
           proof=handoff?null:readProof();
@@ -101,7 +101,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
             (${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify(body),signal}),lifetime.signal);
-            frame.srcdoc=value.html;document.body.append(frame);document.getElementById('status').textContent='';
+            frame.srcdoc=value.html;document.body.append(frame);document.getElementById('status').hidden=true;
             ${browserLifetime}
           }).catch(()=>{if(!stopped)stop();});
         })();`;
