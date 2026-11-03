@@ -1879,64 +1879,43 @@ describe("notices sent to you", () => {
       resetOrphanedDrafts();
     });
 
-    it("reads a row the pointer rests on, not one it crosses", () => {
+    it("reads a row the moment the pointer reaches it, before React's next task", () => {
       const onHideWorkspaceError = vi.fn();
       renderNotices(errorProps(onHideWorkspaceError));
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       expect(screen.getByTestId("notice-center-count").textContent).toBe("2");
 
-      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
-      act(() => vi.advanceTimersByTime(300));
-      fireEvent.pointerLeave(screen.getByTestId("notice-e1"));
-      fireEvent.pointerEnter(screen.getByTestId("notice-e2"));
-      act(() => vi.advanceTimersByTime(599));
-      expect(onHideWorkspaceError).not.toHaveBeenCalled();
-
-      act(() => vi.advanceTimersByTime(1));
+      // Outside act, React renders a pointer's update in a later task unless
+      // the read flushes it, and fake timers hold that task back. No time passes.
+      const actEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+      Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", false);
+      try {
+        screen.getByTestId("notice-e2").dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+        expect(screen.queryByTestId("notice-e2-unread")).toBeNull();
+        expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+      } finally {
+        Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", actEnvironment);
+      }
       expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e2");
-      expect(screen.queryByTestId("notice-e2-unread")).toBeNull();
       expect(screen.getByTestId("notice-e1-unread").textContent).toBe("Unread");
-      expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
       // Reading changes nothing else: the row and its Try again stay.
       expect(within(screen.getByTestId("notice-e2")).getByRole("button", { name: "Try again" })).toBeTruthy();
+
+      // Crossing a row on the way to another reads it too.
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      expect(onHideWorkspaceError).toHaveBeenLastCalledWith("e1");
+      expect(screen.queryByTestId("notice-center-count")).toBeNull();
     });
 
-    it("reads a row keyboard focus rests on", () => {
+    it("reads a row the moment keyboard focus reaches it", () => {
       const onReadSentNotice = vi.fn();
       renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       act(() => screen.getByTestId("sent-notice-a").focus());
-      act(() => vi.advanceTimersByTime(300));
-      // Moving within the row keeps its rest going.
-      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
-      act(() => vi.advanceTimersByTime(300));
       expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
-    });
-
-    it("reads nothing once the panel closes mid-rest", () => {
-      const onHideWorkspaceError = vi.fn();
-      renderNotices(errorProps(onHideWorkspaceError));
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      act(() => vi.advanceTimersByTime(1_000));
-      expect(onHideWorkspaceError).not.toHaveBeenCalled();
-      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 2 unread");
-    });
-
-    it("reads nothing when the rested row goes away and returns", () => {
-      const onHideWorkspaceError = vi.fn();
-      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      act(() => screen.getByTestId("notice-e1").focus());
-      act(() => vi.advanceTimersByTime(300));
-      // A removed row gets no blur, so its rest must stop another way.
-      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
-      act(() => vi.advanceTimersByTime(200));
-      rerender(noticeElement(errorProps(onHideWorkspaceError)));
-      act(() => vi.advanceTimersByTime(1_000));
-      expect(onHideWorkspaceError).not.toHaveBeenCalled();
-      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+      // Moving within the row reads nothing more.
+      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
+      expect(onReadSentNotice).toHaveBeenCalledOnce();
     });
 
     it("marks this computer's rows read with Mark all read, and a row that returns is unread again", () => {
@@ -1954,30 +1933,12 @@ describe("notices sent to you", () => {
       expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
     });
 
-    it("reads a row's words as they are when the rest ends", () => {
-      const onHideWorkspaceError = vi.fn();
-      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
-      act(() => vi.advanceTimersByTime(300));
-      const [, second] = errorProps().workspaceErrors;
-      rerender(noticeElement({
-        ...errorProps(onHideWorkspaceError),
-        workspaceErrors: [{ ...error, message: "dohc could not save Trip/day-3.md." }, second!],
-      }));
-      act(() => vi.advanceTimersByTime(300));
-      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e1");
-      expect(screen.queryByTestId("notice-e1-unread")).toBeNull();
-    });
-
-    it("reads a row once when the pointer and focus both rest on it", () => {
+    it("reads a row once when the pointer and focus both reach it", () => {
       const onReadSentNotice = vi.fn();
       renderNotices({ sentNotices: [sentRow("a")], onReadSentNotice });
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       act(() => screen.getByTestId("sent-notice-a").focus());
-      act(() => vi.advanceTimersByTime(100));
       fireEvent.pointerEnter(screen.getByTestId("sent-notice-a"));
-      act(() => vi.advanceTimersByTime(1_000));
       expect(onReadSentNotice).toHaveBeenCalledOnce();
     });
 
@@ -1987,7 +1948,6 @@ describe("notices sent to you", () => {
       await act(async () => {});
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       fireEvent.pointerEnter(screen.getByTestId("notice-set-aside-edits"));
-      act(() => vi.advanceTimersByTime(600));
       expect(screen.queryByTestId("notice-set-aside-edits-unread")).toBeNull();
 
       await act(async () => {
