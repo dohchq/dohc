@@ -591,7 +591,7 @@ fn mention_parser_ignores_inline_and_fenced_code() {
 #[test]
 fn mention_parser_skips_names_inside_file_links() {
     // The expected handles are what the desktop's chatMentionTokens reads.
-    let cases: [(&str, &[&str]); 10] = [
+    let cases: [(&str, &[&str]); 12] = [
         ("see @[trip @Nova notes.md]", &[]),
         ("see @[notes @Nova.md#Day 1]", &[]),
         (
@@ -608,6 +608,9 @@ fn mention_parser_skips_names_inside_file_links() {
         ("`@[a @k]`", &[]),
         // An escaped `]` stays in the path.
         ("@[a%5D @l] @m", &["m"]),
+        // Multi-byte text before and inside a link.
+        ("日本 @[ノート @Nova.md] @Ana", &["ana"]),
+        ("@[ノート.md#見出し @Nova] @Bo", &["bo"]),
     ];
     for (body, handles) in cases {
         assert_eq!(parse_mention_handles(body), handles, "{body:?}");
