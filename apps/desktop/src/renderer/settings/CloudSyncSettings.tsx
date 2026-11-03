@@ -454,6 +454,11 @@ export function ProtectedFilesRow(props: {
             event.preventDefault();
             if (!props.busy && !tooShort) props.onSubmit();
           }}
+          // Moving between the passphrase and its button isn't leaving.
+          onBlur={(event) => {
+            const next = event.relatedTarget;
+            setLeft(!(next instanceof Node && event.currentTarget.contains(next)));
+          }}
         >
           <input
             type="password"
@@ -467,10 +472,6 @@ export function ProtectedFilesRow(props: {
             onChange={(event) => {
               setLeft(false);
               props.onPassphrase(event.currentTarget.value);
-            }}
-            onBlur={(event) => {
-              const next = event.relatedTarget;
-              setLeft(!(next instanceof Node && event.currentTarget.form?.contains(next)));
             }}
             className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink focus:border-ink"
           />

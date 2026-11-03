@@ -558,7 +558,7 @@ describe("CloudSyncSettings", () => {
       fireEvent.click(backdrop);
     };
 
-    it("stays open while a typed passphrase waits to be used", async () => {
+    it("stays open while a typed passphrase waits to be used, and says why after Tab to Protect", async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
       render(
@@ -574,10 +574,11 @@ describe("CloudSyncSettings", () => {
       expect(document.activeElement).toBe(screen.getByTestId("cloud-sync-passphrase-submit"));
       expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
 
-      pressBackdrop();
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
 
       expect(onClose).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(input);
+      expect(screen.getByTestId("cloud-sync-hint").textContent).toBe("Press Protect to use this passphrase.");
     });
 
     it.each([

@@ -38,7 +38,8 @@ import {
 import { bridge } from "../bridge";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
-import { applyLookSettings } from "../theme";
+import { applyLookSettings, currentLookRevision } from "../theme";
+import { reportInstallationFailure } from "../shell/installationNotices";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
@@ -110,20 +111,17 @@ function StatusPill(props: { state: SettingsSaveState }) {
   );
 }
 
-// Try again for a save that closing Settings cut off. It sends the same
-// change, and main writes only that change onto the file as it is then.
-function retryUserSave(
-  change: { settings: DesktopUserSettings; base: DesktopUserSettings },
-  onError: ((message: string, cause?: unknown, retry?: () => Promise<void>) => void) | undefined,
-): () => Promise<void> {
-  return async () => {
-    try {
-      applyLookSettings((await bridge().setUserSettings(change)).settings);
-    } catch (cause) {
-      onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause, retryUserSave(change, onError));
-    }
-  };
+// A user settings write that closing Settings cut off. User settings belong to
+// every workspace, so its failure goes to the notices of the workspace open
+// when it fails, and its Try again sends the same write. A save sends only its
+// change, which main writes onto the file as it is then.
+function reportCutOffWrite(send: () => Promise<DesktopUserSettingsResult>, words: (cause: unknown) => string, cause: unknown): void {
+  reportInstallationFailure({ message: words(cause), cause, serverUrl: null, retry: () => {
+    void send().then((result) => applyLookSettings(result.settings), (next: unknown) => reportCutOffWrite(send, words, next));
+    return true;
+  } });
 }
+const saveWords = (cause: unknown) => ipcErrorMessage(cause, "dohc could not save your settings.");
 
 export function SettingsDialog(props: {
   // `details` are facts for Copy details, one line each. A report with an
@@ -351,6 +349,7 @@ export function SettingsDialog(props: {
       ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
     }));
     applyLookSettings(settings);
+    const look = currentLookRevision();
     markSaving();
     setError(null);
     try {
@@ -360,19 +359,20 @@ export function SettingsDialog(props: {
       markSaved();
       return saved;
     } catch (cause) {
-      // Closing Settings can cut a save off. Its failure still reaches the
-      // shell's notice, whose Try again sends the same change.
+      // Closing Settings can cut a save off. Its failure still reports.
       const cutOff = userSaveRequestRef.isCutOff(requestId);
       if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      const message = ipcErrorMessage(cause, "dohc could not save your settings.");
-      if (cutOff) props.onError?.(message, cause, retryUserSave({ settings, base: previous.settings }, props.onError));
-      else props.onError?.(message, cause);
+      const change = { settings, base: previous.settings };
+      if (cutOff) reportCutOffWrite(() => bridge().setUserSettings(change), saveWords, cause);
+      else props.onError?.(saveWords(cause), cause);
       // `previous` can hold a change an earlier save failed to make, so the
-      // dialog goes back to the settings the file holds.
+      // dialog goes back to the settings the file holds. A cut-off save puts
+      // back the look only while no newer look, from a reopened Settings or
+      // another window, has replaced its own.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
+      if (cutOff ? currentLookRevision() !== look : !userSaveRequestRef.isCurrent(requestId)) return null;
       setUserResult(restored);
       applyLookSettings(restored.settings);
       return null;
@@ -391,10 +391,13 @@ export function SettingsDialog(props: {
       markSaved();
       return true;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId) && !userSaveRequestRef.isCutOff(requestId)) return false;
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return false;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(failure ? withErrorWords(failure, cause) : ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      const words = (reason: unknown) => (failure ? withErrorWords(failure, reason) : saveWords(reason));
+      if (cutOff) reportCutOffWrite(() => bridge().orderAgents({ order: [...order] }), words, cause);
+      else props.onError?.(words(cause), cause);
       return false;
     }
   }, [markSaved, markSaving, props.onError]);
@@ -471,9 +474,13 @@ export function SettingsDialog(props: {
       setUserResult(saved);
       markSaved();
     } catch (cause) {
+      // Open Settings shows the refusal, which names the file and the way
+      // out. Once closing Settings cut the step off, it reports instead.
+      if (userSaveRequestRef.isCutOff(requestId)) {
+        reportCutOffWrite(() => bridge().stepWindowZoom({ step }), (reason) => ipcErrorMessage(reason, "dohc could not change the window zoom."), cause);
+      }
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      // The refusal names the file and the way out.
       setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
@@ -489,10 +496,13 @@ export function SettingsDialog(props: {
       applyLookSettings(next.settings);
       markSaved();
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId) && !userSaveRequestRef.isCutOff(requestId)) return;
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
+      const words = (reason: unknown) => ipcErrorMessage(reason, "dohc could not reset your settings.");
+      if (cutOff) reportCutOffWrite(() => bridge().resetUserSettings(), words, cause);
+      else props.onError?.(words(cause), cause);
     }
   }, [markSaved, markSaving, props.onError]);
 

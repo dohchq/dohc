@@ -26,6 +26,8 @@ import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
+import { useInstallationNotices } from "../shell/installationNotices";
+import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 const config = {
@@ -447,19 +449,31 @@ describe("SettingsDialog", () => {
       expect(bridge.setUserSettings).not.toHaveBeenCalled();
     });
 
-    it("reports a save that fails after Settings closed, and Try again sends it again", async () => {
-      const user = userEvent.setup();
+    // Settings that unmounts once it closes, as the shell's does, beside the
+    // installation notices a write it cut off reports to.
+    const renderClosable = (initialSection: "general" | "appearance" | "advanced" | "agents") => {
       const onError = vi.fn();
+      const report = vi.fn<(error: ConnectionErrorReport) => void>();
+      function Notices() {
+        useInstallationNotices(report);
+        return null;
+      }
       function Closable() {
         const [open, setOpen] = useState(true);
         const close = () => setOpen(false);
         return open ? (
           <Overlay onClose={close} closeOnBackdrop>
-            <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="general" onError={onError} onClose={close} />
+            <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
           </Overlay>
         ) : null;
       }
-      render(<Closable />);
+      render(<><Notices /><Closable /></>);
+      return { onError, report };
+    };
+
+    it("reports a save that fails after Settings closed, and Try again sends it again", async () => {
+      const user = userEvent.setup();
+      const { onError, report } = renderClosable("general");
       const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
       bridge.setUserSettings.mockImplementationOnce(() => save.promise);
       await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
@@ -471,12 +485,113 @@ describe("SettingsDialog", () => {
       const cause = new Error("The settings file is read-only.");
       await act(async () => save.reject(cause));
 
-      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
-      const [, reported, retry] = onError.mock.lastCall!;
+      // The workspace open when the save fails shows it, even after a switch.
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      expect(onError).not.toHaveBeenCalled();
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
       expect(reported).toBe(cause);
       bridge.setUserSettings.mockClear();
-      await act(async () => retry());
+      await act(async () => expect(retry?.()).toBe(true));
       expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change);
+    });
+
+    it.each([
+      ["puts back the look the file holds", false],
+      ["leaves a newer look in place", true],
+    ] as const)("%s when a save that closing Settings cut off fails", async (_, newerLook) => {
+      const user = userEvent.setup();
+      const look = (accentColor: string) => {
+        applyLookSettings({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor } });
+        return document.documentElement.style.getPropertyValue("--dohc-accent");
+      };
+      const fileAccent = look("#224488");
+      applyLookSettings(DEFAULT_USER_SETTINGS);
+      renderClosable("general");
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+      // A reopened Settings applies its own look before this save fails.
+      const shown = newerLook ? look("#884422") : fileAccent;
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor: "#224488" } },
+        source: "stored",
+      });
+      const reads = bridge.getUserSettings.mock.calls.length;
+
+      await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+      await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalledTimes(reads + 1));
+      await act(async () => {});
+      expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(shown);
+      applyLookSettings(DEFAULT_USER_SETTINGS);
+    });
+
+    it("reports a zoom step that fails after Settings closed, and Try again steps again", async () => {
+      const user = userEvent.setup();
+      const { report } = renderClosable("appearance");
+      const step = deferred<Awaited<ReturnType<typeof bridge.stepWindowZoom>>>();
+      bridge.stepWindowZoom.mockImplementationOnce(() => step.promise);
+      await user.click(within(await screen.findByTestId("settings-row-zoom")).getByRole("button", { name: "Zoom in" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => step.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.stepWindowZoom.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(bridge.stepWindowZoom).toHaveBeenCalledExactlyOnceWith({ step: "in" });
+    });
+
+    it("reports a reset that fails after Settings closed, and Try again resets again", async () => {
+      const user = userEvent.setup();
+      const { report } = renderClosable("advanced");
+      const reset = deferred<Awaited<ReturnType<typeof bridge.resetUserSettings>>>();
+      bridge.resetUserSettings.mockImplementationOnce(() => reset.promise);
+      await user.click(within(await screen.findByTestId("settings-row-reset-user")).getByRole("button", { name: "Reset user" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => reset.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.resetUserSettings.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(bridge.resetUserSettings).toHaveBeenCalledOnce();
+    });
+
+    it("reports an agent order that fails after Settings closed, and Try again sends it again", async () => {
+      const user = userEvent.setup();
+      const order = deferred<DesktopUserSettingsResult>();
+      const orderAgents = vi.fn((_payload: { order: string[] }) => order.promise);
+      vi.stubGlobal("dohcDesktop", { ...bridge, orderAgents });
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }), codex: testAgent({ name: "Codex" }) } },
+        source: "stored",
+      });
+      const { report } = renderClosable("agents");
+      await user.click(await screen.findByRole("button", { name: "Codex actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => order.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      orderAgents.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(orderAgents).toHaveBeenCalledExactlyOnceWith({ order: ["codex"] });
     });
 
     it("stays open on minutes it can't save, and says why", async () => {
