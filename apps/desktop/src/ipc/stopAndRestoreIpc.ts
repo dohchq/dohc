@@ -614,7 +614,7 @@ export function registerStopAndRestoreIpc<
               if (error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable") {
                 return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
               }
-              if (isSharedLiveFileRefusal(error)) return { kind: "refused", detail: refusalDetail(error), refusal: "shared-live" };
+              if (error instanceof LiveDocumentMutationError && isSharedLiveFileRefusal(error)) return { kind: "refused", detail: refusalDetail(error), refusal: "shared-live" };
               if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError || error instanceof SyncedDeletionRevivalError) return { kind: "refused", detail: refusalDetail(error), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) };
               throw error;
             }
