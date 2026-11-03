@@ -3601,6 +3601,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_AUDIT_HELD_RECORDS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 82,
+        id: "v2-capture-first-imports",
+        sql: include_str!("capture_first_imports.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5585,6 +5591,10 @@ mod tests {
                 "v2-live-audit-held-records",
                 "fdee673de2d5851317c73cc994b08542f1af5d49e9a26d069c4e83a4e3b1efae",
             ),
+            (
+                "v2-capture-first-imports",
+                "c6b0c309e5dd16fe6ba196efaa0b4afb91719d1f099ef53aabc513c906c60657",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -7353,7 +7363,6 @@ mod tests {
             let mut conn = open_bare(&dir.join("engine.db"));
             let ctx = MigrationContext::current(1);
             let before = migration_index("v2-live-audit-held-records");
-            assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
             run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
             conn.execute_batch(&format!(
                 "BEGIN; WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<999999)
@@ -7362,7 +7371,7 @@ mod tests {
             ))
             .unwrap();
             let started = std::time::Instant::now();
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap();
             let elapsed = started.elapsed();
             let rows: i64 = conn
                 .query_row("SELECT count(*) FROM replication_log", [], |row| row.get(0))

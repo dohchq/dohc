@@ -897,7 +897,16 @@ impl VersionFence {
         // `version-switch-${id}` / `version-create-${id}`): its moments carry
         // the fence's own summary and one correlation id so the pre-switch
         // "nothing is ever lost" capture groups in history instead of
-        // rendering as unrelated per-file rows.
+        // rendering as unrelated per-file rows. A file an unfinished first
+        // import has not recorded yet joins that import instead. The capture
+        // gate is held, so the live driver cannot finish it meanwhile.
+        let first_import = open
+            .actor
+            .unfinished_first_import(open.workspace_id.clone())
+            .await
+            .inspect_err(|error| eprintln!("engine: first import read failed: {error}"))
+            .ok()
+            .flatten();
         let reconcile_provenance = capture_sink::CaptureProvenance {
             summary: Some(settle_summary.clone()),
             correlation_id: Some(capture_driver::pass_correlation_id(match &intent {
@@ -905,6 +914,7 @@ impl VersionFence {
                 VersionFenceIntent::Switch { .. } => "version-switch",
                 VersionFenceIntent::Undo { .. } => "history-undo",
             })),
+            first_import,
         };
         let probe = self.capture_apply_probe.clone();
         let undo = matches!(&intent, VersionFenceIntent::Undo { .. });

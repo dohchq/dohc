@@ -25,6 +25,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
+use dohc_engine_storage::capture_first_imports;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
@@ -1242,6 +1243,50 @@ impl ActorHandle {
         })
         .await
     }
+
+    /// Continue the workspace's unfinished first import, or start one under
+    /// `correlation_id`. Returns the import's correlation id.
+    pub async fn begin_first_import(
+        &self,
+        workspace_id: String,
+        correlation_id: String,
+    ) -> Result<String, RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::begin_in(tx, &workspace_id, &correlation_id)
+            })? {
+                TxnOutcome::Committed(correlation_id) => Ok(correlation_id),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    /// The correlation id of the workspace's unfinished first import.
+    pub async fn unfinished_first_import(
+        &self,
+        workspace_id: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| capture_first_imports::unfinished_in(conn, &workspace_id))
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn finish_first_import(&self, workspace_id: String) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::finish_in(tx, &workspace_id)
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     pub async fn capture_recoveries(
         &self,
         workspace_id: String,
@@ -3633,6 +3678,7 @@ mod capture_secret_root_guard_tests {
                     path: SECRET_PATH.to_owned(),
                     text: "TOKEN=original".to_owned(),
                     metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 2,
                     claim_foreign_head: true,
