@@ -1297,6 +1297,74 @@ mod tests {
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
+    /// History's Restore of a page this computer owns live is refused before
+    /// anything changes. Once Stop releases the binding, the page restores.
+    #[tokio::test]
+    async fn restore_refuses_a_page_this_computer_owns_live() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        write_for_test(&service, &handle, 1, "first", "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/owned.md", "text": "first\n", "publish": true, "createOnly": true }))
+            .await
+            .unwrap();
+        let second = write_for_test(&service, &handle, 2, "second", "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/owned.md", "text": "second\n", "publish": true }))
+            .await
+            .unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let binding = |sql: &'static str| {
+            let mut store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
+            let claim = store.put_binary_blob(b"lineage").unwrap();
+            store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    tx.execute(sql, [&claim])
+                        .map_err(dohc_engine_storage::StorageError::persist_public)
+                })
+                .unwrap();
+        };
+        binding(
+            "INSERT INTO ydoc_owner_bindings SELECT workspace_id,version_id,object_id,?1,'{}','relay',1,0,0,?1,100,100 FROM snapshots WHERE path='notes/owned.md'",
+        );
+        let restore = json!({ "versionId": "main", "path": "notes/owned.md", "text": "first\n", "origin": "restore",
+            "publish": true, "restoreBeforeMomentId": second["moment"]["momentId"] });
+        let handle = open_for_test(&service, scratch.path()).await;
+        let refused = write_for_test(
+            &service,
+            &handle,
+            3,
+            "restore",
+            "versionedText.write",
+            restore.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.message, "live-page-owned");
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("notes/owned.md")).unwrap(),
+            "second\n"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+        binding("DELETE FROM ydoc_owner_bindings WHERE lineage_claim_id=?1");
+        let handle = open_for_test(&service, scratch.path()).await;
+        write_for_test(
+            &service,
+            &handle,
+            4,
+            "restore-after-stop",
+            "versionedText.write",
+            restore,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("notes/owned.md")).unwrap(),
+            "first\n"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn guarded_history_undo_preserves_identity_and_refuses_occupied_paths() {
         for occupied in ["absent", "disk", "snapshot"] {

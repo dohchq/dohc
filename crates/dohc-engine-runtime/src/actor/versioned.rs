@@ -872,6 +872,20 @@ pub(super) fn versioned_text_write_with_publication_on_store(
                 |row| row.get(0),
             )
             .map_err(StorageError::corrupt_public)?;
+        // Restoring a page this computer owns live would leave its owner
+        // binding behind the restored text. A hosted page keeps its refusal.
+        if !replayed
+            && restore_before_moment_id.is_some()
+            && dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &input.path,
+            )
+            .is_ok()
+        {
+            refuse_owned_page(tx, &input.workspace_id, &input.version_id, &input.path)?;
+        }
         if !replayed
             && input.metadata_origin == "restore"
             && let Some(expected) = conditions.and_then(|c| c.expected_sha256.as_deref())
