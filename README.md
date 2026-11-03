@@ -1,4 +1,23 @@
-# dohc
+<a href="https://dohc.computer">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="social-assets/dohc-readme-banner-dark.png">
+    <img src="social-assets/dohc-social-banner.png" alt="dohc. Build and share small apps with your agents.">
+  </picture>
+</a>
+
+<p align="center">
+  <a href="https://dohc.computer/#downloads"><img alt="Download for macOS, Windows, and Linux" src="https://img.shields.io/badge/download-macOS%20%7C%20Windows%20%7C%20Linux-2d342e?style=flat-square"></a>
+  <a href="#where-it-is-today"><img alt="Early alpha" src="https://img.shields.io/badge/status-early%20alpha-2d342e?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-2d342e?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="https://dohc.computer">Website</a> |
+  <a href="https://dohc.computer/#downloads">Download</a> |
+  <a href="docs/README.md">Docs</a> |
+  <a href="docs/how-to/self-host.md">Self-host</a> |
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
 dohc is a free, open-source desktop app for building and sharing small apps with your agents. It's a local-first workspace for your files, documents, data, chat, and apps, with sync, sharing, permissions, and history built in.
 

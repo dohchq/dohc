@@ -1,4 +1,6 @@
-<!doctype html><meta charset="utf-8"><style>
+<!doctype html><meta charset="utf-8">
+<script>if(location.hash==='#dark')document.documentElement.className='dark'</script>
+<style>
   /* Fonts and the engine image come from the site; run pnpm install first. */
   @font-face{font-family:'Inter';font-weight:100 900;
     src:url('../apps/site/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2')}
@@ -27,6 +29,15 @@
   em{position:relative;display:inline-block}
   em svg{position:absolute;left:-2%;bottom:-.12em;width:104%;height:.18em;overflow:visible}
   .note{margin-top:40px;color:#66635d;font:500 26px/1.4 'Inter',system-ui,sans-serif}
+  /* banner.html#dark is the README's dark mode version, in the site's dark colors. */
+  .dark body{background:#100f0e;color:#f4f1ea}
+  .dark .grid{background-image:linear-gradient(rgba(244,241,234,.055) 1px,transparent 1px),
+                               linear-gradient(90deg,rgba(244,241,234,.055) 1px,transparent 1px),
+                               linear-gradient(rgba(244,241,234,.026) 1px,transparent 1px),
+                               linear-gradient(90deg,rgba(244,241,234,.026) 1px,transparent 1px)}
+  .dark .lobe,.dark em path{stroke:#f4f1ea}
+  .dark .dot{fill:#f4f1ea}
+  .dark .note{color:#aaa69c}
 </style>
 <div class="grid"></div>
 <img class="engine" src="../apps/site/public/inline-six-engine.webp" alt="">
