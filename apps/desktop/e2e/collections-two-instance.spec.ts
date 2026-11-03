@@ -311,7 +311,7 @@ test("an agent's file save on one device opens a conflict against the other devi
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
     });
-    capture.start();
+    // Keep A file-only: the desktop capture poll adopts collection records into Y.Docs.
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,
       relay: { baseUrl: relay.baseUrl, token: TOKEN },
@@ -388,6 +388,8 @@ test("an agent's file save on one device opens a conflict against the other devi
       .toBe("exact");
     await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
     await expect(todoApollo).toBeVisible();
+
+    expect(ydocLineageClaimStatus(sourceRoot, apolloPath)).toBeNull();
 
     // A saves the file the way an agent does, with no session, and never
     // pulls, so it holds no claim on B's lineage.
