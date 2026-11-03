@@ -109,7 +109,7 @@ describe("Overlay", () => {
       </Overlay>,
     );
 
-    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+    pressBackdrop();
 
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -124,9 +124,43 @@ describe("Overlay", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Result" }));
     expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+    pressBackdrop();
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a picker open when the press began inside its panel", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose} closeOnBackdrop>
+        <input aria-label="Name" defaultValue="Selected text" />
+      </Overlay>,
+    );
+
+    // Selecting text and letting go past the panel edge clicks the backdrop.
+    await user.pointer([
+      { keys: "[MouseLeft>]", target: screen.getByRole("textbox", { name: "Name" }) },
+      { keys: "[/MouseLeft]", target: backdrop() },
+    ]);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stays open on a press outside while a field holds what it can't save, and focuses it", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose} closeOnBackdrop>
+        <button type="button">First</button>
+        <input aria-label="Held" data-unsaved />
+      </Overlay>,
+    );
+    screen.getByRole("button", { name: "First" }).focus();
+
+    pressBackdrop();
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Held" }));
   });
 
   it("closes an open menu on the first Escape and the overlay on the second", async () => {
@@ -320,9 +354,18 @@ it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (
   expect(document.activeElement).toBe(screen.getByText("Done"));
   if (action === "Escape") fireEvent.keyDown(document, { key: "Escape" });
   else if (action === "Done") fireEvent.click(screen.getByText("Done"));
-  else fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+  else pressBackdrop();
   await waitFor(() => expect(document.activeElement).toBe(opener));
 });
+
+function backdrop(): HTMLElement {
+  return document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+}
+
+function pressBackdrop(): void {
+  fireEvent.pointerDown(backdrop());
+  fireEvent.click(backdrop());
+}
 
 it("returns to the containing surface when the dialog opener was removed", async () => {
   render(<FocusDialog removeOpener />);

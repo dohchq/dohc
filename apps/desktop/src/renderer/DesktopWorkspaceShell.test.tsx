@@ -1795,6 +1795,17 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
+  it("closes settings on a press outside them", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await screen.findByTestId("settings-dialog");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  });
+
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

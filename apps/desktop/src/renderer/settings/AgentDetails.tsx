@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { AGENT_TOOLS, launchCommand, launchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { Agent, AgentSettings } from "../../settings/userSettings";
@@ -8,6 +8,11 @@ import { HueControl } from "./SettingRow";
 const LINK = "rounded text-[12px] text-ink underline underline-offset-2 hover:text-muted";
 const MIN_TIMEOUT = 1;
 const MAX_TIMEOUT = 1440;
+
+function validMinutes(value: string): boolean {
+  const minutes = Number(value);
+  return value.trim() !== "" && Number.isInteger(minutes) && minutes >= MIN_TIMEOUT && minutes <= MAX_TIMEOUT;
+}
 
 /** The tool as detection found it, such as "Codex 0.98, signed in". */
 export function toolLine(tool: "claude" | "codex", detection: AgentToolsResult | null): string {
@@ -20,29 +25,45 @@ export function toolLine(tool: "claude" | "codex", detection: AgentToolsResult |
 }
 
 // One value edited in place: Enter or leaving the field saves, Escape keeps it as it was.
+// A value it can't save keeps the field open, with the reason beside it.
 function InlineField(props: {
   label: string;
   initial: string;
   className: string;
   numeric?: boolean;
+  // Why a value can't be saved, or null when it can.
+  problem?: (value: string) => string | null;
+  // Shown right after the field, such as its unit.
+  after?: ReactNode;
   onCommit: (value: string) => void;
   onDone: () => void;
 }) {
   const [draft, setDraft] = useState(props.initial);
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
   const input = useRef<HTMLInputElement | null>(null);
   const cancelled = useRef(false);
   useEffect(() => input.current?.select(), []);
-  return (
+  return <>
     <input
       ref={input}
       aria-label={props.label}
+      aria-invalid={error ? true : undefined}
+      data-unsaved={error ? true : undefined}
+      aria-describedby={error ? errorId : undefined}
       value={draft}
       spellCheck={false}
       autoComplete="off"
       autoCapitalize="none"
       {...(props.numeric ? { type: "number", inputMode: "numeric" as const, min: MIN_TIMEOUT, max: MAX_TIMEOUT, step: 1 } : { maxLength: 4096 })}
-      onChange={(event) => setDraft(event.currentTarget.value)}
+      onChange={(event) => {
+        setDraft(event.currentTarget.value);
+        setError(null);
+      }}
       onBlur={() => {
+        const found = cancelled.current ? null : (props.problem?.(draft) ?? null);
+        setError(found);
+        if (found) return;
         if (!cancelled.current) props.onCommit(draft);
         props.onDone();
       }}
@@ -56,9 +77,11 @@ function InlineField(props: {
           event.currentTarget.blur();
         }
       }}
-      className={`h-7 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink ${props.className}`}
+      className={`h-7 rounded-md border bg-bg px-2 text-[12px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"} ${props.className}`}
     />
-  );
+    {props.after}
+    {error ? <span id={errorId} role="alert" className="min-w-0 text-danger">{error}</span> : null}
+  </>;
 }
 
 function Term(props: { label: string; children: ReactNode }) {
@@ -113,14 +136,13 @@ export function AgentDetails(props: {
           <Term label="Stops after">
             {editing === "timeout" ? <>
               <InlineField label={`Minutes before ${agent.name} stops`} initial={String(agent.timeoutMinutes)} numeric className="w-16 text-right"
+                after={<span className="text-muted">min</span>}
+                problem={(value) => validMinutes(value) ? null : `Enter whole minutes from ${MIN_TIMEOUT} to ${MAX_TIMEOUT}.`}
                 onDone={() => setEditing(null)}
                 onCommit={(value) => {
                   const minutes = Number(value);
-                  if (Number.isInteger(minutes) && minutes >= MIN_TIMEOUT && minutes <= MAX_TIMEOUT && minutes !== agent.timeoutMinutes) {
-                    onChange((current) => ({ ...current, timeoutMinutes: minutes }));
-                  }
+                  if (minutes !== agent.timeoutMinutes) onChange((current) => ({ ...current, timeoutMinutes: minutes }));
                 }} />
-              <span className="text-muted">min</span>
             </> : <>
               <span>{agent.timeoutMinutes} min</span>
               <button type="button" className={LINK} aria-label={`Change when ${agent.name} stops`} onClick={() => setEditing("timeout")}>Change</button>

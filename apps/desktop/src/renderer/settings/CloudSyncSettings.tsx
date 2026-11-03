@@ -449,6 +449,8 @@ export function ProtectedFilesRow(props: {
             spellCheck={false}
             aria-label="Passphrase"
             aria-invalid={props.error !== null}
+            // A passphrase typed and not yet used is lost if Settings closes.
+            data-unsaved={props.passphrase ? true : undefined}
             data-testid="cloud-sync-passphrase"
             value={props.passphrase}
             onChange={(event) => props.onPassphrase(event.currentTarget.value)}

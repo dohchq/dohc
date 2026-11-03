@@ -370,6 +370,106 @@ describe("SettingsDialog", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  describe("a press outside Settings", () => {
+    const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+    const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
+        </Overlay>,
+      );
+
+    it("saves the name being typed, then closes", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderInOverlay(onClose, "general");
+      // The save is still on its way when the press ends.
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.profile).toEqual({ preferredName: "Sam" }));
+      await act(async () => save.resolve({ settings: savedSettings()!, source: "stored" }));
+    });
+
+    it("stays open on a name it refuses, with the field focused", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderInOverlay(onClose, "general");
+      const field = await screen.findByTestId("general-preferred-name-input");
+      await user.click(field);
+      await user.paste("Sam");
+      bridge.setUserSettings.mockClear();
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(field);
+      expect(screen.getByRole("alert").textContent).toBe("Names cannot contain control characters.");
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    });
+
+    it("saves a new agent name, then closes", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      const field = screen.getByRole("textbox", { name: "Name of Nova" });
+      await user.clear(field);
+      await user.type(field, "Vega");
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.agents.default?.name).toBe("Vega"));
+      await act(async () => save.resolve({ settings: savedSettings()!, source: "stored" }));
+    });
+
+    it("stays open on an agent name another agent has, with the field focused", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const settings = settingsWithAgent({ name: "Nova" });
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...settings, agents: { ...settings.agents, other: testAgent({ name: "Orion" }) } },
+        source: "stored",
+      });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      const field = screen.getByRole("textbox", { name: "Name of Nova" });
+      await user.clear(field);
+      await user.type(field, "Orion");
+      bridge.setUserSettings.mockClear();
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(field);
+      expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    });
+
+    it("stays open on minutes it can't save, and says why", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Details" }));
+      await user.click(screen.getByRole("button", { name: "Change when Nova stops" }));
+      const minutes = screen.getByRole("spinbutton", { name: "Minutes before Nova stops" });
+      await user.clear(minutes);
+      await user.type(minutes, "2000");
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(minutes);
+      expect(screen.getByRole("alert").textContent).toBe("Enter whole minutes from 1 to 1440.");
+      // A value it can save then saves and closes.
+      await user.clear(minutes);
+      await user.type(minutes, "90");
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.agents.default?.timeoutMinutes).toBe(90));
+    });
+  });
+
   it("leaves Tab and Escape to a higher overlay", async () => {
     const onClose = vi.fn();
     render(

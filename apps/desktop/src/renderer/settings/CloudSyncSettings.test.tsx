@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { Overlay } from "../Overlay";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
   CloudSyncSettings,
@@ -548,6 +549,47 @@ describe("CloudSyncSettings", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({ workspaceId: "ws-1", passphrase: "shared passphrase" }),
     );
+  });
+
+  describe("a press outside Settings", () => {
+    const pressBackdrop = () => {
+      const backdrop = document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+      fireEvent.pointerDown(backdrop);
+      fireEvent.click(backdrop);
+    };
+
+    it("stays open while a typed passphrase waits to be used", () => {
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      fireEvent.change(input, { target: { value: "shared passphrase" } });
+
+      pressBackdrop();
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(input);
+    });
+
+    it("closes from an empty passphrase prompt", async () => {
+      bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."));
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      fireEvent.click(syncSwitch());
+      expect((await screen.findByTestId("cloud-sync-passphrase")).getAttribute("aria-invalid")).toBe("true");
+
+      pressBackdrop();
+
+      expect(onClose).toHaveBeenCalledOnce();
+    });
   });
 
   it("unlocks protected files, then offers to protect them", async () => {
