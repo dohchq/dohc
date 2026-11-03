@@ -10,7 +10,8 @@ import { type CodexConfigFiles, codexConfigFiles, codexRunConfig } from "./codex
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
 // The dohc MCP tools a profile's run gets: every tool dohc-mcp offers a local
-// workspace, or only the reply tool, as for the runner self-test.
+// workspace, or only the reply tool. A reply-only run also gets none of the
+// agent's own tools that write (agentToolCatalog.ts, codexRunConfig.ts).
 export type RunDohcTools = "all" | "reply";
 
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
@@ -374,9 +375,10 @@ export function createChatRunnerProcess(
             platform,
             files: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
             behindCmd: codexBehindCmd,
+            readOnly: input.dohcTools === "reply",
           })
           : []),
-      ])]
+      ], input.dohcTools === "reply")]
       : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered

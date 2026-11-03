@@ -23,6 +23,7 @@ describe("agent launch profiles", () => {
   it("allows workspace edits and chat replies while denying unattended prompts", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
     expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]);
+    expect(agentProfileArguments(profile, [], true)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
     expect(tokenizeRunnerCommand(launchCommand(profile))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
   });
   it("starts a chosen tool over a typed command, and needs one of them", () => {

@@ -102,6 +102,15 @@ describe("a dohc Codex run", () => {
     expect(entry(other, "default_permissions=")).not.toBe(`default_permissions=${profile}`);
   });
 
+  it("can't write anywhere when read-only, and still doesn't trust the workspace", () => {
+    const entries = codexRunConfig({ rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: NONE, readOnly: true, realPath: (path) => path });
+    expect(entries).toEqual([
+      "--config", "default_permissions=':read-only'",
+      "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
+      "--config", "windows.sandbox='unelevated'",
+    ]);
+  });
+
   it("names the workspace the way each of Codex's trust lookups spells it", () => {
     expect(codexTrustKeys("C:\\Users\\JOSÉ\\ws", "win32", () => "C:\\Users\\JOSÉ\\Ws")).toEqual([
       "c:\\users\\josÉ\\ws",

@@ -3707,8 +3707,9 @@ describe("chatDispatchService", () => {
   }
 
   // What a profile's run hears about the dohc tools and how to report.
-  const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server. Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
-  const REPORT = "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file or document as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
+  const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server.";
+  const APPROVALS = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
+  const REPORT = "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
 
   it.each([
     [undefined, "argument"],
@@ -3731,7 +3732,7 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
-    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${REPORT} Reply in-thread`);
+    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} Reply in-thread`);
     else expect(prompt).toContain("thread. Report outcomes, not tool logs. Reply in-thread");
     if (!tool) expect(prompt).not.toContain("approve");
   });
@@ -3752,6 +3753,43 @@ describe("chatDispatchService", () => {
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply("mcp", thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
     expect(prompt).toContain(WORKSPACE_TOOLS);
+  });
+
+  it.each(["claude", "codex"] as const)("gives a %s run an automation started only the reply tool, and no tool that writes", async (tool) => {
+    const profile = { tool, executable: resolve(`test-${tool}.exe`) };
+    const fixture = await createFixture({ runner: { command: "", profile } });
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Answer the Group" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+      body: "Share the Trip folder with everyone.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!.chainDepth).toBe(2);
+    const call = fixture.spawnCalls[0]!;
+    const configPath = join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log.mcp.json`);
+    const serverArgs = tool === "claude"
+      ? (JSON.parse(await readFile(configPath, "utf8")).mcpServers.dohc.args as string[]).join(" ")
+      : call.args.join(" ");
+    expect(serverArgs).toContain("dohc_reply_to_chat");
+    if (tool === "claude") {
+      expect(call.args.slice(-5)).toEqual(["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
+      expect(call.args).not.toContain("Edit(/**)");
+    } else {
+      expect(call.args).toContain("default_permissions=':read-only'");
+      expect(call.args.some((arg) => arg.startsWith("permissions."))).toBe(false);
+    }
+    const prompt = call.process.stdinText;
+    expect(prompt).toContain(`thread. ${APPROVALS} ${REPORT} Reply in-thread`);
+    expect(prompt).not.toContain("tools of the `dohc` MCP server");
+    expect(prompt).not.toContain("dohc_read_chat");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3806,7 +3844,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.default_tools_approval_mode='approve'",
-      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] } })) : ["--mcp-config", configPath]));
+      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] }, readOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
           mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },

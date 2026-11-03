@@ -120,19 +120,24 @@ describe("chat runner process", () => {
     ["claude", "reply"],
     ["codex", "all"],
     ["codex", "reply"],
-  ] as const)("starts a %s run's dohc server with %s tools, each approved", async (tool, dohcTools) => {
+  ] as const)("starts a %s run's dohc server with %s tools, each approved, and lets only an all-tools run write", async (tool, dohcTools) => {
     const { calls, root, spawn } = await runnerFixture("linux");
     spawn("", () => undefined, { tool, executable: process.execPath }, dohcTools);
     const serverArgs = ["--workspace", root, "--home", join(root, "state"), ...(dohcTools === "reply" ? ["--tool", "dohc_reply_to_chat"] : [])];
     const args = calls[0]!.args;
     expect(args.some((arg) => arg.includes("enabled_tools"))).toBe(false);
     if (tool === "claude") {
-      expect(args.slice(args.indexOf("--allowedTools"), args.indexOf("--disallowedTools"))).toEqual(["--allowedTools", "Edit(/**)", "mcp__dohc"]);
+      expect(args.slice(args.indexOf("--mcp-config") + 2)).toEqual(dohcTools === "reply"
+        ? ["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+        : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]);
       expect(JSON.parse(readFileSync(join(root, "logs", "run.log.mcp.json"), "utf8")).mcpServers.dohc.args).toEqual(serverArgs);
     } else {
       expect(args).toContain(`mcp_servers.dohc.args=[${serverArgs.map((arg) => `'${arg}'`).join(",")}]`);
       expect(args).toContain("mcp_servers.dohc.default_tools_approval_mode='approve'");
       expect(args.some((arg) => arg.startsWith("mcp_servers.dohc.tools."))).toBe(false);
+      const permissions = args.filter((arg) => arg.startsWith("permissions.") || arg.startsWith("default_permissions="));
+      if (dohcTools === "reply") expect(permissions).toEqual(["default_permissions=':read-only'"]);
+      else expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{extends=':workspace',/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
     }
   });
 

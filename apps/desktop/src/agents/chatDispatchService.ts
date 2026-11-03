@@ -13,6 +13,7 @@ import {
   type RunnerProcess,
   type ChatRunnerProcessOptions,
   type ReplyRuntimeAvailability,
+  type RunDohcTools,
 } from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
@@ -331,19 +332,29 @@ function replyToolCall(threadId: string, runId: string): string {
 // Both tools' profiles refuse anything that needs approval, so the run hears
 // it before a refusal turns its reply into an explanation. A file chip,
 // `@[path]`, opens from chat; nothing in a message opens a folder,
-// Collection, or chat yet, so the run names those.
-function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
+// Collection, or chat yet, so the run names those. Only a run with every dohc
+// tool hears of them.
+function buildRunnerPrompt(
+  threadMarkdown: string,
+  threadId: string,
+  runId: string,
+  tool: AgentLaunchProfile["tool"] | undefined,
+  dohcTools: RunDohcTools,
+): string {
   const form = replyFormFor(tool);
   const instructionsFile = tool === "claude"
     ? "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them. "
     : tool === "codex"
       ? "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there. "
       : "";
-  const workspaceTools = form === "mcp"
-    ? "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server. Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it. "
+  const workspaceTools = form === "mcp" && dohcTools === "all"
+    ? "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server. "
+    : "";
+  const approvals = form === "mcp"
+    ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it. "
     : "";
   const report = form === "mcp"
-    ? "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file or document as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
+    ? "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
     : "Report outcomes, not tool logs. ";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
@@ -355,7 +366,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${report}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -996,15 +1007,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         dispatch: "run",
       });
       const profile = launchProfile(agent.launch);
+      // Only people's own messages, which only the owner's send records,
+      // start a run at depth 0. A run an automation started gets the reply
+      // tool and can't write.
+      const dohcTools: RunDohcTools = claim.chainDepth === 0 ? "all" : "reply";
       const markdown = await buildRunnerThreadContext({
         dispatchStore: dispatch,
         store: options.chatStoreFor(workspace),
         workspaceId: workspace.workspaceId,
         threadId: claim.run.threadId,
         askingMessageId: claim.run.triggerMessageId,
-        readEarlier: replyFormFor(profile?.tool) === "argument"
-          ? `dohc chat show ${claim.run.threadId} --peek`
-          : "dohc_read_chat",
+        ...(replyFormFor(profile?.tool) === "argument"
+          ? { readEarlier: `dohc chat show ${claim.run.threadId} --peek` }
+          : dohcTools === "all" ? { readEarlier: "dohc_read_chat" } : {}),
       });
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
@@ -1016,8 +1031,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         logPath,
         command: launchCommand(agent.launch),
         profile,
-        dohcTools: "all",
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, profile?.tool),
+        dohcTools,
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, profile?.tool, dohcTools),
         assertMayStart,
       });
       const timeout = setTimeout(() => {
