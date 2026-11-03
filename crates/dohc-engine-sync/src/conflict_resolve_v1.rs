@@ -1476,6 +1476,12 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         // A different local resolution is a new decision, even if it kept a reviewed side.
         disposition = ImportedHeadDisposition::Diverged;
     }
+    if disposition == ImportedHeadDisposition::ReviewedSide
+        && reviewed_note_moved_here(tx, payload, &live)?
+    {
+        // Taking the result up would give the note a second path here.
+        disposition = ImportedHeadDisposition::Diverged;
+    }
     if disposition != ImportedHeadDisposition::Diverged
         && payload.lineage_transition.is_none()
         && !unbound_receiver_lineages_match_reviewed_sides(tx, payload)?
@@ -2029,6 +2035,25 @@ fn classify_imported_head(
             current_live
         },
     ))
+}
+
+/// Whether this machine holds the reviewed note at another path: its reviewed
+/// path here is free, but the note still has a path in the version.
+fn reviewed_note_moved_here(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+    live: &HeadV1,
+) -> Result<bool, SyncError> {
+    let (None, Some(result)) = (live.present(), payload.result.present()) else {
+        return Ok(false);
+    };
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM path_aliases \
+           WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+        params![payload.workspace_id, payload.target_version_id, result.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 fn kept_text_write_reviews_incoming(
