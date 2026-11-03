@@ -1784,7 +1784,7 @@ describe("CLI socket server", () => {
     }))).toEqual([
       {
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -4121,7 +4121,7 @@ describe("CLI socket server", () => {
       },
       {
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
