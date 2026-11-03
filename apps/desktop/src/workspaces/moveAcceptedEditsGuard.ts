@@ -1,8 +1,9 @@
 // Before a live page, or a folder holding one, moves, this device catches up
 // with the server for a few seconds: one owner sync for each page it is bound
 // to, then one ordinary pull, so the move carries edits the server already
-// accepted. The guard never refuses a move. Offline, failing or out of time,
-// the move goes ahead as it would without it.
+// accepted. The pull runs even when an owner sync fails, since a published
+// edit can still be waiting. The guard never refuses a move. Offline, failing
+// or out of time, the move goes ahead as it would without it.
 
 export interface LiveDocumentPath {
   path: string;
@@ -15,9 +16,8 @@ export interface MoveAcceptedEditsGuardOptions {
   liveDocuments(workspaceId: string): readonly LiveDocumentPath[] | undefined;
   // Sync already reports a failure, so catching up would only wait.
   offline(workspaceId: string): boolean;
-  // One owner sync for each listed page. True only when every page answered
-  // or this device is not bound to it.
-  ownerCatchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean>;
+  // One owner sync for each listed page. The pull follows whatever it answers.
+  ownerCatchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<unknown>;
   // One ordinary pull, which lands the saved edit in the file.
   relayCatchUp(workspaceId: string, signal: AbortSignal): Promise<void>;
   // How long each move waits, from its arrival.
@@ -59,8 +59,8 @@ export function createMoveAcceptedEditsGuard(options: MoveAcceptedEditsGuardOpti
   async function run(workspaceId: string, attempt: Attempt): Promise<void> {
     const { signal } = attempt.controller;
     if (expired(attempt) || options.offline(workspaceId)) return;
-    const answered = await options.ownerCatchUp(workspaceId, [...attempt.targets], signal);
-    if (!answered || expired(attempt)) return;
+    await options.ownerCatchUp(workspaceId, [...attempt.targets], signal).catch(() => undefined);
+    if (expired(attempt)) return;
     await options.relayCatchUp(workspaceId, signal);
   }
 

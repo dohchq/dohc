@@ -107,17 +107,28 @@ it("runs the owner sync, then the pull, before the move goes ahead", async () =>
   expect(moved.done).toBe(true);
 });
 
-it("goes ahead without a pull when an owner sync did not answer", async () => {
+// Every way an owner sync can end: answered, not answered, or failed.
+const answers = [
+  {answer: "an answer", end: (reply: Deferred<boolean>) => reply.resolve(true)},
+  {answer: "no answer", end: (reply: Deferred<boolean>) => reply.resolve(false)},
+  {answer: "a failure", end: (reply: Deferred<boolean>) => reply.reject(new Error("transport closed"))},
+];
+
+it.each(answers.slice(1))("still pulls before the move after $answer from the owner sync", async ({end}) => {
   const h = harness();
   const moved = h.move("Notes/Page.md");
   await h.settle();
-  h.owner[0]!.reply.resolve(false);
+  end(h.owner[0]!.reply);
+  await h.settle();
+  expect(h.relay).toHaveLength(1);
+  expect(h.relay[0]!.signal).toBe(h.owner[0]!.signal);
+  expect(moved.done).toBe(false);
+  h.relay[0]!.reply.resolve();
   await h.settle();
   expect(moved.done).toBe(true);
-  expect(h.relay).toEqual([]);
 });
 
-it("goes ahead at the deadline, aborts the attempt, and starts no pull for a late answer", async () => {
+it.each(answers)("goes ahead at the deadline, aborts the attempt, and starts no pull for $answer that comes late", async ({end}) => {
   const h = harness();
   const moved = h.move("Notes/Page.md");
   await h.at(MOVE_ACCEPTED_EDITS_WAIT_MS - 1);
@@ -126,7 +137,7 @@ it("goes ahead at the deadline, aborts the attempt, and starts no pull for a lat
   await h.at(1);
   expect(moved.done).toBe(true);
   expect(h.owner[0]!.signal.aborted).toBe(true);
-  h.owner[0]!.reply.resolve(true);
+  end(h.owner[0]!.reply);
   await h.settle();
   expect(h.relay).toEqual([]);
 });
@@ -236,12 +247,12 @@ it("a later move that joins a pending attempt keeps it alive only for itself", a
 
 // The event loop can be busy past a deadline, so promises settle before the
 // timer that aborts the attempt runs.
-it("starts no pull for an owner answer that arrives after the deadline, before its timer runs", async () => {
+it.each(answers)("starts no pull for $answer that arrives after the deadline, before its timer runs", async ({end}) => {
   const h = harness();
   const moved = h.move("Notes/Page.md");
   await h.settle();
   h.jump(MOVE_ACCEPTED_EDITS_WAIT_MS);
-  h.owner[0]!.reply.resolve(true);
+  end(h.owner[0]!.reply);
   await h.settle();
   expect(h.relay).toEqual([]);
   expect(moved.done).toBe(true);
