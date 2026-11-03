@@ -9,8 +9,8 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { existsSync, type PathLike } from "node:fs";
+import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -70,6 +70,7 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
 
 vi.mock("node:timers/promises", { spy: true });
+vi.mock("node:fs/promises", { spy: true });
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -4477,6 +4478,29 @@ describe("createDefaultDiskWriter symlink containment", () => {
       await writer.deletePath(path);
     }
     expect(await readdir(root)).toEqual([]);
+  });
+
+  // The folder the check found absent can appear before a delete would run,
+  // even as a link out of the workspace. Nothing was there, so the delete
+  // removes nothing.
+  it("removes nothing under a folder that was absent when the delete was checked", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    const folder = join(root, "notes");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(lstat).mockImplementationOnce((async (path: PathLike) => {
+      try {
+        return await actual.lstat(path);
+      } finally {
+        await symlink(outside, folder, "dir");
+      }
+    }) as typeof lstat);
+    vi.mocked(rm).mockClear();
+    await createDefaultDiskWriter(root).deletePath(join(folder, "keep.md"));
+    expect((await actual.lstat(folder)).isSymbolicLink(), "the folder appeared as a link after the check").toBe(true);
+    expect(rm).not.toHaveBeenCalled();
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
   });
 
   it("refuses a delete through an ancestor link that leaves the workspace", async () => {

@@ -1782,15 +1782,14 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      works on that path. Re-walking the spelling would let an ancestor
   //      alias swapped after the check redirect the mkdir, the checks, and the
   //      write to somewhere no rule was applied.
-  async function assertResolvedArea(absolutePath: string, label: string): Promise<string> {
-    const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+  async function assertResolvedArea(absolutePath: string, label: string) {
+    return await assertResolvedWorkspacePath({
       rootPath,
       absolutePath,
       spelled: absolutePath,
       label,
       access: "entry",
     });
-    return resolvedAbsolute;
   }
   // Text and bytes take the same four checks in the same order, so they take
   // one path through them. writeFile defaults a string to UTF-8 and ignores
@@ -1803,7 +1802,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
-    const target = await assertResolvedArea(absolutePath, "Engine write path");
+    const { resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
@@ -1815,9 +1814,11 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
       // The parent may be absent: a device that never had the folder still
-      // receives the delete. The resolver places an absent tail inside the
-      // root and refuses a missing root or a broken ancestor link.
-      const target = await assertResolvedArea(absolutePath, "Engine delete path");
+      // receives the delete. The resolver refuses a missing root or a broken
+      // ancestor link. With no parent there is nothing to remove, so the
+      // delete stops before it touches the disk.
+      const { resolvedAbsolute: target, parentPresent } = await assertResolvedArea(absolutePath, "Engine delete path");
+      if (!parentPresent) return;
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });

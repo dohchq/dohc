@@ -33,8 +33,12 @@ export type PathAccess = "read" | "write" | "entry";
 // of resolving a second time and hoping the two agree. In `noFollow` mode it
 // is the resolved PARENT plus the held-back name, which is the entry the
 // caller renames — not wherever that entry points.
+//
+// `parentPresent` says the target's parent was there during this walk. When it
+// wasn't, nothing was at the target either, so a delete has nothing to remove
+// and doesn't touch a path whose folders could appear after the walk.
 export type RealTarget =
-  | { ok: true; relative: string; resolvedAbsolute: string }
+  | { ok: true; relative: string; resolvedAbsolute: string; parentPresent: boolean }
   | { ok: false; reason: "escapes-workspace" }
   | { ok: false; reason: "unreadable-root"; code: string }
   | { ok: false; reason: "dangling-symlink" }
@@ -127,6 +131,7 @@ export async function realRelativeInRoot(
       ok: true,
       relative: [...resolved.split(sep), ...absentTail].filter(Boolean).join("/"),
       resolvedAbsolute: absentTail.length === 0 ? real : join(real, ...absentTail),
+      parentPresent: absentTail.length <= 1,
     };
   }
 }
