@@ -16,6 +16,7 @@ import { SettingRow, SwitchControl } from "./SettingRow";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 const MIN_PASSPHRASE_LENGTH = 8;
+const PASSPHRASE_TOO_SHORT = "Enter at least 8 characters to protect synced secrets.";
 // What turning sync off leaves alone. Groups and received shares sync on
 // their own, so a pause here does not reach them.
 export const SYNC_OFF_KEEPS = "Turning this off keeps your work, history, and shares; groups you joined keep syncing.";
@@ -176,7 +177,7 @@ export function CloudSyncSettings(props: {
         setSyncError(
           /could not/i.test(message)
             ? "That passphrase couldn't unlock synced secrets."
-            : "Enter at least 8 characters to protect synced secrets.",
+            : PASSPHRASE_TOO_SHORT,
         );
         return;
       }
@@ -424,6 +425,12 @@ export function ProtectedFilesRow(props: {
     props.purpose === "protect"
       ? props.passphrase.length < MIN_PASSPHRASE_LENGTH
       : props.passphrase.length === 0;
+  // A passphrase left in the field, rather than taken to its button, says how
+  // to use it. Every other Settings field saves on leave; this one doesn't.
+  const [left, setLeft] = useState(false);
+  const hint = !left || !props.passphrase ? null
+    : props.purpose === "protect" && tooShort ? PASSPHRASE_TOO_SHORT
+    : `Press ${props.purpose === "protect" ? "Protect" : "Unlock"} to use this passphrase.`;
   return (
     <SettingRow
       title="Protected files"
@@ -432,6 +439,10 @@ export function ProtectedFilesRow(props: {
         props.error ? (
           <span data-testid="cloud-sync-error" role="alert" className="text-danger">
             {props.error}
+          </span>
+        ) : hint ? (
+          <span data-testid="cloud-sync-hint" role="alert" className="text-warning">
+            {hint}
           </span>
         ) : undefined
       }
@@ -453,7 +464,14 @@ export function ProtectedFilesRow(props: {
             data-unsaved={props.passphrase ? true : undefined}
             data-testid="cloud-sync-passphrase"
             value={props.passphrase}
-            onChange={(event) => props.onPassphrase(event.currentTarget.value)}
+            onChange={(event) => {
+              setLeft(false);
+              props.onPassphrase(event.currentTarget.value);
+            }}
+            onBlur={(event) => {
+              const next = event.relatedTarget;
+              setLeft(!(next instanceof Node && event.currentTarget.form?.contains(next)));
+            }}
             className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink focus:border-ink"
           />
           <PrimaryButton

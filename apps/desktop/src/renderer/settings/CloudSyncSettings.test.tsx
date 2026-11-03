@@ -558,21 +558,48 @@ describe("CloudSyncSettings", () => {
       fireEvent.click(backdrop);
     };
 
-    it("stays open while a typed passphrase waits to be used", () => {
+    it("stays open while a typed passphrase waits to be used", async () => {
+      const user = userEvent.setup();
       const onClose = vi.fn();
       render(
         <Overlay onClose={onClose} closeOnBackdrop>
           <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })} />
         </Overlay>,
       );
-      fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+      await user.click(screen.getByTestId("cloud-protect-secrets"));
       const input = screen.getByTestId("cloud-sync-passphrase");
-      fireEvent.change(input, { target: { value: "shared passphrase" } });
+      await user.type(input, "shared passphrase");
+      // Moving to Protect is how a passphrase gets used, so the row says nothing.
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByTestId("cloud-sync-passphrase-submit"));
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
 
       pressBackdrop();
 
       expect(onClose).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(input);
+    });
+
+    it.each([
+      ["protect", "protected-key-present", "cloud-protect-secrets", "shared passphrase", "Press Protect to use this passphrase."],
+      ["protect", "protected-key-present", "cloud-protect-secrets", "short", "Enter at least 8 characters to protect synced secrets."],
+      ["unlock", "protected-key-missing", "cloud-unlock-secrets", "shared passphrase", "Press Unlock to use this passphrase."],
+    ] as const)("says how to %s with a passphrase left in the field", async (_, secretState, start, typed, words) => {
+      const user = userEvent.setup();
+      render(
+        <Overlay onClose={vi.fn()} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: secretState })} />
+        </Overlay>,
+      );
+      await user.click(screen.getByTestId(start));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      await user.type(input, typed);
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByRole("alert").textContent).toBe(words);
+      await user.type(input, "x");
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
     });
 
     it("closes from an empty passphrase prompt", async () => {

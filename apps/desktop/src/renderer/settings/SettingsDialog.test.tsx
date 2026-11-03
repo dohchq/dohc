@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -444,6 +445,38 @@ describe("SettingsDialog", () => {
       expect(document.activeElement).toBe(field);
       expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
       expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    });
+
+    it("reports a save that fails after Settings closed, and Try again sends it again", async () => {
+      const user = userEvent.setup();
+      const onError = vi.fn();
+      function Closable() {
+        const [open, setOpen] = useState(true);
+        const close = () => setOpen(false);
+        return open ? (
+          <Overlay onClose={close} closeOnBackdrop>
+            <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="general" onError={onError} onClose={close} />
+          </Overlay>
+        ) : null;
+      }
+      render(<Closable />);
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+      const change = bridge.setUserSettings.mock.lastCall![0];
+      expect(change.settings.profile).toEqual({ preferredName: "Sam" });
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => save.reject(cause));
+
+      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      const [, reported, retry] = onError.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.setUserSettings.mockClear();
+      await act(async () => retry());
+      expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change);
     });
 
     it("stays open on minutes it can't save, and says why", async () => {

@@ -12,6 +12,7 @@ import { focusedElementIn } from "./ui/focusedElement";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
 import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
+import { menuClosingPresses } from "./ui/useDismiss";
 
 // A field marks itself data-unsaved while it holds what it can't save yet:
 // a value it refused, a save that failed, or typing that waits for its own
@@ -40,8 +41,9 @@ export function OverlayFrame(props: {
   onBackdropClick?: () => void;
   children: ReactNode;
 }) {
-  // A click closes only when its press began on the backdrop, so text
-  // selected in a field and dragged out of the panel keeps the dialog.
+  // A click closes only when its press began on the backdrop and closed no
+  // menu. Text selected in a field and dragged out of the panel keeps the
+  // dialog, and so does the press that closes a menu inside it.
   const pressedBackdrop = useRef(false);
   return (
     <div
@@ -52,7 +54,8 @@ export function OverlayFrame(props: {
       {...(props.onBackdropClick ? {
         onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
           const target = event.target instanceof Node ? event.target : null;
-          pressedBackdrop.current = target !== null && event.currentTarget.contains(target) && !props.panelRef.current?.contains(target);
+          pressedBackdrop.current = target !== null && event.currentTarget.contains(target) &&
+            !props.panelRef.current?.contains(target) && !menuClosingPresses.has(event.nativeEvent);
         },
         onClick: () => {
           if (pressedBackdrop.current) props.onBackdropClick?.();

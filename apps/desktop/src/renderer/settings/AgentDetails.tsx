@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, CircleAlert } from "lucide-react";
 import { AGENT_TOOLS, launchCommand, launchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { Agent, AgentSettings } from "../../settings/userSettings";
 import { isComposingKey } from "../ui/keys";
@@ -80,7 +80,11 @@ function InlineField(props: {
       className={`h-7 rounded-md border bg-bg px-2 text-[12px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"} ${props.className}`}
     />
     {props.after}
-    {error ? <span id={errorId} role="alert" className="min-w-0 text-danger">{error}</span> : null}
+    {error ? (
+      <span id={errorId} role="alert" className="flex min-w-0 items-center gap-1 text-[12px] text-danger">
+        <CircleAlert size={12} aria-hidden className="shrink-0" />{error}
+      </span>
+    ) : null}
   </>;
 }
 

@@ -110,6 +110,21 @@ function StatusPill(props: { state: SettingsSaveState }) {
   );
 }
 
+// Try again for a save that closing Settings cut off. It sends the same
+// change, and main writes only that change onto the file as it is then.
+function retryUserSave(
+  change: { settings: DesktopUserSettings; base: DesktopUserSettings },
+  onError: ((message: string, cause?: unknown, retry?: () => Promise<void>) => void) | undefined,
+): () => Promise<void> {
+  return async () => {
+    try {
+      applyLookSettings((await bridge().setUserSettings(change)).settings);
+    } catch (cause) {
+      onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause, retryUserSave(change, onError));
+    }
+  };
+}
+
 export function SettingsDialog(props: {
   // `details` are facts for Copy details, one line each. A report with an
   // `identity` replaces the row of that identity, and `onClearError` takes it back.
@@ -168,6 +183,12 @@ export function SettingsDialog(props: {
   // (or, via the next full-settings save, overwrite) workspace B. Mirrors the
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRequestSequence();
+  // A workspace write's failure shows while it is the newest write for this
+  // workspace, or when closing Settings cut it off. A newer write or another
+  // workspace keeps it quiet.
+  const workspaceWriteFailureShows = (token: number, requestId: number) =>
+    (workspaceTokenRef.isCurrent(token) && workspaceSaveRequestRef.isCurrent(requestId)) ||
+    (workspaceTokenRef.isCutOff(token) && workspaceSaveRequestRef.isCutOff(requestId));
   // A zoom broadcast arriving while the initial Promise.all load is in flight
   // is newer than the user-settings snapshot that load retained, and must not
   // be painted over.
@@ -339,14 +360,19 @@ export function SettingsDialog(props: {
       markSaved();
       return saved;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return null;
+      // Closing Settings can cut a save off. Its failure still reaches the
+      // shell's notice, whose Try again sends the same change.
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      const message = ipcErrorMessage(cause, "dohc could not save your settings.");
+      if (cutOff) props.onError?.(message, cause, retryUserSave({ settings, base: previous.settings }, props.onError));
+      else props.onError?.(message, cause);
       // `previous` can hold a change an earlier save failed to make, so the
       // dialog goes back to the settings the file holds.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!userSaveRequestRef.isCurrent(requestId)) return null;
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
       setUserResult(restored);
       applyLookSettings(restored.settings);
       return null;
@@ -365,7 +391,7 @@ export function SettingsDialog(props: {
       markSaved();
       return true;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      if (!userSaveRequestRef.isCurrent(requestId) && !userSaveRequestRef.isCutOff(requestId)) return false;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(failure ? withErrorWords(failure, cause) : ipcErrorMessage(cause, "dohc could not save your settings."), cause);
@@ -417,12 +443,7 @@ export function SettingsDialog(props: {
         if (saved.refusal) setSaveState("error");
         else markSaved();
       } catch (cause) {
-        if (
-          !workspaceTokenRef.isCurrent(token) ||
-          !workspaceSaveRequestRef.isCurrent(requestId)
-        ) {
-          return;
-        }
+        if (!workspaceWriteFailureShows(token, requestId)) return;
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(ipcErrorMessage(cause));
@@ -468,7 +489,7 @@ export function SettingsDialog(props: {
       applyLookSettings(next.settings);
       markSaved();
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId) && !userSaveRequestRef.isCutOff(requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
@@ -494,12 +515,7 @@ export function SettingsDialog(props: {
       onWorkspaceSettingsRead?.(next);
       markSaved();
     } catch (cause) {
-      if (
-        !workspaceTokenRef.isCurrent(token) ||
-        !workspaceSaveRequestRef.isCurrent(requestId)
-      ) {
-        return;
-      }
+      if (!workspaceWriteFailureShows(token, requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(

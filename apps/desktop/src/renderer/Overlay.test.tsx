@@ -190,6 +190,30 @@ describe("Overlay", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("closes an open menu on the first press outside and the dialog on the second", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    function Dialog() {
+      const [menuOpen, setMenuOpen] = useState(false);
+      return (
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
+            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
+        </Overlay>
+      );
+    }
+    render(<Dialog />);
+    await user.click(screen.getByRole("button", { name: "Row actions" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+
+    await user.click(backdrop());
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(backdrop());
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("closes only the topmost of two nested overlays on Escape", () => {
     const onCloseOuter = vi.fn();
     const onCloseInner = vi.fn();

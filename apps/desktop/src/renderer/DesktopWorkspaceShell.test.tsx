@@ -1806,6 +1806,26 @@ describe("settings entry points", () => {
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
   });
 
+  it("reports a save that fails after settings closed, with Try again, in a toast and Notices", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("The settings file is read-only.");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).getByText(/The settings file is read-only\./)).toBeTruthy();
+  });
+
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
