@@ -180,6 +180,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### Fields
 
 - Put a label above each field, with no colon. Mark an optional field `Optional` after its label.
+- A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. A blur with nothing typed cancels, and Enter with nothing typed shows the error.
 - A placeholder shows an example value or nothing. It never holds the instruction or the label.
 - Check a field when focus leaves it or the person presses the primary. Never check on each key. A length limit can count down while they type.
 - Show the error under the field in `text-danger`, after a 12px `CircleAlert`. Say what is wrong and how to fix it: `Enter a name for the version.`
@@ -229,6 +230,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
 - If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. On a toast, Details sits under the text. On a row, it comes last on the actions line.
+- **Details** is for text that reports something. A control that copies the person's own work, or something made to paste elsewhere, such as set-aside edits or an invitation, needs no Details. Its tooltip and accessible name say what it copies: `Copy edits`, `Copy invitation`.
 - **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
 - While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
 - **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
@@ -239,10 +241,10 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- F6 moves focus to the newest toast's first worded action, such as **Try again**. With no worded action, it lands on **Details**, and with neither, on the toast. **Details** is one Shift+Tab back.
+- F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast. When **Details** is there and closed, Shift+Tab from the first worded action reaches it.
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
 - **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
-- Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Notices also closes when a dialog opens or the app quits, and each commits the dismissals. A dismissal that fails brings its row back.
+- Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Opening a dialog closes Notices too, which commits them. If dohc quits first, the cleared rows come back at the next start, because their Undo was still open. A dismissal that fails brings its row back.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
 - A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text. A toast keeps its worded actions in a column at its right, beside the text.
