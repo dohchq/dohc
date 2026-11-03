@@ -8,6 +8,14 @@ use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
+/// How long recovery waits before asking again after a reader failure that
+/// clears on its own. Each ask uses one of the resolver's bounded retries, so
+/// its final, unavailable answer ends them.
+#[cfg(not(test))]
+const READER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(4);
+#[cfg(test)]
+const READER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::ZERO;
+
 pub(super) struct MarkdownRecovery {
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -73,10 +81,19 @@ async fn run(
     let wake = initial.actor.markdown_recovery_wake();
     drop(initial);
     let mut attempted = HashMap::<i64, String>::new();
+    // Attempts the reader answered retryable whose backoff has passed.
+    let retries_due = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
     // A workspace that opens with nothing held has nothing to announce.
     let mut reported_holds = Vec::new();
     loop {
         tokio::select! { biased; () = cancel.cancelled() => return, () = wake.notified() => {} }
+        // Ask again each save whose backoff has passed, unless a later attempt
+        // recorded another fingerprint and so has its own answer.
+        for (order, fingerprint) in std::mem::take(&mut *lock(&retries_due)) {
+            if attempted.get(&order) == Some(&fingerprint) {
+                attempted.remove(&order);
+            }
+        }
         let Some(open) = open.upgrade() else {
             return;
         };
@@ -151,6 +168,7 @@ async fn run(
         #[cfg(test)]
         let mut pass_attempts = Vec::new();
         let mut blocked = HashSet::new();
+        let mut reader_retries = Vec::new();
         for candidate in &candidates {
             if cancel.is_cancelled() {
                 return;
@@ -193,7 +211,7 @@ async fn run(
                 blocked.insert(document);
                 continue;
             }
-            attempted.insert(owed.order, fingerprint);
+            attempted.insert(owed.order, fingerprint.clone());
             #[cfg(test)]
             pass_attempts.push(owed.key.clone());
             let root_guard = match crate::capture_sink::CapturedRoot::bind(&open.root) {
@@ -341,12 +359,29 @@ async fn run(
                     blocked.insert(document);
                 }
                 Err(error) => {
+                    if super::error::reader_retryable(&error) {
+                        reader_retries.push((owed.order, fingerprint));
+                    }
                     if !matches!(error, RuntimeError::MarkdownWriteHeld { .. }) {
                         eprintln!("engine: Markdown recovery retained: {error}");
                     }
                     blocked.insert(document);
                 }
             }
+        }
+        // Only these saves are asked again. Waking every save would give one
+        // the reader already gave up on a fresh count.
+        if !reader_retries.is_empty() {
+            let (due, wake, cancel) = (retries_due.clone(), wake.clone(), cancel.clone());
+            tokio::spawn(async move {
+                tokio::select! { biased;
+                    () = cancel.cancelled() => {}
+                    () = tokio::time::sleep(READER_RETRY_BACKOFF) => {
+                        lock(&due).extend(reader_retries);
+                        wake.notify_one();
+                    }
+                }
+            });
         }
         #[cfg(test)]
         if let Some(passes) = &passes {

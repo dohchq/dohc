@@ -155,6 +155,22 @@ fn engine_folder_not_private(refused: &dohc_macos_files::NotPrivate) -> WireErro
     )
 }
 
+/// The reader failed in a way that clears on its own and the proof has
+/// retries left, so the caller asks again after a backoff. The resolver
+/// bounds those retries and then answers `markdown-reader-unavailable`.
+pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Collab(CollabError::MarkdownReaderRetryable)
+            | RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderRetryable
+            ))
+            | RuntimeError::Sync(SyncError::RetryableState {
+                reason: "markdown-reader-retryable"
+            })
+    )
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // The volume keeps ACL entries on the engine's folder or store, or what is
     // at one of their paths can't be kept private.
@@ -220,6 +236,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         })
     ) {
         return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
+    }
+    if reader_retryable(error) {
+        return WireError::new(ErrorCode::Overloaded, "markdown-reader-retryable");
     }
     if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = error {
         return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
@@ -641,6 +660,7 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
         CollabError::MarkdownReaderPending(_)
         | CollabError::MarkdownReaderUnavailable
         | CollabError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
+        CollabError::MarkdownReaderRetryable => ErrorCode::Overloaded,
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -1275,6 +1295,34 @@ mod tests {
         ));
         assert_eq!(error.code, ErrorCode::Overloaded);
         assert_eq!(error.message, "settlement-materialization-pending");
+    }
+
+    #[test]
+    fn a_reader_with_retries_left_asks_for_a_backoff_and_an_exhausted_one_does_not() {
+        for error in [
+            RuntimeError::Collab(CollabError::MarkdownReaderRetryable),
+            RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderRetryable,
+            )),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "markdown-reader-retryable",
+            }),
+        ] {
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Overloaded);
+            assert_eq!(wire.message, "markdown-reader-retryable");
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
+        }
+        for error in [
+            RuntimeError::Collab(CollabError::MarkdownReaderUnavailable),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "dohc could not verify this file. Try again.",
+            }),
+        ] {
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Internal);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
+        }
     }
 
     /// The artifact lock and a busy engine database are two

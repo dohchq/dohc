@@ -97,6 +97,17 @@ async fn first_owner_append(crash: bool, available: bool) {
         .await;
     if available {
         assert!(result.is_ok(), "{result:?}");
+    } else if crash {
+        // A crashed reader can start again, so its proof asks for a backoff.
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Collab(
+                    dohc_engine_collab::CollabError::MarkdownReaderRetryable
+                ))
+            ),
+            "{result:?}"
+        );
     } else {
         assert!(
             matches!(

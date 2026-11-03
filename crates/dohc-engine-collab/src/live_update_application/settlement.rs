@@ -62,7 +62,9 @@ fn audit_error(error: ApplicationError) -> ApplicationError {
     match error {
         ApplicationError::Storage(_)
         | ApplicationError::Collab(
-            CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable,
+            CollabError::MarkdownReaderPending(_)
+            | CollabError::MarkdownReaderUnavailable
+            | CollabError::MarkdownReaderRetryable,
         ) => error,
         _ => StorageError::StateCorrupt { source: None }.into(),
     }

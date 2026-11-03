@@ -2924,7 +2924,7 @@ describe("YdocLiveAdapter", () => {
     text: string,
     options?: {
       settleDebounceMs?: number;
-      blocker?: "file-locked" | "engine-store-busy" | "settlement-materialization-pending";
+      blocker?: "file-locked" | "engine-store-busy" | "settlement-materialization-pending" | "markdown-reader-retryable";
       replicated?: boolean;
     },
   ) {
@@ -3007,6 +3007,26 @@ describe("YdocLiveAdapter", () => {
     await drain();
     expect(settled).toHaveLength(1);
     expect(settled[0]).toMatchObject({content: expect.stringContaining("typed after a pending settlement")});
+    await provider.close({settle: false});
+  });
+
+  it("saves after reader recovery without another edit", async () => {
+    // The Markdown reader failed twice in a way that clears on its own, so the
+    // engine asks for a backoff. The provider asks again by itself, and the
+    // note saves once the reader is back, with no edit and no Try again.
+    const {provider, blocked, refusal, settleErrors, settled, scheduler} =
+      await openAgainstABlockedSettle("typed while the reader restarted", {blocker: "markdown-reader-retryable"});
+    scheduler.fire();
+    await drain();
+    expect(settleErrors).toEqual([refusal]);
+    expect(settled).toEqual([]);
+    expect(scheduler.armed).toHaveLength(1);
+    blocked.held = false;
+    scheduler.fire();
+    await drain();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({content: expect.stringContaining("typed while the reader restarted")});
+    expect(scheduler.armed).toHaveLength(0);
     await provider.close({settle: false});
   });
 

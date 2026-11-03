@@ -1482,7 +1482,9 @@ pub(super) fn read_adoption_source(
                 resolver,
             ) {
                 Ok(_) => {}
-                Err(CollabError::MarkdownReaderUnavailable) => {
+                Err(
+                    CollabError::MarkdownReaderUnavailable | CollabError::MarkdownReaderRetryable,
+                ) => {
                     super::activation::reader_settled_at_boundary(
                         conn,
                         namespace,
