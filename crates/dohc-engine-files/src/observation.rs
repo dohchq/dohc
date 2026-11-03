@@ -4,7 +4,7 @@ use crate::floor;
 use crate::scan::FailedPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -84,8 +84,9 @@ pub(crate) enum Reread {
     /// the next walk reads it again to compare.
     Read { recent: bool, sha256: [u8; 32] },
     /// The read failed, the file changed or was replaced after the walk
-    /// listed it, or reading it would download it from a cloud provider. The
-    /// feed keeps the last bytes it read to compare with.
+    /// listed it, or reading it would download it from a cloud provider. While
+    /// the file lists as it did, the feed keeps the last bytes it read to
+    /// compare with.
     Unknown,
 }
 
@@ -344,6 +345,8 @@ struct FileReader {
 }
 
 impl FileReader {
+    /// `root` is the workspace's canonical path, so a link in its place was
+    /// put there after the workspace opened. The reader refuses it.
     fn new(root: &std::path::Path, buffer_bytes: usize) -> Self {
         Self {
             #[cfg(unix)]
@@ -351,6 +354,7 @@ impl FileReader {
                 root,
                 rustix::fs::OFlags::RDONLY
                     | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
                     | rustix::fs::OFlags::CLOEXEC,
                 rustix::fs::Mode::empty(),
             )
@@ -774,8 +778,23 @@ impl ObservationFeed {
                 }
             }
         }
-        // A read the walk couldn't trust, and a file a failed folder hid, keep
-        // the last bytes read to compare the next read with.
+        // A read the walk couldn't trust keeps the last bytes read only while
+        // the file lists as it did. When its listing changed, this walk reports
+        // that change, and comparing the next read with the older bytes would
+        // report it again.
+        let mut unknown_unchanged = HashSet::new();
+        if rereads.values().any(|reread| *reread == Reread::Unknown) {
+            for entry in &listing {
+                if rereads.get(&entry.path) == Some(&Reread::Unknown)
+                    && state
+                        .listing
+                        .binary_search_by(|old| old.order(entry))
+                        .is_ok_and(|index| state.listing[index] == *entry)
+                {
+                    unknown_unchanged.insert(entry.path.clone());
+                }
+            }
+        }
         let mut recent = HashMap::new();
         for (path, reread) in rereads {
             let sha256 = match reread {
@@ -785,12 +804,13 @@ impl ObservationFeed {
                 } => sha256,
                 Reread::Read { recent: false, .. } => continue,
                 Reread::Unknown => match state.recent.get(&path) {
-                    Some(&sha256) => sha256,
-                    None => continue,
+                    Some(&sha256) if unknown_unchanged.contains(&path) => sha256,
+                    _ => continue,
                 },
             };
             recent.insert(path, sha256);
         }
+        // A file a failed folder hid keeps its last bytes read.
         for path in retained {
             if let Some(&sha256) = state.recent.get(&path) {
                 recent.insert(path, sha256);
@@ -1375,6 +1395,39 @@ mod tests {
         assert!(publish(None).is_empty());
     }
 
+    /// A read the walk can't trust, of a file whose size or times changed,
+    /// leaves one change. The next read doesn't compare with the bytes from
+    /// before that change.
+    #[test]
+    fn an_unknown_read_after_a_listed_change_reads_as_one_change() {
+        let feed = ObservationFeed::new();
+        let entry = |size: u64| ObservedEntry {
+            path: "note.md".to_owned(),
+            symlink: false,
+            size,
+            modified: None,
+            #[cfg(unix)]
+            changed: (0, 0),
+            #[cfg(any(windows, target_vendor = "apple"))]
+            key: "note.md".to_owned(),
+        };
+        let publish = |size: u64, reread: Reread| {
+            let cursor = feed.changes_since(None).cursor;
+            let rereads = HashMap::from([("note.md".to_owned(), reread)]);
+            feed.publish(vec![entry(size)], rereads, &[], 10, FOLDS)
+                .unwrap();
+            feed.changes_since(Some(&cursor)).facts
+        };
+        let read = |byte: u8| Reread::Read {
+            recent: true,
+            sha256: [byte; 32],
+        };
+        publish(1, read(1));
+        let mut facts = publish(2, Reread::Unknown);
+        facts.extend(publish(2, read(2)));
+        assert_eq!(facts, vec![fact("note.md", FileChangeKind::Changed)]);
+    }
+
     /// A folder the walk can't read keeps its files' last bytes, so a write
     /// that keeps size and times still reads as changed once it can.
     #[test]
@@ -1525,6 +1578,21 @@ mod tests {
         assert!(reader.open("note.md").is_none());
         assert!(reader.open("dir/note.md").is_none());
         assert!(reader.open("moved/note.md").is_some());
+    }
+
+    /// A link put in the workspace root's place after it opened is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_refuses_a_link_in_place_of_the_root() {
+        let parent = ScratchDir::new_named("observation-root-link").unwrap();
+        let root = parent.path().join("workspace");
+        let moved = parent.path().join("moved");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("note.md"), "a").unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+        assert!(FileReader::new(&root, 64).open("note.md").is_none());
+        assert!(FileReader::new(&moved, 64).open("note.md").is_some());
     }
 
     /// A FIFO swapped in after the listing is refused at once. Opening it
