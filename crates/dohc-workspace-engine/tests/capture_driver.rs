@@ -2591,6 +2591,62 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     );
 }
 
+/// The same, for a file that is already unreadable when the workspace opens.
+/// The opening scan is then degraded, so startup waits for its full barrier
+/// instead of an early import. Once the controller quarantines the file, the
+/// import finishes and a file created afterwards is a live change.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_unreadable_at_open_lets_the_first_import_finish() {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "healthy.md", b"imported");
+    let mut lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .share_mode(0)
+        .open(scratch.path().join("locked.md"))
+        .expect("share-locked file");
+    lock.write_all(b"unreadable through the import")
+        .expect("locked write");
+    lock.flush().expect("locked flush");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "healthy.md", Some("imported")).await;
+
+    // Each flush drives up to MAX_FLUSH_CYCLES passes, so the controller
+    // quarantines the locked file and then reports nothing dirty.
+    for id in 2..5 {
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("flush");
+        assert_eq!(flush.result["degraded"], json!(true));
+    }
+
+    write_file(scratch.path(), "live.md", b"after the import");
+    wait_for_text(&transport, &handle, "live.md", Some("after the import")).await;
+    drop(lock);
+    close_workspace(&transport, handle, 9_100).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db, "healthy.md");
+    assert_eq!(summary.as_deref(), Some(FIRST_IMPORT_SUMMARY));
+    assert_eq!(
+        moment_metadata(&db, "live.md"),
+        (None, None),
+        "a quarantined file must not keep the import open"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_edit_during_an_unfinished_first_import_is_a_live_change() {
     let scratch = ScratchDir::new().expect("scratch");
