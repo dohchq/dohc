@@ -399,17 +399,52 @@ describe("ChatLane", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Monday" }).getAttribute("aria-pressed")).toBe("true"));
   });
 
-  it("shows the posted answer and says why its poll stayed open", async () => {
+  it("says a choice that posted left its question open, with no Try again", async () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", body: "Monday" }),
-      resolveFailure: "Error: This poll changed. Try again.",
+      resolveFailure: "Error: Your server session changed. Try again.",
     });
     render(lane());
     fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("This poll changed. Try again.", "Error: This poll changed. Try again."));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "Sent your choice. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
+    expect(onError.mock.lastCall?.[2]).toBeUndefined();
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+  });
+
+  it("says a choice that did not send, and Try again sends it again", async () => {
+    const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    const input = {
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Monday",
+      resolves: { messageId: "message-1", chosenOption: "Monday" },
+    };
+    bridgeMock.sendChatMessage
+      .mockRejectedValueOnce(new Error("The engine stopped."))
+      .mockRejectedValueOnce(new Error("The engine stopped."))
+      .mockResolvedValueOnce({
+        message: message({ id: "answer", body: "Monday" }),
+        resolveFailure: "Error: Your server session changed. Try again.",
+        waitsForTrust: true,
+      });
+    render(lane());
+    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not send your choice.", expect.any(Error), expect.any(Function)));
+    const tryAgain = onError.mock.lastCall?.[2] as () => void;
+    onError.mockClear();
+    tryAgain();
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not send your choice.", expect.any(Error), expect.any(Function)));
+    const tryOnceMore = onError.mock.lastCall?.[2] as () => void;
+    onError.mockClear();
+    tryOnceMore();
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "Sent your choice. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
+    expect(onError.mock.lastCall?.[2]).toBeUndefined();
+    expect(onAgentWaitsForTrust).toHaveBeenCalledWith("workspace-a");
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(3);
+    for (const call of bridgeMock.sendChatMessage.mock.calls) expect(call[0]).toEqual(input);
   });
 
   function openPoll() {
@@ -776,21 +811,23 @@ describe("ChatLane", () => {
     await act(async () => reload.resolve({ decisions: [resolved] }));
   });
 
-  it("says why a question stayed open after its answer was sent", async () => {
+  it("says a reply that posted left its question open, with no Try again", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
       message({ id: "question", body: "What should I call the file?", authorKind: "agent", authorDisplayName: "Nova" }),
     ] });
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", body: "notes.md", parentMessageId: "question" }),
-      resolveFailure: "Error: This question changed. Try again.",
+      resolveFailure: "Error: Your server session changed. Try again.",
     });
     render(lane("agent-dm", "workspace-a", "agent"));
     fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
     const reply = await screen.findByTestId("chats-lane-thread-composer");
     fireEvent.change(reply, { target: { value: "notes.md" } });
     fireEvent.keyDown(reply, { key: "Enter" });
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("This question changed. Try again.", "Error: This question changed. Try again."));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "Sent your reply. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
+    expect(onError.mock.lastCall?.[2]).toBeUndefined();
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 

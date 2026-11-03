@@ -349,7 +349,7 @@ export function ChatLane(props: {
       setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
       const resolved = result.resolved;
       if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
-      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that question."), result.resolveFailure);
+      if (result.resolveFailure) onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
       void load(true);
       return true;
     } catch (error) {
@@ -366,13 +366,15 @@ export function ChatLane(props: {
     if (!target || sending || loading || props.locked) return;
     const parentMessageId = post ? undefined : asked?.parentMessageId;
     const current = token.current;
+    const input = {
+      workspaceId, threadId: target, body: option,
+      ...(parentMessageId ? { parentMessageId } : {}),
+      resolves: { messageId: decision.messageId, chosenOption: option },
+    };
+    const stayedOpen = (failure: unknown) => onError("Sent your choice. dohc could not mark the question answered.", failure);
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({
-        workspaceId, threadId: target, body: option,
-        ...(parentMessageId ? { parentMessageId } : {}),
-        resolves: { messageId: decision.messageId, chosenOption: option },
-      });
+      const result = await bridge().sendChatMessage(input);
       if (current !== token.current) return;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
@@ -380,10 +382,16 @@ export function ChatLane(props: {
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
       const resolved = result.resolved;
       if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
-      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that poll."), result.resolveFailure);
+      if (result.resolveFailure) stayedOpen(result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not answer that poll."), error);
+      // Nothing posted, so Try again sends the choice again. The change it
+      // makes reloads the conversation.
+      const again = () => void bridge().sendChatMessage(input).then((result) => {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(input.workspaceId);
+        if (result.resolveFailure) stayedOpen(result.resolveFailure);
+      }, (retryError: unknown) => onError("dohc could not send your choice.", retryError, again));
+      onError("dohc could not send your choice.", error, again);
     } finally {
       if (current === token.current) {
         setSending(false);
