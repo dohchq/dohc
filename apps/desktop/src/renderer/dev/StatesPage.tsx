@@ -972,6 +972,27 @@ const changeCard = (state: CollectionChangeState | null, proposal = CHANGE_PROPO
 const WAITING = { kind: "waiting" } as const;
 const applyFailure = collectionApplyFailure("Volunteers");
 
+// Ada added Phone after the agent asked, then applied the change from the
+// review, so her reply attaches the change it applied. Neither message
+// mentions its file, so neither draws a chip.
+const REVIEWED_PROPOSAL = changeProposal([CHANGE_ROWS[0]!,
+  { kind: "field-added", key: "field:phone", field: "Phone", type: "text", records: 12, empty: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 44) } },
+  ...CHANGE_ROWS.slice(1)], CHANGE_PROPOSAL.files, CHANGE_PROPOSAL.note);
+const attachingChange = (message: ChatMessageRecord, fileId: string): ChatMessageRecord => ({ ...message, attachments: [{
+  attachmentId: `${message.id}-change`, threadId: message.threadId, messageId: message.id, targetKind: "file",
+  pathHint: `volunteers/changes/${fileId}.json`, createdAtMs: message.createdAtMs }] });
+const REVIEWED_ASK = attachingChange(CHANGE_MESSAGE, "8d0c5b7e-2f4a-4c1e-9b3d-6a7f0e2c5d14");
+const REVIEWED_REPLY = attachingChange(changeMessage("change-reviewed", "ada", "Applied the change to Volunteers.", 47), "3f2a91c0-7b6e-4d2a-8c5f-1e9b0a4d7c36");
+
+function ChangeAppliedFromReviewSpecimen() {
+  return <div className="flex h-[720px] w-[780px] flex-col">
+    <ChatMessageList testIdPrefix="states-change-chat" messages={[REVIEWED_ASK, REVIEWED_REPLY]} loading={false} emptyLabel="No messages yet." anchor="start"
+      renderMessageFooter={message => message.id === REVIEWED_ASK.id
+        ? <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, REVIEWED_PROPOSAL, REVIEWED_ASK)} appliedBy={REVIEWED_REPLY} /> : null} />
+  </div>;
+}
+
 const DEFINITION_BEFORE = `{
   "name": "Volunteers",
   "fields": [
@@ -2650,6 +2671,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="Ada changed its files after it was sent">
           <div className="w-[740px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+        </Specimen>
+        <Specimen label="in a DM, applied from the review after Ada added Phone: the card credits her part, and her reply has no chip">
+          <ChangeAppliedFromReviewSpecimen />
         </Specimen>
       </Section>
 
