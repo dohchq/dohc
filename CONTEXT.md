@@ -1,6 +1,6 @@
 # dohc
 
-A local-first workspace for people and their agents. This glossary is the canonical vocabulary; check new names against it before defining them.
+A local-first workspace where people and their agents build, share, and manage small apps alongside their files, documents, data, and chat. This glossary is the canonical vocabulary; check new names against it before defining them.
 
 ## Language
 
