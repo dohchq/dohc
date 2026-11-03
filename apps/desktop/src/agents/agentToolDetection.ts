@@ -2,7 +2,7 @@ import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolveSpawnCommand } from "../process/windowsSpawn";
 import { runProbeProcess, windowsProbeOwner } from "./agentProbeProcess";
-import { probeAgentTools, type ProbeOutput } from "./agentToolProbe";
+import { parseToolVersion, probeAgentTools, type ProbeOutput } from "./agentToolProbe";
 import { codexConfigFiles, codexMayRunWithoutLogin } from "./codexRunConfig";
 
 // resourcesRoot is chosen by Electron main, never by a workspace or renderer.
@@ -10,6 +10,12 @@ export async function runProbe(executable: string, args: readonly string[], sign
   signal.throwIfAborted();
   const command = resolveSpawnCommand(executable, [...args], { cwd: homedir() });
   return runProbeProcess(command, signal, process.platform === "win32" ? windowsProbeOwner(resourcesRoot) : undefined);
+}
+
+// The version an installed tool reports, or null when it reports none.
+export async function agentToolVersion(executable: string, resourcesRoot: string): Promise<string | null> {
+  const output = await runProbe(executable, ["--version"], new AbortController().signal, resourcesRoot);
+  return output.exitCode === 0 ? parseToolVersion(output.stdout) : null;
 }
 
 export function detectAgentTools(workspaceRoot: string, signal: AbortSignal, resourcesRoot: string) {

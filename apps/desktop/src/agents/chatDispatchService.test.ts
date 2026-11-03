@@ -129,6 +129,8 @@ interface FixtureOptions {
   runner?: Partial<RunnerSettings>;
   // The default agent's name in Settings. Nova when absent.
   agentName?: string;
+  // What the agent's Claude Code reports to --version. 2.1.317 when absent.
+  claudeVersion?: string | null;
   // Agents after the default one, which `runner` sets up.
   agents?: Agent[];
   dispatchNoticeFailures?: Error[];
@@ -614,6 +616,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
       ...(options.agents ?? []),
     ],
+    agentToolVersion: async () => options.claudeVersion === undefined ? "2.1.317" : options.claudeVersion,
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
     isPackaged: () => options.packaged ?? false,
@@ -1270,6 +1273,18 @@ describe("chatDispatchService", () => {
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
+  });
+
+  it.each(["2.1.294", null])("doesn't start Claude Code that reports %s, which may not hold a run to its tools", async (claudeVersion) => {
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } }, claudeVersion });
+    const trigger = await createAgentThread(fixture, { body: "Plan the trip." });
+    await activate(fixture);
+
+    await vi.waitFor(() => expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({
+      state: "failed",
+      failureReason: "runner failed to start: update Claude Code to 2.1.295 or later to use this agent",
+    }));
+    expect(fixture.spawnCalls).toEqual([]);
   });
 
   it("doesn't let an automation start an agent that runs the person's own command", async () => {

@@ -62,7 +62,7 @@ import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collectio
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
-import { detectAgentTools } from "./agents/agentToolDetection";
+import { agentToolVersion, detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
@@ -3531,6 +3531,7 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  agentToolVersion: (executable) => agentToolVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
