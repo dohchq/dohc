@@ -10,7 +10,7 @@ import {
 import { bridge } from "../bridge";
 import {
   applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, readCollectionChangeProposal, undoCollectionChange,
-  type CollectionChange, type CollectionChangeState,
+  type CollectionChange,
 } from "../collections/collectionChangeFlow";
 import { ipcErrorMessage } from "../ipcError";
 import { formatClock } from "../time";
@@ -23,11 +23,11 @@ const notNowKey = (workspaceId: string, messageId: string) => `dohc:change-card:
 const readNotNow = (key: string) => { try { return localStorage.getItem(key) === "1"; } catch { return false; } };
 const by = (name: string, atMs: number | null) => atMs === null ? name : `${name} · ${formatClock(atMs)}`;
 /** What a failed Apply says. The server answers "not found" for a Collection the caller can't change, so a 404 names the server. */
-const applyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
+export const collectionApplyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
   ? { words: `The server that keeps ${name} refused this change. Nothing changed. Ask its owner to apply it.`, retry: false }
   : { words: ipcErrorMessage(error, "dohc couldn't apply this change."), retry: true };
 
-type Phase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
+export type CollectionChangeCardPhase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
 
 // The last change each card showed this session, so a card the chat list
 // draws again, as it scrolls back into view, keeps its height from the start.
@@ -65,7 +65,7 @@ export function CollectionChangeCard(props: {
   const [proposal, setProposal] = useState<CollectionChangeProposal | null>(() => shownChanges.get(shownKey)?.proposal ?? null);
   const [change, setChange] = useState<CollectionChange | null>(() => shownChanges.get(shownKey) ?? null);
   const [loadFailure, setLoadFailure] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const [phase, setPhase] = useState<CollectionChangeCardPhase>({ kind: "idle" });
   const key = notNowKey(workspaceId, message.id);
   const [notNow, setNotNow] = useState(() => readNotNow(key));
   const [reload, setReload] = useState(0);
@@ -111,7 +111,7 @@ export function CollectionChangeCard(props: {
         await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
       } else if (mounted.current) setStale(true);
       settled();
-    } catch (error) { fail(applyFailure(shown.proposal.name)(error), error); }
+    } catch (error) { fail(collectionApplyFailure(shown.proposal.name)(error), error); }
   };
 
   const undo = async (shown: CollectionChange) => {
@@ -123,14 +123,59 @@ export function CollectionChangeCard(props: {
     } catch (error) { fail({ words: ipcErrorMessage(error, "dohc couldn't undo this change."), retry: true }, error); }
   };
 
-  const testId = (part: string) => `${props.testIdPrefix}-change-${part}`;
   if (proposal === null) return null;
-  const state: CollectionChangeState | null = change === null ? null
-    : stale && change.state.kind === "waiting" ? { kind: "edited", by: null, atMs: null } : change.state;
+  const putOff = () => { try { localStorage.setItem(key, "1"); } catch { /* It shows again next time. */ } setNotNow(true); };
+  const unfold = () => { try { localStorage.removeItem(key); } catch { /* Not now lasts only as long as storage does. */ } setNotNow(false); };
+  const failure = collectionApplyFailure(proposal.name);
+  // Apply found the files no longer make the change shown, so the card says they changed.
+  const shown = change !== null && stale && change.state.kind === "waiting" ? { ...change, state: { kind: "edited" as const, by: null, atMs: null } } : change;
+  return <>
+    <CollectionChangeCardView message={message} proposal={proposal} change={shown} loadFailure={loadFailure} phase={phase} notNow={notNow}
+      appliedBy={props.appliedBy} undoneBy={props.undoneBy} locked={props.locked} onOpenPath={props.onOpenPath} testIdPrefix={props.testIdPrefix}
+      onApply={() => { if (change) void apply(change); }} onUndo={() => { if (change) void undo(change); }} onReview={() => setReviewing(change)}
+      onNotNow={putOff} onUnfold={unfold} onRetryLoad={() => setReload(value => value + 1)} />
+    {reviewing ? createPortal(<CollectionChangeReviewDialog workspaceId={workspaceId} asked={reviewing} locked={props.locked} failure={failure}
+      testIdPrefix={props.testIdPrefix} onClose={() => setReviewing(null)} onNotNow={putOff}
+      onApply={async review => {
+        try { await applyCollectionChangeReview(bridge(), workspaceId, review); } catch (error) {
+          if (!mounted.current) props.onError(failure(error).words, error);
+          throw error;
+        }
+        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
+        if (mounted.current) setStale(false);
+        settled();
+      }} />, document.body) : null}
+  </>;
+}
+
+/** The card as it draws in one state, which the states page shows without a workspace. */
+export function CollectionChangeCardView(props: {
+  message: ChatMessageRecord;
+  proposal: CollectionChangeProposal;
+  /** Null while History and the Collection answer. */
+  change: CollectionChange | null;
+  loadFailure: string | null;
+  phase: CollectionChangeCardPhase;
+  notNow: boolean;
+  appliedBy?: ChatMessageRecord;
+  undoneBy?: ChatMessageRecord;
+  locked: boolean;
+  onOpenPath?: (path: string) => void;
+  onApply: () => void;
+  onUndo: () => void;
+  onReview: () => void;
+  onNotNow: () => void;
+  onUnfold: () => void;
+  onRetryLoad: () => void;
+  testIdPrefix: string;
+}) {
+  const { message, proposal, change, phase } = props;
+  const testId = (part: string) => `${props.testIdPrefix}-change-${part}`;
+  const state = change?.state ?? null;
   const busy = phase.kind === "applying";
   // Folded until it's known to be applied. Its line says Waiting once that's known.
-  if (notNow && !busy && state?.kind !== "applied") {
-    return <button type="button" data-testid={testId("not-now")} onClick={() => { try { localStorage.removeItem(key); } catch { /* Not now lasts only as long as storage does. */ } setNotNow(false); }}
+  if (props.notNow && !busy && state?.kind !== "applied") {
+    return <button type="button" data-testid={testId("not-now")} onClick={props.onUnfold}
       className="mt-2 flex h-[38px] w-full max-w-[740px] items-center gap-2 rounded-lg border border-line bg-panel px-3.5 text-left text-[13px] text-muted transition-colors hover:bg-panel-2">
       <ChevronRight size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
       {state ? <><span className="font-medium text-ink">Waiting</span><span className="min-w-0 truncate">· Change to {proposal.name}</span></>
@@ -144,14 +189,15 @@ export function CollectionChangeCard(props: {
     {status}
   </div>;
   if (change === null || state === null) {
+    const loadFailure = props.loadFailure;
     // The rows wait for History and the Collection. Only a failed read offers Try again.
     return <div data-testid={testId("loading")} className="mt-2 w-full max-w-[740px] overflow-hidden rounded-lg border border-line bg-panel">
       {heading()}
-      {loadFailure ? <div data-testid={testId("load-failed")} className="flex items-start gap-2 px-3.5 py-2.5 text-[12px] text-ink">
+      {loadFailure !== null ? <div data-testid={testId("load-failed")} className="flex items-start gap-2 px-3.5 py-2.5 text-[12px] text-ink">
         <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
         <span className="min-w-0">{loadFailure}</span>
         <CopyButton iconOnly label="Copy" pinName getText={() => loadFailure} />
-        <SecondaryButton size="row" className="ml-auto shrink-0" onClick={() => setReload(value => value + 1)}>Try again</SecondaryButton>
+        <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetryLoad}>Try again</SecondaryButton>
       </div> : <div className="flex min-h-8 items-center py-1.5 pl-10 pr-3.5">
         <SkeletonRows rows={1} className="w-full" label={`Loading the change to ${proposal.name}`} />
       </div>}
@@ -163,14 +209,12 @@ export function CollectionChangeCard(props: {
   const undoable = historyCanUndoCollectionChange(rows);
   const applyLabel = collectionApplyLabel(deletes);
   const ApplyButton = deletes.records || deletes.values ? DangerButton : PrimaryButton;
-  const failure = applyFailure(proposal.name);
   const tense = state.kind === "applied" ? "past" : "present";
   const noteAt = proposal.note === null ? -1 : collectionChangeNoteRow(rows);
   const note = proposal.note === null ? null : `${message.authorDisplayName}'s note: "${proposal.note}"`;
-  const review = <button type="button" data-testid={testId("review")} onClick={() => setReviewing(change)}
+  const review = <button type="button" data-testid={testId("review")} onClick={props.onReview}
     className="ml-4 shrink-0 text-[12px] text-muted underline underline-offset-[3px] hover:text-ink">Review source change</button>;
-  const putOff = () => { try { localStorage.setItem(key, "1"); } catch { /* It shows again next time. */ } setNotNow(true); };
-  const later = <SecondaryButton data-testid={testId("not-now-button")} disabled={props.locked} onClick={putOff}>Not now</SecondaryButton>;
+  const later = <SecondaryButton data-testid={testId("not-now-button")} disabled={props.locked} onClick={props.onNotNow}>Not now</SecondaryButton>;
   const status = undone ? { label: "Undone", dot: "bg-subtle", reply: props.undoneBy }
     : state.kind === "applied" ? { label: "Applied", dot: "bg-success", reply: props.appliedBy } : null;
 
@@ -178,17 +222,17 @@ export function CollectionChangeCard(props: {
   if (busy) {
     footer = <Footer><LoaderCircle size={14} strokeWidth={1.9} aria-hidden className="shrink-0 animate-spin text-ink" /><span className="text-[12px] text-muted">{phase.words}</span></Footer>;
   } else if (state.kind === "edited") {
-    footer = <Footer><PrimaryButton data-testid={testId("review-button")} onClick={() => setReviewing(change)}>Review source change</PrimaryButton>{later}</Footer>;
+    footer = <Footer><PrimaryButton data-testid={testId("review-button")} onClick={props.onReview}>Review source change</PrimaryButton>{later}</Footer>;
   } else if (state.kind === "waiting") {
     const retry = phase.kind !== "failed" || phase.retry;
     footer = <Footer>
-      {retry ? <ApplyButton data-testid={testId("apply")} disabled={props.locked} onClick={() => void apply(change)}>{phase.kind === "failed" ? "Try again" : applyLabel}</ApplyButton> : null}
+      {retry ? <ApplyButton data-testid={testId("apply")} disabled={props.locked} onClick={props.onApply}>{phase.kind === "failed" ? "Try again" : applyLabel}</ApplyButton> : null}
       {later}
       {undoable ? <span className="flex-1" /> : <span className="min-w-0 flex-1 text-[12px] text-muted">{CHANGE_LOSS}</span>}
       {review}
     </Footer>;
   } else if (!undone && state.current && undoable) {
-    footer = <Footer><SecondaryButton data-testid={testId("undo")} disabled={props.locked} onClick={() => void undo(change)}>Undo</SecondaryButton></Footer>;
+    footer = <Footer><SecondaryButton data-testid={testId("undo")} disabled={props.locked} onClick={props.onUndo}>Undo</SecondaryButton></Footer>;
   } else if (!undone && !undoable) {
     footer = <Footer><span className="min-w-0 flex-1 text-[12px] text-muted">{CHANGE_LOSS}</span></Footer>;
   }
@@ -215,17 +259,6 @@ export function CollectionChangeCard(props: {
       <span>{state.atMs === null ? "Its files changed after it was sent." : state.by ? `${state.by.name} changed these files at ${formatClock(state.atMs)}.` : `These files changed at ${formatClock(state.atMs)}.`} Review the change to apply it.</span>
     </p> : null}
     {footer}
-    {reviewing ? createPortal(<CollectionChangeReviewDialog workspaceId={workspaceId} asked={reviewing} locked={props.locked} failure={failure}
-      testIdPrefix={props.testIdPrefix} onClose={() => setReviewing(null)} onNotNow={putOff}
-      onApply={async review => {
-        try { await applyCollectionChangeReview(bridge(), workspaceId, review); } catch (error) {
-          if (!mounted.current) props.onError(failure(error).words, error);
-          throw error;
-        }
-        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
-        if (mounted.current) setStale(false);
-        settled();
-      }} />, document.body) : null}
   </div>;
 }
 

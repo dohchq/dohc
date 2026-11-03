@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject } from "react";
 import { ChevronRight, CircleAlert, Code, Database, Minus, PenLine, Plus, Shield, type LucideIcon } from "lucide-react";
 import {
   collectionApplyLabel, collectionChangeDeletes, describeCollectionChangeRow, historyCanUndoCollectionChange,
@@ -22,8 +22,8 @@ export const CHANGE_ICONS: Record<CollectionChangeIcon, { icon: LucideIcon; tone
 };
 export const CHANGE_LOSS = "History can't undo this change.";
 
-type Load = { kind: "loading" } | { kind: "failed"; words: string } | { kind: "ready"; review: CollectionChangeReview };
-type Phase = { kind: "idle" } | { kind: "applying" } | { kind: "failed"; words: string; retry: boolean };
+export type CollectionChangeReviewLoad = { kind: "loading" } | { kind: "failed"; words: string } | { kind: "ready"; review: CollectionChangeReview };
+export type CollectionChangeReviewPhase = { kind: "idle" } | { kind: "applying" } | { kind: "failed"; words: string; retry: boolean };
 
 /**
  * The change the Collection's files make now, row by row, with each row's
@@ -43,8 +43,8 @@ export function CollectionChangeReviewDialog(props: {
   testIdPrefix: string;
 }) {
   const { workspaceId, asked } = props;
-  const [load, setLoad] = useState<Load>({ kind: "loading" });
-  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const [load, setLoad] = useState<CollectionChangeReviewLoad>({ kind: "loading" });
+  const [phase, setPhase] = useState<CollectionChangeReviewPhase>({ kind: "idle" });
   const [attempt, setAttempt] = useState(0);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   // The preparation this dialog holds and has not applied, discarded when it closes.
@@ -90,6 +90,38 @@ export function CollectionChangeReviewDialog(props: {
     }
   };
 
+  const toggle = (key: string) => setOpen(shown => {
+    const next = new Set(shown);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
+
+  return <Overlay onClose={() => { if (!busy) props.onClose(); }}>
+    <CollectionChangeReviewCard asked={asked} load={load} phase={phase} open={open} onToggle={toggle} rowRefs={rowRefs}
+      onApply={review => void apply(review)} onNotNow={() => { props.onNotNow(); props.onClose(); }} onRetry={() => setAttempt(value => value + 1)}
+      locked={props.locked} testIdPrefix={props.testIdPrefix} />
+  </Overlay>;
+}
+
+/** The review's panel without its overlay, which the states page draws in place. */
+export function CollectionChangeReviewCard(props: {
+  asked: CollectionChange;
+  load: CollectionChangeReviewLoad;
+  phase: CollectionChangeReviewPhase;
+  /** The rows whose file changes show. */
+  open: ReadonlySet<string>;
+  onToggle: (key: string) => void;
+  onApply: (review: CollectionChangeReview) => void;
+  onNotNow: () => void;
+  /** Prepares the change again after a failed preparation. */
+  onRetry: () => void;
+  locked: boolean;
+  testIdPrefix: string;
+  rowRefs?: MutableRefObject<Array<HTMLButtonElement | null>>;
+}) {
+  const { asked, load, phase, open } = props;
+  const ownRows = useRef<Array<HTMLButtonElement | null>>([]);
+  const rowRefs = props.rowRefs ?? ownRows;
   const move = (event: KeyboardEvent<HTMLUListElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const rows = rowRefs.current.filter((row): row is HTMLButtonElement => row !== null);
@@ -99,23 +131,18 @@ export function CollectionChangeReviewDialog(props: {
     event.preventDefault();
     next.focus();
   };
-  const toggle = (key: string) => setOpen(shown => {
-    const next = new Set(shown);
-    if (!next.delete(key)) next.add(key);
-    return next;
-  });
 
   const testId = (part: string) => `${props.testIdPrefix}-change-review-${part}`;
-  const change = ready?.change ?? null;
-  const rows = change?.rows ?? asked.rows;
+  const ready = load.kind === "ready" ? load.review : null;
+  const busy = phase.kind === "applying";
+  const rows = ready?.change.rows ?? asked.rows;
   const deletes = collectionChangeDeletes(rows);
   const ApplyButton = deletes.records || deletes.values ? DangerButton : PrimaryButton;
   const authors = [...new Set(rows.flatMap(row => row.source?.author ? [row.source.author.name] : []))];
   const sides = new Map(ready?.files.map(file => [file.path, file]) ?? []);
   const retry = phase.kind !== "failed" || phase.retry;
 
-  return <Overlay onClose={() => { if (!busy) props.onClose(); }}>
-    <div role="dialog" aria-modal="true" aria-labelledby={testId("title")} data-testid={testId("dialog")}
+  return <div role="dialog" aria-modal="true" aria-labelledby={testId("title")} data-testid={testId("dialog")}
       className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(760px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel p-[18px]">
       <div className="flex items-center gap-2.5">
         <h2 id={testId("title")} className="m-0 text-sm font-semibold text-ink">Review source change to {asked.proposal.name}</h2>
@@ -135,11 +162,12 @@ export function CollectionChangeReviewDialog(props: {
         {load.kind === "loading" ? <SkeletonRows label="Preparing this change…" className="px-2.5 py-2" /> : null}
         {load.kind === "failed" ? <div role="alert" data-testid={testId("load-failed")} className="flex items-start gap-2 px-2.5 py-2 text-[12px] text-ink">
           <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
-          <span className="min-w-0 flex-1">{load.words}</span>
-          <SecondaryButton size="row" className="shrink-0" onClick={() => setAttempt(value => value + 1)}>Try again</SecondaryButton>
+          <span className="min-w-0">{load.words}</span>
+          <CopyButton iconOnly label="Copy" pinName getText={() => load.words} />
+          <SecondaryButton size="row" className="ml-auto shrink-0" onClick={props.onRetry}>Try again</SecondaryButton>
         </div> : null}
         {ready ? <ul className="m-0 list-none p-0" onKeyDown={move}>
-          {ready.change.rows.map((row, index) => <ReviewRow key={row.key} row={row} open={open.has(row.key)} onToggle={() => toggle(row.key)}
+          {ready.change.rows.map((row, index) => <ReviewRow key={row.key} row={row} open={open.has(row.key)} onToggle={() => props.onToggle(row.key)}
             buttonRef={element => { rowRefs.current[index] = element; }} sides={sides.get(row.source?.path ?? "")} testId={testId} />)}
         </ul> : null}
       </div>
@@ -150,13 +178,12 @@ export function CollectionChangeReviewDialog(props: {
       </div> : null}
       <div className="mt-3.5 flex items-center gap-2.5">
         <span className="min-w-0 flex-1 text-[12px] text-muted">{historyCanUndoCollectionChange(rows) ? null : CHANGE_LOSS}</span>
-        <SecondaryButton data-testid={testId("not-now")} disabled={busy} onClick={() => { props.onNotNow(); props.onClose(); }}>Not now</SecondaryButton>
-        {retry ? <ApplyButton data-testid={testId("apply")} disabled={!ready || busy || props.locked} onClick={() => { if (ready) void apply(ready); }}>
+        <SecondaryButton data-testid={testId("not-now")} disabled={busy} onClick={props.onNotNow}>Not now</SecondaryButton>
+        {retry ? <ApplyButton data-testid={testId("apply")} disabled={!ready || busy || props.locked} onClick={() => { if (ready) props.onApply(ready); }}>
           {busy ? "Applying…" : phase.kind === "failed" ? "Try again" : collectionApplyLabel(deletes)}
         </ApplyButton> : null}
       </div>
-    </div>
-  </Overlay>;
+    </div>;
 }
 
 function Kbd(props: { children: string }) {
