@@ -846,7 +846,7 @@ export function NoticeCenter(props: {
   // Try again on a failed run's notice. The shell asks first when the run
   // would start over, and reports why it did not run.
   onRetrySentNotice?: (notice: NoticeRow) => void;
-  // Marks one notice read: the pointer or keyboard focus rested on its row.
+  // Marks one notice read: the pointer or keyboard focus reached its row.
   onReadSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
