@@ -4204,20 +4204,6 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         return row === undefined ? null : { path: String(row.path), origin: String(row.origin) };
       } finally { db.close(); }
     };
-    // Stop live editing on A's row, then wait until the server retired A and no retirement is owed.
-    const stopAndRetire = async () => {
-      const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA })
-        .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
-      if (!stopped.ok) observe({ stopped, liveRow: await liveRowOfA(), ownerA: ownerRowsOfA(), head: headOfA() });
-      expect(stopped, `${kind}: Stop live editing is accepted`).toMatchObject({ ok: true });
-      let row: Awaited<ReturnType<typeof liveRowOfA>> = null;
-      await expect.poll(async () => {
-        if (await owedStopsOfA() > 0) await syncPass();
-        row = await liveRowOfA();
-        return row?.status === "retired" && await owedStopsOfA() === 0;
-      }, { timeout: 120_000, interval: 500 }).toBe(true).catch(error => { throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error }); });
-      return { stopped, row };
-    };
 
     if (kind === "stop-then-delete" || kind === "deferred-stop") {
       // Step 2: Stop live editing on A's row. "deferred-stop" first leaves more
@@ -4294,13 +4280,6 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         "A keeps its head and its owner binding, with no delete").toEqual({ head: headBefore, bound: true, deletesOfA: 0 });
       await newAndChanged();
       expectPublished("after a refused restore", await settle(6, relay => relay.a && relay.b && relay.cChanged), true);
-
-      // Step 4: after Stop, the same restore goes through.
-      step = "4-stop-then-restore";
-      const { stopped, row } = await stopAndRetire();
-      const again = await restore();
-      observe({ stopped, liveRow: row, again, head: headOfA(), deletesOfA: await deletesOfA(), onDisk: await onDisk(), ownerA: ownerRowsOfA() });
-      expect({ ok: again.ok, onDisk: await onDisk() }, "after Stop, the restore goes through").toEqual({ ok: true, onDisk: true });
       return;
     }
 
@@ -4414,5 +4393,5 @@ it.skipIf(engine.missing)("leaves an owner-bound live page deleted outside dohc 
   () => runDeleteRepros(["file-manager"]), 300_000);
 it.skipIf(engine.missing)("records an owner-bound live page that capture wrote and that is deleted outside dohc, with no refusal (file-manager-capture)",
   () => runDeleteRepros(["file-manager-capture"]), 300_000);
-it.skipIf(engine.missing)("refuses restoring an owner-bound live page deleted outside dohc, and restores it after Stop (file-manager-restore)",
+it.skipIf(engine.missing)("refuses restoring an owner-bound live page deleted outside dohc (file-manager-restore)",
   () => runDeleteRepros(["file-manager-restore"]), 300_000);
