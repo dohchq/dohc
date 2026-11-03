@@ -159,7 +159,10 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
 
     await test.step("History offers no Restore shared file for the shared note (#3090)", async () => {
       await openHistoryView(page);
-      const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();
+      // R1's row, not the note's creation: History can list the creation
+      // before the live edits arrive, and restoring it deletes the note.
+      const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`)
+        .filter({hasText: recipientAccount.name}).first();
       await expect(moment).toBeVisible({timeout: 60_000});
       await moment.click();
       await page.getByTestId("engine-diff-more").click();
