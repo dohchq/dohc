@@ -1795,6 +1795,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
+      const profile = launchProfile(agent.launch);
+      if (profile?.tool === "claude" && !supportsAgentProfile("claude", await options.agentToolVersion(profile.executable))) {
+        return { ok: false, detail: `Update Claude Code to ${CLAUDE_MIN_VERSION} or later to use this agent.` };
+      }
 
       // A self-test spawns a real runner and writes a scratch thread, so it
       // takes the same run lease and engine gate as a claimed run. A workspace
@@ -1862,7 +1866,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return { ok: false, detail: "A runner became active before the self-test could start." };
         }
         // The same reply form as a real run, so passing proves replies work.
-        const prompt = replyFormFor(launchProfile(agent.launch)?.tool) === "mcp"
+        const prompt = replyFormFor(profile?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
         await options.setRunAttribution(workspace, {
@@ -1877,7 +1881,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           runId,
           logPath,
           command,
-          profile: launchProfile(agent.launch),
+          profile,
           // The self-test checks only that the reply arrives.
           dohcTools: "reply",
           prompt,
