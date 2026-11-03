@@ -3156,8 +3156,9 @@ describe("the move guard over a real relay and live host", () => {
     expect(device.targetedPasses()).toBe(requested + 1);
     const carriedInTime = elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS && moved !== undefined && moved.includes(text);
     if (!input.unbound) {
-      // The guard promises one owner sync and one pull, not the edit. These bound
-      // moves expect it inside the wait; one past the wait may go ahead without it.
+      // The guard attempts one owner sync, then one pull while time remains. It
+      // doesn't promise the edit. These bound moves expect it inside the wait;
+      // one past the wait may go ahead without it.
       if (elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS || moved !== unchanged) expect(moved).toContain(text);
       return carriedInTime;
     }
@@ -3173,8 +3174,8 @@ describe("the move guard over a real relay and live host", () => {
       expect(moved).toContain(text);
       return carriedInTime;
     }
-    // The guard promises one pull. A pull that answers retry later lets the
-    // move go ahead without the edit, which stays published under the page's binding.
+    // The guard doesn't promise the edit. A pull that answers retry later lets
+    // the move go ahead without it, and the edit stays published under the page's binding.
     if (pull.result === "succeeded") expect(moved, "the guard's pull succeeded").toContain(text);
     else {
       expect({ wireCode: pull.wireCode, message: pull.message, retry: pull.retry }, "the guard's pull failed").toEqual(RETRY_LATER);
