@@ -245,6 +245,7 @@ import {
   VersionComparePage,
   VersionMenu,
   type VersionMergeNotice,
+  isVersionMergeIdentity,
   mergeFilesWait,
 } from "./workbench/WorkspaceVersions";
 import {
@@ -2400,31 +2401,8 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
-  // A merge that answered after its dialog closed. One that left files to
-  // decide offers the review, and its row has no Dismiss: it leaves when the
-  // review closes with none of that merge's files waiting.
-  const mergesToDecide = useRef(new Map<string, string>());
-  const reportVersionMerge = useCallback(({ decideFrom, ...notice }: VersionMergeNotice) => {
-    if (decideFrom === undefined) mergesToDecide.current.delete(notice.identity);
-    else mergesToDecide.current.set(notice.identity, decideFrom);
-    reportShellFailure({
-      ...notice,
-      ...(decideFrom === undefined
-        ? {}
-        : { noDismiss: true, action: { label: "Decide what to keep", run: () => setConflictReviewOpen(true), reads: true } }),
-    });
-  }, [reportShellFailure]);
-  const closeConflictReview = useCallback(() => {
-    setConflictReviewOpen(false);
-    for (const [identity, sourceVersionId] of mergesToDecide.current) {
-      // A read that fails keeps the row, and the next close asks again.
-      void mergeFilesWait(workspaceId, sourceVersionId).then((waiting) => {
-        if (waiting || mergesToDecide.current.get(identity) !== sourceVersionId) return;
-        mergesToDecide.current.delete(identity);
-        clearIdentity(identity);
-      }, () => undefined);
-    }
-  }, [clearIdentity, workspaceId]);
+  // Whether a merge dialog is open. A merge notice's Try again waits for it.
+  const [versionMergeOpen, setVersionMergeOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -3303,6 +3281,33 @@ export function DesktopWorkspaceShell(props: {
       sidebarVisible: true,
     }));
   }, [mutateWb]);
+  // A merge that answered after its dialog closed. One that left files to
+  // decide offers the review, and its row has no Dismiss: it leaves when the
+  // review closes with none of that merge's files waiting. One that stopped
+  // partway offers History, which shows what is in Main.
+  const mergesToDecide = useRef(new Map<string, string>());
+  const reportVersionMerge = useCallback(({ decideFrom, offersHistory, ...notice }: VersionMergeNotice) => {
+    if (decideFrom === undefined) mergesToDecide.current.delete(notice.identity);
+    else mergesToDecide.current.set(notice.identity, decideFrom);
+    reportShellFailure({
+      ...notice,
+      ...(decideFrom === undefined
+        ? {}
+        : { noDismiss: true, action: { label: "Decide what to keep", run: () => setConflictReviewOpen(true), reads: true } }),
+      ...(offersHistory ? { action: { label: "Open History", run: openHistoryView, reads: true } } : {}),
+    });
+  }, [openHistoryView, reportShellFailure]);
+  const closeConflictReview = useCallback(() => {
+    setConflictReviewOpen(false);
+    for (const [identity, sourceVersionId] of mergesToDecide.current) {
+      // A read that fails keeps the row, and the next close asks again.
+      void mergeFilesWait(workspaceId, sourceVersionId).then((waiting) => {
+        if (waiting || mergesToDecide.current.get(identity) !== sourceVersionId) return;
+        mergesToDecide.current.delete(identity);
+        clearIdentity(identity);
+      }, () => undefined);
+    }
+  }, [clearIdentity, workspaceId]);
   // Open History shows the timeline with the recovery change open beside it.
   const openCaptureRecovery = useCallback(
     (momentId: string, path: string) => {
@@ -5543,24 +5548,27 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.paths ? { paths: error.paths } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
+          ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
           ...(error.details ?? []),
           ...reportFacts(),
         ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         retryBusy: error.retryBusy,
+        ...(versionMergeOpen && isVersionMergeIdentity(error.identity) ? { retryBlocked: "Close the open merge first." } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
-    [shellErrors, reportFacts],
+    [shellErrors, reportFacts, versionMergeOpen],
   );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
@@ -5891,6 +5899,8 @@ export function DesktopWorkspaceShell(props: {
             onError={reportFailureMessage}
             clearError={clearIdentity}
             onMergeNotice={reportVersionMerge}
+            onMergeOpenChange={setVersionMergeOpen}
+            onOpenHistory={openHistoryView}
             onConflictError={reportShellError}
             {...(shareView
               ? {}

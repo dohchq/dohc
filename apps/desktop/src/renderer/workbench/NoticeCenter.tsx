@@ -20,6 +20,7 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
+import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
@@ -28,6 +29,8 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  // Why it is disabled, on hover.
+  reason?: string;
   busy?: boolean;
 };
 
@@ -41,6 +44,8 @@ export type Notice = {
   // A line after the body that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // Paths the body lists, one per line under it.
+  paths?: readonly string[];
   actions?: readonly NoticeAction[];
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -73,6 +78,7 @@ export interface WorkspaceErrorNotice {
   title?: string;
   message: string;
   lastLine?: string;
+  paths?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   details: string;
@@ -80,6 +86,8 @@ export interface WorkspaceErrorNotice {
   atMs: number;
   canRetry: boolean;
   retryBusy?: boolean;
+  // Try again can't run yet. It shows disabled, with this as its reason.
+  retryBlocked?: string;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
   additionalActionLabels?: string[];
@@ -238,12 +246,14 @@ function UnreadMark(props: { unread: boolean; testId: string; className?: string
 // A notice's title and text, in its row or its toast, clipped to fit. A
 // click on clipped text, or Show more, shows all of it in place, wrapped
 // and selectable. A body with one fact per line shows its first 3 facts
-// whole, so none is cut in half; prose clamps at 3 lines.
+// whole, so none is cut in half; prose clamps at 3 lines. Paths are facts
+// after the body, each cut in the middle to fit its line until it opens.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
   titleClass: string;
   body: string;
+  paths?: readonly string[];
   // Off for a body that is already shown whole.
   clamp?: boolean;
   // A last line shown with the whole body, such as how many more files a
@@ -259,8 +269,10 @@ function NoticeText(props: {
   const [open, setOpen] = useState(false);
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
-  const facts = props.body.split("\n");
-  const byFacts = clamp && facts.length > 1;
+  const lines = props.body ? props.body.split("\n") : [];
+  const paths = props.paths ?? [];
+  const facts = lines.length + paths.length;
+  const byFacts = clamp && facts > 1;
   const { onOpenChange } = props;
   const show = (next: boolean) => {
     setOpen(next);
@@ -286,7 +298,8 @@ function NoticeText(props: {
     if (body) observer.observe(body);
     return () => observer.disconnect();
   }, [open, clamp, byFacts, props.title, props.body]);
-  const hidden = clipped || (byFacts && facts.length > 3);
+  const hidden = clipped || (byFacts && facts > 3);
+  const shownPaths = byFacts && !open ? paths.slice(0, Math.max(0, 3 - lines.length)) : paths;
   // A click that ends a selection, or the second of a double click, opens nothing.
   const openOnClick = hidden && !open
     ? (event: MouseEvent<HTMLElement>) => {
@@ -316,8 +329,17 @@ function NoticeText(props: {
             onClick={openOnClick}
             className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
-            {byFacts && !open ? facts.slice(0, 3).join("\n") : props.body}
+            {byFacts && !open ? lines.slice(0, 3).join("\n") : props.body}
           </p>
+        ) : null}
+        {shownPaths.length > 0 ? (
+          <ul data-testid={`${props.testId}-paths`} className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-muted">
+            {shownPaths.map((path) => (
+              <li key={path} title={path} className={open ? "select-text wrap-anywhere" : "flex min-w-0"}>
+                {open ? path : <PathLine path={path} />}
+              </li>
+            ))}
+          </ul>
         ) : null}
         {props.after && (open || !hidden) ? (
           <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
@@ -583,6 +605,7 @@ export function WorkspaceErrorToast(props: {
         title={error.title ?? error.message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
         body={error.title ? error.message : ""}
+        paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
         testId="workspace-shell-toast"
@@ -625,7 +648,8 @@ export function WorkspaceErrorToast(props: {
         <button
           type="button"
           data-testid="workspace-shell-error-retry"
-          disabled={error.retryBusy}
+          disabled={error.retryBusy || error.retryBlocked !== undefined}
+          title={error.retryBlocked}
           aria-busy={error.retryBusy || undefined}
           onClick={() => props.onRetry?.(error.id)}
           className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
@@ -683,6 +707,7 @@ export function LocalNoticeRow(props: {
         title={notice.title}
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={notice.body}
+        paths={notice.paths}
         clamp={notice.filePaths === undefined}
         after={notice.lastLine}
         testId={`notice-${notice.id}`}
@@ -743,6 +768,7 @@ export function LocalNoticeRow(props: {
                     key={action.label}
                     type="button"
                     disabled={action.disabled}
+                    title={action.reason}
                     aria-busy={action.busy || undefined}
                     onClick={() => props.onAction(action)}
                     className={ROW_ACTION_CLASS}
@@ -1206,8 +1232,9 @@ export function NoticeCenter(props: {
             ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
-                disabled: error.retryBusy,
+                disabled: error.retryBusy || error.retryBlocked !== undefined,
                 busy: error.retryBusy,
+                ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
               }]
             : []),
         ],
@@ -1226,6 +1253,7 @@ export function NoticeCenter(props: {
         copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
         copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
+        ...(error.paths?.length ? { paths: error.paths } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }

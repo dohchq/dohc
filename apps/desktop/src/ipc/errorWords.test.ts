@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, MergeStoppedPartwayError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
@@ -32,6 +32,7 @@ import {
   isShareReadOnlyRefusal,
   isLiveFolderRefusal,
   isLivePageOwnedRefusal,
+  isMergeStoppedPartway,
   livePageBody,
   livePageTitle,
   isSharedLiveFileRefusal,
@@ -390,6 +391,13 @@ describe("error words", () => {
     expect(readError(received).words).toBe(refused.message);
     expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
     expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
+  });
+
+  it("knows a merge that stopped partway across IPC, and keeps the failure for Copy details", () => {
+    const received = acrossIpc(new MergeStoppedPartwayError(new Error("disk full")), "desktop:merge-workspace-version");
+    expect(isMergeStoppedPartway(received)).toBe(true);
+    expect(readError(received)).toEqual({ words: null, mapped: false, cause: "Error: disk full" });
+    expect(isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version"))).toBe(false);
   });
 
   it("reads a refused folder move across IPC as its title and body", () => {

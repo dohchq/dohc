@@ -127,7 +127,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
   });
 });
 
-function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVersion"> = {}) {
+function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVersion" | "onOpenHistory" | "onMergeOpenChange"> = {}) {
   const props = {
     onWorkspaceStateChanged: vi.fn(),
     onError: vi.fn<ComponentProps<typeof VersionMenu>["onError"]>(),
@@ -165,6 +165,11 @@ function descriptionOf(element: HTMLElement): string | null | undefined {
 
 function acrossIpc(channel: string, error: string): Error {
   return new Error(`Error invoking remote method '${channel}': ${error}`);
+}
+
+// A merge that failed after some of the version's files reached Main.
+function stoppedPartway(): Error {
+  return acrossIpc("desktop:merge-workspace-version", "MergeStoppedPartwayError: Error: disk full");
 }
 
 describe("VersionMenu", () => {
@@ -307,6 +312,38 @@ describe("VersionMenu", () => {
     expect(props.onError).not.toHaveBeenCalled();
   });
 
+  it("shows a merge that stopped partway with Open History at the left, then Cancel and Merge again", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(stoppedPartway());
+    const onOpenHistory = vi.fn();
+    const user = userEvent.setup();
+    renderMenu({ onOpenHistory });
+    await confirmMerge(user);
+    const dialog = screen.getByTestId("version-merge-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("version-merge-failure-words").textContent)
+      .toBe("dohc could not finish the merge. Some of Draft's changes are in Main, and History shows which."));
+    await user.click(within(dialog).getByRole("button", { name: "Details" }));
+    expect(within(dialog).getByTestId("version-merge-failure").textContent).toContain("Cause: Error: disk full");
+    const footer = ["version-merge-open-history", "version-merge-cancel", "version-merge-confirm"];
+    expect(within(dialog).getAllByRole("button").map((button) => button.dataset.testid ?? "").filter((id) => footer.includes(id)))
+      .toEqual(footer);
+    expect(screen.getByTestId("version-merge-confirm").textContent).toBe("Merge again");
+
+    await user.click(screen.getByTestId("version-merge-open-history"));
+    expect(onOpenHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
+  });
+
+  it("tells the shell while a merge dialog is open", async () => {
+    const onMergeOpenChange = vi.fn<(open: boolean) => void>();
+    const user = userEvent.setup();
+    renderMenu({ onMergeOpenChange });
+    await openOn(user, "Draft");
+    await user.click(screen.getByTestId("version-merge"));
+    expect(onMergeOpenChange).toHaveBeenLastCalledWith(true);
+    await user.click(screen.getByTestId("version-merge-cancel"));
+    expect(onMergeOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("puts Details under a failure whose copy text holds more than it shows", async () => {
     bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new TypeError("result.conflicts is undefined"));
     const user = userEvent.setup();
@@ -322,24 +359,23 @@ describe("VersionMenu", () => {
       .toContain("Error: dohc could not merge Draft into Main.\nCause: TypeError: result.conflicts is undefined");
   });
 
-  it("reports a merge that fails after the menu is gone as a notice with no Try again", async () => {
+  it.each([
+    ["fails", new Error("The engine stopped."), { title: "dohc could not merge Draft into Main", message: "Merge again once History is back." }],
+    ["stops partway", stoppedPartway(), {
+      title: "dohc could not finish merging Draft into Main", message: "Some of Draft's changes are in Main. Merge again once History is back.",
+    }],
+  ])("reports a merge that %s after the menu is gone as a notice with no Try again", async (_name, failure, words) => {
     const answer = deferredMerge();
     const user = userEvent.setup();
     const props = renderMenu();
     await confirmMerge(user);
     await waitFor(() => expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledOnce());
     cleanup();
-    const failure = new Error("The engine stopped.");
     await act(async () => {
       answer.reject(failure);
       await Promise.resolve();
     });
-    expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({
-      identity: "version-merge:ws-1:draft",
-      title: "dohc could not merge Draft into Main",
-      message: "Merge again once History is back.",
-      cause: failure,
-    });
+    expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({ identity: "version-merge:ws-1:draft", ...words, cause: failure });
     expect(props.onError).not.toHaveBeenCalled();
   });
 
@@ -368,11 +404,10 @@ describe("VersionMenu", () => {
 
   it.each([
     ["merged files", { ...merged, mergedFileCount: 4 }, { tone: "success", message: "Merged 4 files from Draft into Main" }],
-    ["nothing to merge", { ...merged, mergedFileCount: 0 }, { tone: "success", message: "Main already has everything in Draft" }],
+    ["nothing to merge", { ...merged, mergedFileCount: 0 }, { tone: "success", message: "No files from Draft merged into Main" }],
     ["files all decided elsewhere", { ...merged, conflictCount: 2 }, { tone: "success", message: "Merged Draft into Main" }],
     ["protected files", { ...merged, replacedProtectedPaths: [".env"] }, {
-      tone: "success", title: "Merged 1 file from Draft into Main", message: "One protected file took Draft's copy.",
-      details: [["Protected file", ".env", 4]],
+      tone: "success", title: "Merged 1 file from Draft into Main", message: "One protected file took Draft's copy.", paths: [".env"],
     }],
     ["files to decide", { ...merged, conflictCount: 2, conflicts: [conflict], nextAfterConflictId: "c-1" }, {
       tone: "warning", title: "Merged Draft into Main", message: "2 files have two copies.", decideFrom: "draft",
@@ -422,6 +457,26 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
     // A Try again while a dialog is open can't merge, so its row stays.
     expect(notice.retry!()).toBe(false);
+  });
+
+  it("reports a closed merge that stopped partway with History to open and Try again", async () => {
+    const answer = deferredMerge();
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await closeWhileMerging(user, "button");
+    const failure = stoppedPartway();
+    await act(async () => {
+      answer.reject(failure);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({
+      identity: "version-merge:ws-1:draft",
+      title: "dohc could not finish merging Draft into Main",
+      message: "Some of Draft's changes are in Main, and History shows which.",
+      cause: failure,
+      retry: expect.any(Function),
+      offersHistory: true,
+    }));
   });
 
   it("names a closed merge's failure in its title alone when the error has no words", async () => {

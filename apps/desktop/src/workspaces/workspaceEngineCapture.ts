@@ -1267,6 +1267,15 @@ export class RestoreFolderInUseError extends Error {
   }
 }
 
+// A merge failed after some of the version's files were already in Main.
+// Its message is the failure's own, for Copy details.
+export class MergeStoppedPartwayError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause));
+    this.name = "MergeStoppedPartwayError";
+  }
+}
+
 // History's current rules refused a restore. An unreadable rules file's
 // message leads with the files dohc could not read, so the error map names
 // them after IPC turns the error into one string. The parser's text follows,
@@ -6863,7 +6872,10 @@ export function createWorkspaceEngineCapture(
     },
 
     mergeVersionIntoMain(sourceVersionId) {
-      return enqueueResult("merge version into Main", async () => {
+      // The version's files already in Main. A failure after the first says
+      // the merge stopped partway.
+      let mergedFileCount = 0;
+      const merge = async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
@@ -6953,7 +6965,6 @@ export function createWorkspaceEngineCapture(
         }
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
-        let mergedFileCount = 0;
         let unchangedFileCount = 0;
         for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
@@ -7043,7 +7054,10 @@ export function createWorkspaceEngineCapture(
           await materialize(deletesBeforeWrites(materializations), policy);
         }
         return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
-      });
+      };
+      return enqueueResult("merge version into Main", () => merge().catch((error: unknown) => {
+        throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+      }));
     },
 
     async listOpenConflictsPage(afterConflictId) {

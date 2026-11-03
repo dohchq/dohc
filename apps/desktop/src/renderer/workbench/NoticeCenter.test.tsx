@@ -916,6 +916,49 @@ describe("notice center", () => {
     expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-2");
   });
 
+  it("lists a notice's paths one per line, three facts whole and the rest behind Show more", async () => {
+    const user = userEvent.setup();
+    const paths = [".env", "keys/deploy.pem", "config/production.env"];
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-3", tone: "success", title: "Merged 1 file from Draft into Main",
+        message: "3 protected files took Draft's copy.", paths, details: "", atMs: 1_000, canRetry: false, seen: false,
+      }],
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const listed = (testId: string) => [...screen.getByTestId(testId).querySelectorAll("li")].map((item) => item.title);
+    // The message is the first fact, so two paths show before Show more.
+    expect(listed("workspace-shell-toast-paths")).toEqual(paths.slice(0, 2));
+    await user.click(screen.getByTestId("workspace-shell-toast-more"));
+    expect(listed("workspace-shell-toast-paths")).toEqual(paths);
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(listed("notice-shell-error-3-paths")).toEqual(paths.slice(0, 2));
+    await user.click(screen.getByTestId("notice-shell-error-3-more"));
+    expect(listed("notice-shell-error-3-paths")).toEqual(paths);
+  });
+
+  it("shows a Try again that can't run yet as disabled with its reason, on the toast and the row", async () => {
+    const onRetryWorkspaceError = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message: "The engine stopped.",
+        details: "Error: The engine stopped.", atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
+      }],
+      onRetryWorkspaceError,
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const blocked = (button: HTMLButtonElement) => ({ disabled: button.disabled, reason: button.title });
+    const expected = { disabled: true, reason: "Close the open merge first." };
+    expect(blocked(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }))).toEqual(expected);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(blocked(within(screen.getByTestId("notice-shell-error-4")).getByRole("button", { name: "Try again" }))).toEqual(expected);
+    expect(onRetryWorkspaceError).not.toHaveBeenCalled();
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderNotices({
       syncStatus: {

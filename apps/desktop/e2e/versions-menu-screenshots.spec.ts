@@ -359,7 +359,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText("Main already has everything in Draft", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("No files merged into Main", { timeout: 30_000 });
     await shootWindow(page, "merge-nothing-new");
     await page.getByTestId("version-merge-done").click();
 

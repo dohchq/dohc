@@ -28,6 +28,7 @@ import {
   createWorkspaceEngineCapture,
   isVolumeSharesNewFilesCause,
   isYDocPathNotInVersionError,
+  MergeStoppedPartwayError,
   probeEngineStoreRefusal,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
@@ -326,6 +327,49 @@ describe("merge materialization order", () => {
 
       await engine.mergeVersionIntoMain(draftId);
       expect(merged).toEqual(order);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each([
+    ["names a failure after a file reached Main as stopped partway", 2, true],
+    ["passes on a failure before any file reached Main", 1, false],
+  ])("%s", async (_name, failAt, partway) => {
+    const root = await createTestScratch("dohc-merge-partway-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    let merges = 0;
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge && ++merges === failAt) throw new Error("disk full");
+      return await send(request);
+    });
+    for (const path of ["a.md", "b.md"]) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old
+" });
+      await write(root, path, "old
+");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const path of ["a.md", "b.md"]) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new
+" });
+      }
+      await engine.switchVersion("main");
+
+      const failure = await engine.mergeVersionIntoMain(draftId).then(() => null, (error: unknown) => error);
+      expect(failure).toMatchObject({ message: expect.stringContaining("disk full") });
+      expect(failure instanceof MergeStoppedPartwayError).toBe(partway);
     } finally {
       await engine.stop();
     }

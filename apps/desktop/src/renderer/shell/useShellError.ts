@@ -92,6 +92,8 @@ export interface ShellError {
   // A line after the message that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // Paths the message lists, one per line under it.
+  paths?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -387,6 +389,7 @@ export function useShellError(workspaceId: string) {
       cause?: unknown;
       command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
+      paths?: readonly string[];
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
@@ -409,6 +412,7 @@ export function useShellError(workspaceId: string) {
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(failure.command ? { command: failure.command } : {}),
+        ...(failure.paths?.length ? { paths: failure.paths } : {}),
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
