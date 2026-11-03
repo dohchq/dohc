@@ -3,7 +3,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VersionMenu, mergeFilesWait } from "./WorkspaceVersions";
+import { type MergeRetry, VersionMenu, mergeFilesWait } from "./WorkspaceVersions";
 
 const bridgeMock = {
   listWorkspaceVersions: vi.fn(),
@@ -127,7 +127,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
   });
 });
 
-function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVersion" | "onOpenHistory" | "onMergeOpenChange"> = {}) {
+function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVersion" | "onOpenHistory" | "onMergeOpenChange" | "mergeRetry"> = {}) {
   const props = {
     onWorkspaceStateChanged: vi.fn(),
     onError: vi.fn<ComponentProps<typeof VersionMenu>["onError"]>(),
@@ -457,6 +457,29 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
     // A Try again while a dialog is open can't merge, so its row stays.
     expect(notice.retry!()).toBe(false);
+  });
+
+  it("merges again from a notice made before the menu went and came back", async () => {
+    const answer = deferredMerge();
+    const user = userEvent.setup();
+    const mergeRetry: { current: MergeRetry | null } = { current: null };
+    const props = renderMenu({ mergeRetry });
+    await closeWhileMerging(user, "button");
+    await act(async () => {
+      answer.reject(acrossIpc("desktop:merge-workspace-version", "Error: The engine stopped."));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledOnce());
+    const notice = props.onMergeNotice.mock.calls[0]![0];
+    cleanup();
+    // With no menu, Try again can't merge, so its row stays.
+    expect(notice.retry!()).toBe(false);
+    renderMenu({ mergeRetry });
+    await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft"));
+    deferredMerge();
+    act(() => void notice.retry!());
+    expect(screen.getByTestId("version-merge-confirm").textContent).toBe("Merging…");
+    await waitFor(() => expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(2));
   });
 
   it("reports a closed merge that stopped partway with History to open and Try again", async () => {

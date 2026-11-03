@@ -113,6 +113,7 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
+import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
@@ -244,9 +245,7 @@ import {
   ConflictReviewDialog,
   VersionComparePage,
   VersionMenu,
-  type VersionMergeNotice,
   isVersionMergeIdentity,
-  mergeFilesWait,
 } from "./workbench/WorkspaceVersions";
 import {
   ProposalReviewDialog,
@@ -2401,8 +2400,6 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
-  // Whether a merge dialog is open. A merge notice's Try again waits for it.
-  const [versionMergeOpen, setVersionMergeOpen] = useState(false);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -3281,33 +3278,20 @@ export function DesktopWorkspaceShell(props: {
       sidebarVisible: true,
     }));
   }, [mutateWb]);
-  // A merge that answered after its dialog closed. One that left files to
-  // decide offers the review, and its row has no Dismiss: it leaves when the
-  // review closes with none of that merge's files waiting. One that stopped
-  // partway offers History, which shows what is in Main.
-  const mergesToDecide = useRef(new Map<string, string>());
-  const reportVersionMerge = useCallback(({ decideFrom, offersHistory, ...notice }: VersionMergeNotice) => {
-    if (decideFrom === undefined) mergesToDecide.current.delete(notice.identity);
-    else mergesToDecide.current.set(notice.identity, decideFrom);
-    reportShellFailure({
-      ...notice,
-      ...(decideFrom === undefined
-        ? {}
-        : { noDismiss: true, action: { label: "Decide what to keep", run: () => setConflictReviewOpen(true), reads: true } }),
-      ...(offersHistory ? { action: { label: "Open History", run: openHistoryView, reads: true, afterRetry: true } } : {}),
-    });
-  }, [openHistoryView, reportShellFailure]);
+  const openConflictReview = useCallback(() => setConflictReviewOpen(true), []);
+  const versionMerges = useVersionMergeNotices({
+    workspaceId,
+    menuShown: captureAvailable,
+    reportShellFailure,
+    clearIdentity,
+    openHistory: openHistoryView,
+    openConflictReview,
+  });
+  const { settle: settleVersionMerges } = versionMerges;
   const closeConflictReview = useCallback(() => {
     setConflictReviewOpen(false);
-    for (const [identity, sourceVersionId] of mergesToDecide.current) {
-      // A read that fails keeps the row, and the next close asks again.
-      void mergeFilesWait(workspaceId, sourceVersionId).then((waiting) => {
-        if (waiting || mergesToDecide.current.get(identity) !== sourceVersionId) return;
-        mergesToDecide.current.delete(identity);
-        clearIdentity(identity);
-      }, () => undefined);
-    }
-  }, [clearIdentity, workspaceId]);
+    settleVersionMerges();
+  }, [settleVersionMerges]);
   // Open History shows the timeline with the recovery change open beside it.
   const openCaptureRecovery = useCallback(
     (momentId: string, path: string) => {
@@ -5561,7 +5545,7 @@ export function DesktopWorkspaceShell(props: {
         atMs: error.atMs,
         canRetry: error.retry !== null,
         retryBusy: error.retryBusy,
-        ...(versionMergeOpen && isVersionMergeIdentity(error.identity) ? { retryBlocked: "Close the open merge first." } : {}),
+        ...(versionMerges.retryBlocked && isVersionMergeIdentity(error.identity) ? { retryBlocked: versionMerges.retryBlocked } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
         ...(error.action?.afterRetry ? { actionAfterRetry: true } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
@@ -5569,7 +5553,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
-    [shellErrors, reportFacts, versionMergeOpen],
+    [shellErrors, reportFacts, versionMerges.retryBlocked],
   );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
@@ -5898,9 +5882,10 @@ export function DesktopWorkspaceShell(props: {
             onOpenCompare={openVersionCompareTab}
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
-            clearError={clearIdentity}
-            onMergeNotice={reportVersionMerge}
-            onMergeOpenChange={setVersionMergeOpen}
+            clearError={versionMerges.clear}
+            onMergeNotice={versionMerges.report}
+            onMergeOpenChange={versionMerges.onMergeOpenChange}
+            mergeRetry={versionMerges.retry}
             onOpenHistory={openHistoryView}
             onConflictError={reportShellError}
             {...(shareView

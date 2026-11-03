@@ -6,6 +6,7 @@ import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../work
 import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useId,
@@ -98,6 +99,10 @@ export interface VersionMergeNotice {
   // It stopped partway, and History shows which files are in Main.
   offersHistory?: true;
 }
+
+// Opens the merge dialog merging this version. False while it can't, such
+// as while another merge dialog is open.
+export type MergeRetry = (version: WorkspaceVersionRecord) => boolean;
 
 // Whether a merge from this version still has files to decide. It reads the
 // open conflicts page by page and stops at the first one.
@@ -196,6 +201,10 @@ export function VersionMenu(props: {
   onMergeNotice: (notice: VersionMergeNotice) => void;
   // Whether a merge dialog is open, so a merge notice's Try again waits.
   onMergeOpenChange?: (open: boolean) => void;
+  // Where a merge notice's Try again finds the menu mounted now. The shell
+  // keeps it, so a notice from before the menu went and came back with
+  // capture still merges.
+  mergeRetry?: RefObject<MergeRetry | null>;
   // A merge that stopped partway offers History, which shows what is in Main.
   onOpenHistory?: () => void;
   // A conflict choice in the merge dialog reports a fallback and the error,
@@ -235,6 +244,18 @@ export function VersionMenu(props: {
       mounted.current = false;
     };
   }, []);
+  const ownRetry = useRef<MergeRetry | null>(null);
+  const retryTo = props.mergeRetry ?? ownRetry;
+  useEffect(() => {
+    retryTo.current = (version) => {
+      if (mergeOpen.current) return false;
+      setMerge({ source: version, runOnOpen: true });
+      return true;
+    };
+    return () => {
+      retryTo.current = null;
+    };
+  }, [retryTo]);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -466,16 +487,13 @@ export function VersionMenu(props: {
   // The dialog shows a merge's answer while it is open. Closed first, by the
   // person or because this menu went with capture, the merge keeps going and
   // its answer is a notice. A failure's Try again opens the dialog and merges
-  // again, while this menu is here to do it.
+  // again, in whichever menu is mounted then.
   const answerMergeAway = useCallback(
     (version: WorkspaceVersionRecord, answer: MergeAnswer) => {
-      const retry = () => {
-        if (!mounted.current || mergeOpen.current) return false;
-        setMerge({ source: version, runOnOpen: true });
-      };
+      const retry = () => (retryTo.current?.(version) ? undefined : false);
       props.onMergeNotice(mergeNotice(mergeIdentity(workspaceId, version.id), version, answer, mounted.current ? retry : null));
     },
-    [props.onMergeNotice, workspaceId],
+    [props.onMergeNotice, retryTo, workspaceId],
   );
 
   if (!snapshot) return null;
