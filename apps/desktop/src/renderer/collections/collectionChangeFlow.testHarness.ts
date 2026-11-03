@@ -23,15 +23,17 @@ const schemaSql = "CREATE TABLE volunteers (id TEXT PRIMARY KEY);", operationSou
 const migrationPath = "volunteers/migrations/004-due-date.sql", migrationSql = "ALTER TABLE volunteers ADD COLUMN due TEXT; ALTER TABLE volunteers DROP COLUMN notes;";
 export const proposalPath = `volunteers/changes/${id(50)}.json`;
 export const base = describeDatasetRevision({ definition: volunteers, revision: 3, schemaSql, operationSource });
-const counts: DatasetMigrationCandidate["preview"]["tables"] = [{ table: "volunteers", beforeRows: 12, afterRows: 12, changedRows: 12, deletedRows: 0,
-  beforeValues: { id: 12, email: 12, notes: 12 }, afterValues: { id: 12, email: 12, due: 0 }, clearedValues: { id: 0, email: 0, notes: 12 } }];
+/** What the migration does to the Collection's records, when it holds `records` of them and `notes` have Notes. */
+const countsOf = (records: number, notes = records): DatasetMigrationCandidate["preview"]["tables"] => [{ table: "volunteers", beforeRows: records, afterRows: records,
+  changedRows: records, deletedRows: 0, beforeValues: { id: records, email: records, notes }, afterValues: { id: records, email: records, due: 0 }, clearedValues: { id: 0, email: 0, notes } }];
+const counts = countsOf(12);
 export const ice = { name: "Ice", agent: false }, claude = { name: "Claude Code", agent: true };
 
 /**
  * A workspace and its Collection as the bridge answers for them. Preparing
  * reads the files as they are now, and approving spends the preparation
  * first, as main does. `refuse` makes the next approval throw that error
- * instead.
+ * instead. `recount` changes the records the next preparation counts.
  */
 export function world() {
   const files: Record<string, string> = { "volunteers/dataset.json": JSON.stringify(asked, null, 2), [volunteers.schemaPath]: schemaSql,
@@ -50,11 +52,11 @@ export function world() {
   const calls: DatasetRequest[] = [];
   const reads: string[] = [];
   const control = { refuse: null as unknown };
-  let preparations = 0;
+  let preparations = 0, records = counts;
   const prepare = () => {
     const revision = describeDatasetRevision({ definition: JSON.parse(files["volunteers/dataset.json"]!), revision: head.revision + 1, schemaSql: files[volunteers.schemaPath]!, operationSource: files[volunteers.operationsPath]! });
     const migration = files[migrationPath]!;
-    const candidate = { changeSha256: datasetChangeDigest({ revisionSha256: revision.revisionSha256, migrationSql: migration }), preview: { tables: counts } } as unknown as DatasetMigrationCandidate;
+    const candidate = { changeSha256: datasetChangeDigest({ revisionSha256: revision.revisionSha256, migrationSql: migration }), preview: { tables: records } } as unknown as DatasetMigrationCandidate;
     return { kind: "migration-prepared" as const, preparationId: id(60 + ++preparations), previousRevision: head, revision, schemaSql: files[volunteers.schemaPath]!,
       operationSource: files[volunteers.operationsPath]!, migrationSql: migration, approvalDigest: "a".repeat(64), candidate };
   };
@@ -99,7 +101,8 @@ export function world() {
       throw new Error(`Unexpected ${request.action}`);
     }),
   } as unknown as CollectionChangeApi;
-  return { api, files, moments, calls, reads, moment, control, head: () => head, actions: () => calls.map(call => call.action) };
+  const recount = (total: number, notes = total) => { records = countsOf(total, notes); };
+  return { api, files, moments, calls, reads, moment, control, recount, head: () => head, actions: () => calls.map(call => call.action) };
 }
 export type World = ReturnType<typeof world>;
 

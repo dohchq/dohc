@@ -3,13 +3,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
+import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
 import { formatClock } from "../time";
 import { CollectionChangeCard } from "./CollectionChangeCard";
 
 const posted: ChatMessageRecord = { id: "message-1", threadId: "thread-1", presentation: { group: "agent", hue: null, self: false },
   authorKind: "agent", authorDisplayName: "Claude Code", body: "Here's the due date you asked for.", createdAtMs: 3_000 };
-const onReply = vi.fn(async (_input: { body: string; resolves: boolean }) => undefined);
+const onReply = vi.fn(async (_input: { body: string; resolves: boolean; attach?: string }) => undefined);
 const onError = vi.fn();
 let place: World;
 // Cards remember what they showed for the session, so each test posts its own message.
@@ -86,6 +87,42 @@ it("applies the rows it showed and answers the message as the person who clicked
   await waitFor(() => expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true }));
   expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
   expect(onError).not.toHaveBeenCalled();
+});
+
+it("applies the change after records came, and its reply attaches the change as it applied it", async () => {
+  ask(place); card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  // A volunteer signed up without a note.
+  place.recount(13, 12);
+  fireEvent.click(apply);
+  await waitFor(() => expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true, attach: expect.stringMatching(COLLECTION_CHANGE_FILE) }));
+  const { attach } = onReply.mock.calls[0]![0] as { attach: string };
+  expect(attach).not.toBe(proposalPath);
+  expect(JSON.parse(place.files[attach]!).rows).toContainEqual(expect.objectContaining({ kind: "migration", records: 13 }));
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("applies nothing when records changed so that the change deletes more, and points to the review", async () => {
+  const proposal = ask(place); card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  place.recount(13);
+  fireEvent.click(apply);
+  const failed = await screen.findByTestId("lane-change-failed");
+  expect(failed.textContent).toBe("Records changed after it was sent, and it now deletes more. Review the change to apply it.");
+  expect(screen.queryByTestId("lane-change-apply")).toBeNull();
+  expect(screen.getByTestId("lane-change-review")).toBeTruthy();
+  expect(place.head().revisionSha256).not.toBe(proposal.revisionSha256);
+  expect(onReply).not.toHaveBeenCalled();
+});
+
+it("offers Try again for an Applied reply that didn't post, which posts it", async () => {
+  ask(place); card();
+  onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
+  fireEvent.click(await screen.findByTestId("lane-change-apply"));
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc couldn't send that message.", expect.any(Error), expect.any(Function)));
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
+  expect(onReply).toHaveBeenLastCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
 });
 
 it("names the server when it refuses the change, with no Try again", async () => {

@@ -4,7 +4,7 @@ import { ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { isDatasetServerNotFound } from "../../ipc/errorWords";
 import {
-  collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, describeCollectionChangeRow, historyCanUndoCollectionChange,
+  collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, describeCollectionChangeRow, historyCanUndoCollectionChange, sameCollectionChange,
   type CollectionChangeProposal, type CollectionChangeRow,
 } from "../../workspaces/collectionChange";
 import { bridge } from "../bridge";
@@ -103,15 +103,28 @@ export function CollectionChangeCard(props: {
     if (mounted.current) setPhase({ kind: "failed", ...failure });
     else props.onError(failure.words, error);
   };
-  const posted = (body: string, resolves: boolean, words: string, attach?: string) => props.onReply({ body, resolves, ...(attach ? { attach } : {}) })
-    .catch((error: unknown) => props.onError(ipcErrorMessage(error, words), error));
+  // A reply that didn't post can be posted again from its notice, so the message still gets its answer.
+  const posted = (body: string, resolves: boolean, words: string, attach?: string) => {
+    const post = (): Promise<void> => props.onReply({ body, resolves, ...(attach ? { attach } : {}) })
+      .catch((error: unknown) => props.onError(ipcErrorMessage(error, words), error, () => void post()));
+    return post();
+  };
+  // When what was applied isn't exactly what was asked, the reply attaches a file that records it, so the card shows it.
+  const recorded = (asked: CollectionChangeProposal, applied: CollectionChangeProposal) =>
+    applied.changeSha256 === asked.changeSha256 && sameCollectionChange(asked.rows, applied.rows) ? Promise.resolve(undefined)
+      : recordCollectionChange(bridge(), workspaceId, applied).catch((error: unknown) => {
+        props.onError(ipcErrorMessage(error, "dohc applied the change but couldn't save which change it applied."), error);
+        return undefined;
+      });
   const settled = () => { if (mounted.current) { setPhase({ kind: "idle" }); setReload(value => value + 1); } };
 
   const apply = async (shown: CollectionChange) => {
     setPhase({ kind: "applying", words: "Applying…" });
     try {
-      if (await applyCollectionChange(bridge(), workspaceId, shown) === "applied") {
-        await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
+      const result = await applyCollectionChange(bridge(), workspaceId, shown);
+      if (result.kind === "deletes-more") return fail({ words: "Records changed after it was sent, and it now deletes more. Review the change to apply it.", retry: false }, null);
+      if (result.kind === "applied") {
+        await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", await recorded(shown.proposal, result.proposal));
       } else if (mounted.current) setStale(true);
       settled();
     } catch (error) { fail(collectionApplyFailure(shown.proposal.name)(error), error); }
@@ -144,14 +157,8 @@ export function CollectionChangeCard(props: {
           if (!mounted.current) props.onError(failure(error).words, error);
           throw error;
         }
-        // A review can apply another change than the one asked. The reply attaches a file that records it, so the card shows it.
-        const applied = review.change.proposal;
-        const attach = applied.changeSha256 === reviewing.proposal.changeSha256 ? undefined
-          : await recordCollectionChange(bridge(), workspaceId, applied).catch((error: unknown) => {
-            props.onError(ipcErrorMessage(error, "dohc applied the change but couldn't save which change it applied."), error);
-            return undefined;
-          });
-        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", attach);
+        // A review can apply another change than the one asked.
+        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", await recorded(reviewing.proposal, review.change.proposal));
         if (mounted.current) setStale(false);
         settled();
       }} />, document.body) : null}

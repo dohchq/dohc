@@ -208,9 +208,12 @@ export function attributeCollectionChangeRows(rows: readonly Draft[], input: {
   });
 }
 
-/** Whether two lists apply the same change, whoever made each part. */
-export function sameCollectionChange(a: readonly CollectionChangeRow[], b: readonly CollectionChangeRow[]): boolean {
-  const plain = (rows: readonly CollectionChangeRow[]) => json(rows.map(({ source: _source, ...row }) => row));
+const COUNTS = new Set(["records", "empty", "values", "lost"]);
+
+/** Whether two lists apply the same change, whoever made each part. With `counts: false`, however many records each part touches. */
+export function sameCollectionChange(a: readonly CollectionChangeRow[], b: readonly CollectionChangeRow[], options: { counts?: boolean } = {}): boolean {
+  const plain = (rows: readonly CollectionChangeRow[]) => json(rows.map(({ source: _source, ...row }) =>
+    options.counts === false ? Object.fromEntries(Object.entries(row).filter(([key]) => !COUNTS.has(key))) : row));
   return plain(a) === plain(b);
 }
 

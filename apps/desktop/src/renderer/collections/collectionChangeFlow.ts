@@ -1,7 +1,7 @@
 import { datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../../ipc/bridgeContract";
 import {
-  attributeCollectionChangeRows, collectionChangeProposal, CollectionChangeProposal, collectionReviewRows, sameCollectionChange,
+  attributeCollectionChangeRows, collectionChangeDeletes, collectionChangeProposal, CollectionChangeProposal, collectionReviewRows, sameCollectionChange,
   type CollectionChangeAuthor, type CollectionChangeRow, type CollectionChangeStep,
 } from "../../workspaces/collectionChange";
 import { engineMomentAuthorName } from "../workbench/EngineHistory";
@@ -140,12 +140,14 @@ async function changeState(api: Api, input: {
 
 /**
  * Applies the change the card shows. It prepares the Collection's files
- * afresh and applies them only when they make exactly the rows shown, with
- * the digest shown, so an edit to the files or to the attached file after the
- * card loaded can't change what Apply does. Otherwise it applies nothing.
+ * afresh and applies them only when they make the rows shown, with the digest
+ * shown, so an edit to the files or to the attached file after the card loaded
+ * can't change what Apply does. Records can come and go since then, which
+ * changes only the counts, but it applies nothing that now deletes more than
+ * shown. It returns the change it applied, counted as it applied it.
  */
 export async function applyCollectionChange(api: Pick<Api, "dataset">, workspaceId: string,
-  shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<"applied" | "edited"> {
+  shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<{ kind: "applied"; proposal: CollectionChangeProposal } | { kind: "edited" | "deletes-more" }> {
   const { proposal } = shown;
   const prepared = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "prepareMigration", migrationPath: proposal.migrationPath });
   if (prepared.kind !== "migration-prepared") throw new Error("dohc couldn't prepare this change. Try again.");
@@ -154,12 +156,14 @@ export async function applyCollectionChange(api: Pick<Api, "dataset">, workspace
     let fresh: CollectionChangeProposal | null = null;
     try { fresh = collectionChangeProposal(prepared, { datasetPath: proposal.datasetPath, migrationPath: proposal.migrationPath, note: proposal.note }); }
     catch { fresh = null; }
-    if (!fresh || fresh.changeSha256 !== proposal.changeSha256 || !sameCollectionChange(shown.rows, fresh.rows)) return "edited";
+    if (!fresh || fresh.changeSha256 !== proposal.changeSha256 || !sameCollectionChange(shown.rows, fresh.rows, { counts: false })) return { kind: "edited" };
+    const was = collectionChangeDeletes(shown.rows), now = collectionChangeDeletes(fresh.rows);
+    if (now.records > was.records || now.values > was.values) return { kind: "deletes-more" };
     approving = true;
     const result = await api.dataset({ workspaceId, action: "approveMigration", preparationId: prepared.preparationId,
       revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest, changeSha256: proposal.changeSha256 });
     if (result.kind !== "migrated") throw new Error("dohc couldn't confirm this change. Refresh the Collection.");
-    return "applied";
+    return { kind: "applied", proposal: fresh };
   } finally {
     if (!approving) await api.dataset({ workspaceId, action: "discardMigration", preparationId: prepared.preparationId }).catch(() => undefined);
   }
