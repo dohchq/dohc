@@ -3402,6 +3402,25 @@ pub fn live_page_under_folder(
     Ok(owned.then_some(LivePageUnderFolder::Owned))
 }
 
+/// Whether this computer owns the page at `path`: its head's object has an
+/// owner binding. A rename would leave the binding's path behind.
+pub fn live_page_owned(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings b
+           JOIN snapshots s ON s.workspace_id=b.workspace_id
+             AND s.version_id=b.main_version_id AND s.object_id=b.object_id
+         WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND s.path=?3)",
+        params![workspace_id, version_id, path],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 fn ensure_adopted_owner_binding_unchanged(
     conn: &Connection,
     key: &DocKey,

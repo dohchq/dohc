@@ -345,7 +345,7 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
-  if (name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError") {
+  if (name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError" || name === "LivePageMoveError") {
     const [title = "", ...body] = message.split("\n");
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
@@ -565,6 +565,19 @@ export function isLiveFolderMoveRefusal(error: unknown): boolean {
 export function isFolderMoveRefusal(error: unknown): boolean {
   const { name } = parse(error);
   return name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError";
+}
+
+/** A page this computer owns live can't be renamed or moved. Try again reruns the move. */
+export function isLivePageMoveRefusal(error: unknown): boolean {
+  return parse(error).name === "LivePageMoveError";
+}
+
+export function livePageMoveTitle(path: string, action: "move" | "rename"): string {
+  return `dohc can't ${action} "${path}" while it has live editing on`;
+}
+
+export function livePageMoveBody(action: "move" | "rename"): string {
+  return `In Live documents, stop live editing for this page, then ${action} it again.`;
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */

@@ -8,6 +8,7 @@ import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { workspaceDestinationError, workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
+import { isLivePageMoveRefusal } from "../ipc/errorWords";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveDocumentMutationError, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -537,6 +538,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
   } catch (error) {
+    // Explorer reads this refusal by its name to offer Try again and Live documents.
+    if (options.byHand && isLivePageMoveRefusal(error)) throw error;
     if (error instanceof StoredEntryIdentityUnavailable) error = moveIdentityUnavailable(input.fromPath, input.toPath);
     return async () => ({ ok: false, path: input.fromPath, reason: reason(error, failed) });
   }

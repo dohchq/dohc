@@ -198,9 +198,17 @@ struct VersionedTextCheckMoveParams {
     path: String,
     #[serde(default)]
     author: Option<Value>,
-    /// A folder move also waits for a page under it that this computer owns.
+    /// What a move carries. A delete or a duplicate leaves it out and checks
+    /// only this computer's hosted pages.
     #[serde(default)]
-    folder: bool,
+    moving: Option<MovingPath>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum MovingPath {
+    Page,
+    Folder,
 }
 
 #[derive(Deserialize)]
@@ -726,7 +734,7 @@ impl EngineService {
         validated_author(params.author.as_ref())?;
         let open = self.open(request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        if params.folder {
+        if let Some(MovingPath::Folder) = params.moving {
             let live = Self::read_under_ctx(
                 &cancellation,
                 "versionedText.checkMove",
@@ -754,11 +762,24 @@ impl EngineService {
             "versionedText.checkMove",
             open.actor.ensure_no_adopted_owner_under_path(
                 open.workspace_id.clone(),
-                params.version_id,
-                params.path,
+                params.version_id.clone(),
+                params.path.clone(),
             ),
         )
         .await?;
+        if params.moving.is_none() {
+            return Ok(json!({"allowed":true}));
+        }
+        let owned = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.checkMove",
+            open.actor
+                .live_page_owned(open.workspace_id.clone(), params.version_id, params.path),
+        )
+        .await?;
+        if owned {
+            return Err(WireError::new(ErrorCode::InvalidParams, "live-page-owned"));
+        }
         Ok(json!({"allowed":true}))
     }
 

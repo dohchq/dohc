@@ -100,6 +100,8 @@ async function reconnectFailureCapture(prefix: string) {
     moveRequests: [] as string[],
     // A page this computer owns: only a folder check over it refuses.
     ownedUnder: null as string | null,
+    // A page this computer owns: only a page move of it refuses.
+    ownedPage: null as string | null,
     checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
   };
@@ -114,12 +116,19 @@ async function reconnectFailureCapture(prefix: string) {
         return { id: request.id, result: { closed: true } };
       }
       if (request.method === "versionedText.checkMove") {
-        const params = request.params as { path: string; folder?: boolean };
-        state.checkedFolders.push({ path: params.path, folder: params.folder === true });
-        if (params.folder === true && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+        const params = request.params as { path: string; moving?: "page" | "folder" };
+        state.checkedFolders.push({ path: params.path, folder: params.moving === "folder" });
+        if (params.moving === "folder" && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
           state.moveRequests.push(request.method);
           throw new DaemonRefusalError(
             { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
+        if (params.moving === "page" && params.path === state.ownedPage) {
+          state.moveRequests.push(request.method);
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" },
             new Error("daemon response"),
           );
         }
@@ -345,6 +354,23 @@ it("checks a folder move ahead of the move, with the folder words, and passes a 
   ]);
   expect(state.moveRequests.every(method => method === "versionedText.checkMove")).toBe(true);
   expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+const PAGE_REFUSAL = `dohc can't move "notes/page.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`;
+
+it("refuses a move of an owned page with the move words, before anything moves, and deletes it as before", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-page-move-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedPage = "notes/page.md";
+  await expect(capture.beginFileRename("notes/page.md", "notes/renamed.md")).rejects.toMatchObject({ name: "LivePageMoveError", message: PAGE_REFUSAL });
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  // A delete sends no move, so only a hosted page refuses it.
+  const finish = await capture.settleAndCloseLiveSessionsForPath("notes/page.md");
+  finish(false);
   await capture.stop();
 });
 

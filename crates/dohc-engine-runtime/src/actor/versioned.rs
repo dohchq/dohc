@@ -135,6 +135,24 @@ impl ActorHandle {
         .await
     }
 
+    /// Whether this computer owns the page at `path` live.
+    pub async fn live_page_owned(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            let path = dohc_engine_domain::validate_addressable_plaintext_path(&path)?;
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::live_page_owned(conn, &workspace_id, &version_id, &path)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// The live page on this computer that a move of `folder` would split.
     pub async fn live_page_under_folder(
         &self,

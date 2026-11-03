@@ -1072,14 +1072,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return inputs;
   }
 
-  /** `folder`: the path is a folder being moved, so a page this computer owns under it refuses too. */
-  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor; folder?: boolean }): Promise<void> {
+  /** `moving`: what a move carries, so a page this computer owns at or under the path refuses too. A delete or duplicate leaves it out. */
+  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor; moving?: "page" | "folder" }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.textCheckMove, {
       versionId: input.versionId,
       path: input.path,
       ...(input.author ? { author: input.author } : {}),
-      ...(input.folder ? { folder: true } : {}),
+      ...(input.moving ? { moving: input.moving } : {}),
     });
   }
 

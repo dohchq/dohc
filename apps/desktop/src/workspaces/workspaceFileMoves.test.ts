@@ -1130,9 +1130,9 @@ describe("a folder with a live page", () => {
     const f = await fixture({ beforeRequest: request => {
       methods.push(request.method);
       if (request.method !== VERSIONED_METHOD.textCheckMove) return;
-      const params = request.params as { path: string; folder?: boolean };
-      checks.push({ path: params.path, folder: params.folder === true });
-      if (params.folder === true && "notes/page.md".startsWith(`${params.path}/`)) {
+      const params = request.params as { path: string; moving?: "page" | "folder" };
+      checks.push({ path: params.path, folder: params.moving === "folder" });
+      if (params.moving === "folder" && "notes/page.md".startsWith(`${params.path}/`)) {
         throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" }, null);
       }
     } });
@@ -1169,6 +1169,47 @@ describe("a folder with a live page", () => {
     await f.removeByHand("notes");
     expect(existsSync(join(f.rootPath, "notes"))).toBe(false);
     expect(f.checks.every(check => !check.folder)).toBe(true);
+  });
+});
+
+describe("a page this computer owns live", () => {
+  const refusal = [`dohc can't move "notes/page.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then move it again."].join(String.fromCharCode(10));
+  // The engine refuses only a page move of notes/page.md.
+  async function ownedFixture() {
+    const methods: string[] = [], moving: Array<string | undefined> = [];
+    const f = await fixture({ beforeRequest: request => {
+      methods.push(request.method);
+      if (request.method !== VERSIONED_METHOD.textCheckMove) return;
+      const params = request.params as { path: string; moving?: "page" | "folder" };
+      if (params.path === "notes/page.md") moving.push(params.moving);
+      if (params.moving === "page" && params.path === "notes/page.md") {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    const seen = await f.start();
+    return { ...f, methods, moving, seen };
+  }
+
+  it("refuses its move from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.move("notes/page.md", "notes/renamed.md")).toMatchObject({ ok: false, reason: refusal });
+    await expect(f.moveByHand("notes/page.md", "notes/renamed.md")).rejects.toMatchObject({ name: "LivePageMoveError", message: refusal });
+    expect(f.moving).toEqual(["page", "page"]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    expect(existsSync(join(f.rootPath, "notes/renamed.md"))).toBe(false);
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  it("deletes it as before, with no move check", async () => {
+    const f = await ownedFixture();
+    await f.removeByHand("notes/page.md");
+    expect(existsSync(join(f.rootPath, "notes/page.md"))).toBe(false);
+    expect(f.moving.every(value => value === undefined)).toBe(true);
   });
 });
 

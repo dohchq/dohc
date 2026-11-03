@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { LIVE_FOLDER_MOVE_BODY, LiveDocumentMutationError, LiveFolderMoveError, liveFolderMoveTitle, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { LIVE_FOLDER_MOVE_BODY, LiveDocumentMutationError, LiveFolderMoveError, liveFolderMoveTitle, LivePageMoveError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
@@ -28,6 +28,9 @@ import {
   isPrivacyDenied,
   isShareReadOnlyRefusal,
   isLiveFolderMoveRefusal,
+  isLivePageMoveRefusal,
+  livePageMoveBody,
+  livePageMoveTitle,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   namingCollectionMove,
@@ -372,6 +375,21 @@ describe("error words", () => {
     expect(isLiveFolderMoveRefusal(received)).toBe(true);
     expect(readError(received)).toMatchObject({ title: `dohc can't move "notes/box" while a page in it has live editing on`, words: LIVE_FOLDER_MOVE_BODY });
     expect(isSharedLiveFileRefusal(received)).toBe(false);
+  });
+
+  it("reads a refused page move across IPC as its title and body, with a word for each action", () => {
+    const received = acrossIpc(new LivePageMoveError([livePageMoveTitle("docs/a.md", "move"), livePageMoveBody("move")].join(String.fromCharCode(10))),
+      "desktop:move-workspace-path");
+    expect(isLivePageMoveRefusal(received)).toBe(true);
+    expect(readError(received)).toMatchObject({ title: `dohc can't move "docs/a.md" while it has live editing on`,
+      words: "In Live documents, stop live editing for this page, then move it again.", cause: null });
+    expect(isLiveFolderMoveRefusal(received)).toBe(false);
+    expect(isSharedLiveFileRefusal(received)).toBe(false);
+    expect([livePageMoveTitle("docs/a.md", "rename"), livePageMoveBody("rename")]).toEqual([
+      `dohc can't rename "docs/a.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then rename it again.",
+    ]);
+    expect(isLivePageMoveRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(false);
   });
 
   it("explains an open editing session across IPC and keeps its refusal for Copy", () => {

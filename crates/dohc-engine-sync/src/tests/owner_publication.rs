@@ -902,3 +902,72 @@ fn a_folder_without_a_live_page_moves_and_the_page_check_is_unchanged() {
         })
         .unwrap();
 }
+
+fn page_check(store: &EngineStore, path: &str) -> bool {
+    store
+        .read_with(|conn| crate::live_page_owned(conn, "ws", "main", path))
+        .unwrap()
+}
+
+/// A page this computer owns refuses its own move, and only its own: an
+/// unbound page beside it, its folder and a prefix of its path move.
+#[test]
+fn an_owned_page_refuses_its_own_move() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    seed_text_head(&mut store, "plain", "notes/box/plain.md", "plain");
+    assert!(page_check(&store, "notes/box/owner.md"));
+    for path in [
+        "notes/box/plain.md",
+        "notes/box",
+        "notes/box/owner",
+        "other.md",
+    ] {
+        assert!(!page_check(&store, path), "{path}");
+    }
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+}
+
+/// The page check reads the head's path, as the folder check does, so a
+/// binding's stale `currentPath` neither hides the page nor refuses its old path.
+#[test]
+fn an_owned_page_move_is_found_by_its_head_not_its_binding_path() {
+    let (_dir, mut store, _, _) = fixture_at("notes/owner.md");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','elsewhere/owner.md')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert!(page_check(&store, "notes/owner.md"));
+    assert!(!page_check(&store, "elsewhere/owner.md"));
+}
+
+/// Once Stop releases the owner binding, the page and its folder move.
+#[test]
+fn a_released_owned_page_moves() {
+    use dohc_engine_collab::owner_outbox::release;
+    let (_dir, mut store, observed, _) = fixture_at("notes/owner.md");
+    let key = DocKey::new("ws", "main", "owner").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            release::request_in_tx(tx, &key, 20)?;
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                Some(observed.accepted_cursor),
+                None,
+                21,
+                |_, _, _, _, _| Ok(()),
+            )
+        })
+        .unwrap();
+    assert!(!page_check(&store, "notes/owner.md"));
+    assert_eq!(folder_check(&store, "notes"), None);
+}

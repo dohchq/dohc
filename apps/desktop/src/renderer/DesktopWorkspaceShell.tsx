@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isSharedLiveFileRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderMoveRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isSharedLiveFileRefusal, livePageMoveBody, livePageMoveTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -209,9 +209,9 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
-import { Explorer } from "./workbench/Explorer";
+import { Explorer, type LivePageMoveRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { folderMoveIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -962,6 +962,18 @@ export function DesktopWorkspaceShell(props: {
     (message: string, cause?: unknown, retry?: () => void, identity?: string) =>
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
+  );
+  // Explorer's failures. A move refused for live editing opens Live
+  // documents, at the page's row for a page, whose words name the action that ran.
+  const reportExplorerError = useCallback(
+    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageMoveRefused) => {
+      if (!livePage && !isLiveFolderMoveRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
+      const id = workspaceId, reveal = livePage?.path ?? null;
+      reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
+        ...(livePage ? { title: livePageMoveTitle(livePage.path, livePage.action), message: livePageMoveBody(livePage.action) } : { message }),
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
+    },
+    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
@@ -3862,9 +3874,9 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A folder move that succeeds takes back its earlier refusal.
+      // A move that succeeds takes back its earlier refusal.
       for (const change of changes) {
-        if (change.kind === "folder") clearIdentity(folderMoveIdentity(workspaceId, change));
+        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
@@ -5332,7 +5344,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={reportFailureMessage}
+        onError={reportExplorerError}
         onChangeSucceeded={clearIdentity}
         onNewCollection={setNewCollectionFolder}
       />

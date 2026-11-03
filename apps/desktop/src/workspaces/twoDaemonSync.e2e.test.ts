@@ -3386,24 +3386,25 @@ describe("the move guard over a real relay and live host", () => {
     }
   }, 600_000);
 });
-// Checks whether renaming a page whose owner native owner delivery has bound
-// stops all outbound publication from the owner's workspace. Each workspace
-// renames A, creates B and saves a change to the file C, then tries one
-// recovery from that state. "unbound" edits A live but never binds its owner,
-// for comparison. Every observation prints as one `REPRO-OBS` JSON line; the
-// soft expectations hold the correct behavior, so the case fails only where
-// publication stays stopped.
-type RenameReproCase = "wait" | "stop" | "workaround" | "restart" | "unbound";
+// dohc refuses to rename a page whose owner native owner delivery has bound,
+// so its workspace keeps publishing. Each workspace renames A in Explorer,
+// creates B and saves a change to the file C. In "bound" the rename is
+// refused, B and C still publish, and after Stop the rename succeeds and
+// publishes. "unbound" edits A live but never binds its owner, and renames.
+// Each sync pass prints as one `REPRO-OBS` JSON line.
+type RenameReproCase = "bound" | "unbound";
 type RenameReproDocument = ReturnType<typeof readyOwnerDeliveryDocuments>[number];
 type RenameReproPush = Awaited<ReturnType<EngineRelayWorkspaceClient["push"]>>;
 const renameRepro = { oldPath: "docs/a.md", newPath: "docs/a-renamed.md", newPage: "notes/b.md", existing: "notes/c.md" } as const;
 const reproErrorText = (error: unknown) => error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+const ownedRenameRefusal = `dohc can't move "${renameRepro.oldPath}" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`;
 
 async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<typeof mintLocalhostCa>>,
   trustEnv: Record<string, string>, localStates: Map<string, LocalStateBindings>): Promise<void> {
   const { oldPath, newPath, newPage, existing } = renameRepro;
   const workspaceId = `repro-rename-${kind}-${randomUUID().slice(0, 8)}`;
-  const bound = kind !== "unbound";
+  const bound = kind === "bound";
   const rootA = await createTestScratch("dohc-repro-rename-owner-");
   const rootB = await createTestScratch("dohc-repro-rename-peer-");
   const relayRoot = await createTestScratch("dohc-repro-rename-relay-");
@@ -3568,7 +3569,8 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     return moveWorkspacePathByHand(operation, { fromPath, toPath }, { kind: "human", humanId: "local-person" }, {
       capture: o.pages, requestId: randomUUID(),
       trashItem: async () => { throw new Error("This test trashes nothing."); }, markDeleted: () => undefined })
-      .then(result => ({ ok: true as const, path: result.path }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
+      .then(result => ({ ok: true as const, path: result.path }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error),
+        code: error instanceof Error && error.cause instanceof DaemonRefusalError ? error.cause.message : null }));
   };
   // An ordinary save of a file, as an editor outside dohc saves it, which capture records.
   const saveFile = async (path: string, text: string) => {
@@ -3677,6 +3679,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     const stillLive = !stopped.ok ? "not waited: Stop refused" : await expect.poll(async () => (await ready()).map(document => document.binding.currentPath),
       { timeout: 60_000 }).toEqual([]).then(() => null, () => discoveryPayload);
     observe({ stopInput: input, stopped, stillLiveAfterStop: stillLive, ownerA: bindingOf(objectIdA) });
+    return stopped;
   };
   try {
     relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
@@ -3748,75 +3751,52 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
       .toEqual({ ownerBoundAtOldPath: bound, anyBinding: bound, currentActivation: false });
     await settle(3, relay => relay.aOld);
 
-    // Step 2: with A's tab closed, the owner renames A in Explorer. A refusal
-    // is recorded, and A is then renamed on disk under the capture hold, as
-    // another program or an agent renames a file.
+    // Step 2: with A's tab closed, the owner renames A in Explorer. dohc
+    // refuses a bound A, which stays where it was.
     step = "2-rename";
-    const o = owner();
+    const onDisk = async () => ({ old: await stat(join(rootA, oldPath)).then(() => true, () => false),
+      new: await stat(join(rootA, newPath)).then(() => true, () => false) });
     const renamed = await appRename(oldPath, newPath);
-    let route = "app";
-    if (!renamed.ok) {
-      route = "disk-under-hold";
-      const files = await o.adapter();
-      const { holdId } = await files.holdCapture();
-      try { observe({ renamed, moved: await files.moveFileUnderHold({ holdId, fromPath: oldPath, toPath: newPath }) }); }
-      finally { await files.releaseCapture(holdId); }
-      await files.reconcileCapture();
+    observe({ renamed, onDisk: await onDisk() });
+    if (bound) {
+      expect(renamed, "the rename is refused with the move words").toEqual({ ok: false, code: "live-page-owned",
+        error: `LivePageMoveError: ${ownedRenameRefusal}` });
+      expect(await onDisk(), "A stays at its old path").toEqual({ old: true, new: false });
+    } else {
+      expect(renamed).toEqual({ ok: true, path: newPath });
     }
-    const onDisk = (path: string) => stat(join(rootA, path)).then(() => true, () => false);
-    observe({ renamed, route, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) } });
-    await settle(3, relay => relay.aNew);
+    const at = bound ? "aOld" : "aNew";
 
     // Step 3: a new page B, and an ordinary saved change to the file C, which
     // synced before step 1 and is not enrolled for live delivery.
     step = "3-new-and-changed";
     await writePage(newPage, "# B\n");
     await saveFile(existing, savedC);
-    const blocked = await settle(4, reachedAll("aNew"));
-    expectOwnerIntact("after B and C", blocked);
-    expectPublished("after B and C", blocked);
-    if (kind === "unbound") return;
+    const published = await settle(6, reachedAll(at));
+    expectOwnerIntact("after B and C", published);
+    expectPublished("after B and C", published, at);
+    if (!bound) return;
 
-    // Each recovery starts from the state step 3 left.
-    step = `recovery-${kind}`;
-    // Stop live editing on the Live documents row, which names the server's
-    // path for A (still its old one) and A's object.
-    if (kind === "stop") await tryStop({ path: oldPath, objectId: objectIdA });
-    // The workaround: rename A back in Explorer, Stop live editing on its
-    // row, wait until the row is Stopped, rename A to its new path again, sync.
-    if (kind === "workaround") {
-      const renamedBack = await appRename(newPath, oldPath);
-      observe({ renamedBack, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) } });
-      step = "recovery-workaround:1-renamed-back";
-      await settle(3, reachedAll("aOld"));
-      step = "recovery-workaround:2-stop";
-      await tryStop({ path: oldPath, objectId: objectIdA });
-      let row: Awaited<ReturnType<typeof serverRowOfA>> = null;
-      let owed = -1;
-      const stopped = await expect.poll(async () => {
-        row = await serverRowOfA();
-        owed = await owedStopsOfA();
-        return row !== null && "status" in row && row.status === "retired" && owed === 0;
-      }, { timeout: 120_000 }).toBe(true).then(() => true, () => false);
-      observe({ stoppedState: stopped, serverRow: row, owedStops: owed, ownerA: bindingOf(objectIdA) });
-      expect.soft(stopped, `${kind}: A's Live documents row reaches Stopped`).toBe(true);
-      const afterStop = await settle(4, reachedAll("aOld"));
-      expectOwnerIntact("after rename back and Stop", afterStop);
-      expectPublished("after rename back and Stop", afterStop, "aOld");
-      step = "recovery-workaround:3-renamed-again";
-      const renamedAgain = await appRename(oldPath, newPath);
-      observe({ renamedAgain, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) }, serverRow: await serverRowOfA() });
-    }
-    if (kind === "restart") {
-      await closeOwner();
-      current = await openOwner();
-      current.pages.start();
-      observe({ restarted: true });
-    }
+    // Step 4: Stop live editing on A's row, which names the server's path
+    // for A and A's object, with no rename back. The row then reads Stopped.
+    step = "4-stop";
+    expect((await tryStop({ path: oldPath, objectId: objectIdA })).ok, "Stop live editing is accepted").toBe(true);
+    let row: Awaited<ReturnType<typeof serverRowOfA>> = null;
+    await expect.poll(async () => {
+      // A delivery pass sends a retirement the Stop still owes.
+      if (await owedStopsOfA() > 0) await syncPass();
+      row = await serverRowOfA();
+      return row !== null && "status" in row && row.status === "retired" && await owedStopsOfA() === 0;
+    }, { timeout: 120_000, interval: 500 }).toBe(true).catch(error => { throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error }); });
+    observe({ serverRow: row, ownerA: bindingOf(objectIdA) });
+
+    // Step 5: A renames now, and the rename publishes with B and C.
+    step = "5-renamed";
+    expect(await appRename(oldPath, newPath)).toEqual({ ok: true, path: newPath });
+    expect(await onDisk()).toEqual({ old: false, new: true });
     const recovered = await settle(6, reachedAll("aNew"));
-    observe({ serverRow: bound ? await serverRowOfA() : null });
-    expectOwnerIntact(`after recovery ${kind}`, recovered);
-    expectPublished(`after recovery ${kind}`, recovered);
+    expectOwnerIntact("after Stop and rename", recovered);
+    expectPublished("after Stop and rename", recovered);
   } catch (error) {
     observe({ failed: reproErrorText(error), stack: error instanceof Error ? error.stack : undefined, diagnostics: diagnostics() });
     throw error;
@@ -3829,7 +3809,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
   }
 }
 
-it.skipIf(engine.missing)("renaming an owner-bound live page keeps its workspace publishing (wait, stop, workaround, restart, unbound)", async () => {
+it.skipIf(engine.missing)("refuses renaming an owner-bound live page, keeps its workspace publishing, and renames it after Stop (bound, unbound)", async () => {
   const ca = await mintLocalhostCa(await createTestScratch("dohc-repro-rename-ca-"));
   const previousRoots = getCACertificates("default");
   setDefaultCACertificates([...previousRoots, ca.ca]);
@@ -3843,8 +3823,8 @@ it.skipIf(engine.missing)("renaming an owner-bound live page keeps its workspace
     localStateOpenAt: rootPath => localStates.get(rootPath)?.localStateOpenAt(rootPath) ?? Promise.resolve(null),
   });
   try {
-    // The five workspaces run side by side so the case fits its time.
-    const cases: RenameReproCase[] = ["wait", "stop", "workaround", "restart", "unbound"];
+    // The two workspaces run side by side so the case fits its time.
+    const cases: RenameReproCase[] = ["bound", "unbound"];
     const outcomes = await Promise.allSettled(cases.map(kind => runRenameRepro(kind, ca, trustEnv, localStates)));
     const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [`${cases[index]}: ${reproErrorText(outcome.reason)}`] : []);
     expect(failed, "every workspace reached the end of its steps").toEqual([]);
@@ -3853,4 +3833,4 @@ it.skipIf(engine.missing)("renaming an owner-bound live page keeps its workspace
     setDefaultCACertificates(previousRoots);
     vi.unstubAllEnvs();
   }
-}, 360_000);
+}, 300_000);

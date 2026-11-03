@@ -4513,6 +4513,7 @@ describe("a refused folder move", () => {
     const notices = await screen.findByTestId("notice-center");
     const row = (await within(notices).findByText(TITLE)).closest("li")!;
     expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     // The person stops live editing, then renames the folder again.
     await rename();
@@ -4522,5 +4523,56 @@ describe("a refused folder move", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const reopened = await screen.findByTestId("notice-center");
     expect(within(reopened).queryByText(TITLE)).toBeNull();
+  });
+});
+
+describe("a refused rename of a page this computer owns live", () => {
+  const TITLE = `dohc can't rename "a.md" while it has live editing on`;
+  const BODY = "In Live documents, stop live editing for this page, then rename it again.";
+  const refusal = new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageMoveError: dohc can't move "a.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`);
+  const treePaths = async () => (await screen.findAllByTestId("tree-row")).map(row => row.dataset.path);
+
+  it("puts the old name back at once, says rename, and offers Try again and Live documents", async () => {
+    const refused = deferred<never>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise)
+        .mockResolvedValueOnce({ path: "renamed.md", undo: { available: false, reason: "", paths: [] } }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "a.md", objectId: "object-a", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!;
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed{Enter}");
+    await waitFor(async () => expect(await treePaths()).toContain("renamed.md"));
+    // No refresh answers from here, so only the refusal itself can put the old name back.
+    bridge.listWorkspaceFiles.mockImplementation(() => new Promise(() => undefined));
+    refused.reject(refusal);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(await treePaths()).toContain("a.md");
+    expect(await treePaths()).not.toContain("renamed.md");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByText(BODY)).toBeTruthy();
+    expect(within(toast).queryByRole("button", { name: /Stop/u })).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(notice).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-a.md").getAttribute("aria-current")).toBe("true"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    // Live editing stopped: Try again renames to the name the person typed.
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "renamed.md" });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
 });
