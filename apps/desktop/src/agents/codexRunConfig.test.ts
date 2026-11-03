@@ -8,7 +8,7 @@ import { createTestScratch } from "../workspaces/testTemp";
 const SYSTEM = "C:\\ProgramData\\OpenAI\\Codex\\config.toml";
 const USER = "C:\\Users\\Sam\\.codex\\config.toml";
 const REQUIREMENTS = "C:\\ProgramData\\OpenAI\\Codex\\requirements.toml";
-const NONE: CodexConfigFiles = { requirements: [], config: [] };
+const NONE: CodexConfigFiles = { requirements: [], config: [], managedPreferences: [] };
 
 function missing(path: string): never {
   throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
@@ -65,7 +65,7 @@ function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases =
 // The run's entries on Windows, with the person's config files as given.
 function windowsRun(
   files: Record<string, string> = {},
-  paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] },
+  paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER], managedPreferences: [] },
   folders = disk("win32", [WORKSPACE, ...OUTSIDE]),
 ): string[] {
   return codexRunConfig({
@@ -104,7 +104,7 @@ describe("a dohc Codex run", () => {
 
   it("only reads the workspace when read-only, starts none of the person's own tools, and still doesn't trust the workspace", () => {
     const entries = codexRunConfig({
-      rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER] }, readOnly: true, replyOnly: true, realPath: (path) => path,
+      rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER], managedPreferences: [] }, readOnly: true, replyOnly: true, realPath: (path) => path,
       readConfig: (path) => ({
         [SYSTEM]: "[mcp_servers.org-docs]\ncommand = 'docs'\n",
         [USER]: "notify = ['notifier']\napprovals_reviewer = 'auto_review'\n[mcp_servers.github]\ncommand = 'gh'\n[mcp_servers.org-docs]\nenabled = true\n[mcp_servers.dohc]\ncommand = 'old'\n",
@@ -142,7 +142,7 @@ describe("a dohc Codex run", () => {
 
   it("names no server to turn off when it can't read the person's config, and leaves the check to refuse", () => {
     const entries = codexRunConfig({
-      rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"] }, readOnly: true, realPath: (path) => path,
+      rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"], managedPreferences: [] }, readOnly: true, realPath: (path) => path,
       readConfig: () => "[mcp_servers.github\n",
     });
     expect(entries.filter((value) => value.startsWith("mcp_servers."))).toEqual([]);
@@ -208,7 +208,7 @@ describe("a dohc Codex run", () => {
       expect(entry(windowsRun(files), "windows.sandbox=")).toBeUndefined();
     }
     const denied = codexRunConfig({
-      rootPath: "C:\\w", runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
+      rootPath: "C:\\w", runId: "run_1", platform: "win32", files: { requirements: [], config: [USER], managedPreferences: [] },
       readConfig: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
     });
     expect(entry(denied, "windows.sandbox=")).toBeUndefined();
@@ -217,7 +217,7 @@ describe("a dohc Codex run", () => {
   });
 
   it("always gives a read-only Windows run the unelevated sandbox without MXC", () => {
-    const windows = (files: Record<string, string>, paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform: NodeJS.Platform = "win32") =>
+    const windows = (files: Record<string, string>, paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER], managedPreferences: [] }, platform: NodeJS.Platform = "win32") =>
       codexRunConfig({ rootPath: WORKSPACE, runId: "run_1", platform, files: paths, readOnly: true, replyOnly: true, readConfig: (path) => files[path] ?? missing(path), ...disk("win32", [WORKSPACE]) })
         .filter((value, index, entries) => entries[index - 1] === "--config" && value.startsWith("windows."));
     const unelevated = ["windows.sandbox='unelevated'", "windows.allow_mxc=false"];
@@ -232,7 +232,7 @@ describe("a dohc Codex run", () => {
 
   it("refuses a read-only run where the system requirements or a Unix managed config would override it, or can't be read", () => {
     const refuses = (text: string | null, platform: NodeJS.Platform = "win32") =>
-      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform, (path) => path === REQUIREMENTS && text !== null ? text : missing(path));
+      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER], managedPreferences: [] }, platform, (path) => path === REQUIREMENTS && text !== null ? text : missing(path));
     for (const platform of ["win32", "linux"] as const) {
       expect(refuses(null, platform)).toBe(false);
       expect(refuses("model = 'gpt-5'\n", platform)).toBe(false);
@@ -261,12 +261,12 @@ describe("a dohc Codex run", () => {
     expect(refuses("[windows]\nallowed_sandbox_implementations = []\n")).toBe(true);
     expect(refuses("[windows]\nrequire_mxc = true\n")).toBe(true);
     expect(refuses("[windows]\nrequire_mxc = true\n", "linux")).toBe(false);
-    expect(codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [] }, "win32", () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })).toBe(true);
+    expect(codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [], managedPreferences: [] }, "win32", () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })).toBe(true);
     expect(codexRequirementsRefuseReadOnly(null, "linux")).toBe(true);
     // A Unix managed config wins over every setting the run passes.
     const MANAGED = "/etc/codex/managed_config.toml";
     const managed = (text: string | null) =>
-      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER, MANAGED] }, "linux", (path) => path === MANAGED && text !== null ? text : missing(path));
+      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER, MANAGED], managedPreferences: [] }, "linux", (path) => path === MANAGED && text !== null ? text : missing(path));
     expect(managed(null)).toBe(false);
     expect(managed("")).toBe(false);
     expect(managed("default_permissions = ':read-only'\n")).toBe(true);
@@ -308,7 +308,7 @@ describe("a dohc Codex run", () => {
     const roots = ["C:\\other", "C:\\o'brien", "C:\\a\u007fb"];
     const config: Record<string, string> = { [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots).replace(/\u007f/gu, "\\u007f")}\n` };
     const run = (behindCmd: boolean) => filesystem(codexRunConfig({
-      rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
+      rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER], managedPreferences: [] },
       readConfig: (path) => config[path] ?? missing(path), ...disk("win32", [WORKSPACE, ...OUTSIDE]), behindCmd,
     }));
     expect(run(true)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\other": "write" });
@@ -327,7 +327,7 @@ describe("a dohc Codex run", () => {
     expect(filesystem(windowsRun({ [REQUIREMENTS]: roots }))).toEqual(baseline);
     expect(filesystem(windowsRun({}, null))).toEqual(baseline);
     const denied = codexRunConfig({
-      rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER] },
+      rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER], managedPreferences: [] },
       readConfig: (file) => {
         if (file === SYSTEM) return roots;
         throw Object.assign(new Error("EACCES"), { code: "EACCES" });
@@ -342,7 +342,7 @@ describe("a dohc Codex run", () => {
       const folders = disk("win32", [WORKSPACE, ...OUTSIDE], { aliases: { "c:\\OTHER": "C:\\other" } });
       const spies = { realPath: vi.fn(folders.realPath), readLink: vi.fn(folders.readLink), fileId: vi.fn(folders.fileId), listFolder: vi.fn(folders.listFolder) };
       const entries = codexRunConfig({
-        rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [REQUIREMENTS], config: [SYSTEM, USER] },
+        rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [REQUIREMENTS], config: [SYSTEM, USER], managedPreferences: [] },
         readConfig: (path) => path === USER ? "[sandbox_workspace_write]\nwritable_roots = ['C:\\other', 'c:\\OTHER']\n" : missing(path),
         ...folders, ...spies, ...mode,
       });
@@ -396,7 +396,7 @@ describe("a dohc Codex run", () => {
       "/home/sam/.codex/config.toml": "[sandbox_workspace_write]\nwritable_roots = ['../extra', '/workspace', '/workspace/notes/../.dohc/engine', ':workspace_roots']\n",
     };
     const run = (config: string[]) => codexRunConfig({
-      rootPath: "/workspace", runId: "run_1", platform: "linux", files: { requirements: [], config },
+      rootPath: "/workspace", runId: "run_1", platform: "linux", files: { requirements: [], config, managedPreferences: [] },
       readConfig: (file) => files[file] ?? missing(file),
       ...disk("linux", ["/workspace/.dohc/engine", "/etc/codex/system", "/home/sam/extra"]),
     });
@@ -422,7 +422,7 @@ describe("a dohc Codex run", () => {
       const workspace = `${home}${sep}ws`;
       const roots = ["~", "~/ws/.dohc", "~/other", ...(platform === "win32" ? ["~\\more"] : [])];
       const entries = codexRunConfig({
-        rootPath: workspace, runId: "run_1", platform, files: { requirements: [], config: [`${home}${sep}.codex${sep}config.toml`] },
+        rootPath: workspace, runId: "run_1", platform, files: { requirements: [], config: [`${home}${sep}.codex${sep}config.toml`], managedPreferences: [] },
         readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
         ...disk(platform, [`${workspace}${sep}.dohc`, `${home}${sep}other`, `${home}${sep}more`]), home,
       });
@@ -439,7 +439,7 @@ describe("a dohc Codex run", () => {
       "\\\\localhost\\d", "\\\\localhost\\d\\engine", `${share}\\other`,
     ];
     const entries = codexRunConfig({
-      rootPath: `${share}\\ws`, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
+      rootPath: `${share}\\ws`, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER], managedPreferences: [] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("win32", [`${share}\\ws\\.dohc\\engine`, `${share}\\other`], {
         aliases: {
@@ -454,7 +454,7 @@ describe("a dohc Codex run", () => {
 
   it("omits folder names that a profile would read as a pattern or a Windows stream", () => {
     const entries = codexRunConfig({
-      rootPath: "/workspace", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/config/config.toml"] },
+      rootPath: "/workspace", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/config/config.toml"], managedPreferences: [] },
       readConfig: () => "[sandbox_workspace_write]\nwritable_roots = ['/other/**', '/other/[draft]', '/other/closing]', '/other/what?', '/other/notes']\n",
       ...disk("linux", ["/workspace", "/other/**", "/other/[draft]", "/other/closing]", "/other/what?", "/other/notes"]),
     });
@@ -466,7 +466,7 @@ describe("a dohc Codex run", () => {
 
   it("drops writable folders the run could swap for a link, and gives linked ones by their real paths", () => {
     const run = (roots: string[]) => filesystem(codexRunConfig({
-      rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"] },
+      rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"], managedPreferences: [] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("linux", [
         "/home/sam", "/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/srv/other/.dohc",
@@ -529,7 +529,7 @@ describe("a dohc Codex run", () => {
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {
     const entries = codexRunConfig({
-      rootPath: "/Users/sam/ws", runId: "run_1", platform: "darwin", files: { requirements: [], config: ["/Users/sam/.codex/config.toml"] },
+      rootPath: "/Users/sam/ws", runId: "run_1", platform: "darwin", files: { requirements: [], config: ["/Users/sam/.codex/config.toml"], managedPreferences: [] },
       readConfig: () => "[sandbox_workspace_write]\nwritable_roots = ['/var/other', '/Users/sam/WS/.DOHC/engine', '/var/link']\n",
       ...disk("darwin", ["/Users/sam/ws/.dohc/engine", "/private/var/other"], {
         aliases: { "/Users/sam/WS/.DOHC/engine": "/Users/sam/ws/.dohc/engine" },
@@ -561,20 +561,26 @@ describe("a dohc Codex run", () => {
     expect(codexConfigFiles({ ProgramData: "D:\\ProgramData" }, "win32", "C:\\Users\\Sam")).toEqual({
       requirements: ["D:\\ProgramData\\OpenAI\\Codex\\requirements.toml"],
       config: ["D:\\ProgramData\\OpenAI\\Codex\\config.toml", "C:\\Users\\Sam\\.codex\\config.toml"],
+      managedPreferences: [],
     });
     expect(codexConfigFiles({ CODEX_HOME: "E:\\codex" }, "win32", "C:\\Users\\Sam")).toEqual({
       requirements: [REQUIREMENTS],
       config: [SYSTEM, "E:\\codex\\config.toml"],
+      managedPreferences: [],
     });
-    expect(codexConfigFiles({}, "darwin", "/Users/sam")).toEqual({
+    expect(codexConfigFiles({}, "darwin", "/Users/sam", "sam")).toEqual({
       requirements: ["/etc/codex/requirements.toml"],
       config: ["/etc/codex/config.toml", "/Users/sam/.codex/config.toml", "/etc/codex/managed_config.toml"],
+      managedPreferences: [
+        "/Library/Managed Preferences/com.openai.codex.plist",
+        "/Library/Managed Preferences/sam/com.openai.codex.plist",
+      ],
     });
   });
 });
 
 describe("Codex without a saved login", () => {
-  const paths: CodexConfigFiles = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] };
+  const paths: CodexConfigFiles = { requirements: [REQUIREMENTS], config: [SYSTEM, USER], managedPreferences: [] };
   const mayRun = (files: Record<string, string>, env: NodeJS.ProcessEnv = {}, given: CodexConfigFiles | null = paths) =>
     codexMayRunWithoutLogin(env, given, (path) => files[path] ?? missing(path));
 
@@ -604,5 +610,17 @@ describe("Codex without a saved login", () => {
   it("may reach a model when dohc can't read the person's config", () => {
     expect(mayRun({ [USER]: "model_provider = \n" })).toBe(true);
     expect(mayRun({}, {}, null)).toBe(true);
+  });
+
+  it("may reach a model when an organization manages Codex's preferences on a Mac", () => {
+    const mac = codexConfigFiles({}, "darwin", "/Users/sam", "sam")!;
+    const openai = { "/Users/sam/.codex/config.toml": "model_provider = 'openai'\n" };
+    expect(mayRun(openai, {}, mac)).toBe(false);
+    for (const plist of mac.managedPreferences) expect(mayRun({ ...openai, [plist]: "bplist00" }, {}, mac)).toBe(true);
+    const denied = (path: string) => {
+      if (path === mac.managedPreferences[1]) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      return missing(path);
+    };
+    expect(codexMayRunWithoutLogin({}, mac, denied)).toBe(true);
   });
 });
