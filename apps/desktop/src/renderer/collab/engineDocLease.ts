@@ -274,8 +274,8 @@ function makeTransport(
         if (event.sessionId !== sessionId) return;
         if (!documentGone()) {
           listener(event.update, event.lineageGeneration, event.head);
-        } else if (event.head) {
-          // The head alone still arrives, so a check waiting on it settles.
+        } else if (event.head?.sha256 !== undefined) {
+          // A known head alone still arrives, so a check waiting on it settles.
           listener(EMPTY_YJS_UPDATE, event.lineageGeneration, event.head);
         }
       });

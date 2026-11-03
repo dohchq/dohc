@@ -170,13 +170,16 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   // Mutates main's copy and delivers the resulting incremental update as
   // a forwarded remote delta: a co-editor's edit, stamped with the lineage
-  // main currently serves, as main stamps every remote update.
-  function emitRemoteEdit(suffix: string): void {
+  // main currently serves, as main stamps every remote update, and with the
+  // head main read it with, if any.
+  function emitRemoteEdit(suffix: string, head?: { sha256: string | null }): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const before = Y.encodeStateVector(doc);
     doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
     const update = Y.encodeStateAsUpdate(doc, before);
-    const event = { sessionId: openedSessionId, update, lineageGeneration: currentLineageGeneration };
+    const event = {
+      sessionId: openedSessionId, update, lineageGeneration: currentLineageGeneration, ...(head ? { head } : {}),
+    };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });

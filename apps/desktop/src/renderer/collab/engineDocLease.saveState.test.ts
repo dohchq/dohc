@@ -1028,10 +1028,11 @@ it("takes a head after a deletion without its edit, so a pending check settles",
   harness.emit("deleted", harness.applied.at(-1)!.seq);
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
 
-  harness.emitHead({ sha256: "c".repeat(64) });
+  harness.emitRemoteEdit("+remote", { sha256: "c".repeat(64) });
 
   expect(boundOutcome().headSha256).toBe("c".repeat(64));
   expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
 });
 
 it("stores a deleted scene as portable Excalidraw JSON", async () => {
