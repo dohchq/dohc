@@ -72,6 +72,12 @@ const FAILED_OUTCOMES: ReadonlySet<RunOutcome> = new Set<FailedOutcome>([
 ]);
 const isFailedOutcome = (outcome: RunOutcome): outcome is FailedOutcome => FAILED_OUTCOMES.has(outcome);
 
+// A reply already posted must not be posted again. Quit and restart keep
+// their existing recovery path, including runs that posted before the stop.
+function canRepeatFailedRun(outcome: FailedOutcome, posted: boolean): boolean {
+  return !posted || outcome === "quit" || outcome === "restarted";
+}
+
 // The agent's Settings name at 32 characters. An agent no longer in
 // Settings is "Your agent".
 function noticeAgentName(agentName: string | undefined): string {
@@ -252,12 +258,12 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   };
 }
 
-// A failed run whose request has not gone back in line.
+// A failed run shown under its request, with or without Try again.
 interface StoppedRun {
   run: AgentRunRecord;
   outcome: FailedOutcome;
-  attemptCount: number;
-  // Whether its request can run once more.
+  attemptCount?: number;
+  // Whether its attempts and posted replies allow the request to run again.
   retryable: boolean;
 }
 
@@ -887,7 +893,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     agent: Agent | undefined,
     attemptCount?: number,
   ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchFailedRun["nextStep"] }> {
-    const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
+    const posted = (await options.dispatchStoreFor(workspace)
       .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
@@ -904,25 +910,36 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       : !agent.launch ? { kind: "set-up", name: agent.name }
       : !agent.enabled ? { kind: "turn-on", name: agent.name }
       : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
-    const attempts = attemptCount ?? (await options.listFailedRunRecoveries?.(workspace, run.threadId))
-      ?.find((each) => each.run.runId === run.runId)?.attemptCount;
-    let reason = runFailureReason(run, outcome, nodeAvailable);
-    if (attempts !== undefined && attempts >= 2) {
-      const { channel } = await options.chatStoreFor(workspace).getThread({
-        workspaceId: workspace.workspaceId, threadId: run.threadId,
-      });
-      const name = noticeAgentName(agent?.name);
-      const next = channel?.kind === "agent" && channel.agentId === run.agentId
-        ? `Ask ${name} again in a new message.`
-        : `Mention ${name} in a new message to ask again.`;
-      reason = cutText(reason, NOTICE_BODY_MAX_CHARS - next.length - 2);
-      reason = `${reason}${/[.!?]$/u.test(reason) ? " " : ". "}${next}`;
-    }
-    return {
+    const words = {
       lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
-      reason,
+      reason: runFailureReason(run, outcome, nodeAvailable),
       ...(nextStep ? { nextStep } : {}),
     };
+    if (agent === undefined) return words;
+    let attempts = attemptCount;
+    try {
+      attempts ??= (await options.listFailedRunRecoveries?.(workspace, run.threadId))
+        ?.find((each) => each.run.runId === run.runId)?.attemptCount;
+    } catch (error) {
+      reportError(error);
+      return words;
+    }
+    if (!canRepeatFailedRun(outcome, posted) || (attempts !== undefined && attempts >= 2)) {
+      try {
+        const { channel } = await options.chatStoreFor(workspace).getThread({
+          workspaceId: workspace.workspaceId, threadId: run.threadId,
+        });
+        const name = noticeAgentName(agent.name);
+        const next = channel?.kind === "agent" && channel.agentId === run.agentId
+          ? `Ask ${name} again in a new message.`
+          : `Mention ${name} in a new message to ask again.`;
+        const reason = cutText(words.reason, NOTICE_BODY_MAX_CHARS - next.length - 2);
+        words.reason = `${reason}${/[.!?…]$/u.test(reason) ? " " : ". "}${next}`;
+      } catch (error) {
+        reportError(error);
+      }
+    }
+    return words;
   }
 
   // The thread's title, read from its own channel's threads. An empty title
@@ -1707,7 +1724,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const [pauseState, pending, failed] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
       pendingRead,
-      failedRunForThread(workspace, threadId),
+      failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
     const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
@@ -1726,8 +1743,24 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function failedRunForThread(
     workspace: ChatDispatchWorkspace,
     threadId: string,
+    pending: Promise<readonly AgentDispatchRecord[]>,
   ): Promise<ChatDispatchFailedRun | null> {
-    const found = await stoppedRunForThread(workspace, threadId);
+    let found = await stoppedRunForThread(workspace, threadId);
+    if (!found?.retryable) {
+      const dispatch = options.dispatchStoreFor(workspace);
+      const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId);
+      if (latest?.endedAtMs !== undefined) {
+        const outcome = savedRunOutcome(latest);
+        // Completed runs that posted are absent from the recovery list,
+        // but their failure still belongs under the message they answered.
+        if (outcome !== "exited" && isFailedOutcome(outcome) &&
+            outcome !== "quit" && outcome !== "restarted" &&
+            !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
+          const posted = (await dispatch.listRunMessages(workspace.workspaceId, latest.runId, durableDispatchRequest)).length > 0;
+          if (!canRepeatFailedRun(outcome, posted)) found = { run: latest, outcome, retryable: false };
+        }
+      }
+    }
     if (!found) return null;
     const { run, outcome, retryable } = found;
     const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
@@ -1742,8 +1775,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   // The one place that decides which run Try again can run again: the
-  // conversation's newest failed run, while it is
-  // still its agent's latest run there and its request is still stopped.
+  // conversation's newest failed run, while it is still its agent's latest
+  // run there and its request is still stopped. Posted replies prevent a
+  // second run unless dohc's quit or restart stopped the first one.
   // Another agent's run in the conversation doesn't hide it, and neither
   // does a run that has used both its attempts. Once the request is back in
   // line, the conversation shows it waiting instead. Runs live in this
@@ -1754,23 +1788,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<StoppedRun | null> {
     const recoveries = (await options.listFailedRunRecoveries?.(workspace, threadId)) ?? [];
     const dispatch = options.dispatchStoreFor(workspace);
+    const checkedAgents = new Set<string>();
     let exhausted: StoppedRun | null = null;
     for (const { run, attemptCount } of recoveries.toReversed()) {
+      if (checkedAgents.has(run.agentId)) continue;
+      checkedAgents.add(run.agentId);
       const saved = savedRunOutcome(run);
       const outcome = saved === "exited" && run.failureHandled && !runMessageLinkPending(workspace, run.runId)
         ? "no-reply" : saved;
       if (outcome === "exited" || !isFailedOutcome(outcome)) continue;
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
-      const found = { run, outcome, attemptCount, retryable: attemptCount < 2 };
+      const posted = (await dispatch.listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
+      const found = { run, outcome, attemptCount, retryable: attemptCount < 2 && canRepeatFailedRun(outcome, posted) };
       if (found.retryable) return found;
       exhausted ??= found;
     }
     return exhausted;
   }
 
-  // Try again on a stopped run puts its request back in line. False when
-  // the run can't be tried again any more, as after a second press.
+  // Try again puts an eligible failed run's request back in line. False
+  // when its attempts or posted replies prevent another run.
   async function retryStoppedRun(
     workspaceId: string,
     threadId: string,

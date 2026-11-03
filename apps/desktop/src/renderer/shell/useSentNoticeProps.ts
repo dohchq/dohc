@@ -377,7 +377,7 @@ export function useSentNoticeProps(input: {
   });
 
   const retryAutomationNotice = noticeRetry.retry;
-  // Try again on a stopped agent run puts its request back in line, then
+  // Try again on an eligible failed run puts its request back in line, then
   // reads again whether the notice still offers it. Main queues nothing when
   // the request is already back in line, as after a second press or a Try
   // again in the conversation, so the read just takes the button away.

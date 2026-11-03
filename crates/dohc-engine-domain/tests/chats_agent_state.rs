@@ -1317,6 +1317,37 @@ fn every_failed_ending_can_requeue_once() {
 }
 
 #[test]
+fn completed_error_with_a_reply_is_not_listed_or_requeued() {
+    for handled in [false, true] {
+        let (_scratch, mut store) = open_store();
+        claimed_run(&mut store, "trigger", "thread", "run", 20);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .complete_dispatch(WS, "run", 7, 30, &NO_FAULTS)
+            .expect("complete");
+        chats
+            .record_run_message(WS, "reply", "run", &NO_FAULTS)
+            .expect("reply");
+        if handled {
+            chats
+                .mark_failure_handled(WS, "run", &NO_FAULTS)
+                .expect("handled");
+        }
+        assert!(
+            chats
+                .list_failed_run_recoveries(WS, None, None, 10)
+                .expect("no recovery")
+                .is_empty()
+        );
+        assert!(
+            !chats
+                .requeue_failed_trigger(WS, "trigger", "run", 31, &NO_FAULTS)
+                .expect("no second reply")
+        );
+    }
+}
+
+#[test]
 fn clean_exit_needs_a_confirmed_missing_reply_before_requeue() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);

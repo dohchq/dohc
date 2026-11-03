@@ -35,7 +35,7 @@ export interface LiveAgentDispatchStoreHandle {
     agentId: string;
     runId: string;
   }): Promise<boolean>;
-  /** Stopped runs in the workspace, or only in one thread. */
+  /** Failed runs in the workspace, or only in one thread. */
   listFailedRunRecoveries(workspaceId: string, threadId?: string): Promise<ChatDispatchRecovery[]>;
   close(): Promise<void>;
 }
