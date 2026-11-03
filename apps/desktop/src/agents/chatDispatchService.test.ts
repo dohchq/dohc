@@ -3421,15 +3421,17 @@ describe("chatDispatchService", () => {
   });
 
   it.each([
-    { replied: false, words: "Nova didn't reply. Its run ended with an error." },
-    { replied: true, words: "Nova stopped before finishing. Its run ended with an error. Mention Nova in a new message to ask again." },
-  ])("offers Try again after an error only when no reply was posted: %j", async ({ replied, words }) => {
-    const fixture = await createFixture();
+    { reply: "none", words: "Nova didn't reply. Its run ended with an error." },
+    { reply: "linked", words: "Nova stopped before finishing. Its run ended with an error. Mention Nova in a new message to ask again." },
+    { reply: "link pending", words: "Nova stopped before finishing. Its run ended with an error. Mention Nova in a new message to ask again." },
+  ] as const)("offers Try again after an error only when no reply was posted: %j", async ({ reply, words }) => {
+    const fixture = await createFixture({ hasPendingRunMessageLink: () => reply === "link pending" });
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
-    if (replied) await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    if (reply === "linked") await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    const replied = reply !== "none";
 
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -3735,6 +3737,29 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(queued.threadId);
+  });
+
+  it("offers Try again after a timeout only once the run's process exits", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({ runner: { timeoutMinutes: 1 } });
+    const trigger = await createAgentThread(fixture, { body: "This harness will hang.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun)
+      .toMatchObject({ runId: claim.run.runId, retryable: false });
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
+
+    const updatesBeforeExit = fixture.runUpdatedWorkspaces.length;
+    fixture.spawnCalls[0]!.process.emitExit(null, "SIGTERM");
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.runUpdatedWorkspaces.length).toBeGreaterThan(updatesBeforeExit);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun)
+      .toMatchObject({ runId: claim.run.runId, retryable: true });
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(true);
+    expect(fixture.requeues).toEqual([expect.objectContaining({ runId: claim.run.runId })]);
   });
 
   it("retries timeout persistence for a local-only live workspace", async () => {
