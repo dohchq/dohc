@@ -21,6 +21,7 @@ The approval steps are the snapshot bucket lock, DNS publication, the first star
 | Edge | Cloudflare, proxying `drive.dohc.computer` and `*.dohc.app` |
 | Mail | Postmark SMTP on port 2525 with STARTTLS |
 | Snapshots | Cloudflare R2, with a Healthchecks.io heartbeat |
+| Disk watch | A second Healthchecks.io check, pinged every hour while the volume is less than 70% full |
 
 The server's origin is `https://drive.dohc.computer`.
 The relay accepts live editing on `drive.dohc.computer,sync-relay:1788`. The release derives that list from `DOHC_PUBLIC_HOST`.
@@ -202,6 +203,7 @@ The job takes its first snapshot as soon as the relay is healthy after the first
 3. **Provider:** Create an R2 token with Object Read & Write permission for that bucket only.
    R2 tokens cannot be limited to writing. The bucket lock keeps a token on a compromised server from deleting snapshots.
 4. **Provider:** Create a Healthchecks.io check with a period of 1 hour. Send its alerts to the operator.
+5. **Provider:** Create a second Healthchecks.io check for the disk, with a period of 1 hour. Send its alerts to the operator.
 
 The job takes a snapshot every hour after the first, and pings Healthchecks.io only after an upload succeeds.
 A failed snapshot emails `DOHC_SNAPSHOT_ALERT_EMAIL` at most once a day.
@@ -210,6 +212,11 @@ See [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-
 
 Snapshots omit accounts, host data, the configuration, and continuity.
 An old snapshot supports file salvage. It does not restore a server.
+
+No setting limits how much one account stores, so the disk check warns the operator before the volume fills.
+Every hour, `drive.mjs disk-watch` pings the disk check while the volume is less than 70% full.
+When the volume is 70% full or more, or is not mounted, it reports a failure, and Healthchecks.io alerts the operator at once.
+Missing pings show a watch that stopped.
 
 ### App certificate
 
@@ -236,7 +243,8 @@ The Origin CA certificate serves only the app hosts. It is not the edge certific
    - `DOHC_SMTP_USER` and `DOHC_SMTP_PASSWORD`: the Postmark server token, in both settings.
    - `DOHC_SNAPSHOT_S3_ACCESS_KEY_ID` and `DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY`: the R2 token for the snapshot bucket.
    - `DOHC_SNAPSHOT_ALERT_EMAIL`: the operator address for snapshot failures.
-   - `DOHC_SNAPSHOT_HEARTBEAT_URL`: the Healthchecks.io ping URL.
+   - `DOHC_SNAPSHOT_HEARTBEAT_URL`: the snapshot check's Healthchecks.io ping URL.
+   - `DOHC_DISK_HEARTBEAT_URL`: the disk check's Healthchecks.io ping URL.
    - `DOHC_SIGN_UP_EMAILS`: the approved addresses.
 
    Keep each value on one line. `drive.mjs` refuses a secret setting that spans lines, because it could not hide that secret in its output.
@@ -303,6 +311,17 @@ If it does not, stop and report before changing the certificate setup.
    If the first start fails after it created the deployment, run `start` without `--first-start`.
    If it fails after the release set up the accounts database but before it created the deployment, both starts refuse.
    Keep the volume and the database as they are, and report the failure. Rebuild only under an approved plan.
+3. **Operator:** Install the disk watch, which runs at 17 minutes past each hour:
+
+   ```sh
+   sudo tee /etc/cron.d/dohc-drive-disk >/dev/null <<'EOF'
+   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+   17 * * * * root node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid> >/dev/null 2>&1
+   EOF
+   ```
+
+   The `PATH` line finds `node` where `sudo` finds it.
+   The watch sends each failure's reason to Healthchecks.io, which shows it in the check's log.
 
 ### Check that only Cloudflare reaches the origin
 
@@ -323,7 +342,7 @@ If any command connects, apply the Cloud Firewall to the Droplet at once, then c
 
 ## Accept the server
 
-The rehearsal does not test mail, snapshots, the heartbeat, a published app, or live editing.
+The rehearsal does not test mail, snapshots, the heartbeat, the disk watch, a published app, or live editing.
 After the first start, the operator tests each of them with the real providers.
 Do the checks in order. If a check fails, stop and report it.
 
@@ -435,6 +454,23 @@ The check passes when the operator receives the down alert, and Healthchecks.io 
 
 Record the times when the job stopped, the alert arrived, the job started, and the check recovered.
 
+### Disk watch
+
+1. **Operator:** Run the watch with a limit of 1%, so that it reports a failure:
+
+   ```sh
+   sudo node /srv/dohc-drive/tools/drive/drive.mjs disk-watch --env-file /etc/dohc/drive.env --volume-uuid <volume-uuid> --limit 1
+   ```
+
+   It exits with status 1 and ends with `Reported this to the disk check.`
+2. **Operator:** Wait until Healthchecks.io marks the disk check down and alerts the operator.
+3. **Operator:** Run the watch again without `--limit`. It prints `Pinged the disk check.`
+4. **Operator:** After the next run at 17 minutes past the hour, confirm that Healthchecks.io shows its ping.
+
+The check passes when the operator receives the down alert, Healthchecks.io marks the check up again, and the hourly run pings it.
+
+Record the volume's use that each run printed, and the times of the alert, the recovery, and the hourly ping.
+
 The server is accepted when every check passes.
 
 ## Replace a dead server
@@ -470,6 +506,7 @@ A copy rolls back the relay database and its continuity record together, and the
    ```
 
 10. **Operator:** [Check that only Cloudflare reaches the origin](#check-that-only-cloudflare-reaches-the-origin).
+11. **Operator:** Install the disk watch, as in step 3 of [Check and start](#check-and-start). Then run it once without `--limit`. It prints `Pinged the disk check.`
 
 The move mounts the volume by `<volume-uuid>` at `/mnt/dohc-drive` if it is not mounted.
 It refuses when no attached volume has that UUID, when two attached devices have it, when the mount point is missing or not empty, or when another filesystem is mounted there.

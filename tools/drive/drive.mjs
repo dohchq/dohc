@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 // Checks, starts and moves the dohc Drive server through the self-host release's own commands. See docs/how-to/drive.md.
 import { spawn } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statfsSync } from "node:fs";
 import { posix } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
 
 const usage = `node tools/drive/drive.mjs check|start|move --bundle DIR --env-file PATH --volume-uuid UUID [--first-start]
+node tools/drive/drive.mjs disk-watch --env-file PATH --volume-uuid UUID [--limit PERCENT]
 
 check   Checks this host, the release, the configuration and the mounted volume, then runs the release check.
 start   Runs the same checks, then starts the deployment. Add --first-start only for the deployment's first start.
 move    Mounts the attached volume by its filesystem UUID, runs the same checks, then runs the release move.
         Stop the old server and attach its volume to this Droplet first. This command never attaches a volume.
+disk-watch  Pings the disk check while the volume is less than PERCENT full (70 by default), and reports a failure to it otherwise.
 
 No command formats a disk, creates a deployment folder or prints a secret.`;
 
-/** Settings whose values never reach the terminal. The Healthchecks URL is itself a credential. */
+/** Settings whose values never reach the terminal. Each Healthchecks URL is itself a credential. */
 export const secretNames = ["POSTGRES_PASSWORD", "BETTER_AUTH_SECRET", "DOHC_RELAY_LINK_KEY", "DOHC_RELAY_EXCHANGE_KEY", "DOHC_SNAPSHOT_KEY",
-  "DOHC_SMTP_USER", "DOHC_SMTP_PASSWORD", "DOHC_SNAPSHOT_S3_ACCESS_KEY_ID", "DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY", "DOHC_SNAPSHOT_HEARTBEAT_URL"];
+  "DOHC_SMTP_USER", "DOHC_SMTP_PASSWORD", "DOHC_SNAPSHOT_S3_ACCESS_KEY_ID", "DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY", "DOHC_SNAPSHOT_HEARTBEAT_URL",
+  "DOHC_DISK_HEARTBEAT_URL"];
 export const deploymentFolders = ["sync-relay", "continuity", "host-data", "snapshots"];
 const dockerArchitectures = { x64: "amd64", arm64: "arm64" };
 
@@ -25,16 +28,24 @@ export function parseDriveArguments(args) {
   let parsed;
   try {
     parsed = parseArgs({ args, allowPositionals: true, strict: true, options: {
-      bundle: { type: "string" }, "env-file": { type: "string" }, "volume-uuid": { type: "string" }, "first-start": { type: "boolean" } } });
+      bundle: { type: "string" }, "env-file": { type: "string" }, "volume-uuid": { type: "string" }, "first-start": { type: "boolean" },
+      limit: { type: "string" } } });
   } catch { throw new Error(usage); }
-  const { values, positionals } = parsed, [command] = positionals;
-  if (positionals.length !== 1 || !["check", "start", "move"].includes(command) || !values.bundle || !values["env-file"] || !values["volume-uuid"]) {
+  const { values, positionals } = parsed, [command] = positionals, watch = command === "disk-watch";
+  if (positionals.length !== 1 || !["check", "start", "move", "disk-watch"].includes(command) || !values["env-file"] || !values["volume-uuid"] ||
+    (watch ? values.bundle !== undefined : !values.bundle)) {
     throw new Error(usage);
   }
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(values["volume-uuid"])) {
     throw new Error("Set --volume-uuid to the volume's lowercase filesystem UUID, as lsblk -o NAME,UUID shows it.");
   }
   if (values["first-start"] && command !== "start") throw new Error("Use --first-start only with start.");
+  if (values.limit !== undefined && !watch) throw new Error("Use --limit only with disk-watch.");
+  if (watch) {
+    const limit = values.limit ?? "70";
+    if (!/^[1-9][0-9]?$/.test(limit)) throw new Error("Set --limit to a whole percentage from 1 to 99.");
+    return { command, envFile: posix.resolve(values["env-file"]), volumeUuid: values["volume-uuid"], limit: Number(limit) };
+  }
   return { command, bundle: posix.resolve(values.bundle), envFile: posix.resolve(values["env-file"]), volumeUuid: values["volume-uuid"],
     firstStart: Boolean(values["first-start"]) };
 }
@@ -75,6 +86,11 @@ export const systemHost = {
   lstat: path => lstatSync(path, { throwIfNoEntry: false }),
   readFile: path => readFileSync(path, "utf8"),
   readdir: path => readdirSync(path),
+  statfs: path => statfsSync(path),
+  /** Returns the HTTP status, or undefined when the request fails or takes over 10 seconds. */
+  async ping(url, body) {
+    try { return (await fetch(url, { method: "POST", body, signal: AbortSignal.timeout(10_000) })).status; } catch { return undefined; }
+  },
   loadConfig: bundle => import(pathToFileURL(posix.join(bundle, "tools/self-host/config.mjs")).href),
   run: spawnRun,
   write: text => process.stdout.write(text),
@@ -98,6 +114,10 @@ function checkRelease(options, host) {
   return { ...release, architecture };
 }
 
+const noMount = "Set DOHC_DATA_DIRECTORY to a folder directly on the volume's mount point, such as /mnt/dohc-drive/dohc.";
+const dataMount = settings => settings.DOHC_DATA_DIRECTORY ? posix.dirname(settings.DOHC_DATA_DIRECTORY) : "/";
+const diskCheckUrl = settings => /^https:\/\/\S+$/.test(settings.DOHC_DISK_HEARTBEAT_URL ?? "") ? settings.DOHC_DISK_HEARTBEAT_URL : undefined;
+
 function checkSettings(options, settings, release, config) {
   const errors = config.validateSettings(settings);
   const placeholders = Object.keys(settings).filter(name => /<[a-z0-9-]+>/i.test(settings[name]));
@@ -109,8 +129,9 @@ function checkSettings(options, settings, release, config) {
   if (!settings.DOHC_SNAPSHOT_S3_BUCKET || !settings.DOHC_SNAPSHOT_HEARTBEAT_URL) {
     errors.push("Drive takes hourly snapshots. Set the DOHC_SNAPSHOT_S3_ values and DOHC_SNAPSHOT_HEARTBEAT_URL.");
   }
-  const mount = settings.DOHC_DATA_DIRECTORY ? posix.dirname(settings.DOHC_DATA_DIRECTORY) : "/";
-  if (mount === "/") errors.push("Set DOHC_DATA_DIRECTORY to a folder directly on the volume's mount point, such as /mnt/dohc-drive/dohc.");
+  if (!diskCheckUrl(settings)) errors.push("Drive watches its volume's free space. Set DOHC_DISK_HEARTBEAT_URL to the disk check's Healthchecks.io URL.");
+  const mount = dataMount(settings);
+  if (mount === "/") errors.push(noMount);
   if (errors.length) throw new Error(errors.join("\n"));
   return mount;
 }
@@ -216,6 +237,41 @@ async function checkNoAccounts(options, settings, config, host) {
   if (state !== "missing") throw new Error(`Could not check database ${database} for dohc accounts. Check the database settings and the CA file, then try again.`);
 }
 
+/** Sends the disk check a report, with up to three tries. */
+async function report(url, text, host) {
+  for (let tries = 1; ; tries++) {
+    const status = await host.ping(url, text);
+    if (status >= 200 && status < 300) return;
+    if (tries === 3) throw new Error(`${text} The disk check did not accept this report.`);
+  }
+}
+
+/**
+ * Pings the disk check while the volume is under the limit, and reports a failure to it otherwise.
+ * Healthchecks.io emails the operator on a failure, and when the hourly pings stop.
+ */
+async function watchDisk(options, settings, host) {
+  const url = diskCheckUrl(settings);
+  if (!url) throw new Error("Set DOHC_DISK_HEARTBEAT_URL to the disk check's Healthchecks.io URL.");
+  let state, problem;
+  try {
+    const mount = dataMount(settings);
+    if (mount === "/") throw new Error(noMount);
+    if (!await mountState(mount, options.volumeUuid, host)) throw new Error(`Volume ${options.volumeUuid} is not mounted at ${mount}.`);
+    // Like df, count the blocks reserved for root as neither used nor free.
+    const { blocks, bfree, bavail } = host.statfs(mount), used = Math.ceil(100 * (blocks - bfree) / (blocks - bfree + bavail));
+    state = `Volume ${options.volumeUuid} at ${mount} is ${used}% full.`;
+    if (used >= options.limit) problem = `${state} The limit is ${options.limit}%. Make room on the volume or grow it.`;
+  } catch (error) { problem = error.message; }
+  if (!problem) {
+    await report(url, state, host);
+    host.write(`${state} Pinged the disk check.\n`);
+    return;
+  }
+  await report(`${url}/fail`, problem, host);
+  throw new Error(`${problem} Reported this to the disk check.`);
+}
+
 const releaseCommands = {
   check: options => ["scripts/check-self-host.mjs", "--env-file", options.envFile],
   start: options => ["scripts/check-self-host.mjs", "--start", ...(options.firstStart ? ["--first-start"] : []), "--env-file", options.envFile],
@@ -228,7 +284,7 @@ export async function runDrive(options, host = systemHost) {
     if (host.platform !== "linux") throw new Error("Run Drive commands on the Drive server, which runs Linux.");
     // Without root, blkid cannot probe devices and reports no match, which would skip the duplicate volume check.
     if (host.uid !== 0) throw new Error("Run Drive commands as root, with sudo.");
-    const release = checkRelease(options, host);
+    const release = options.command === "disk-watch" ? undefined : checkRelease(options, host);
     const envStats = host.lstat(options.envFile);
     if (!envStats?.isFile() || envStats.uid !== host.uid || !hasMode(envStats, 0o600)) {
       throw new Error(`${options.envFile} must be a regular file that belongs to you, with mode 0600. It holds the server's secrets.`);
@@ -238,6 +294,7 @@ export async function runDrive(options, host = systemHost) {
     const multiline = secretNames.filter(name => /[\r\n]/.test(settings[name] ?? ""));
     if (multiline.length) throw new Error(`Put ${multiline.join(", ")} on one line in ${options.envFile}. A secret setting cannot span lines.`);
     redact = redactor(settings);
+    if (options.command === "disk-watch") return await watchDisk(options, settings, host);
     const config = await host.loadConfig(options.bundle), mount = checkSettings(options, settings, release, config);
     checkFiles(settings, host);
     await checkHost(settings, release, host);
