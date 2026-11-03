@@ -508,7 +508,7 @@ describe("history page", () => {
       await waitFor(() => expect(state.queued).toHaveLength(0));
       await act(async () => {});
       expect(screen.getByTestId("workspace-shell-error").textContent)
-        .toContain("dohc could not record recent changes in History.");
+        .toContain("Your files still save normally. Open files may not show changes made outside dohc until History records again.");
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = screen.getByRole("dialog", { name: "Notices" });
       within(notices).getByTestId("notice-history-capture-failed");
