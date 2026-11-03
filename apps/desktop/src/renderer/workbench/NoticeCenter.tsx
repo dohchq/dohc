@@ -697,6 +697,11 @@ const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
   corner: "bottom-14 right-3 w-[min(360px,calc(100vw-24px))]",
 };
 
+// A toast's worded actions sit in a row under its text, as on its row in
+// Notices, so the text keeps the toast's width. Copy and close stay top right.
+const TOAST_ACTIONS_CLASS = "mt-1.5 flex flex-wrap gap-1";
+const TOAST_ACTION_CLASS = `${ACTION_CLASS} disabled:opacity-50`;
+
 function toneClass(tone: Notice["tone"]): string {
   if (tone === "danger") return "text-danger";
   if (tone === "warning") return "text-warning";
@@ -740,7 +745,7 @@ export function WorkspaceErrorToast(props: {
       aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
       aria-busy={error.retryBusy || undefined}
       onClick={() => props.onRetry?.(error.id)}
-      className={`${ACTION_CLASS} disabled:opacity-50`}
+      className={TOAST_ACTION_CLASS}
     >
       Try again
     </button>
@@ -793,16 +798,15 @@ export function WorkspaceErrorToast(props: {
                 </div>
               ) : null}
             </div>
-            {/* Actions sit under the text, as on its row, so the text keeps the toast's width. */}
             {actions ? (
-              <div className="mt-1.5 flex flex-wrap gap-1">
+              <div className={TOAST_ACTIONS_CLASS}>
                 {error.actionAfterRetry ? retry : null}
                 {error.actionLabel && props.onAction ? (
                   <button
                     type="button"
                     data-testid="workspace-shell-error-action"
                     onClick={() => props.onAction?.(error.id)}
-                    className={ACTION_CLASS}
+                    className={TOAST_ACTION_CLASS}
                   >
                     {error.actionLabel}
                   </button>
@@ -810,7 +814,7 @@ export function WorkspaceErrorToast(props: {
                 {props.onAction ? error.additionalActionLabels?.map((label, index) => (
                   <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
                     onClick={() => props.onAction?.(error.id, index + 1)}
-                    className={ACTION_CLASS}>
+                    className={TOAST_ACTION_CLASS}>
                     {label}
                   </button>
                 )) : null}
@@ -1833,6 +1837,8 @@ export function NoticeCenter(props: {
   // A failure's toast stays until it is closed; any other fades.
   const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
   const sentToastFades = sentToast !== null && !sentToastFails;
+  const sentToastRetries = sentToast !== null && (retriesRun(sentToast.notice) || sentToast.retryable) && Boolean(props.onRetrySentNotice);
+  const sentToastOpens = sentToast !== null && sentToast.openable && Boolean(props.onOpenSentNotice);
   useEffect(() => {
     if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
@@ -1920,32 +1926,51 @@ export function NoticeCenter(props: {
               {isHeld(sentToast.notice)
                 ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
                 : <SenderMark kind={sentToast.notice.senderKind} />}
-              <span className="min-w-0 flex-1 break-words leading-snug">
-                {sentToast.notice.title}
-                {/* About four lines, then it scrolls, so a long reason never
-                    pushes the title and controls out of a short window. */}
-                {sentToastFails && sentToast.notice.body ? (
-                  <span
-                    data-testid="sent-notice-toast-body"
-                    className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
-                  >
-                    {sentToast.notice.body}
-                  </span>
+              <div className="min-w-0 flex-1">
+                <span className="block break-words leading-snug">
+                  {sentToast.notice.title}
+                  {/* About four lines, then it scrolls, so a long reason never
+                      pushes the title and controls out of a short window. */}
+                  {sentToastFails && sentToast.notice.body ? (
+                    <span
+                      data-testid="sent-notice-toast-body"
+                      className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                    >
+                      {sentToast.notice.body}
+                    </span>
+                  ) : null}
+                </span>
+                {sentToastRetries || sentToastOpens ? (
+                  <div className={TOAST_ACTIONS_CLASS}>
+                    {sentToastRetries ? (
+                      <button
+                        type="button"
+                        data-testid="sent-notice-toast-retry"
+                        onClick={() => {
+                          onHideSentNoticeToast?.();
+                          props.onRetrySentNotice?.(sentToast.notice);
+                        }}
+                        className={TOAST_ACTION_CLASS}
+                      >
+                        Try again
+                      </button>
+                    ) : null}
+                    {sentToastOpens ? (
+                      <button
+                        type="button"
+                        data-testid="sent-notice-toast-open"
+                        onClick={() => {
+                          onHideSentNoticeToast?.();
+                          void openSentNotice(sentToast.notice);
+                        }}
+                        className={TOAST_ACTION_CLASS}
+                      >
+                        {isHeld(sentToast.notice) ? "Open note" : "Open"}
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
-              </span>
-              {(retriesRun(sentToast.notice) || sentToast.retryable) && props.onRetrySentNotice ? (
-                <button
-                  type="button"
-                  data-testid="sent-notice-toast-retry"
-                  onClick={() => {
-                    onHideSentNoticeToast?.();
-                    props.onRetrySentNotice?.(sentToast.notice);
-                  }}
-                  className={ACTION_CLASS}
-                >
-                  Try again
-                </button>
-              ) : null}
+              </div>
               {sentToastFails ? (
                 <CopyButton
                   key={sentToastKey}
@@ -1955,19 +1980,6 @@ export function NoticeCenter(props: {
                   testId="sent-notice-toast-copy"
                   getText={() => failureDetails(sentToast.notice)}
                 />
-              ) : null}
-              {sentToast.openable && props.onOpenSentNotice ? (
-                <button
-                  type="button"
-                  data-testid="sent-notice-toast-open"
-                  onClick={() => {
-                    onHideSentNoticeToast?.();
-                    void openSentNotice(sentToast.notice);
-                  }}
-                  className={ACTION_CLASS}
-                >
-                  {isHeld(sentToast.notice) ? "Open note" : "Open"}
-                </button>
               ) : null}
               {onHideSentNoticeToast ? (
                 <button
@@ -1989,19 +2001,23 @@ export function NoticeCenter(props: {
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <liveDelivery.Icon size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {liveDelivery.title}. {liveDelivery.body}
-              </span>
-              {liveDeliveryAction ? (
-                <button
-                  type="button"
-                  data-testid="owner-live-delivery-toast-action"
-                  onClick={liveDeliveryAction.onClick}
-                  className={ACTION_CLASS}
-                >
-                  {liveDeliveryAction.label}
-                </button>
-              ) : null}
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {liveDelivery.title}. {liveDelivery.body}
+                </span>
+                {liveDeliveryAction ? (
+                  <div className={TOAST_ACTIONS_CLASS}>
+                    <button
+                      type="button"
+                      data-testid="owner-live-delivery-toast-action"
+                      onClick={liveDeliveryAction.onClick}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      {liveDeliveryAction.label}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <CopyButton
                 key={liveDeliveryKey}
                 iconOnly
@@ -2028,19 +2044,23 @@ export function NoticeCenter(props: {
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
-              </span>
-              {onOpenLiveDocuments ? (
-                <button
-                  type="button"
-                  data-testid="owner-live-refusals-toast-action"
-                  onClick={onOpenLiveDocuments}
-                  className={ACTION_CLASS}
-                >
-                  Live documents
-                </button>
-              ) : null}
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
+                </span>
+                {onOpenLiveDocuments ? (
+                  <div className={TOAST_ACTIONS_CLASS}>
+                    <button
+                      type="button"
+                      data-testid="owner-live-refusals-toast-action"
+                      onClick={onOpenLiveDocuments}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      Live documents
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <CopyButton
                 key={refusalsKey}
                 iconOnly
@@ -2068,22 +2088,26 @@ export function NoticeCenter(props: {
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
-              </span>
-              {onOpenSharingDeclined ? (
-                <button
-                  type="button"
-                  data-testid="sharing-declined-toast-open"
-                  onClick={() => {
-                    closeDecline(declineToast);
-                    onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
-                  }}
-                  className={ACTION_CLASS}
-                >
-                  Open document
-                </button>
-              ) : null}
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
+                </span>
+                {onOpenSharingDeclined ? (
+                  <div className={TOAST_ACTIONS_CLASS}>
+                    <button
+                      type="button"
+                      data-testid="sharing-declined-toast-open"
+                      onClick={() => {
+                        closeDecline(declineToast);
+                        onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
+                      }}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      Open document
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <CopyButton
                 key={sharingDeclinedKey(props.workspaceId, declineToast)}
                 iconOnly
@@ -2110,19 +2134,23 @@ export function NoticeCenter(props: {
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {crashReport.title}
-              </span>
-              {props.onSendCrashReport ? (
-                <button
-                  type="button"
-                  data-testid="crash-report-toast-send"
-                  onClick={props.onSendCrashReport}
-                  className={ACTION_CLASS}
-                >
-                  Send report
-                </button>
-              ) : null}
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {crashReport.title}
+                </span>
+                {props.onSendCrashReport ? (
+                  <div className={TOAST_ACTIONS_CLASS}>
+                    <button
+                      type="button"
+                      data-testid="crash-report-toast-send"
+                      onClick={props.onSendCrashReport}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      Send report
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <CopyButton
                 key={crashReport.revision}
                 iconOnly

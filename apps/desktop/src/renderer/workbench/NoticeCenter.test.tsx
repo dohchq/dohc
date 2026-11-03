@@ -89,12 +89,26 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onRetrySentNotice ? { onRetrySentNotice: props.onRetrySentNotice } : {})}
       {...(props.onOpenTarget ? { onOpenTarget: props.onOpenTarget } : {})}
       {...(props.onReviewShareChanges ? { onReviewShareChanges: props.onReviewShareChanges } : {})}
+      {...(props.crashReport ? { crashReport: props.crashReport } : {})}
+      {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
     />
   );
 }
 
 function renderNotices(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
   return render(noticeElement(props));
+}
+
+// A toast's worded actions sit in one row under its text, in this order, and
+// its copy and close follow them at the top right.
+function expectActionRow(toast: HTMLElement, labels: readonly string[]) {
+  const buttons = within(toast).getAllByRole("button");
+  const row = buttons[0]!.parentElement!;
+  expect(buttons.slice(0, labels.length).map((button) => button.textContent)).toEqual(labels);
+  for (const button of buttons.slice(0, labels.length)) expect(button.parentElement).toBe(row);
+  expect(row.parentElement!.parentElement).toBe(toast);
+  expect(row.previousElementSibling?.textContent).toBeTruthy();
+  for (const button of buttons.slice(labels.length)) expect(row.contains(button)).toBe(false);
 }
 
 // A clean workspace whose only news is owner live delivery. A fresh object
@@ -410,6 +424,7 @@ describe("notice center", () => {
     const onOpenSharingDeclined = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
+    expectActionRow(screen.getByTestId("sharing-declined-toast"), ["Open document"]);
 
     await user.click(screen.getByTestId("sharing-declined-toast-open"));
     expect(onOpenSharingDeclined).toHaveBeenCalledWith("main", "object-1");
@@ -1365,6 +1380,7 @@ describe("notice center", () => {
     const onRetryLiveDelivery = vi.fn();
     renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
     outlastQuietRetry();
+    expectActionRow(screen.getByTestId("owner-live-delivery-toast"), ["Try again"]);
 
     await userEvent.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
@@ -1723,6 +1739,7 @@ describe("notice center", () => {
 
       const toast = screen.getByTestId("owner-live-refusals-toast");
       expect(toast.textContent).toContain("Some shares could not start live editing");
+      expectActionRow(toast, ["Live documents"]);
       // A repeated status read is the same fact, not a second one.
       rerender(
         noticeElement({ syncStatus: refusalsStatus(true), onOpenLiveDocuments }),
@@ -2013,6 +2030,14 @@ describe("failed run notices", () => {
   });
 });
 
+it("puts the crash report toast's Send report in a row under its title", async () => {
+  const onSendCrashReport = vi.fn();
+  renderNotices({ crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "report", atMs: 0 }, onSendCrashReport });
+  expectActionRow(screen.getByTestId("crash-report-toast"), ["Send report"]);
+  await userEvent.click(screen.getByTestId("crash-report-toast-send"));
+  expect(onSendCrashReport).toHaveBeenCalledOnce();
+});
+
 describe("a held change from another workspace", () => {
   it("shows as a warning whose Next is Open note, on the toast and the row", async () => {
     const held = sentRow("h", {
@@ -2029,6 +2054,7 @@ describe("a held change from another workspace", () => {
     expect(toast.querySelector("[data-sender-shape]")).toBeNull();
     expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
     expect(screen.getByTestId("sent-notice-toast-open").textContent).toBe("Open note");
+    expectActionRow(toast, ["Open note"]);
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const row = screen.getByTestId("sent-notice-h");
     expect(row.querySelector(".text-warning")).toBeTruthy();
@@ -2045,6 +2071,7 @@ describe("failed runs of the owner's server", () => {
     renderNotices({ sentNotices: [failed, sentRow("a")], sentNoticeToast: failed, onOpenSentNotice: vi.fn(async () => null), onRetrySentNotice });
     // Copy sits beside the failure on the toast and the row; another notice has none.
     expect(screen.getByTestId("sent-notice-toast-copy")).toBeTruthy();
+    expectActionRow(screen.getByTestId("sent-notice-toast"), ["Try again", "Open"]);
     await userEvent.click(screen.getByTestId("sent-notice-toast-retry"));
     expect(onRetrySentNotice).toHaveBeenCalledWith(failed.notice);
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
