@@ -57,7 +57,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -3464,7 +3464,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (isSharedLiveFileRefusal(error)) {
-        reportShellFailure({ title: `dohc can't restore "${path}" because it has been shared live`, message: "Copy the text you want from History into the file.", identity });
+        reportShellFailure({ title: sharedLiveRestoreTitle(path), message: SHARED_LIVE_RESTORE_BODY, identity });
         return;
       }
       if (readError(error).refusal === "synced-deletion") error = new SyncedDeletionRevivalError(path, { cause: error }, true);

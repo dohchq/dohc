@@ -31,7 +31,7 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
-import { readError } from "./errorWords";
+import { isSharedLiveFileRefusal, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 
 // A refused file's reason, as the person reads it. A file History no longer
@@ -591,7 +591,7 @@ export function registerStopAndRestoreIpc<
           },
           reviewPath: path => dependencies.hasOtherWorkspaceWindow?.(event.sender, workspaceId)
             ? "Open in another window. Close that window and try again."
-            : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version" : null,
+            : input.reviewPaths?.includes(path) ? "Changed on this device since the last saved version." : null,
           moment: async (momentId) => {
             const detail = await capture.readMoment(momentId);
             if (detail && !detail.protected && isCaptureRecoveryOrigin(detail.moment.metadata.origin)) return null;
@@ -614,6 +614,7 @@ export function registerStopAndRestoreIpc<
               if (error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable") {
                 return { kind: "rules-unreadable", unreadable: [...error.unreadable] };
               }
+              if (isSharedLiveFileRefusal(error)) return { kind: "refused", detail: refusalDetail(error), refusal: "shared-live" };
               if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError || error instanceof SyncedDeletionRevivalError) return { kind: "refused", detail: refusalDetail(error), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) };
               throw error;
             }
@@ -687,9 +688,10 @@ export function registerStopAndRestoreIpc<
       for (const receipt of pending?.session?.receipts ?? []) paths.set(receipt.restoredMomentId, receipt.path);
       for (const momentId of [...ids].reverse()) {
         operation.assertCurrent();
+        let path: string | undefined;
         try {
           const detail = await capture.readMoment(momentId);
-          const path = detail?.moment.path;
+          path = detail?.moment.path;
           if (dependencies.hasOtherWorkspaceWindow?.(event.sender, operation.workspace.workspaceId)) throw new RestoreLocalChangesError(path ?? "", "Open in another window. Close that window and try again.");
           if (path && input.reviewPaths?.includes(path)) throw new RestoreLocalChangesError(path);
           const receipt = await capture.restoreFileToBeforeMoment(momentId, person, {
@@ -701,7 +703,8 @@ export function registerStopAndRestoreIpc<
             error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
           await receipts.add(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
             ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
-            : { momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) });
+            : { momentId, kind: "refused", detail: path && isSharedLiveFileRefusal(error) ? `${sharedLiveRestoreTitle(path)}
+${SHARED_LIVE_RESTORE_BODY}` : refusalDetail(error).slice(0, 500), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) });
         }
       }
       await receipts.flush();

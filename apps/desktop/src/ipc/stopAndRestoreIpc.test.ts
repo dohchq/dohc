@@ -14,6 +14,7 @@ import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@do
 import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
 import { CollectionAutomations, type KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
+import { SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle } from "./errorWords";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
@@ -371,6 +372,16 @@ describe("stop and restore in main", () => {
     await vi.waitFor(async () => expect(await store.pendingRestores()).toEqual([]));
     expect(f.releases).toContain("pending-pass");
     expect(f.releases).toContain(pending.id);
+  });
+
+  it("names a shared live file's refused Undo in History's words", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
+      restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files."), undoRunsOf: async () => NOTHING});
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{momentId: "back-schema", kind: "refused", detail: `${sharedLiveRestoreTitle(SCHEMA)}
+${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
+    });
   });
 
   it("keeps a waiting session's refused file in review on the next Stop", async () => {
@@ -1343,7 +1354,7 @@ describe("stop and restore in main", () => {
   it("keeps local content and unsettled drafts for review with the engine's reason", async () => {
     const f = fixture({ restoreError: new RestoreLocalChangesError(SCHEMA) });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
-      restored: [], review: [{ path: SCHEMA, reason: "restore-refused", detail: "Changed on this device since the last saved version" }],
+      restored: [], review: [{ path: SCHEMA, reason: "restore-refused", detail: "Changed on this device since the last saved version." }],
       unfinished: null,
     });
   });
@@ -1351,7 +1362,8 @@ describe("stop and restore in main", () => {
   it("reviews a shared live file History refuses, and reports any other restore failure", async () => {
     const live = fixture({ restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files.") });
     await expect(live.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
-      review: [{ path: SCHEMA, reason: "restore-refused", detail: "dohc could not restore it. This action is unavailable for shared live files." }],
+      review: [{ path: SCHEMA, reason: "restore-refused", detail: `${sharedLiveRestoreTitle(SCHEMA)}
+${SHARED_LIVE_RESTORE_BODY}` }],
       unfinished: null,
     });
     const down = fixture({ restoreError: new Error("The workspace engine is not running.") });

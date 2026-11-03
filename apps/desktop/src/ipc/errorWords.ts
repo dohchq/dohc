@@ -669,6 +669,10 @@ export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";
 }
 
+/** A restore History refuses for a shared live file: a title, then what to do. */
+export const sharedLiveRestoreTitle = (path: string): string => `dohc can't restore "${path}" because it has been shared live`;
+export const SHARED_LIVE_RESTORE_BODY = "Copy the text you want from History into the file.";
+
 /** A chat page cursor lost its access or version binding. Restart the walk once. */
 export function isChatMentionPageChanged(error: unknown): boolean {
   const { name, code, message } = parse(error);
