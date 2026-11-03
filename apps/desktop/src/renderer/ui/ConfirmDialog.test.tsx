@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { ConfirmDialogCard } from "./ConfirmDialog";
+import userEvent from "@testing-library/user-event";
+import { ConfirmDialog, ConfirmDialogCard } from "./ConfirmDialog";
 
 function card(intent?: "default" | "danger") {
   return (
@@ -41,5 +42,76 @@ describe("ConfirmDialog intent", () => {
     expect(screen.getByRole("dialog", { name: "Delete 12 files from Research?" })).toBeTruthy();
     expect(screen.getByTestId("confirm-cancel").textContent).toBe("Cancel");
     expect(confirm.textContent).toBe("Delete files");
+  });
+});
+
+function dialog(overrides: Partial<{ confirmDisabled: boolean; choice: boolean }> = {}) {
+  const onCancel = vi.fn();
+  const onConfirm = vi.fn();
+  render(
+    <ConfirmDialog
+      title="Delete notes.md?"
+      confirmLabel="Delete"
+      intent="danger"
+      confirmDisabled={overrides.confirmDisabled}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+      testId="confirm"
+      cancelTestId="confirm-cancel"
+      confirmTestId="confirm-action"
+    >
+      {overrides.choice ? <label><input type="checkbox" /> Keep a copy</label> : <p>It moves to the trash.</p>}
+    </ConfirmDialog>,
+  );
+  return { onCancel, onConfirm, cancel: screen.getByTestId("confirm-cancel"), confirm: screen.getByTestId("confirm-action") };
+}
+
+describe("ConfirmDialog keys", () => {
+  afterEach(cleanup);
+
+  it("starts on the confirm button, so Enter confirms", async () => {
+    const user = userEvent.setup();
+    const { onCancel, onConfirm, confirm } = dialog();
+    expect(document.activeElement).toBe(confirm);
+    await user.keyboard("{Enter}");
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels with Escape", async () => {
+    const user = userEvent.setup();
+    const { onCancel, onConfirm } = dialog();
+    await user.keyboard("{Escape}");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("moves between its buttons with the arrow keys, and Tab still works", async () => {
+    const user = userEvent.setup();
+    const { onCancel, onConfirm, cancel, confirm } = dialog();
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(cancel);
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(confirm);
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(cancel);
+    await user.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(confirm);
+    await user.tab();
+    expect(document.activeElement).toBe(cancel);
+    await user.keyboard("{Enter}");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("starts on the first control when confirm waits for a choice, and Enter cannot confirm", async () => {
+    const user = userEvent.setup();
+    const { onConfirm, cancel } = dialog({ confirmDisabled: true, choice: true });
+    expect(document.activeElement).toBe(screen.getByRole("checkbox", { name: "Keep a copy" }));
+    await user.keyboard("{Enter}");
+    cancel.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(cancel);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

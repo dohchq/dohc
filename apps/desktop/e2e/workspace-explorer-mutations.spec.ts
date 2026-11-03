@@ -81,9 +81,25 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await confirmation.getByRole("button", { name: "Cancel" }).click();
     await expect(renamed).toBeVisible();
 
+    // By keyboard, as in a native dialog: focus starts on Delete and shows
+    // its ring, Escape keeps the file, the arrows move between the buttons,
+    // and Enter deletes.
+    const confirm = page.getByTestId("confirm-delete");
     await renamed.click();
     await renamed.press("Delete");
-    await page.getByTestId("confirm-delete").click();
+    await expect(confirm).toBeFocused();
+    await expect(confirm).toHaveCSS("outline-style", "solid");
+    await page.keyboard.press("Escape");
+    await expect(confirmation).toHaveCount(0);
+    await expect(renamed).toBeVisible();
+
+    await renamed.click();
+    await renamed.press("Delete");
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("cancel-delete")).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(confirm).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(renamed).toHaveCount(0);
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))

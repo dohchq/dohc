@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
@@ -235,5 +235,43 @@ describe("macOS file tree keys", () => {
     fireEvent.click(row("apps/reading-list/index.html"), { metaKey: true });
     expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
     expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("the delete dialog by keyboard", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function askToDelete() {
+    const deleteWorkspacePath = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("dohcDesktop", { platform: "win32", deleteWorkspacePath });
+    const user = userEvent.setup();
+    render(<Fixture {...explorerProps()} />);
+    await user.click(row("notes.md"));
+    await user.keyboard("{Delete}");
+    return { user, deleteWorkspacePath };
+  }
+
+  it("deletes with Delete then Enter", async () => {
+    const { user, deleteWorkspacePath } = await askToDelete();
+    expect(document.activeElement).toBe(screen.getByTestId("confirm-delete"));
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+  });
+
+  it("keeps the file with Delete then Escape", async () => {
+    const { user, deleteWorkspacePath } = await askToDelete();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    expect(deleteWorkspacePath).not.toHaveBeenCalled();
+  });
+
+  it("moves to Cancel with an arrow key, and Enter there keeps the file", async () => {
+    const { user, deleteWorkspacePath } = await askToDelete();
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(screen.getByTestId("cancel-delete"));
+    await user.keyboard("{Enter}");
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    expect(deleteWorkspacePath).not.toHaveBeenCalled();
   });
 });
