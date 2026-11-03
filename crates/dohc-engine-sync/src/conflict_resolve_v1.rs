@@ -8579,10 +8579,13 @@ mod tests {
         let key = DocKey::new("ws", "main", "object-a").unwrap();
         let edited = "base text\nTokyo";
         let built = peer_kept_its_copy(&mut store, &key, (&claim, &predecessor), edited);
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.origin_id = "peer-resolver".to_owned();
+        envelope.recorded_at_ms = 26;
         crate::apply_replication_envelope(
             &mut store,
             &mut dohc_engine_collab::WriterDocCache::new(),
-            &imported_envelope(0, "conflict.resolve", built.value.clone()),
+            &envelope,
             &NoFaults,
             &crate::NoLiveLeases,
         )
@@ -8613,7 +8616,10 @@ mod tests {
             .read_text("ws", "main", "moved.md")
             .unwrap()
             .unwrap();
-        assert_eq!((moved.object_id.as_str(), moved.text.as_str()), ("object-a", edited));
+        assert_eq!(
+            (moved.object_id.as_str(), moved.text.as_str()),
+            ("object-a", edited)
+        );
         assert_eq!(paths(&store), ["moved.md"]);
         assert_eq!(text_keep_open_rows(&store), 0);
     }
