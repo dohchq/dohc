@@ -122,8 +122,10 @@ export async function openLiveMoveFixture(input: {
     const profile = selfHostLiveProfile();
     const nativeConfigPath = join(rootA, "owner-ingress.json");
     await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+    // Every desktop's daemon gets the private live transport, as the desktop prepares it; the peer never enrolls.
+    const privateOwnerHost = { configPath: nativeConfigPath, client: profile.nativeClient };
     const owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
-      allowInsecureLoopbackForTests: false, privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient } });
+      allowInsecureLoopbackForTests: false, privateOwnerHost });
     cleanups.push(() => owner.close());
     localStates.set(rootA, owner.sessions);
     const ownerRelay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
@@ -235,7 +237,8 @@ export async function openLiveMoveFixture(input: {
     let peerDevice: MoveDevice | undefined;
     if (input.peer) {
       const rootB = await createTestScratch("dohc-live-move-peer-");
-      const peer = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootB }, { maxRestarts: 0, allowInsecureLoopbackForTests: false });
+      const peer = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootB }, { maxRestarts: 0, allowInsecureLoopbackForTests: false,
+        privateOwnerHost });
       cleanups.push(() => peer.close());
       localStates.set(rootB, peer.sessions);
       const peerRelay = peer.relay.bind({ ...peer.workspace, relay: relayConnection });
