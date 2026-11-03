@@ -1515,3 +1515,29 @@ fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
     assert_eq!(lineage_rows(&b), 0);
     assert!(open_conflicts(&b).is_empty());
 }
+
+/// A bare marker, like the one an owner stop leaves on an unenrolled file,
+/// holds nothing another device could have. A resolution retires it even when
+/// an earlier lineage of the same object journaled an update.
+#[test]
+fn a_resolution_retires_a_bare_lineage_whatever_an_earlier_lineage_journaled() {
+    let (_scratch, mut b) = device("device-b");
+    b.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,\
+             head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) \
+             VALUES('ws','main',?1,'richdoc','local-only',0,0,'unclaimed',1)",
+            [RECORD],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,\
+             recorded_at_ms,imported) VALUES('ws','device-c',0,'ydoc.update',?1,1,1)",
+            [json!({ "versionId": "main", "objectId": RECORD }).to_string()],
+        )
+        .map_err(SyncError::persist)?;
+        crate::ydoc_apply::retire_unclaimed_resolution_lineage_in_tx(tx, &key(), 2)
+    })
+    .expect("a bare lineage retires");
+    assert_eq!(lineage_rows(&b), 0);
+}

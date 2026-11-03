@@ -4326,8 +4326,10 @@ pub(crate) fn retire_unclaimed_resolution_lineage_in_tx(
         if marker.content_kind == ContentKind::Scene {
             return Ok(());
         }
+        // A bare lineage holds nothing another computer could have, whatever
+        // an earlier lineage of this object journaled.
         if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Unclaimed
-            || !empty_seed_never_replicated_in_tx(tx, key)?
+            || (lineage_has_content(marker) && !empty_seed_never_replicated_in_tx(tx, key)?)
         {
             return Err(SyncError::RetryableState {
                 reason: "ydoc-unsettled-local-lineage",
