@@ -107,7 +107,7 @@ describe("History paused words", () => {
 
   it("says in the toast and the Notices row that files still save", async () => {
     renderShell(pausedBridge());
-    const body = "dohc could not record recent changes in History. Your files still save normally.";
+    const body = "dohc could not record recent changes in History. Your files still save normally. Open files may not show changes made outside dohc until History records again.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("History paused");
     expect(toast.textContent).toContain(body);

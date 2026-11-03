@@ -567,7 +567,7 @@ export function useShellError(workspaceId: string) {
         identity,
         title: "History paused",
         message: paused === undefined
-          ? "dohc could not record recent changes in History. Your files still save normally."
+          ? "dohc could not record recent changes in History. Your files still save normally. Open files may not show changes made outside dohc until History records again."
           : paused === "catching-up"
             ? "History is still catching up. Try again in a few minutes."
             : stopped.length === 0

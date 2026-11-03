@@ -2312,7 +2312,6 @@ export function DesktopWorkspaceShell(props: {
         readNewestMomentOrder(
           workspaceId,
           () => latestMomentRequest.current === token && !workspaceAdmission.superseded,
-          () => syncStatusLane.latest()?.historyCaptureFailed === true,
         ),
         (order) => order ?? latestMomentLane.latest(),
         (error) =>
