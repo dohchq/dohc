@@ -186,3 +186,28 @@ describe("Show in the file manager", () => {
     }
   });
 });
+
+describe("a selection of several rows", () => {
+  const labels = (overrides: Partial<ExplorerMenuScope>) =>
+    explorerMenuEntries(scope(overrides), "linux").map((entry) => (entry.kind === "item" ? entry.label : "-"));
+
+  it("offers only what acts on every row, and says how many", () => {
+    expect(labels({ kind: "file", count: 3 })).toEqual(["Delete 3 items", "Pin 3 items"]);
+    expect(labels({ kind: "folder", count: 2, canShare: true })).toEqual(["Delete 2 items", "Pin 2 items"]);
+  });
+
+  it("unpins when every row is pinned", () => {
+    expect(labels({ kind: "file", count: 4, pinned: true })).toEqual(["Delete 4 items", "Unpin 4 items"]);
+  });
+
+  it.each([
+    ["a read-only share view", { shareView: shareView("view") }],
+    ["a share mount", { isMountPath: true, hasMountRecord: true }],
+  ] as const)("offers no delete in %s", (_label, overrides) => {
+    expect(labels({ kind: "file", count: 2, ...overrides })).toEqual(["Pin 2 items"]);
+  });
+
+  it("leaves the root menu as it is", () => {
+    expect(commands({ kind: "root", count: 2 })).toEqual(commands({ kind: "root" }));
+  });
+});

@@ -4661,6 +4661,36 @@ describe("a refused delete of a page this computer owns live", () => {
     expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "a.md" }));
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
+
+  it("deletes the rest of a selection and names every refused page in one notice", async () => {
+    const SEVERAL = `dohc can't delete "a.md" and "c.md" while they have live editing on`;
+    const SEVERAL_BODY = "In Live documents, stop live editing for these pages, then delete them again.";
+    const refusal = (path: string) => new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${path}" while it has live editing on\n${BODY}`);
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath !== "b.md") throw refusal(relativePath);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map(path => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("a.md"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("c.md"));
+    await user.keyboard("{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(SEVERAL);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe(SEVERAL_BODY);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(SEVERAL)).toHaveLength(1);
+    const notice = within(notices).getByText(SEVERAL).closest("li")!;
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+  });
 });
 
 describe("a refused drag of a page this computer owns live", () => {

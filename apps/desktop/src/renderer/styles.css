@@ -101,6 +101,7 @@
   --color-ink: var(--dohc-ink);
   --color-hover: var(--dohc-hover);
   --color-selected: var(--dohc-selected);
+  --color-selection: var(--dohc-selection);
   --color-scrim: var(--dohc-scrim);
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);

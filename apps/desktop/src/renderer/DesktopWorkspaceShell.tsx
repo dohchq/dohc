@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -973,9 +973,11 @@ export function DesktopWorkspaceShell(props: {
   const reportExplorerError = useCallback(
     (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
-      const id = workspaceId, reveal = livePage?.path ?? null;
+      const id = workspaceId, reveal = livePage && "path" in livePage ? livePage.path : null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
-        ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
+        ...(!livePage ? { message }
+          : "path" in livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) }
+          : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action) }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
