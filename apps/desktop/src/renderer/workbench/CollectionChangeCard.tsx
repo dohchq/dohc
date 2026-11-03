@@ -1,0 +1,220 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
+import type { ChatMessageRecord } from "../../ipc/bridgeContract";
+import { isDatasetServerNotFound } from "../../ipc/errorWords";
+import {
+  collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, describeCollectionChangeRow, historyCanUndoCollectionChange,
+  type CollectionChangeRow,
+} from "../../workspaces/collectionChange";
+import { bridge } from "../bridge";
+import {
+  applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, undoCollectionChange, type CollectionChange, type CollectionChangeState,
+} from "../collections/collectionChangeFlow";
+import { ipcErrorMessage } from "../ipcError";
+import { formatClock } from "../time";
+import { CopyButton } from "../ui/CopyButton";
+import { DangerButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import { CHANGE_ICONS, CHANGE_LOSS, CollectionChangeReviewDialog } from "./CollectionChangeReviewDialog";
+/** Not now is one person's choice on one device. It posts nothing. */
+const notNowKey = (workspaceId: string, messageId: string) => `dohc:change-card:not-now:${workspaceId}:${messageId}`;
+const readNotNow = (key: string) => { try { return localStorage.getItem(key) === "1"; } catch { return false; } };
+const by = (name: string, atMs: number | null) => atMs === null ? name : `${name} · ${formatClock(atMs)}`;
+/** What a failed Apply says. The server answers "not found" for a Collection the caller can't change, so a 404 names the server. */
+const applyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
+  ? { words: `The server that keeps ${name} refused this change. Nothing changed. Ask its owner to apply it.`, retry: false }
+  : { words: ipcErrorMessage(error, "dohc couldn't apply this change."), retry: true };
+
+type Phase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
+
+/**
+ * A message's attached change to a Collection's rules: what applying it does
+ * and who made each part, with Apply and Not now while it waits. Apply posts
+ * a reply as the person who clicked, which answers the message's question.
+ */
+export function CollectionChangeCard(props: {
+  workspaceId: string;
+  message: ChatMessageRecord;
+  path: string;
+  /** The reply that answered the message, which applied the change. */
+  appliedBy?: ChatMessageRecord;
+  /** The later reply that undid it. */
+  undoneBy?: ChatMessageRecord;
+  locked: boolean;
+  onOpenPath?: (path: string) => void;
+  /** Posts the reply that applying or undoing the change makes. Resolves once it posts. */
+  onReply: (input: { body: string; resolves: boolean }) => Promise<void>;
+  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  testIdPrefix: string;
+}) {
+  const { workspaceId, message, path } = props;
+  const [change, setChange] = useState<CollectionChange | null>(null);
+  const [loadFailure, setLoadFailure] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const key = notNowKey(workspaceId, message.id);
+  const [notNow, setNotNow] = useState(() => readNotNow(key));
+  const [reload, setReload] = useState(0);
+  // Apply found the files no longer make the change shown.
+  const [stale, setStale] = useState(false);
+  // The change as the card showed it when Review opened.
+  const [reviewing, setReviewing] = useState<CollectionChange | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  useEffect(() => {
+    let current = true;
+    setLoadFailure(null);
+    loadCollectionChange(bridge(), { workspaceId, path, postedAtMs: message.createdAtMs }).then(
+      loaded => { if (current) setChange(loaded); },
+      (error: unknown) => { if (current) setLoadFailure(ipcErrorMessage(error, "dohc couldn't read this change.")); },
+    );
+    return () => { current = false; };
+  }, [workspaceId, path, message.createdAtMs, reload, props.appliedBy?.id, props.undoneBy?.id]);
+
+  // A failure stays on the card while it shows, and goes to the shell's toasts once the chat closed.
+  const fail = (failure: { words: string; retry: boolean }, error: unknown) => {
+    if (mounted.current) setPhase({ kind: "failed", ...failure });
+    else props.onError(failure.words, error);
+  };
+  const posted = (body: string, resolves: boolean, words: string) => props.onReply({ body, resolves })
+    .catch((error: unknown) => props.onError(ipcErrorMessage(error, words), error));
+  const settled = () => { if (mounted.current) { setPhase({ kind: "idle" }); setReload(value => value + 1); } };
+
+  const apply = async (shown: CollectionChange) => {
+    setPhase({ kind: "applying", words: "Applying…" });
+    try {
+      if (await applyCollectionChange(bridge(), workspaceId, shown) === "applied") {
+        await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
+      } else if (mounted.current) setStale(true);
+      settled();
+    } catch (error) { fail(applyFailure(shown.proposal.name)(error), error); }
+  };
+
+  const undo = async (shown: CollectionChange) => {
+    setPhase({ kind: "applying", words: "Undoing…" });
+    try {
+      await undoCollectionChange(bridge(), workspaceId, shown.proposal);
+      await posted(`Undid the change to ${shown.proposal.name}.`, false, "dohc undid the change but couldn't post that it did.");
+      settled();
+    } catch (error) { fail({ words: ipcErrorMessage(error, "dohc couldn't undo this change."), retry: true }, error); }
+  };
+
+  const testId = (part: string) => `${props.testIdPrefix}-change-${part}`;
+  if (loadFailure && !change) {
+    return <div data-testid={testId("load-failed")} className="mt-2 flex w-full max-w-[740px] items-start gap-2 rounded-lg border border-line bg-panel px-3.5 py-2.5 text-[12px] text-ink">
+      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
+      <span className="min-w-0">{loadFailure}</span>
+      <SecondaryButton size="row" className="ml-auto shrink-0" onClick={() => setReload(value => value + 1)}>Try again</SecondaryButton>
+    </div>;
+  }
+  if (!change) return null;
+  const { proposal, rows } = change;
+  const state: CollectionChangeState = stale && change.state.kind === "waiting" ? { kind: "edited", by: null, atMs: null } : change.state;
+  const undone = state.kind === "applied" && !state.current && props.undoneBy;
+  const waiting = state.kind !== "applied";
+  const busy = phase.kind === "applying";
+  if (waiting && notNow && !busy) {
+    return <button type="button" data-testid={testId("not-now")} onClick={() => { try { localStorage.removeItem(key); } catch { /* Not now lasts only as long as storage does. */ } setNotNow(false); }}
+      className="mt-2 flex h-[38px] w-full max-w-[740px] items-center gap-2 rounded-lg border border-line bg-panel px-3.5 text-left text-[13px] text-muted transition-colors hover:bg-panel-2">
+      <ChevronRight size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
+      <span className="font-medium text-ink">Waiting</span><span className="min-w-0 truncate">· Change to {proposal.name}</span>
+    </button>;
+  }
+  const deletes = collectionChangeDeletes(rows);
+  const undoable = historyCanUndoCollectionChange(rows);
+  const applyLabel = collectionApplyLabel(deletes);
+  const ApplyButton = deletes.records || deletes.values ? DangerButton : PrimaryButton;
+  const failure = applyFailure(proposal.name);
+  const tense = state.kind === "applied" ? "past" : "present";
+  const noteAt = proposal.note === null ? -1 : collectionChangeNoteRow(rows);
+  const note = proposal.note === null ? null : `${message.authorDisplayName}'s note: "${proposal.note}"`;
+  const review = <button type="button" data-testid={testId("review")} onClick={() => setReviewing(change)}
+    className="ml-4 shrink-0 text-[12px] text-muted underline underline-offset-[3px] hover:text-ink">Review source change</button>;
+  const putOff = () => { try { localStorage.setItem(key, "1"); } catch { /* It shows again next time. */ } setNotNow(true); };
+  const later = <SecondaryButton data-testid={testId("not-now-button")} disabled={props.locked} onClick={putOff}>Not now</SecondaryButton>;
+  const status = undone ? { label: "Undone", dot: "bg-subtle", reply: props.undoneBy }
+    : state.kind === "applied" ? { label: "Applied", dot: "bg-success", reply: props.appliedBy } : null;
+
+  let footer: ReactNode = null;
+  if (busy) {
+    footer = <Footer><LoaderCircle size={14} strokeWidth={1.9} aria-hidden className="shrink-0 animate-spin text-ink" /><span className="text-[12px] text-muted">{phase.words}</span></Footer>;
+  } else if (state.kind === "edited") {
+    footer = <Footer><PrimaryButton data-testid={testId("review-button")} onClick={() => setReviewing(change)}>Review source change</PrimaryButton>{later}</Footer>;
+  } else if (state.kind === "waiting") {
+    const retry = phase.kind !== "failed" || phase.retry;
+    footer = <Footer>
+      {retry ? <ApplyButton data-testid={testId("apply")} disabled={props.locked} onClick={() => void apply(change)}>{phase.kind === "failed" ? "Try again" : applyLabel}</ApplyButton> : null}
+      {later}
+      {undoable ? <span className="flex-1" /> : <span className="min-w-0 flex-1 text-[12px] text-muted">{CHANGE_LOSS}</span>}
+      {review}
+    </Footer>;
+  } else if (!undone && state.current && undoable) {
+    footer = <Footer><SecondaryButton data-testid={testId("undo")} disabled={props.locked} onClick={() => void undo(change)}>Undo</SecondaryButton></Footer>;
+  } else if (!undone && !undoable) {
+    footer = <Footer><span className="min-w-0 flex-1 text-[12px] text-muted">{CHANGE_LOSS}</span></Footer>;
+  }
+
+  return <div data-testid={testId("card")} data-state={undone ? "undone" : busy ? "applying" : phase.kind === "failed" ? "failed" : state.kind}
+    className="mt-2 w-full max-w-[740px] overflow-hidden rounded-lg border border-line bg-panel">
+    <div className="flex min-h-11 items-center gap-2.5 border-b border-line px-3.5 py-2.5">
+      <span className="font-semibold text-ink">Change to {props.onOpenPath
+        ? <button type="button" onClick={() => props.onOpenPath?.(proposal.datasetPath)} className="font-semibold text-ink underline decoration-subtle underline-offset-[3px]">{proposal.name}</button>
+        : proposal.name}</span>
+      {status ? <span className="ml-auto flex items-center gap-2 text-[12px] text-muted">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[11px] text-ink">
+          <span className={`size-1.5 rounded-full ${status.dot}`} aria-hidden />{status.label}
+        </span>
+        {status.reply ? <span>by {by(status.reply.authorDisplayName, status.reply.createdAtMs)}</span> : null}
+      </span> : null}
+    </div>
+    <ul className="py-1">
+      {rows.map((row, index) => <ChangeRow key={row.key} row={row} tense={tense} note={index === noteAt ? note : null} message={message} />)}
+    </ul>
+    {note !== null && noteAt === -1 ? <p className="mx-3.5 mb-2 text-[12px] text-muted">{note}</p> : null}
+    {phase.kind === "failed" && !busy ? <div role="alert" data-testid={testId("failed")} className="mx-3.5 mb-2.5 mt-0.5 flex items-start gap-2 rounded-md border border-danger/45 bg-bg px-2.5 py-2 text-[12px] text-ink">
+      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
+      <span className="min-w-0">{phase.words}</span>
+      <CopyButton iconOnly label="Copy" pinName getText={() => phase.words} />
+    </div> : null}
+    {state.kind === "edited" && !busy ? <p data-testid={testId("edited")} className="mx-3.5 mb-2.5 mt-0.5 flex items-center gap-1.5 text-[12px] text-warning">
+      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
+      <span>{state.atMs === null ? "Its files changed after it was sent." : state.by ? `${state.by.name} changed these files at ${formatClock(state.atMs)}.` : `These files changed at ${formatClock(state.atMs)}.`} Review the change to apply it.</span>
+    </p> : null}
+    {footer}
+    {reviewing ? createPortal(<CollectionChangeReviewDialog workspaceId={workspaceId} asked={reviewing} locked={props.locked} failure={failure}
+      testIdPrefix={props.testIdPrefix} onClose={() => setReviewing(null)} onNotNow={putOff}
+      onApply={async review => {
+        try { await applyCollectionChangeReview(bridge(), workspaceId, review); } catch (error) {
+          if (!mounted.current) props.onError(failure(error).words, error);
+          throw error;
+        }
+        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
+        if (mounted.current) setStale(false);
+        settled();
+      }} />, document.body) : null}
+  </div>;
+}
+
+function Footer(props: { children: ReactNode }) {
+  return <div className="flex items-center gap-2.5 border-t border-line px-3.5 py-2.5">{props.children}</div>;
+}
+
+/** One part of the change. A part someone other than the message's author made names them on the right. */
+function ChangeRow(props: { row: CollectionChangeRow; tense: "present" | "past"; note: string | null; message: ChatMessageRecord }) {
+  const words = describeCollectionChangeRow(props.row, props.tense);
+  const { icon: Icon, tone } = CHANGE_ICONS[words.icon];
+  const author = props.row.source?.author;
+  const other = author && (author.name !== props.message.authorDisplayName || author.agent !== (props.message.authorKind === "agent"));
+  const effect = props.note ?? words.effect;
+  return <li className="grid grid-cols-[18px_minmax(0,1fr)_auto] gap-2 px-3.5 py-1.5">
+    <span className={`grid size-[18px] place-items-center ${tone}`}><Icon size={14} strokeWidth={1.9} aria-hidden /></span>
+    <div className="min-w-0">
+      <div className="font-medium text-ink">{words.text}{words.type ? <span className="font-normal text-muted"> {words.type}</span> : null}</div>
+      {effect ? <div className={`flex items-center gap-1.5 text-[12px] ${words.danger && !props.note ? "text-danger" : "text-muted"}`}>
+        {words.danger && !props.note ? <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" /> : null}
+        <span className={words.file && !props.note ? "font-mono text-[11px]" : undefined}>{effect}</span>
+      </div> : null}
+    </div>
+    {other ? <span className="mt-0.5 text-[11px] text-subtle">{by(author.name, props.row.source?.atMs ?? null)}</span> : <span />}
+  </li>;
+}

@@ -20,9 +20,15 @@ import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
+import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
+import { CollectionChangeCard } from "./CollectionChangeCard";
 import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
+
+// The change to a Collection's rules a message asks a person to apply.
+const changeFileOf = (message: ChatMessageRecord) =>
+  message.attachments?.find((attachment) => attachment.pathHint !== undefined && COLLECTION_CHANGE_FILE.test(attachment.pathHint))?.pathHint;
 
 type PaintedLane = {
   threadId: string | null;
@@ -382,6 +388,28 @@ export function ChatLane(props: {
     }
   }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages]);
 
+  // Applying or undoing a change answers in the change's own place, as the person who clicked.
+  // Apply answers the message's question. Undo attaches the change file again.
+  const replyToChange = useCallback(async (asked: ChatMessageRecord, path: string, input: { body: string; resolves: boolean }) => {
+    const post = asked.threadId !== threadId ? asked.threadId : undefined;
+    const target = post ?? threadId;
+    if (!target) throw new Error("dohc couldn't find this chat.");
+    const parentMessageId = post ? undefined : asked.parentMessageId;
+    const current = token.current;
+    const result = await bridge().sendChatMessage({
+      workspaceId, threadId: target, body: input.body,
+      ...(parentMessageId ? { parentMessageId } : {}),
+      ...(input.resolves ? { resolves: { messageId: asked.id } } : { fileReferences: [{ path }] }),
+    });
+    if (current !== token.current) return;
+    loadSequence.current += 1;
+    setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+    const resolved = result.resolved;
+    if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === asked.id ? resolved : entry));
+    if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."), result.resolveFailure);
+    void load(true);
+  }, [load, onError, threadId, workspaceId]);
+
   const liveRunId = dispatch?.liveRunId ?? null;
   const stopRun = useCallback(async () => {
     if (liveRunId === null || stopping) return;
@@ -461,8 +489,23 @@ export function ChatLane(props: {
   // Under a message: its poll, and why the agent didn't answer it.
   const renderFooter = useCallback((message: ChatMessageRecord) => {
     const decision = decisionsByMessage.get(message.id);
+    const changeFile = decision ? changeFileOf(message) : undefined;
+    const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) =>
+      reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
+    const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
     return <>
-      {decision ? <DecisionStatus
+      {changeFile !== undefined ? <CollectionChangeCard
+        workspaceId={workspaceId}
+        message={message}
+        path={changeFile}
+        appliedBy={appliedBy}
+        undoneBy={undoneBy}
+        locked={props.locked}
+        onOpenPath={props.onOpenPath}
+        onReply={(input) => replyToChange(message, changeFile, input)}
+        onError={onError}
+        testIdPrefix="chats-lane"
+      /> : decision ? <DecisionStatus
         decision={decision}
         testIdPrefix="chats-lane"
         {...(!props.locked && !sending && decision.options?.length ? {
@@ -477,7 +520,7 @@ export function ChatLane(props: {
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, props.locked, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (

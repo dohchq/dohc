@@ -8,6 +8,7 @@ import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
+import { ask, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
 
 vi.mock("./chatFileMentions", { spy: true });
 
@@ -679,6 +680,25 @@ describe("ChatLane", () => {
       workspaceId: "workspace-a", threadId: "post-1", body: "Monday",
       resolves: { messageId: "poll", chosenOption: "Monday" },
     }));
+  });
+
+  it("shows a Collection change on the message that attaches it, and Apply answers that message", async () => {
+    const place = world();
+    ask(place);
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, ...place.api });
+    const attachment = { attachmentId: "attachment-1", threadId: "thread-1", messageId: "asks", targetKind: "file" as const, pathHint: proposalPath, createdAtMs: 3_000 };
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "asks", body: "Here's the due date.", authorKind: "agent", authorDisplayName: "Claude Code", createdAtMs: 3_000, attachments: [attachment] }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "asks", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "applied", body: "Applied the change to Volunteers." }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-change-apply"));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Applied the change to Volunteers.", resolves: { messageId: "asks" },
+    }));
+    expect(screen.queryByTestId("chats-lane-decision-open")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("drops the poll with the draft when the group changes", async () => {

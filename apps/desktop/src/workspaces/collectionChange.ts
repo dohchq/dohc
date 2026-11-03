@@ -274,7 +274,7 @@ export function describeCollectionChangeRow(row: CollectionChangeRow, tense: "pr
         ...(row.values !== null && row.values > 1 ? { effect: `All ${row.values} ${row.field} values ${verb("are", "were")} already different` } : {}) };
     case "field-choices": return { icon: "rule", text: `${verb("Changes", "Changed")} the choices for ${row.field}` };
     case "field-default": return { icon: "rule", text: `${verb("Changes", "Changed")} the default for ${row.field}` };
-    case "records-deleted": return { icon: "remove", text: `${verb("Removes", "Removed")} records from ${row.table}`,
+    case "records-deleted": return { icon: "remove", text: verb("Removes records", "Removed records"),
       effect: verb(`Deletes ${plural(row.records, "record")}`, `Deleted ${plural(row.records, "record")}`), danger: true };
     case "action-added": return { icon: "code", text: `${verb("Adds", "Added")} the ${row.action} action` };
     case "action-removed": return { icon: "code", text: `${verb("Removes", "Removed")} the ${row.action} action` };
@@ -282,7 +282,7 @@ export function describeCollectionChangeRow(row: CollectionChangeRow, tense: "pr
     case "code-changed": return { icon: "code", text: verb("Changes the code for the actions", "Changed the code for the actions") };
     case "schema-changed": return { icon: "data", text: verb("Changes the schema", "Changed the schema"), effect: basename(row.file), file: true };
     case "migration": return { icon: "data", file: true, effect: basename(row.file),
-      text: row.records ? `${verb("Runs", "Ran")} a migration on the ${row.records === 1 ? "1 existing record" : `${row.records} existing records`}` : verb("Runs a migration", "Ran a migration") };
+      text: `${verb("Runs", "Ran")} a migration${!row.records ? "" : row.records === 1 ? " on 1 existing record" : ` on the ${row.records} existing records`}` };
   }
 }
 

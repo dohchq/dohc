@@ -1,0 +1,73 @@
+import { expect, it } from "vitest";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { describeCollectionChangeRow } from "../../workspaces/collectionChange";
+import { applyCollectionChange, collectionChangeDigest, loadCollectionChange } from "./collectionChangeFlow";
+import { ask, asked, base, claude, fixtureSources, ice, id, proposalPath, world, type World } from "./collectionChangeFlow.testHarness";
+
+const { schemaSql, operationSource, migrationSql } = fixtureSources;
+const load = (place: World) => loadCollectionChange(place.api, { workspaceId: "w", path: proposalPath, postedAtMs: 3_000 });
+
+it("computes the digest the server checks", async () => {
+  const next = describeDatasetRevision({ definition: asked, revision: 4, schemaSql, operationSource });
+  await expect(collectionChangeDigest({ definition: asked, revision: 4, schemaSql, operationSource, migrationSql }))
+    .resolves.toBe(datasetChangeDigest({ revisionSha256: next.revisionSha256, migrationSql }));
+});
+
+it("shows a collaborator's unapplied edit as its own row with its author", async () => {
+  const place = world(); ask(place);
+  const change = (await load(place))!;
+  expect(change.state).toEqual({ kind: "waiting" });
+  expect(change.rows.map(row => [describeCollectionChangeRow(row, "present").text, row.source?.author?.name, row.source?.atMs])).toEqual([
+    ["Adds the field Due date", "Claude Code", 2_000],
+    ["Removes the field Notes", "Claude Code", 2_000],
+    ["Makes Email unique", "Ice", 1_000],
+    ["Runs a migration on the 12 existing records", "Claude Code", 2_100],
+  ]);
+});
+
+it("applies the rows the card showed, whatever the attached file says after it loaded", async () => {
+  const place = world(); const proposal = ask(place);
+  const change = (await load(place))!;
+  // Someone with write access hides the deletion in the attached file.
+  place.files[proposalPath] = JSON.stringify({ ...proposal, rows: proposal.rows.filter(row => row.kind !== "field-removed") });
+  const reads = place.reads.length;
+  await expect(applyCollectionChange(place.api, "w", change)).resolves.toBe("applied");
+  expect(place.reads.length).toBe(reads);
+  expect(place.calls.find(call => call.action === "approveMigration")).toMatchObject({ changeSha256: proposal.changeSha256 });
+  expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
+  expect((await load(place))!.state).toEqual({ kind: "applied", current: true });
+});
+
+it("applies nothing when the attached file hid part of the change before the card loaded", async () => {
+  const place = world(); const proposal = ask(place);
+  place.files[proposalPath] = JSON.stringify({ ...proposal, rows: proposal.rows.filter(row => row.kind !== "field-removed") });
+  const change = (await load(place))!;
+  expect(change.rows.some(row => row.kind === "field-removed")).toBe(false);
+  await expect(applyCollectionChange(place.api, "w", change)).resolves.toBe("edited");
+  expect(place.actions().slice(-2)).toEqual(["prepareMigration", "discardMigration"]);
+  expect(place.head().revisionSha256).toBe(base.revisionSha256);
+});
+
+it("applies nothing when the files changed after the card loaded, and then says who changed them", async () => {
+  const place = world(); ask(place);
+  const change = (await load(place))!;
+  const later: DatasetDefinition = structuredClone(asked);
+  later.tables[0]!.fields.push({ fieldId: id(10), name: "Phone", sqlColumn: "phone", type: "text", required: false, unique: false });
+  place.files["volunteers/dataset.json"] = JSON.stringify(later);
+  place.moments.push(place.moment(5, "volunteers/dataset.json", 4_000, { personAuthorName: "Ice" }, JSON.stringify(later)));
+  await expect(applyCollectionChange(place.api, "w", change)).resolves.toBe("edited");
+  expect(place.actions()).not.toContain("approveMigration");
+  expect(place.head().revisionSha256).toBe(base.revisionSha256);
+  const reloaded = (await load(place))!;
+  expect(reloaded.state).toEqual({ kind: "edited", by: ice, atMs: 4_000 });
+  // The rows are still the ones the message asked about, made before it was sent.
+  expect(reloaded.rows.map(row => row.source?.author)).toEqual([claude, claude, ice, claude]);
+});
+
+it("is no change card for a file that isn't one", async () => {
+  const place = world();
+  place.files[proposalPath] = JSON.stringify({ kind: "something-else" });
+  await expect(load(place)).resolves.toBeNull();
+  expect(place.calls).toEqual([]);
+});

@@ -28,6 +28,8 @@ import {
   HistoryStillPausedError,
   ipcWireError,
   isChatMentionPageChanged,
+  isDatasetServerNotFound,
+  markDatasetServerNotFound,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
   isLiveFolderRefusal,
@@ -67,6 +69,15 @@ it("explains the held-file live-open refusal after Electron serializes it", () =
 function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"): Error {
   return new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(error))}`);
 }
+
+it("keeps a server Collection's not found code across Electron, with the words other callers show", () => {
+  const error = acrossIpc(markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, { code: "not_found" }), "desktop:dataset");
+  expect(isDatasetServerNotFound(error)).toBe(true);
+  expect(readError(error).words).toBe("That share isn't available anymore.");
+  expect(isDatasetServerNotFound(acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"))).toBe(false);
+  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }))).toBe(false);
+  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
+});
 
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);

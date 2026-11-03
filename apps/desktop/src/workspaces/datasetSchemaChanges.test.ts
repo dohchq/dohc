@@ -131,7 +131,7 @@ it("asks to apply an edited dataset.json and migration as a file that lists the 
     base: { revision: 1, revisionSha256: approved.revision.revisionSha256 }, changeSha256: asked.changeSha256, note: "Adds a due date." });
   expect(proposal.changeSha256).toBe(datasetChangeDigest({ revisionSha256: proposal.revisionSha256, migrationSql: generated.migrationSql }));
   expect(proposal.files).toEqual(expect.arrayContaining(["people/dataset.json", generated.migrationPath]));
-  expect(proposal.rows.map(row => describeCollectionChangeRow(row, "present").text)).toEqual(["Adds the field Due date", "Runs a migration on the 1 existing record"]);
+  expect(proposal.rows.map(row => describeCollectionChangeRow(row, "present").text)).toEqual(["Adds the field Due date", "Runs a migration on 1 existing record"]);
   expect(describeCollectionChangeRow(proposal.rows[0]!, "present").effect).toBe("1 record starts with an empty Due date");
   expect(discard).toHaveBeenCalledOnce();
   expect(f.host.approvedArtifacts(id(1)).revision.revisionSha256).toBe(approved.revision.revisionSha256);

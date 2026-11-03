@@ -105,7 +105,7 @@ it("counts records and values a migration deletes, even when no field changes", 
   const rows = collectionChangeRows({ previous: revision(volunteers, 3, 1), next: revision(volunteers, 4, 1), operationSource: "custom code",
     migrationSql: "DELETE FROM volunteers WHERE status IS NULL; UPDATE volunteers SET status = NULL;", migrationPath: "volunteers/clear.sql", counts: cleared }) as CollectionChangeRow[];
   expect(words(rows, "present").map(row => [row.text, row.effect, row.danger])).toEqual([
-    ["Removes records from Volunteers", "Deletes 3 records", true],
+    ["Removes records", "Deletes 3 records", true],
     ["Changes the field Status", "Deletes 6 of its values", true],
     ["Runs a migration on the 12 existing records", "clear.sql", undefined],
   ]);
@@ -123,4 +123,11 @@ it("treats the same change from different authors as the same, and new counts as
 
 it("refuses a row with a field it does not know", () => {
   expect(() => CollectionChangeRow.parse({ kind: "code-changed", key: "code", text: "Deletes nothing" })).toThrow();
+});
+
+it("counts the records a migration runs on only when there are some", () => {
+  const migration = (records: number | null) => ({ kind: "migration", key: "migration", file: "volunteers/m.sql", records }) as CollectionChangeRow;
+  expect([0, null, 1, 12].map(records => describeCollectionChangeRow(migration(records), "present").text)).toEqual(
+    ["Runs a migration", "Runs a migration", "Runs a migration on 1 existing record", "Runs a migration on the 12 existing records"]);
+  expect(describeCollectionChangeRow(migration(1), "past").text).toBe("Ran a migration on 1 existing record");
 });
