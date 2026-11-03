@@ -1801,7 +1801,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
       const posted = (await dispatch.listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
-      const found = { run, outcome, attemptCount, retryable: attemptCount < 2 && canRepeatFailedRun(outcome, posted) };
+      const found: StoppedRun = { run, outcome, attemptCount, retryable: attemptCount < 2 && canRepeatFailedRun(outcome, posted) };
       if (found.retryable) return found;
       exhausted ??= found;
     }
