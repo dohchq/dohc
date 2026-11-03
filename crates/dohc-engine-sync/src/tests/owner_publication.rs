@@ -1088,7 +1088,9 @@ fn a_stuck_167_1_delete_and_the_moments_after_it_publish_after_the_sweep() {
     let pushes = client.transport().pushes.lock().unwrap();
     let published = |digest: &str| {
         pushes.iter().flat_map(|push| &push.ops).any(|op| {
-            op.payload.get("payloadAfterBlobSha256").and_then(|value| value.as_str())
+            op.payload
+                .get("payloadAfterBlobSha256")
+                .and_then(|value| value.as_str())
                 == Some(digest)
         })
     };

@@ -8619,13 +8619,12 @@ mod tests {
         crate::adopt_join_identity(store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
         store
             .read_with(|conn| {
-                conn.execute(
-                    "UPDATE ydoc_docs SET path='doc.md',regime='replicated'",
-                    [],
-                )
+                conn.execute("UPDATE ydoc_docs SET path='doc.md',regime='replicated'", [])
             })
             .unwrap();
-        let marker = dohc_engine_collab::read_marker(store, key).unwrap().unwrap();
+        let marker = dohc_engine_collab::read_marker(store, key)
+            .unwrap()
+            .unwrap();
         let checkpoint = store
             .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
             .unwrap()
@@ -8656,15 +8655,7 @@ mod tests {
         let dohc_engine_storage::TxnOutcome::Committed(appended) = store
             .write_with(&NoFaults, |tx| {
                 install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)?;
-                append_draft_in_tx(
-                    tx,
-                    "ws",
-                    &observed.binding,
-                    1,
-                    "unsent".into(),
-                    update,
-                    12,
-                )
+                append_draft_in_tx(tx, "ws", &observed.binding, 1, "unsent".into(), update, 12)
             })
             .unwrap()
         else {

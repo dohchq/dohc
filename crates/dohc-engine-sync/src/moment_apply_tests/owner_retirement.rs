@@ -179,10 +179,16 @@ fn recovery_copy(store: &EngineStore, outbox_id: &str) -> (Vec<Vec<u8>>, String)
         .map(|entry| entry.update)
         .collect();
     let doc = Ydoc::wire();
-    for part in [&checkpoint, &pending.base_update].into_iter().chain(&updates) {
+    for part in [&checkpoint, &pending.base_update]
+        .into_iter()
+        .chain(&updates)
+    {
         doc.apply(part).unwrap();
     }
-    (updates, doc.project(YdocContentKind::Richdoc).unwrap().content)
+    (
+        updates,
+        doc.project(YdocContentKind::Richdoc).unwrap().content,
+    )
 }
 
 /// The closed generation is save-only, unbound, and skipped by delivery.
@@ -399,10 +405,8 @@ fn the_open_sweep_closes_a_stranded_owner_binding_once_and_a_crash_keeps_it() {
 
     let mut closed = Vec::new();
     for _ in 0..2 {
-        let TxnOutcome::Committed(count) = owner
-            .store
-            .write_with(&NoFaults, close_stranded)
-            .unwrap()
+        let TxnOutcome::Committed(count) =
+            owner.store.write_with(&NoFaults, close_stranded).unwrap()
         else {
             panic!("the sweep must commit")
         };
@@ -450,10 +454,7 @@ fn the_open_sweep_leaves_bound_pages_and_scene_lineages_alone() {
     )
     .unwrap();
     let before = queues(&owner.store);
-    let TxnOutcome::Committed(closed) = owner
-        .store
-        .write_with(&NoFaults, close_stranded)
-        .unwrap()
+    let TxnOutcome::Committed(closed) = owner.store.write_with(&NoFaults, close_stranded).unwrap()
     else {
         panic!("the sweep must commit")
     };

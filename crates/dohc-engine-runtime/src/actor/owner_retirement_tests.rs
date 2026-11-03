@@ -161,11 +161,9 @@ fn a_corrupt_owner_binding_keeps_only_its_own_page() {
     let kept: String = EngineStore::open_read_only(&db)
         .unwrap()
         .read_with(|conn| {
-            conn.query_row(
-                "SELECT object_id FROM ydoc_owner_bindings",
-                [],
-                |row| row.get(0),
-            )
+            conn.query_row("SELECT object_id FROM ydoc_owner_bindings", [], |row| {
+                row.get(0)
+            })
         })
         .unwrap();
     assert_eq!(kept, "a-corrupt");

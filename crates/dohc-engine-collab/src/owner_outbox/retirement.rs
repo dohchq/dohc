@@ -124,8 +124,7 @@ pub fn stranded_in(conn: &Connection) -> Result<Vec<DocKey>, OwnerOutboxError> {
         .map_err(read_sql)?;
     rows.map(|row| {
         let (workspace_id, version_id, object_id) = row.map_err(read_sql)?;
-        DocKey::new(workspace_id, version_id, object_id)
-            .map_err(|_| OwnerOutboxError::Corrupt)
+        DocKey::new(workspace_id, version_id, object_id).map_err(|_| OwnerOutboxError::Corrupt)
     })
     .collect()
 }
