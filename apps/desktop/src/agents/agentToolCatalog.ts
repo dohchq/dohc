@@ -128,9 +128,10 @@ export function agentProfileArguments(profile: AgentLaunchProfile, runArguments:
   const claudeTools = readOnly
     ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
     : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
+  // Codex prints events with --json. Its other output repeats the prompt, the whole thread, into the run log.
   return profile.tool === "claude"
     ? ["-p", ...own, ...repeat, "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
-    : ["exec", ...own, ...repeat, "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "-"];
+    : ["exec", ...own, ...repeat, "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "--json", "-"];
 }
 
 // Double quotes group, and a backslash escapes only a double quote or
