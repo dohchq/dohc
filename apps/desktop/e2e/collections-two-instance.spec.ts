@@ -286,10 +286,10 @@ test("a drag's field write on one device moves the card on the other device's op
 
 // An agent on device A saves the record as a plain file, with no live
 // document session. Device B opened the record once, so its copy holds a
-// claimed Y.Doc lineage, but B made no edits. A holds no claim, because it
-// never pulls B's lineage, so B cannot take the file as a Y.Doc update. B
-// opens a conflict instead, and its board keeps the old value until the
-// person resolves the conflict.
+// claimed Y.Doc lineage, but B made no edits. A is file-only: it runs no
+// desktop capture poll, so it never adopts the record and holds no lineage.
+// B cannot take the file as a Y.Doc update. B opens a conflict instead, and
+// its board keeps the old value until the person resolves the conflict.
 test("an agent's file save on one device opens a conflict against the other device's claimed record", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -391,8 +391,7 @@ test("an agent's file save on one device opens a conflict against the other devi
 
     expect(ydocLineageClaimStatus(sourceRoot, apolloPath)).toBeNull();
 
-    // A saves the file the way an agent does, with no session, and never
-    // pulls, so it holds no claim on B's lineage.
+    // A saves the file the way an agent does, with no session.
     await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Doing"));
     await waitForPathMoments(capture, apolloPath, 2);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);

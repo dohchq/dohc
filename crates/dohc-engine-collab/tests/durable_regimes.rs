@@ -2455,6 +2455,93 @@ fn relay_base_arbitration_is_ordered_and_claim_safe() {
 }
 
 #[test]
+fn a_successor_over_a_collection_record_updates_its_fields() {
+    let mut ts = fresh_store("collection-successor-index");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    seed_collection_index_context(&mut ts.store, &key);
+    let predecessor_claim_id = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Richdoc,
+            &collection_base(),
+            &NoFaults,
+            1_000,
+        )
+        .expect("claim collection base"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("the first base must be claimed: {other:?}"),
+    };
+    committed(
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET path='tasks/record.md' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("set record path"),
+    );
+    let predecessor = load_persisted(&ts.store, &key)
+        .expect("load predecessor")
+        .expect("predecessor marker");
+    let predecessor_text = predecessor
+        .doc
+        .project(ContentKind::Richdoc)
+        .expect("project predecessor")
+        .content;
+    let successor_text = predecessor_text.replace("status: open", "status: done");
+    assert_ne!(successor_text, predecessor_text);
+    let predecessor_state_vector_sha256 =
+        dohc_engine_collab::hex_sha256(&predecessor.doc.encode_state_vector());
+    let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &predecessor_claim_id,
+        predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-successor",
+        artifact_preimage_sha256: &dohc_engine_collab::hex_sha256(predecessor_text.as_bytes()),
+        content_kind: ContentKind::Richdoc,
+        result_sha256: &dohc_engine_collab::hex_sha256(successor_text.as_bytes()),
+    });
+    let successor =
+        fresh_successor_base(&identity, &successor_text).expect("construct successor base");
+    let status_history = field_history(&ts.store, &key, "status");
+
+    committed(
+        replace_lineage_with_successor(
+            &mut ts.store,
+            SuccessorReplacement {
+                key: &key,
+                expected_predecessor_claim_id: &predecessor_claim_id,
+                expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                path: "tasks/record.md",
+                successor: &successor,
+                scene_result: None,
+                now_ms: 1_200,
+            },
+            &NoFaults,
+        )
+        .expect("install successor"),
+    );
+
+    // Resolving a conflict installs the successor, so the record's fields follow it.
+    assert_eq!(
+        indexed_fields(&ts.store, &key),
+        BTreeMap::from([
+            ("status".to_owned(), "\"done\"".to_owned()),
+            ("title".to_owned(), "\"Original\"".to_owned()),
+        ])
+    );
+    assert_eq!(field_history(&ts.store, &key, "status"), status_history);
+}
+
+#[test]
 fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     let scratch = unique_dir("successor-cas");
     let mut store = open_at(&scratch, 1_000);
