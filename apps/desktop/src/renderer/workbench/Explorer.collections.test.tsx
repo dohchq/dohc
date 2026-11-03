@@ -13,7 +13,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "notes.md", kind: "file" },
       { path: "tasks/one.md", kind: "file" },

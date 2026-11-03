@@ -42,7 +42,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
     folders: [],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],

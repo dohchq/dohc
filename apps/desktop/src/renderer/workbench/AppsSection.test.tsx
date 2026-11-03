@@ -67,7 +67,6 @@ function Harness(props: HarnessProps) {
     mode: "home",
     onModeChange: noop,
     listed: true,
-    recentFiles: [],
     files: [{ path: "client-portal/index.html", kind: "file" }, { path: "docs/index.html", kind: "file" }],
     folders: ["client-portal", "docs"],
     editorGroups: [{ id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 }],
