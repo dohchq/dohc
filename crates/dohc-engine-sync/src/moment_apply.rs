@@ -1065,8 +1065,15 @@ fn apply_moment_append(
             text,
             Some(&snapshot.digest),
             mode.resolver(),
-        )?;
-        Some((complete, decision))
+        );
+        // A diverged file can open a conflict without changing the active binding.
+        match decision {
+            Err(SyncError::LiveDocumentBindingActive) if !content_fast_forward => {
+                crate::ydoc_apply::require_unfenced_lineage(tx, &key)?;
+                None
+            }
+            decision => Some((complete, decision?)),
+        }
     } else {
         None
     };

@@ -233,7 +233,7 @@ enum LocalLineagePlan {
         path: String,
         text: String,
     },
-    UnclaimedBareRetire {
+    UnclaimedRetire {
         key: DocKey,
     },
 }
@@ -3141,12 +3141,11 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 result.conflict.updated_at_ms,
             )?;
         }
-        LocalLineagePlan::UnclaimedBareRetire { key } => {
-            crate::retire_ydoc_lineage_in_tx(
+        LocalLineagePlan::UnclaimedRetire { key } => {
+            crate::ydoc_apply::retire_unclaimed_resolution_lineage_in_tx(
                 tx,
-                &key.workspace_id,
-                &key.version_id,
-                &key.object_id,
+                key,
+                result.conflict.updated_at_ms,
             )?;
         }
     }
@@ -3457,12 +3456,16 @@ fn prepare_local_lineage_in_tx(
             })
         }
         LineageClaimStatus::Unclaimed => {
-            if marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 {
+            let moved_text = payload.result.present().is_some_and(|result| {
+                result.content_kind == HeadContentKindV1::Text
+                    && result.path_ref != current.path_ref
+            });
+            if (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0) && !moved_text {
                 return Err(SyncError::RetryableState {
                     reason: "ydoc-unsettled-local-lineage",
                 });
             }
-            Ok(LocalLineagePlan::UnclaimedBareRetire { key })
+            Ok(LocalLineagePlan::UnclaimedRetire { key })
         }
         LineageClaimStatus::Exact => {
             let predecessor_claim_id = marker

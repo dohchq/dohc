@@ -492,7 +492,7 @@ fn resolve(b: &mut EngineStore, resolution: ResolveConflictKind) {
         workspace_id: "ws".into(),
         conflict_id,
         resolution,
-        object_id: RECORD.into(),
+        object_id: "apollo-resolution-object".into(),
         write_moment_id: "apollo-resolved".into(),
         delete_moment_id: "apollo-resolved-delete".into(),
         metadata_origin: "sync".into(),
@@ -894,7 +894,7 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
         })
         .expect("record paths")
     };
-    for claimed in [false, true] {
+    for (claimed, later_typing) in [(false, false), (false, true), (true, false)] {
         for choice in ["current", "incoming", "merged"] {
             let (_a_scratch, mut a) = device("device-a");
             let created = a_creates_apollo(&mut a, &planned);
@@ -931,16 +931,28 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
             hydrate(&mut b, &[&merged]);
             assert_conflicts_opened(deliver(&mut b, &moved, &NoLiveLeases).expect("apply"), 1);
             assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&planned))]);
+            let later = later_typing.then(|| {
+                b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_100);
+                projected(&doc)
+            });
 
             resolve(&mut b, resolution);
             let check = |b: &EngineStore| {
-                let label = format!("claimed={claimed} choice={choice}");
+                let label = format!("claimed={claimed} later={later_typing} choice={choice}");
+                if let Some(later) = &later {
+                    assert_eq!(recovered(b, later), 1, "later typing survives: {label}");
+                }
                 let left = paths(b);
                 assert_eq!(left.len(), 1, "one path remains: {label} {left:?}");
                 if let Some(path) = path {
                     assert_eq!(left[0], path, "{label}");
                 }
-                assert_eq!(head_text(b, RECORD), Some(chosen.clone()), "{label}");
+                let object = if choice == "incoming" {
+                    "apollo-resolution-object"
+                } else {
+                    RECORD
+                };
+                assert_eq!(head_text(b, object), Some(chosen.clone()), "{label}");
                 assert!(open_conflicts(b).is_empty(), "{label}");
                 assert!(
                     history_holds(b, &draft) >= 1,

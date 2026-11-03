@@ -3448,7 +3448,7 @@ fn ensure_adopted_owner_binding_unchanged(
     Ok(())
 }
 
-fn require_unfenced_lineage(conn: &Connection, key: &DocKey) -> Result<(), SyncError> {
+pub(crate) fn require_unfenced_lineage(conn: &Connection, key: &DocKey) -> Result<(), SyncError> {
     dohc_engine_collab::live_update_application::require_restore_open(conn, key).map_err(|error| {
         match error {
             CollabError::RestoreFenced => SyncError::InvalidInput {
@@ -4294,7 +4294,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         .moment_json();
     dohc_engine_collab::author_coverage::supersede_in(tx, &complete.key, now_ms)
         .map_err(map_collab_hard_error)?;
-    fold_complete_ydoc_lineage_in_tx(
+    match fold_complete_ydoc_lineage_in_tx(
         tx,
         &complete,
         path,
@@ -4302,8 +4302,52 @@ pub fn fold_resolution_into_ydoc_in_tx(
         LineageFoldAuthor::default(),
         now_ms,
         LineageFoldCause::LocalMutation { unsettled_authors },
-    )
-    .map(|_| ())
+    ) {
+        Err(SyncError::InvalidInput {
+            reason: "ydoc-resolution-not-representable",
+        }) if complete.state.as_ref().is_some_and(|(marker, _)| {
+            marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
+        }) && empty_seed_never_replicated_in_tx(tx, &complete.key)? =>
+        {
+            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms)
+        }
+        folded => folded.map(|_| ()),
+    }
+}
+
+/// Preserve unreviewed typing before removing a resolution's local-only lineage.
+pub(crate) fn retire_unclaimed_resolution_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    if let Some((marker, doc)) = complete.state.as_ref() {
+        if marker.content_kind == ContentKind::Scene {
+            return Ok(());
+        }
+        if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Unclaimed
+            || !empty_seed_never_replicated_in_tx(tx, key)?
+        {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc-unsettled-local-lineage",
+            });
+        }
+        let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+        if !projection.content.is_empty() && !projection_held_in_tx(tx, key, &projection.content)? {
+            recover_lineage_side_in_tx(
+                tx,
+                &complete,
+                marker
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| local_corruption("Y.Doc has no path"))?,
+                &projection.content,
+                now_ms,
+            )?;
+        }
+    }
+    retire_complete_ydoc_lineage_in_tx(tx, &complete)
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
