@@ -319,6 +319,10 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     applied,
     applyAttempts,
     closed,
+    // Main's copy now: the open's, or the newest replacement's.
+    get sourceDoc() {
+      return doc;
+    },
     mainText: () => doc.getText("plainText").toString(),
     acknowledgedGenerations,
     sessionId: () => openedSessionId,
