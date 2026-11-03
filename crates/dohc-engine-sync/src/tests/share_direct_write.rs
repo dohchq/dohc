@@ -210,8 +210,11 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
         !statuses(&engine)[path].can_discard,
         "resolve the same submission before offering discard"
     );
-    client
+    let pulled = client
         .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
+        .unwrap();
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &pulled.pending_cursor, &NoFaults)
         .unwrap();
     assert_eq!(
         VersionedTextStore::new(&mut engine)
