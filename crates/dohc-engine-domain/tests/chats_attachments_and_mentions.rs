@@ -589,6 +589,32 @@ fn mention_parser_ignores_inline_and_fenced_code() {
 }
 
 #[test]
+fn mention_parser_skips_names_inside_file_links() {
+    // The expected handles are what the desktop's chatMentionTokens reads.
+    let cases: [(&str, &[&str]); 10] = [
+        ("see @[trip @Nova notes.md]", &[]),
+        ("see @[notes @Nova.md#Day 1]", &[]),
+        (
+            "@[trip @Nova notes.md] for @Nova, and @Ana@[x.md]",
+            &["nova", "ana"],
+        ),
+        // A blank path or heading makes no link.
+        ("@[ ] @a @[ @b ]", &["a"]),
+        ("@[x.md# @c] @[y.md# ] @d", &["d"]),
+        // Neither does a nested opener, a line break, or an opener in code.
+        ("@[a @h @[b] @g]", &["h", "g"]),
+        ("@[a @i\nb]", &["i"]),
+        ("`@[` @j]", &["j"]),
+        ("`@[a @k]`", &[]),
+        // An escaped `]` stays in the path.
+        ("@[a%5D @l] @m", &["m"]),
+    ];
+    for (body, handles) in cases {
+        assert_eq!(parse_mention_handles(body), handles, "{body:?}");
+    }
+}
+
+#[test]
 fn mention_index_dedupes_handles_per_message() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
