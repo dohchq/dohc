@@ -180,7 +180,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### Fields
 
 - Put a label above each field, with no colon. Mark an optional field `Optional` after its label.
-- A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. A blur with nothing typed cancels, and Enter with nothing typed shows the error.
+- A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. For a required name, such as a file or folder, a blur with nothing typed cancels, and Enter with nothing typed shows the error. A page title or a property value can be left empty.
 - A placeholder shows an example value or nothing. It never holds the instruction or the label.
 - Check a field when focus leaves it or the person presses the primary. Never check on each key. A length limit can count down while they type.
 - Show the error under the field in `text-danger`, after a 12px `CircleAlert`. Say what is wrong and how to fix it: `Enter a name for the version.`
