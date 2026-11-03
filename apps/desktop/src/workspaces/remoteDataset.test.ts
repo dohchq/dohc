@@ -46,7 +46,7 @@ describe("remote Collection authority", () => {
     const next = describeDatasetRevision({ definition: { ...definition, name: "Renamed" }, revision: 2, schemaSql: "SQL", operationSource: "RULES" });
     const value = { workspaceId: "workspace", revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor };
     const committed = { revision: next, cursor: { ...approved.cursor, approvedRevisionHash: next.revisionSha256, revision: 1, digest: "a".repeat(64) } };
-    const candidate = { candidateId: id(9), expected: approved.cursor, approvedRevisionHash: next.revisionSha256, checkpointSha256: "f".repeat(64), expiresAtMs: Date.now() + 10000, preview: { tables: [], firstPage: { changes: [], nextCursor: null } } };
+    const candidate = { candidateId: id(9), expected: approved.cursor, approvedRevisionHash: next.revisionSha256, checkpointSha256: "f".repeat(64), changeSha256: "d".repeat(64), expiresAtMs: Date.now() + 10000, preview: { tables: [], firstPage: { changes: [], nextCursor: null } } };
     f.relay.mockResolvedValue(candidate);
     expect(await f.data.prepareMigrationCandidate!(value)).toEqual(candidate);
     expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/prepare-migration`);

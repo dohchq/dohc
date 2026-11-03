@@ -153,9 +153,9 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "history") return host.history(auth, { ...scope, metadataOnly: query.get("metadataOnly") === "true", limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "prepare-migration" ? 1024 * 1024 : 128 * 1024);
         if (route.action === "approve-migration" || route.action === "discard-migration" || route.action === "migration-preview-page") {
-          const body = record(raw, ["candidateId", ...(route.action === "approve-migration" ? ["checkpointSha256"] : [])], route.action === "migration-preview-page" ? ["after", "limit"] : route.action === "approve-migration" ? ["approvalAgent"] : []);
+          const body = record(raw, ["candidateId", ...(route.action === "approve-migration" ? ["checkpointSha256"] : [])], route.action === "migration-preview-page" ? ["after", "limit"] : route.action === "approve-migration" ? ["approvalAgent", "changeSha256"] : []);
           const candidate = { ...scope, candidateId: datasetId(text(body.candidateId)), signal };
-          if (route.action === "approve-migration") return host.approveMigration(auth, { ...candidate, checkpointSha256: digest(body.checkpointSha256), ...(body.approvalAgent === undefined ? {} : {approvalAgent:approvalAgent(body.approvalAgent)}) });
+          if (route.action === "approve-migration") return host.approveMigration(auth, { ...candidate, checkpointSha256: digest(body.checkpointSha256), ...(body.changeSha256 === undefined ? {} : { changeSha256: digest(body.changeSha256) }), ...(body.approvalAgent === undefined ? {} : {approvalAgent:approvalAgent(body.approvalAgent)}) });
           if (route.action === "discard-migration") { await host.discardMigration(auth, candidate); return { discarded: true }; }
           return host.migrationPreviewPage(auth, { ...candidate, after: body.after === undefined ? undefined : text(body.after, 1024), limit: body.limit === undefined ? undefined : positive(body.limit) });
         }

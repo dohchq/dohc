@@ -17,8 +17,8 @@ function preparation(): DatasetMigrationPreparation {
   const expected = { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: dataset.revisionSha256 };
   return { preparationId: id(9), previousRevision: revision, revision: next, expected,
     sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64), schemaSql: "schema", operationSource: "source", migrationSql: "ALTER TABLE people ADD note TEXT;", expiresAtMs: Date.now() + 600_000,
-    candidate: {candidateId: id(10), expected, approvedRevisionHash: next.revisionSha256, checkpointSha256: "a".repeat(64), expiresAtMs: Date.now() + 600_000,
-      preview: {tables: [{table: "people", beforeRows: 0, afterRows: 0, changedRows: 0}], firstPage: {changes: [], nextCursor: null}}} };
+    candidate: {candidateId: id(10), expected, approvedRevisionHash: next.revisionSha256, checkpointSha256: "a".repeat(64), changeSha256: "d".repeat(64), expiresAtMs: Date.now() + 600_000,
+      preview: {tables: [{table: "people", beforeRows: 0, afterRows: 0, changedRows: 0, deletedRows: 0, beforeValues: {}, afterValues: {}}], firstPage: {changes: [], nextCursor: null}}} };
 }
 function setup(overrides: Partial<CollectionFieldsDialogProps> = {}) {
   const props: CollectionFieldsDialogProps = { workspaceId: "w", dataset, tableId: id(2), onPrepare: vi.fn(async () => preparation()), onApprove: vi.fn(async () => {}),

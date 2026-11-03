@@ -23,6 +23,8 @@ import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttem
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
 import { DatasetHostError, DatasetBindingPendingAttemptError, DatasetNotArchivedError } from "@dohc/app-backend-runtime/dataset-error";
 export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+/** An approval named a change, and the prepared change differs from it. */
+export const DATASET_CHANGE_EDITED = "This change differs from the one you were asked to apply. Review the change to apply it.";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 /** Resolve only immutable revisions already approved at this host; callers cannot supply compatibility. */
@@ -439,13 +441,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       for(const [id,saved] of migrationCandidates)if(saved.candidate.expiresAtMs<=Date.now()||(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId))migrationCandidates.delete(id);
       migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
     },
-    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;approvalAgent?:ApprovalAgent|null;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
+    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;changeSha256?:string;approvalAgent?:ApprovalAgent|null;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
       if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));
       if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","This preview is no longer available. Preview the change again.");
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();assertDatasetAttemptsCommitted(db,key);};
       authorize();
+      if(raw.changeSha256!==undefined&&raw.changeSha256!==saved.candidate.changeSha256)throw new DatasetHostError("conflict",DATASET_CHANGE_EDITED);
       const cursor=await options.supervisor.approveMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,checkpointSha256:raw.checkpointSha256,approvalAgent:raw.approvalAgent === undefined ? undefined : parseApprovalAgent(raw.approvalAgent),authorityKey,authorize,signal:raw.signal,
         accountStage(allocation){if(options.accountCheckpointStage)synchronous(()=>options.accountCheckpointStage!(context,allocation));},
         account(allocation){
