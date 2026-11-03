@@ -142,8 +142,9 @@ export interface ToolContext {
   // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
   // The only tools to offer, from repeated --tool flags, within the share
-  // level's. Absent offers all of the level's tools. A dohc agent run offers
-  // only the reply tool.
+  // level's. Absent offers all of the level's tools. The self-test of a dohc
+  // agent run, and a run in a chat someone else can see, offer only the reply
+  // tool.
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.

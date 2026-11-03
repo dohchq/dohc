@@ -37,6 +37,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     stateDir: () => stateRoot,
     appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
     onMessagePosted: () => undefined,
+    runDohcTools: async () => "reply",
     setRunAttribution: () => undefined,
   });
   cleanups.push(() => service.stop());

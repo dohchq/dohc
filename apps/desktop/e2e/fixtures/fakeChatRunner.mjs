@@ -80,7 +80,7 @@ function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
   const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
   const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
@@ -97,8 +97,7 @@ function codexReplyServer(args) {
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-3)) !== JSON.stringify(["--skip-git-repo-check", "--ephemeral", "-"]) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
-    config.get("mcp_servers.dohc.enabled_tools") !== "['dohc_reply_to_chat']" ||
-    config.get("mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode") !== "'approve'") {
+    config.get("mcp_servers.dohc.default_tools_approval_mode") !== "'approve'") {
     return null;
   }
   return { command, args: tomlStrings(config.get("mcp_servers.dohc.args") ?? ""), cwd };
@@ -107,7 +106,7 @@ function codexReplyServer(args) {
 // The dohc MCP server a Claude Code launch names, after checking the launch.
 // Claude Code starts its servers in its own working directory.
 function claudeReplyServer(args) {
-  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
+  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
   const servers = JSON.parse(readFileSync(args[7], "utf8")).mcpServers;
   return Object.keys(servers).join() === "dohc" && servers.dohc.type === "stdio"
@@ -137,9 +136,13 @@ function replyThroughMcp(args, body) {
         send({ method: "notifications/initialized" });
         send({ id: 2, method: "tools/list" });
       } else if (message.id === 2) {
-        // The run's server offers the reply tool and nothing else.
-        const names = message.result?.tools?.map((tool) => tool.name);
-        if (JSON.stringify(names) !== JSON.stringify(["dohc_reply_to_chat"])) {
+        // A self-test's server offers the reply tool and nothing else. A
+        // run's offers it alone or with every other dohc tool, as its launch says.
+        const names = message.result?.tools?.map((tool) => tool.name) ?? [];
+        const replyOnly = launch.args.includes("--tool");
+        if ((selfTestMarker && !replyOnly) ||
+          !names.includes("dohc_reply_to_chat") ||
+          replyOnly !== (names.length === 1)) {
           console.error("Unexpected dohc tools", JSON.stringify(message));
           child.kill();
           process.exit(2);

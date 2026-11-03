@@ -505,6 +505,7 @@ import {
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { runDohcToolsFor } from "./agents/runDohcTools";
 import { createOwedRunNotices } from "./agents/owedRunNotices";
 import { isAppImageBoot, isTemporaryMacAppPath, resolveDohcMcpCommand } from "./agents/dohcMcpCommand";
 import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
@@ -3626,6 +3627,15 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachment(workspace, () =>
       sendToWorkspaceWindows(CHANNELS.chatAgentRequestsChanged, { workspaceId: workspace.workspaceId, channelId }),
     ),
+  // The share roster answers without a network call.
+  runDohcTools: (workspace, threadId) =>
+    withWorkspaceAttachmentAsync(workspace, (lease) => runDohcToolsFor({
+      store: linkedChatStoreFor(lease),
+      workspaceId: workspace.workspaceId,
+      threadId,
+      joinedChannelWireIds: (canonicalWorkspaceFor(lease).sharedChannels ?? []).map((channel) => channel.channelWireId),
+      roster: () => shareRosters.cached(workspace.workspaceId),
+    })),
   setRunAttribution: (workspace, run) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       const workspaceId = workspace.workspaceId;
