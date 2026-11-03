@@ -7,6 +7,7 @@ import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
 import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
 import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
+import { refusedChangesWords } from "../../desktop/src/renderer/workbench/refusedChanges";
 import { ExplorerModeSwitch } from "../../desktop/src/renderer/workbench/ExplorerModeSwitch";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
@@ -231,7 +232,7 @@ export function DemoSidebar(props: {
           onShare={() => undefined}
           onRefresh={() => undefined}
           onError={props.onError}
-          onChangesRefused={(notice) => props.onError(notice.title)}
+          onChangesRefused={(group) => props.onError(refusedChangesWords(group).title)}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

@@ -4,7 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
-import { Explorer, type ExplorerProps, type RefusedChanges } from "./Explorer";
+import { Explorer, type ExplorerProps } from "./Explorer";
+import { refusedChangesWords, type RefusedChanges } from "./refusedChanges";
 import { deleteRefusalIdentity } from "./file-tree-optimistic";
 
 const BLUE = "bg-[var(--dohc-selection)]";
@@ -185,7 +186,9 @@ describe("Escape", () => {
     expect(selectedPaths()).toEqual(["a.md", "b.md"]);
   });
 
-  it("leaves the selection when a menu has focus", async () => {
+  // Native menus never reach the page. This checks that the tree only reads
+  // an Escape typed inside it.
+  it("leaves the selection when Escape is typed outside the tree", async () => {
     const user = userEvent.setup();
     render(
       <>
@@ -277,6 +280,26 @@ async function deleteAll(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByTestId("confirm-delete"));
 }
 
+const lastGroup = (props: ExplorerProps): RefusedChanges =>
+  vi.mocked(props.onChangesRefused).mock.calls.at(-1)![0];
+
+// Selects `count` rows from a.md down and drags them onto docs.
+async function moveToDocs(props: ExplorerProps, count: number, move: (payload: { fromPath: string; toPath: string }) => Promise<void>) {
+  const moveWorkspacePath = vi.fn(async (payload: { fromPath: string; toPath: string }) => {
+    await move(payload);
+    return { path: payload.toPath, undo: { available: false, reason: "", paths: [] } };
+  });
+  window.dohcDesktop = { platform: "win32", deleteWorkspacePath, showExplorerMenu, moveWorkspacePath } as unknown as DohcDesktopBridge;
+  const user = userEvent.setup();
+  render(<Explorer {...props} />);
+  await user.click(row("a.md"));
+  for (let step = 1; step < count; step += 1) await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+  const dataTransfer = { effectAllowed: "move", dropEffect: "move", files: [], types: [], setData: vi.fn() };
+  fireEvent.dragStart(row("a.md"), { dataTransfer });
+  fireEvent.dragOver(row("docs"), { dataTransfer });
+  fireEvent.drop(row("docs"), { dataTransfer });
+}
+
 describe("refusals in a batch", () => {
   it("lets the rest go and raises one notice whose Try again reruns only the refused item", async () => {
     const user = userEvent.setup();
@@ -291,25 +314,26 @@ describe("refusals in a batch", () => {
     expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["a.md", "b.md", "c.md"]);
     expect(vi.mocked(props.onPathsChanged).mock.calls[0]![0].map((change) => "path" in change && change.path)).toEqual(["a.md", "c.md"]);
     expect(props.onError).not.toHaveBeenCalled();
-    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
-    expect(notice).toMatchObject({
+    const group = lastGroup(props);
+    expect(refusedChangesWords(group)).toMatchObject({
       title: "dohc deleted 2 of 3 items",
       message: "Live editing is on: b.md",
-      liveEditing: { path: "b.md" },
+      reveal: "b.md",
+      retryable: true,
     });
+    expect(group.refusals.map((refusal) => refusal.identity)).toEqual([deleteRefusalIdentity("workspace-1", "b.md")]);
 
-    // The rerun is a batch of one, so a second refusal is that page's own notice.
+    // Refused again, the rerun files the same notice, still counting what went.
     deleteWorkspacePath.mockClear();
-    await act(async () => notice.retry!());
-    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+    await act(async () => group.retry(group));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(2));
     expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["b.md"]);
-    const [, , again, identity, livePage] = vi.mocked(props.onError).mock.calls[0]!;
-    expect(again).toBeTypeOf("function");
-    expect(identity).toBe(deleteRefusalIdentity("workspace-1", "b.md"));
-    expect(livePage).toEqual({ path: "b.md", action: "delete" });
+    expect(lastGroup(props).identity).toBe(group.identity);
+    expect(refusedChangesWords(lastGroup(props)).title).toBe("dohc deleted 2 of 3 items");
+    expect(props.onError).not.toHaveBeenCalled();
   });
 
-  it("names each reason once, and Try again reruns only what can run again", async () => {
+  it("names each reason once, and Try again keeps the refusals it does not rerun", async () => {
     const user = userEvent.setup();
     const props = explorerProps();
     deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
@@ -320,17 +344,43 @@ describe("refusals in a batch", () => {
     await deleteAll(user);
 
     await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
-    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
-    expect(notice).toMatchObject({
+    const group = lastGroup(props);
+    expect(refusedChangesWords(group)).toMatchObject({
       title: "dohc deleted 1 of 4 items",
-      message: "Live editing is on: a.md, c.md\nHistory is off: d.md",
-      liveEditing: { path: "a.md" },
+      message: "Live editing is on: a.md, c.md\nHistory is off: d.md. Restart dohc, then try again.",
+      reveal: "a.md",
     });
     deleteWorkspacePath.mockClear();
-    deleteWorkspacePath.mockResolvedValue(undefined);
-    await act(async () => notice.retry!());
-    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(2));
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "c.md") throw refusal(relativePath);
+    });
+    await act(async () => group.retry(group));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(2));
     expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["a.md", "c.md"]);
+    // History off stays, in the order the changes ran, beside what the rerun refused.
+    expect(refusedChangesWords(lastGroup(props))).toMatchObject({
+      title: "dohc deleted 2 of 4 items",
+      message: "Live editing is on: c.md\nHistory is off: d.md. Restart dohc, then try again.",
+    });
+    expect(lastGroup(props).identity).toBe(group.identity);
+  });
+
+  it("keeps its lines in the order the changes ran after Try again", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps({ files: FILES.slice(0, 3) });
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "b.md") throw historyOff(relativePath);
+      if (relativePath === "c.md") throw refusal(relativePath);
+    });
+    render(<Explorer {...props} />);
+    await deleteAll(user);
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    const group = lastGroup(props);
+    await act(async () => group.retry(group));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(2));
+    expect(refusedChangesWords(lastGroup(props)).message)
+      .toBe("History is off: b.md. Restart dohc, then try again.\nLive editing is on: c.md");
   });
 
   it("offers no Try again when nothing refused can run again", async () => {
@@ -343,8 +393,46 @@ describe("refusals in a batch", () => {
     await deleteAll(user);
 
     await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
-    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
-    expect(notice).toMatchObject({ title: "dohc could not delete 2 items", message: "History is off: a.md, b.md", liveEditing: null });
-    expect(notice.retry).toBeUndefined();
+    expect(refusedChangesWords(lastGroup(props))).toMatchObject({
+      title: "dohc could not delete 2 items",
+      message: "History is off: a.md, b.md. Restart dohc, then try again.",
+      reveal: undefined,
+      retryable: false,
+    });
+  });
+
+  it("reports a failure that is not a refusal on its own, as a single change does", async () => {
+    const props = explorerProps({ files: [...FILES.slice(0, 3), { path: "docs/d.md", kind: "file" as const }], folders: ["docs"] });
+    const denied = new Error("Error invoking remote method 'desktop:move-workspace-path': Error: EACCES: permission denied");
+    await moveToDocs(props, 3, async ({ fromPath }) => {
+      if (fromPath === "a.md") throw denied;
+      if (fromPath === "b.md") throw new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "b.md" while it has live editing on\nIn Live documents, stop live editing for this page, then move it again.`);
+    });
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    expect(props.onError).toHaveBeenCalledTimes(1);
+    const [, cause, retry, identity] = vi.mocked(props.onError).mock.calls[0]!;
+    expect(cause).toBe(denied);
+    expect(retry).toBeTypeOf("function");
+    expect(identity).toBe("move:a.md");
+    expect(lastGroup(props).refusals.map((refusal) => refusal.path)).toEqual(["b.md"]);
+    expect(refusedChangesWords(lastGroup(props)).title).toBe("dohc moved 1 of 3 items");
+  });
+
+  it("names and opens the page a move would replace", async () => {
+    const props = explorerProps({
+      files: [...FILES.slice(0, 2), { path: "docs/a.md", kind: "file" as const }],
+      folders: ["docs"],
+    });
+    await moveToDocs(props, 2, async ({ fromPath, toPath }) => {
+      if (fromPath === "a.md") throw new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't replace "${toPath}" while it has live editing on\nIn Live documents, stop live editing for this page, then try again.`);
+    });
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    expect(refusedChangesWords(lastGroup(props))).toMatchObject({
+      title: "dohc moved 1 of 2 items",
+      message: "Live editing is on: docs/a.md",
+      reveal: "docs/a.md",
+    });
   });
 });

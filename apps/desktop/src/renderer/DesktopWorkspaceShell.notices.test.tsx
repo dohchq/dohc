@@ -4686,6 +4686,87 @@ describe("a refused delete of a page this computer owns live", () => {
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(4));
     expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ relativePath: "a.md" }));
   });
+
+  it("keeps each refusal's full words in Details, and lets a page go from the notice once it is deleted", async () => {
+    const refused = new Set(["a.md", "b.md"]);
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async ({ relativePath }: { relativePath: string }) => {
+        if (refused.has(relativePath)) throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${relativePath}" while it has live editing on\n${BODY}`);
+      }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map((path) => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const treeRow = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    const deleteOne = async (path: string) => {
+      await user.click(await treeRow(path));
+      await user.keyboard("{Delete}");
+      await user.click(await screen.findByTestId("confirm-delete"));
+    };
+    await user.click(await treeRow("a.md"));
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe("dohc deleted 1 of 3 items");
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe("Live editing is on: a.md, b.md");
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0]![0].split("\n")).toEqual(expect.arrayContaining([
+      `a.md: dohc can't delete "a.md" while it has live editing on. ${BODY}`,
+      `b.md: dohc can't delete "b.md" while it has live editing on. ${BODY}`,
+    ]));
+
+    // Live editing stopped for a.md, and the person deletes it on its own.
+    refused.delete("a.md");
+    await deleteOne("a.md");
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").querySelector("[id$='-title']")?.textContent)
+      .toBe("dohc deleted 2 of 3 items"));
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(screen.getByTestId("workspace-shell-error").querySelector("[id$='-body']")?.textContent).toBe("Live editing is on: b.md");
+
+    refused.delete("b.md");
+    await deleteOne("b.md");
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(/dohc deleted/u)).toBeNull();
+  });
+
+  it("leaves a dismissed selection notice gone when a page it named is later deleted", async () => {
+    const refused = new Set(["a.md", "b.md"]);
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async ({ relativePath }: { relativePath: string }) => {
+        if (refused.has(relativePath)) throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${relativePath}" while it has live editing on\n${BODY}`);
+      }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map((path) => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const treeRow = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await treeRow("a.md"));
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const center = await screen.findByTestId("notice-center");
+    const notice = (await within(center).findByText("dohc deleted 1 of 3 items")).closest("li")!;
+    await user.click(within(notice).getByRole("button", { name: "Dismiss notice" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+
+    refused.delete("a.md");
+    await user.click(await treeRow("a.md"));
+    await user.keyboard("{Delete}");
+    const listed = bridge.listWorkspaceFiles.mock.calls.length;
+    await user.click(await screen.findByTestId("confirm-delete"));
+    // The tree reads again only after the delete has taken its refusals back.
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listed));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(/dohc deleted/u)).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
 });
 
 describe("a refused drag of a page this computer owns live", () => {

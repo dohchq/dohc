@@ -209,7 +209,8 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
-import { Explorer, type LivePageRefused, type RefusedChanges } from "./workbench/Explorer";
+import { Explorer, type LivePageRefused } from "./workbench/Explorer";
+import { refusedChangesWords, withoutRefusal, type RefusedChanges } from "./workbench/refusedChanges";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
@@ -980,16 +981,38 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
-  // Several Explorer changes refused in one batch: one notice. It opens Live
-  // documents when live editing refused one.
+  // Several Explorer changes refused in one batch: one notice, kept here so
+  // a change that later goes leaves it. It opens Live documents when live
+  // editing refused one.
+  const refusalGroups = useRef(new Map<string, RefusedChanges>());
+  useEffect(() => () => refusalGroups.current.clear(), [workspaceId]);
+  const shownErrors = useRef(shellErrors);
+  shownErrors.current = shellErrors;
   const reportExplorerRefusals = useCallback(
-    (notice: RefusedChanges) => {
-      const id = workspaceId, reveal = notice.liveEditing?.path ?? null;
-      reportShellFailure({ title: notice.title, message: notice.message, identity: notice.identity,
-        ...(notice.retry ? { retry: notice.retry } : {}),
-        ...(notice.liveEditing ? { action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } } : {}) });
+    (group: RefusedChanges, quiet = false) => {
+      refusalGroups.current.set(group.identity, group);
+      const id = workspaceId, { title, message, details, reveal, retryable } = refusedChangesWords(group);
+      reportShellFailure({ title, message, details, identity: group.identity, quiet,
+        ...(retryable ? { retry: () => group.retry(group) } : {}),
+        ...(reveal !== undefined ? { action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } } : {}) });
     },
     [reportShellFailure, openLiveDocuments, workspaceId],
+  );
+  // A change that went takes back its refusal, alone or in a batch's notice.
+  const takeBackExplorerRefusal = useCallback(
+    (identity: string) => {
+      clearIdentity(identity);
+      for (const [key, group] of refusalGroups.current) {
+        const left = withoutRefusal(group, identity);
+        if (left === group) continue;
+        refusalGroups.current.delete(key);
+        // A notice the person dismissed or retried stays gone.
+        if (!shownErrors.current.some((error) => error.identity === key)) continue;
+        if (left) reportExplorerRefusals(left, true);
+        else clearIdentity(key);
+      }
+    },
+    [clearIdentity, reportExplorerRefusals],
   );
   // Chats' failures. An archive refused for live editing opens Live documents
   // at the page's row, and the page's archive takes the refusal back.
@@ -3913,8 +3936,8 @@ export function DesktopWorkspaceShell(props: {
     (changes: PendingTreeChange[]) => {
       // A move that succeeds takes back its earlier refusal.
       for (const change of changes) {
-        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
-        if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
+        if (change.kind === "folder" || change.kind === "file") takeBackExplorerRefusal(moveRefusalIdentity(workspaceId, change));
+        if (change.kind === "delete-file" || change.kind === "delete-folder") takeBackExplorerRefusal(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
@@ -3941,7 +3964,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [clearIdentity, mutateWb, workspaceId],
+    [takeBackExplorerRefusal, mutateWb, workspaceId],
   );
 
   const {
@@ -5383,7 +5406,7 @@ export function DesktopWorkspaceShell(props: {
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onError={reportExplorerError}
-        onChangeSucceeded={clearIdentity}
+        onChangeSucceeded={takeBackExplorerRefusal}
         onChangesRefused={reportExplorerRefusals}
         onNewCollection={setNewCollectionFolder}
       />

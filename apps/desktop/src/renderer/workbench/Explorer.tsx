@@ -38,6 +38,7 @@ import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { clear, extendBy, selectAll, selectOne, selectRange, toggle, type ExplorerSelection } from "./explorerSelection";
 import { SelectionBar } from "./SelectionBar";
+import type { RefusedChange, RefusedChanges } from "./refusedChanges";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
@@ -76,17 +77,6 @@ export type TreeChangeOperation = {
 };
 
 export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" };
-
-// Some changes in a batch of several were refused, and the rest went. One
-// notice names the refused ones by reason. `liveEditing` is set when live
-// editing refused one, with the page Live documents opens at, if any.
-export type RefusedChanges = {
-  title: string;
-  message: string;
-  retry?: () => void;
-  identity: string;
-  liveEditing: { path: string | null } | null;
-};
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -472,49 +462,11 @@ export const TreeRow = memo(function TreeRow(props: {
   );
 });
 
-type Refusal = { change: PendingTreeChange; cause: unknown; retryable: boolean };
+// A batch's refusals so far, for Try again to carry into its rerun.
+type RefusalBatch = Pick<RefusedChanges, "identity" | "total" | "went" | "refusals">;
 
 function changedPath(change: PendingTreeChange): string {
   return "path" in change ? change.path : change.fromPath;
-}
-
-// Why a change was refused, as one line's label, and whether live editing
-// refused it.
-function refusalReason(cause: unknown): { label: string; live: boolean } {
-  if (isLivePageOwnedRefusal(cause) || isLiveFolderRefusal(cause)) return { label: "Live editing is on", live: true };
-  if (isLiveEditingRefusal(cause)) return { label: "History is off", live: false };
-  return { label: ipcErrorMessage(cause, "dohc could not change these files.").replace(/\.$/, ""), live: false };
-}
-
-// One notice for a batch's refusals: what went, then one line per reason
-// naming the refused paths.
-function refusedChangesNotice(
-  workspaceId: string,
-  total: number,
-  refusals: readonly Refusal[],
-  retry: (() => void) | undefined,
-): RefusedChanges {
-  const deleting = refusals.every((refusal) => refusal.change.kind === "delete-file" || refusal.change.kind === "delete-folder");
-  const went = total - refusals.length;
-  const title = went === 0
-    ? `dohc could not ${deleting ? "delete" : "move"} ${total} items`
-    : `dohc ${deleting ? "deleted" : "moved"} ${went} of ${total} items`;
-  const byReason = new Map<string, string[]>();
-  let livePath: string | null | undefined;
-  for (const { change, cause } of refusals) {
-    const { label, live } = refusalReason(cause);
-    byReason.set(label, [...(byReason.get(label) ?? []), changedPath(change)]);
-    if (live && livePath === undefined) livePath = isLivePageOwnedRefusal(cause) ? changedPath(change) : null;
-  }
-  const message = [...byReason].map(([label, paths]) => `${label}: ${paths.join(", ")}`).join("\n");
-  const paths = refusals.map(({ change }) => changedPath(change)).sort();
-  return {
-    title,
-    message,
-    ...(retry ? { retry } : {}),
-    identity: `refused:${JSON.stringify([workspaceId, deleting ? "delete" : "move", ...paths])}`,
-    liveEditing: livePath === undefined ? null : { path: livePath },
-  };
 }
 
 let editIdCounter = 0;
@@ -937,6 +889,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       run: (change: PendingTreeChange) => Promise<unknown>,
       afterBegin?: () => void,
       action: "move" | "rename" = "move",
+      // Try again on a batch's notice: the refusals it left, which stay in
+      // the notice this run files, and where each rerun change first ran.
+      batch?: RefusalBatch & { orders: readonly number[] },
     ): Promise<void> {
       if (changes.length === 0) return;
       // Land the stable active draft and drain queued collection writes
@@ -959,8 +914,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         const succeeded: PendingTreeChange[] = [];
         // A batch of several reports its refusals in one notice, after the rest go.
-        const refusals: Refusal[] = [];
-        for (const change of changes) {
+        const grouped = batch !== undefined || changes.length > 1;
+        const refusals: RefusedChange[] = [];
+        for (const [index, change] of changes.entries()) {
           const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
             await run(change);
@@ -985,20 +941,34 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ? deleteRefusalIdentity(workspaceId, change.path)
                 : undefined;
             const retryable = isLiveFolderRefusal(cause) || livePage !== undefined || (!refused && identity !== undefined);
-            if (changes.length > 1) {
-              refusals.push({ change, cause, retryable });
+            const refusedAs = refusalIdentity ?? identity;
+            if (grouped && refused && refusedAs !== undefined) {
+              const live = isLivePageOwnedRefusal(cause) || isLiveFolderRefusal(cause);
+              refusals.push({ change, order: batch?.orders[index] ?? index, identity: refusedAs,
+                path: livePage?.path ?? changedPath(change), live, reveal: livePage?.path ?? null, retryable, cause });
               continue;
             }
             const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run, undefined, action);
             onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, retryable ? rerun : undefined, refused ? refusalIdentity : identity, livePage);
           }
         }
-        if (refusals.length > 0) {
-          // Try again reruns the refused changes a single refusal would rerun,
-          // so each keeps its own identity and Try again if it is refused again.
-          const again = refusals.filter((refusal) => refusal.retryable).map((refusal) => ({ ...refusal.change, id: nextChangeId() }));
-          onChangesRefused(refusedChangesNotice(workspaceId, changes.length, refusals,
-            again.length > 0 ? () => void runChangesOnce(again, run, undefined, action) : undefined));
+        const all = [...(batch?.refusals ?? []), ...refusals];
+        if (grouped && all.length > 0) {
+          const deleting = all.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder");
+          onChangesRefused({
+            identity: batch?.identity ?? `refused:${JSON.stringify([workspaceId, nextChangeId()])}`,
+            action: deleting ? "delete" : "move",
+            total: batch?.total ?? changes.length,
+            went: (batch?.went ?? 0) + succeeded.length,
+            refusals: all,
+            // Reruns the refusals a single refusal would rerun. The others
+            // stay in the notice the rerun files, with what it refused again.
+            retry: (current) => {
+              const again = current.refusals.filter((refusal) => refusal.retryable);
+              void runChangesOnce(again.map((refusal) => ({ ...refusal.change, id: nextChangeId() })), run, undefined, action,
+                { ...current, refusals: current.refusals.filter((refusal) => !refusal.retryable), orders: again.map((refusal) => refusal.order) });
+            },
+          });
         }
         const changedExistingPath = succeeded.some(
           (change) => change.kind !== "create-folder",
