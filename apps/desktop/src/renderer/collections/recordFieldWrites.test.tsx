@@ -56,7 +56,7 @@ vi.mock("./recordSourceCheck", () => ({
 
 function engineDocState(
   partial: Partial<
-    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
+    Pick<UseEngineDoc, "available" | "opening" | "doc" | "headSha256" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
   >,
 ): UseEngineDoc {
   return {
@@ -351,7 +351,7 @@ describe("retained failures", () => {
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const before = Y.encodeStateAsUpdate(doc);
     try {
-      docMock.current = engineDocState({ available: true, doc });
+      docMock.current = engineDocState({ available: true, doc, headSha256: sha(markdown) });
       const host = render(<CollectionFieldWriteHost />);
       enqueue();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);

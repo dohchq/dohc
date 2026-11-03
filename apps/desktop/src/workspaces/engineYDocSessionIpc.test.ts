@@ -262,8 +262,10 @@ describe("engine Y.Doc IPC adapter", () => {
       channel: CHANNELS.engineYDocRemoteUpdate,
       payload: { sessionId: openPayload.sessionId, update, head: { sha256: "a".repeat(64) }, lineageGeneration: 1 },
     });
-    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null, committed: true });
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: null, committed: true } });
+    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: null } });
+    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: "b".repeat(64), committed: true });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: "b".repeat(64), committed: true } });
     // A delta from another editor brings no head.
     opened.onRemoteUpdate(new Uint8Array([4]));
     expect(sender.sent.at(-1)?.payload).not.toHaveProperty("head");
@@ -286,7 +288,7 @@ describe("engine Y.Doc IPC adapter", () => {
     sender.sent.length = 0;
 
     old.onRemoteUpdate(new Uint8Array([1]), { sha256: "a".repeat(64) });
-    old.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null, committed: true });
+    old.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null });
     expect(sender.sent).toEqual([]);
     current.onRemoteUpdate(new Uint8Array([2]), { sha256: "b".repeat(64) });
     expect(sender.sent.at(-1)?.payload).toMatchObject({sessionId: reopened.sessionId, head: {sha256: "b".repeat(64)}});

@@ -6859,7 +6859,7 @@ describe("immutable original-record recovery", () => {
     expect(refused).toHaveBeenCalledWith("refused-original", refusal);
     expect(refused).toHaveBeenCalledWith("dependent-original", refusal);
     expect(refused).toHaveBeenCalledTimes(2);
-    expect(replacing).toHaveBeenCalledWith(provider.doc, []);
+    expect(replacing).toHaveBeenCalledWith(provider.doc, [], undefined);
     expect(refused.mock.invocationCallOrder[0]).toBeLessThan(replacing.mock.invocationCallOrder[0]!);
     expect(provider.doc).not.toBe(oldDoc);
     expect(provider.doc.getText("plainText").toString()).toBe("abc");
