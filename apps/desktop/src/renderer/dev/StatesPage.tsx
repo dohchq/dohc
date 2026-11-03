@@ -2666,7 +2666,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The Explorer's Home, at the sidebar's narrowest. */}
       <Section part="explorer-home" title="Explorer Home" menusAtRest>
-        <Specimen label="open editors, pinned, pages in folders, Collections, apps, other files; a page open; a row hovered">
+        <Specimen label="open editors with one unsaved, pinned, pages in folders, Collections, apps, other files; a page open; a row hovered">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
             data-force-target='[data-section="pages"]:nth-of-type(1)'>
             <Explorer {...HOME_SPECIMEN} />
@@ -2683,6 +2683,12 @@ function Pane(props: { theme: "light" | "dark" }) {
             <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[{ path: "trip-planner/index.html", kind: "file" }]}
               folders={["trip-planner"]} pinned={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
               shareView={{ granterEmail: "sam@example.com" }} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on an open editor">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
+            data-force-target='[data-testid="open-editor-row"]:nth-child(2) > button'>
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} apps={undefined} dataCollections={[]} />
           </div>
         </Specimen>
         <Specimen label="loading: blank for 150 ms, then skeleton rows">
@@ -3977,9 +3983,14 @@ const HOME_SPECIMEN: ExplorerProps = {
   listed: true,
   files: HOME_FILES,
   folders: ["Days", "Research", "trip-planner", "notes", "notes/reading-list", "guests", "receipts", "photos"],
-  editorGroups: [{ id: "primary", tabs: [{ path: "Days/Day 2 - Sintra.md" }], activeTab: "Days/Day 2 - Sintra.md", size: 1 }],
+  editorGroups: [{
+    id: "primary",
+    tabs: [{ path: "Days/Day 2 - Sintra.md" }, { path: "itinerary.csv" }, { path: "Budget.md" }],
+    activeTab: "Days/Day 2 - Sintra.md",
+    size: 1,
+  }],
   activeEditorGroup: "primary",
-  dirtyPaths: new Set(),
+  dirtyPaths: new Set(["Budget.md"]),
   recoveryPaths: new Set(),
   expandedFolders: ["Days"],
   pinned: ["Trip plan.md"],
