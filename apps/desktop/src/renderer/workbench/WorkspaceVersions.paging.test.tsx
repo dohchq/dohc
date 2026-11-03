@@ -741,7 +741,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   const user = userEvent.setup();
   render(<VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
     onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={onError} clearError={() => {}}
-    onConflictError={onConflictError} />);
+    onMergeNotice={() => {}} onConflictError={onConflictError} />);
   await settle();
   await user.click(screen.getByTestId("version-menu-button"));
   await user.click(screen.getByTestId("version-merge"));
@@ -762,7 +762,7 @@ it("returns focus after a press on blank space closes the Versions menu", async 
     return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
       <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}}
-        onConflictError={() => {}} />
+        onMergeNotice={() => {}} onConflictError={() => {}} />
     </div>;
   }
   render(<Shell />);

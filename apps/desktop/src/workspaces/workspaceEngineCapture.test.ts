@@ -348,10 +348,8 @@ describe("merge materialization order", () => {
       return await send(request);
     });
     for (const path of ["a.md", "b.md"]) {
-      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old
-" });
-      await write(root, path, "old
-");
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old\n" });
+      await write(root, path, "old\n");
     }
     const sessions = mockLiveSessions(loopback);
     const stores = createCaptureLiveStores(
@@ -362,8 +360,7 @@ describe("merge materialization order", () => {
     try {
       const draftId = (await engine.createVersion("Draft")).activeVersionId;
       for (const path of ["a.md", "b.md"]) {
-        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new
-" });
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new\n" });
       }
       await engine.switchVersion("main");
 

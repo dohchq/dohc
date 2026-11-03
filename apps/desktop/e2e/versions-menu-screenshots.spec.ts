@@ -205,7 +205,9 @@ test("@ui-audit the versions menu and what it opens", async () => {
       { path: "notes.md", contents: "# Notes\n" },
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
-    const page = desktop.page;
+    // Narrowed once, for the helpers below that hold or release a merge.
+    const app = desktop;
+    const page = app.page;
     await openWorkspaceFromFirstRun(page, temp);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expectActive(page, "Main");
@@ -304,14 +306,14 @@ test("@ui-audit the versions menu and what it opens", async () => {
     const closeWhileMerging = async (mode: "hold" | "hold-then-fail", shot?: string) => {
       await openMenu(page);
       await page.getByTestId("version-merge").click();
-      await interceptNext(desktop, "desktop:merge-workspace-version", mode);
+      await interceptNext(app, "desktop:merge-workspace-version", mode);
       await page.getByTestId("version-merge-confirm").click();
       await expect(page.getByTestId("version-merge-cancel")).toHaveText("Close");
       await expect(page.getByTestId("version-merge-cancel")).toBeFocused();
       if (shot) await shootWindow(page, shot);
       await page.getByTestId("version-merge-cancel").click();
       await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
-      await releaseHeld(desktop);
+      await releaseHeld(app);
     };
     await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nThird draft.\n");
     await closeWhileMerging("hold", "merge-running-close");
