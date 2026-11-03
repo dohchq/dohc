@@ -553,6 +553,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return options.hasPendingRunMessageLink?.(workspace, runId) === true;
   }
 
+  // A reply whose link is still being written counts as posted.
+  async function runPosted(workspace: ChatDispatchWorkspace, runId: string): Promise<boolean> {
+    return runMessageLinkPending(workspace, runId) || (await options.dispatchStoreFor(workspace)
+      .listRunMessages(workspace.workspaceId, runId, durableDispatchRequest)).length > 0;
+  }
+
   function workspaceProcessReserved(workspace: ChatDispatchWorkspace): boolean {
     const workspaceId = workspace.workspaceId;
     return (
@@ -744,6 +750,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!live.child.hasExited()) return false;
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
+    // Try again waits for the process to exit, so read the run again.
+    notifyRunUpdated(live.workspace, live.claim.run.threadId);
     await releaseLiveWorkspace(live);
     return true;
   }
@@ -893,8 +901,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     agent: Agent | undefined,
     attemptCount?: number,
   ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchFailedRun["nextStep"] }> {
-    const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
-      .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
+    const posted = outcome !== "no-reply" && outcome !== "not-started" && await runPosted(workspace, run.runId);
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
@@ -1758,8 +1765,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (outcome !== "exited" && isFailedOutcome(outcome) &&
           outcome !== "quit" && outcome !== "restarted" &&
           !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
-        const posted = (await dispatch.listRunMessages(workspace.workspaceId, latest.runId, durableDispatchRequest)).length > 0;
-        if (!canRepeatFailedRun(outcome, posted)) found = { run: latest, outcome, retryable: false };
+        if (!canRepeatFailedRun(outcome, await runPosted(workspace, latest.runId))) found = { run: latest, outcome, retryable: false };
       }
     }
     if (!found) return null;
@@ -1800,8 +1806,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (outcome === "exited" || !isFailedOutcome(outcome)) continue;
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
-      const posted = (await dispatch.listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
-      const found: StoppedRun = { run, outcome, attemptCount, retryable: attemptCount < 2 && canRepeatFailedRun(outcome, posted) };
+      // A timed-out run's process can still post until it exits.
+      const running = liveRuns.get(workspace.workspaceId)?.claim.run.runId === run.runId;
+      const retryable = attemptCount < 2 && !running && canRepeatFailedRun(outcome, await runPosted(workspace, run.runId));
+      const found: StoppedRun = { run, outcome, attemptCount, retryable };
       if (found.retryable) return found;
       exhausted ??= found;
     }
