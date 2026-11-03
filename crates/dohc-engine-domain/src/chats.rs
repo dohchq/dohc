@@ -2097,9 +2097,74 @@ fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
 }
 
+/// The byte ranges of a body's file links, in order, read as
+/// `extractChatFileReferenceTokens` reads them: `@[`, a path with no `#`,
+/// then an optional `#` and a heading, neither blank, and no `]` or line
+/// break before the closing `]`. An opener inside code, or a link that holds
+/// another `@[`, is no link, and the scan goes on after its `]`. Every check
+/// is a lookup into arrays built in one backward pass, so the scan is linear.
+fn file_link_ranges(body: &str, code: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
+    if !body.contains("@[") {
+        return links;
+    }
+    let bytes = body.as_bytes();
+    let length = bytes.len();
+    // From each index: the next `]` or line break, the next `#`, and the next `@[`.
+    let mut stop_at = vec![length; length + 1];
+    let mut hash_at = vec![length; length + 1];
+    let mut opener_at = vec![length; length + 1];
+    for at in (0..length).rev() {
+        stop_at[at] = if matches!(bytes[at], b']' | b'\r' | b'\n') {
+            at
+        } else {
+            stop_at[at + 1]
+        };
+        hash_at[at] = if bytes[at] == b'#' {
+            at
+        } else {
+            hash_at[at + 1]
+        };
+        opener_at[at] = if bytes[at] == b'@' && bytes.get(at + 1) == Some(&b'[') {
+            at
+        } else {
+            opener_at[at + 1]
+        };
+    }
+    let mut start = opener_at[0];
+    while start < length {
+        let from = start + 2;
+        let (stop, hash) = (stop_at[from], hash_at[from]);
+        // The path runs to the first `#`, and a heading after it is not empty.
+        let matched = stop < length
+            && bytes[stop] == b']'
+            && stop > from
+            && hash > from
+            && (hash >= stop || stop > hash + 1);
+        if !matched {
+            start = opener_at[start + 1];
+            continue;
+        }
+        let end = stop + 1;
+        let next = opener_at[end];
+        if opener_at[from] + 1 < stop || range_contains(code, start) {
+            start = next;
+            continue;
+        }
+        let path = &body[from..hash.min(stop)];
+        let heading = (hash < stop).then(|| &body[hash + 1..stop]);
+        if !js_trim(path).is_empty() && heading.is_none_or(|heading| !js_trim(heading).is_empty()) {
+            links.push((start, end));
+        }
+        start = next;
+    }
+    links
+}
+
 /// Candidate-agnostic mention scanner shared by local writes, imported apply,
 /// and the mandatory historical backfill. This mirrors `scanMentionTokens`
-/// with `ignoreCode: true`, including fenced and inline backtick suppression.
+/// with `ignoreCode: true`, including fenced and inline backtick suppression,
+/// and skips names inside file links, as chat reads names.
 pub fn parse_mention_handles(body: &str) -> Vec<String> {
     let mut ignored = Vec::<(usize, usize)>::new();
     let mut open_fence: Option<(char, usize, usize)> = None;
@@ -2157,11 +2222,22 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
         }
     }
 
+    let links = file_link_ranges(body, &ignored);
+    let mut link = 0usize;
     let chars: Vec<(usize, char)> = body.char_indices().collect();
     let mut handles = Vec::new();
     let mut seen = HashSet::new();
     for (position, (offset, ch)) in chars.iter().copied().enumerate() {
         if ch != '@' || range_contains(&ignored, offset) {
+            continue;
+        }
+        // A file link owns its whole range, so a name inside a file's name
+        // names no one. A name can't hold `@`, so one that starts before a
+        // link ends before it.
+        while link < links.len() && links[link].1 <= offset {
+            link += 1;
+        }
+        if link < links.len() && links[link].0 <= offset {
             continue;
         }
         if position > 0 {
