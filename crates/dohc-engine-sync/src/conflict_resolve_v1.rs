@@ -2066,7 +2066,11 @@ fn reviewed_note_moved_here(
     tx.query_row(
         "SELECT path FROM path_aliases \
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1",
-        params![payload.workspace_id, payload.target_version_id, result.object_id],
+        params![
+            payload.workspace_id,
+            payload.target_version_id,
+            result.object_id
+        ],
         |row| row.get(0),
     )
     .optional()
@@ -8114,7 +8118,9 @@ mod tests {
             incoming: ConflictFileState::text("doc.md", incoming),
         };
         store
-            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &conflict))
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict)
+            })
             .unwrap();
     }
 
