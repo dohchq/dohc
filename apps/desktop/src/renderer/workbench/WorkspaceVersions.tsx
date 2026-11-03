@@ -233,8 +233,10 @@ export function VersionMenu(props: {
   mergeOpen.current = merge !== null;
   const { onMergeOpenChange } = props;
   const mergeIsOpen = merge !== null;
+  // Once when it opens, and once when it closes or the menu goes.
   useEffect(() => {
-    onMergeOpenChange?.(mergeIsOpen);
+    if (!mergeIsOpen) return;
+    onMergeOpenChange?.(true);
     return () => onMergeOpenChange?.(false);
   }, [mergeIsOpen, onMergeOpenChange]);
   const mounted = useRef(false);

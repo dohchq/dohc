@@ -338,10 +338,12 @@ describe("VersionMenu", () => {
     const user = userEvent.setup();
     renderMenu({ onMergeOpenChange });
     await openOn(user, "Draft");
+    expect(onMergeOpenChange).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("version-merge"));
-    expect(onMergeOpenChange).toHaveBeenLastCalledWith(true);
+    expect(onMergeOpenChange.mock.calls).toEqual([[true]]);
+    // Closing settles the rows that wait on decisions, so it says so once.
     await user.click(screen.getByTestId("version-merge-cancel"));
-    expect(onMergeOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onMergeOpenChange.mock.calls).toEqual([[true], [false]]);
   });
 
   it("puts Details under a failure whose copy text holds more than it shows", async () => {
