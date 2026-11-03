@@ -644,6 +644,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       runUpdatedWorkspaces.push(dispatchWorkspace.workspaceId),
     onAgentRequestsChanged: (_dispatchWorkspace, channelId) =>
       agentRequestGroups.push(channelId),
+    runDohcTools: async () => "all",
     setRunAttribution: async (dispatchWorkspace, run) => {
       attributions.push({ workspaceId: dispatchWorkspace.workspaceId, run });
       await options.setRunAttribution?.(dispatchWorkspace.workspaceId, run);
@@ -3706,6 +3707,10 @@ describe("chatDispatchService", () => {
     return `dohc chat reply ${threadId} --as-agent "${body}"`;
   }
 
+  // What a profile's run hears about the dohc tools and the links in its reply.
+  const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server.";
+  const FILE_LINKS = "Write each file, document, or record you made or changed as `@[path]`, with its path from the workspace root, so a person can open it from your reply. Name a folder or Collection by its path, and a chat by its group.";
+
   it.each([
     [undefined, "argument"],
     ["claude", "mcp"],
@@ -3727,9 +3732,51 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
-    const approvals = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line.";
+    const approvals = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it. If you couldn't do part of the request, say so in one line.";
     if (tool) expect(prompt).toContain(approvals);
     else expect(prompt).not.toContain("approve");
+    if (tool) expect(prompt).toContain(`${WORKSPACE_TOOLS} ${approvals} Report outcomes, not tool logs. ${FILE_LINKS} Reply in-thread`);
+    else expect(prompt).not.toContain("@[path]");
+  });
+
+  it.each([
+    ["claude", "all"],
+    ["claude", "reply"],
+    ["codex", "all"],
+    ["codex", "reply"],
+  ] as const)("gives a %s run in this thread the %s dohc tools main chose", async (tool, dohcTools) => {
+    const profile = { tool, executable: resolve(`test-${tool}.exe`) };
+    const fixture = await createFixture({ runner: { command: "", profile } });
+    const asked: string[] = [];
+    fixture.serviceOptions.runDohcTools = async (workspace, threadId) => {
+      asked.push(`${workspace.workspaceId}:${threadId}`);
+      return dohcTools;
+    };
+    const thread = await createAgentThread(fixture, { body: "Make a Collection of guests." });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(asked).toEqual([`${WORKSPACE_ID}:${thread.threadId}`]);
+    const call = fixture.spawnCalls[0]!;
+    const configPath = join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log.mcp.json`);
+    const replyOnly = tool === "claude"
+      ? (JSON.parse(await readFile(configPath, "utf8")).mcpServers.dohc.args as string[]).includes("--tool")
+      : call.args.some((arg) => arg.includes("'--tool','dohc_reply_to_chat'"));
+    expect(replyOnly).toBe(dohcTools === "reply");
+    const prompt = call.process.stdinText;
+    expect(prompt).toContain(expectedReply("mcp", thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
+    expect(prompt).toContain(FILE_LINKS);
+    if (dohcTools === "all") expect(prompt).toContain(WORKSPACE_TOOLS);
+    else expect(prompt).not.toContain("tools of the `dohc` MCP server");
+  });
+
+  it("asks main for no dohc tools when a custom command runs", async () => {
+    const fixture = await createFixture({ runner: { command: "claude -p" } });
+    fixture.serviceOptions.runDohcTools = async () => { throw new Error("A custom command uses the dohc CLI."); };
+    await createAgentThread(fixture, { body: "Reply." });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.spawnCalls[0]!.process.stdinText).not.toContain("tools of the `dohc` MCP server");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3783,8 +3830,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
-        "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
-        "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
+        "mcp_servers.dohc.default_tools_approval_mode='approve'",
       ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] } })) : ["--mcp-config", configPath]));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({

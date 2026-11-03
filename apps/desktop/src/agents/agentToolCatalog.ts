@@ -43,7 +43,7 @@ export function supportsAgentProfile(tool: AgentToolId, version: string | null):
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
+    permissions: "Edits workspace files and uses dohc's tools without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -57,8 +57,9 @@ export const AGENT_TOOLS = [
 export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
+  // mcp__dohc allows every tool the run's dohc server offers.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
     : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
 }
 

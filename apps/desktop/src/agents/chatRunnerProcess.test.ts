@@ -10,6 +10,7 @@ import {
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
+import type { RunDohcTools } from "./runDohcTools";
 
 const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
   ? ["win32", "x64", "node.exe"] as const
@@ -17,7 +18,7 @@ const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
 
 async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch = "x64") {
   const root = await createTestScratch("dohc-chat-runner-");
-  const calls: { command: string; options: RunnerSpawnOptions }[] = [];
+  const calls: { command: string; args: string[]; options: RunnerSpawnOptions }[] = [];
   const runner = createChatRunnerProcess(
     {
       stateDir: () => join(root, "state"),
@@ -26,8 +27,9 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       resourcesPath: () => platform === "win32" ? join(root, "resources") : join(root, "resources").replace(/^[a-z]:/iu, "").replaceAll("\\", "/"),
       arch,
       platform,
-      spawnRunner: (command, _args, options) => {
-        calls.push({ command, options });
+      codexConfigFiles: () => ({ requirements: [], config: [] }),
+      spawnRunner: (command, args, options) => {
+        calls.push({ command, args, options });
         return {
           pid: 4_100,
           writeStdin: () => undefined,
@@ -39,13 +41,14 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
     },
     () => undefined,
   );
-  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile) =>
+  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile, dohcTools: RunDohcTools = "reply") =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
       logPath: join(root, "logs", "run.log"),
       command,
       profile,
+      dohcTools,
       prompt: "",
       assertMayStart,
     });
@@ -110,6 +113,27 @@ describe("chat runner process", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["claude", "all"],
+    ["claude", "reply"],
+    ["codex", "all"],
+    ["codex", "reply"],
+  ] as const)("starts a %s run's dohc server with %s tools, each approved", async (tool, dohcTools) => {
+    const { calls, root, spawn } = await runnerFixture("linux");
+    spawn("", () => undefined, { tool, executable: process.execPath }, dohcTools);
+    const serverArgs = ["--workspace", root, "--home", join(root, "state"), ...(dohcTools === "reply" ? ["--tool", "dohc_reply_to_chat"] : [])];
+    const args = calls[0]!.args;
+    expect(args.some((arg) => arg.includes("enabled_tools"))).toBe(false);
+    if (tool === "claude") {
+      expect(args.slice(args.indexOf("--allowedTools"), args.indexOf("--disallowedTools"))).toEqual(["--allowedTools", "Edit(/**)", "mcp__dohc"]);
+      expect(JSON.parse(readFileSync(join(root, "logs", "run.log.mcp.json"), "utf8")).mcpServers.dohc.args).toEqual(serverArgs);
+    } else {
+      expect(args).toContain(`mcp_servers.dohc.args=[${serverArgs.map((arg) => `'${arg}'`).join(",")}]`);
+      expect(args).toContain("mcp_servers.dohc.default_tools_approval_mode='approve'");
+      expect(args.some((arg) => arg.startsWith("mcp_servers.dohc.tools."))).toBe(false);
+    }
   });
 
   it("starts the runner when the Node.js sidecar write fails", async () => {
@@ -278,6 +302,7 @@ describe("chat runner process", () => {
         runId: "run-1",
         logPath: join(shims, "run.log"),
         command: `"${shim}"`,
+        dohcTools: "reply",
         prompt: "",
         assertMayStart: () => undefined,
       });
@@ -304,6 +329,7 @@ describe("chat runner process", () => {
       logPath: join(root, "run.log"),
       command: "",
       profile: { tool: "codex", executable: codex },
+      dohcTools: "reply",
       prompt: "",
       assertMayStart: () => undefined,
     });

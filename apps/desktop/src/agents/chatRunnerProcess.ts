@@ -6,6 +6,7 @@ import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 import { type CodexConfigFiles, codexConfigFiles, codexRunConfig } from "./codexRunConfig";
+import type { RunDohcTools } from "./runDohcTools";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -163,13 +164,14 @@ function tomlString(value: string): string {
 
 // A run replies through the dohc MCP server, which its agent starts outside
 // any sandbox; Codex's sandbox cannot connect to the desktop app, and Claude
-// Code's Bash needs Git Bash on Windows. The server offers only the reply
-// tool, and that tool runs without approval.
+// Code's Bash needs Git Bash on Windows. The server offers the run's dohc
+// tools (runDohcTools.ts), and they run without approval.
 // Packaged launchers use dohc's own Node. Codex starts the server in cli-bin;
 // Claude Code starts it in the workspace. Keep the workspace executable-search
 // protections for the agent and its other commands.
 function replyServerArguments(input: {
   tool: AgentLaunchProfile["tool"];
+  dohcTools: RunDohcTools;
   cliBin: string;
   platform: NodeJS.Platform;
   rootPath: string;
@@ -177,7 +179,10 @@ function replyServerArguments(input: {
   logPath: string;
 }): string[] {
   const command = join(input.cliBin, input.platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
-  const args = ["--workspace", input.rootPath, "--home", input.stateDir, "--tool", "dohc_reply_to_chat"];
+  const args = [
+    "--workspace", input.rootPath, "--home", input.stateDir,
+    ...(input.dohcTools === "reply" ? ["--tool", "dohc_reply_to_chat"] : []),
+  ];
   if (input.tool === "claude") {
     const configPath = `${input.logPath}.mcp.json`;
     writeFileSync(configPath, JSON.stringify({ mcpServers: { dohc: { type: "stdio", command, args } } }), { mode: 0o600 });
@@ -188,8 +193,9 @@ function replyServerArguments(input: {
     `mcp_servers.dohc.args=[${args.map(tomlString).join(",")}]`,
     `mcp_servers.dohc.cwd=${tomlString(input.cliBin)}`,
     "mcp_servers.dohc.required=true",
-    "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
-    "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
+    // approval_policy=never refuses a tool that would ask, so every dohc tool,
+    // including one added later, is approved.
+    "mcp_servers.dohc.default_tools_approval_mode='approve'",
   ].flatMap((entry) => ["--config", entry]);
 }
 
@@ -301,6 +307,8 @@ export function createChatRunnerProcess(
     logPath: string;
     command: string;
     profile?: AgentLaunchProfile;
+    // The dohc MCP tools a profile's run gets. A custom command uses the CLI.
+    dohcTools: RunDohcTools;
     prompt: string;
     // Throws unless the runner may still start, such as when the workspace
     // lost its trust. Nothing awaits between it and spawn.
@@ -354,7 +362,7 @@ export function createChatRunnerProcess(
     const commandParts = input.profile
       ? [input.profile.executable, ...agentProfileArguments(input.profile, [
         ...replyServerArguments({
-          tool: input.profile.tool, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
+          tool: input.profile.tool, dohcTools: input.dohcTools, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
         }),
         ...(input.profile.tool === "codex"
           ? codexRunConfig({
