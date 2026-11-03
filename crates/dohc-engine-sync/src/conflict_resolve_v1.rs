@@ -8515,6 +8515,91 @@ mod tests {
         assert_eq!(chosen, "incoming");
     }
 
+    /// This machine holds the history the other machine's choice replaced,
+    /// but moved the note to `moved.md`. The import asks instead of giving
+    /// the note back its old path beside the new one.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_when_this_machine_moved_the_note() {
+        let (base, first, _, _) = peer_editor_history();
+        let scratch = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        let mut files = VersionedTextStore::new(&mut store);
+        files
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .unwrap();
+        files
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "base text".to_owned(),
+                    moment_id: "moment-base".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, &base, true);
+        apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: "doc.md".to_owned(),
+                    to_path: "moved.md".to_owned(),
+                    moment_id: "moment-moved".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 24,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let predecessor = dohc_engine_collab::Ydoc::wire();
+        predecessor.apply(&base).unwrap();
+        predecessor.apply(&first).unwrap();
+        let key = DocKey::new("ws", "main", "object-a").unwrap();
+        let edited = "base text\nTokyo";
+        let built = peer_kept_its_copy(&mut store, &key, (&claim, &predecessor), edited);
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value.clone()),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+
+        let sql = "SELECT path FROM path_aliases \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id='object-a'";
+        let paths: Vec<String> = store
+            .read_with(|conn| {
+                conn.prepare(sql)?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap();
+        assert_eq!(paths, ["moved.md"]);
+        let sql = "SELECT COUNT(*) FROM conflicts WHERE status='open'";
+        let open: i64 = store
+            .read_with(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(open, 1);
+    }
+
     /// The note's history came from an earlier resolution, so its base
     /// travels in that logged resolution rather than in an editor change.
     /// Keeping the other copy after a deletion still rebuilds it.
