@@ -584,10 +584,7 @@ impl RelayTransport for RelayLog {
         let mut response = self.inner.push(req.clone())?;
         response.skipped = req.ops.iter().filter(|op| op.origin_seq <= held).count();
         response.inserted = req.ops.len() - response.skipped;
-        response.current_max_origin_seq = req
-            .ops
-            .last()
-            .map_or(held, |op| op.origin_seq.max(held));
+        response.current_max_origin_seq = req.ops.last().map_or(held, |op| op.origin_seq.max(held));
         response.settlement_refusals = req
             .ops
             .iter()
