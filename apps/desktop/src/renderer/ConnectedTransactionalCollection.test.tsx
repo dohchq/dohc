@@ -320,7 +320,7 @@ function buttonApproval() {
   const preparation = { preparationId: id(10), previousRevision, revision: nextRevision, expected, sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64),
     schemaSql: "schema", operationSource: "source", migrationSql: "SELECT 1;", expiresAtMs: Date.now() + 600_000,
     candidate: { candidateId: id(11), expected, approvedRevisionHash: after.revisionSha256, checkpointSha256: "a".repeat(64), changeSha256: "d".repeat(64), expiresAtMs: Date.now() + 600_000,
-      preview: { tables: [{ table: "registrations", beforeRows: 0, afterRows: 0, changedRows: 0, deletedRows: 0, beforeValues: {}, afterValues: {} }], firstPage: { changes: [], nextCursor: null } } } };
+      preview: { tables: [{ table: "registrations", beforeRows: 0, afterRows: 0, changedRows: 0, deletedRows: 0, beforeValues: {}, afterValues: {}, clearedValues: {} }], firstPage: { changes: [], nextCursor: null } } } };
   return { before, after, preparation, CONFIRM };
 }
 

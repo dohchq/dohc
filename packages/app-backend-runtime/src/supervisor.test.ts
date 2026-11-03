@@ -77,7 +77,7 @@ it("previews actual changed values and approves the exact candidate without runn
   const candidate=await f.supervisor.prepareMigration({...input,authorityKey:"owner-v1"});
   expect(candidate.changeSha256).toBe(datasetChangeDigest({revisionSha256:input.approvedRevisionHash,migrationSql:input.migrationSql}));
   expect(reserved).toBeGreaterThan(128*1024*1024);
-  expect(candidate.preview.tables).toEqual([{table:"items",beforeRows:1,afterRows:1,changedRows:1,deletedRows:0,beforeValues:{id:1,value:1},afterValues:{id:1,value:1,note:1}}]);
+  expect(candidate.preview.tables).toEqual([{table:"items",beforeRows:1,afterRows:1,changedRows:1,deletedRows:0,beforeValues:{id:1,value:1},afterValues:{id:1,value:1,note:1},clearedValues:{id:0,value:0}}]);
   const change=candidate.preview.firstPage.changes[0]!;
   expect(change.before).toEqual({id:"one",value:"original"});expect(change.after).toMatchObject({id:"one",note:"previewed"});
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"one",value:"original"}]);

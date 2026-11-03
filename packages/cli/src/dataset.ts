@@ -91,7 +91,7 @@ const migrationRowChange = z.object({ table: z.string().min(1).max(128), kind: z
   before: migrationValues.nullable(), after: migrationValues.nullable() }).strict();
 export const DatasetMigrationPreviewPage = z.object({ changes: z.array(migrationRowChange).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
 const valueCounts = z.record(z.string().max(256), z.number().int().nonnegative());
-const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative(), deletedRows: z.number().int().nonnegative(), beforeValues: valueCounts, afterValues: valueCounts }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
+const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative(), deletedRows: z.number().int().nonnegative(), beforeValues: valueCounts, afterValues: valueCounts, clearedValues: valueCounts }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
 export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256, changeSha256: sha256,
   expiresAtMs: z.number().int().positive(), preview: migrationPreview }).strict();
 export type DatasetMigrationPreviewPage = z.infer<typeof DatasetMigrationPreviewPage>;

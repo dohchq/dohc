@@ -91,7 +91,7 @@ describe("owner Collection migration", () => {
     f.next();
     const review = await prepare(host, f), exact = approval(review);
     expect(DatasetMigrationPreparation.parse(review).expected.revision).toBe(1);
-    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 1, afterRows: 1, changedRows: 1, deletedRows: 0, beforeValues: { id: 1, name: 1 }, afterValues: { id: 1, name: 1, note: 0 } }]);
+    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 1, afterRows: 1, changedRows: 1, deletedRows: 0, beforeValues: { id: 1, name: 1 }, afterValues: { id: 1, name: 1, note: 0 }, clearedValues: { id: 0, name: 0 } }]);
     expect(review.candidate.preview.firstPage.changes).toMatchObject([{ table: "items", kind: "update", before: { name: "Camera" }, after: { name: "Camera migrated", note: null } }]);
     expect((await host.query(call(first, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
     f.files.set("items/migration.sql", "DROP TABLE items;");
@@ -129,7 +129,7 @@ describe("owner Collection migration", () => {
     f.next();
     f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; DELETE FROM items;");
     const review = await prepare(host, f);
-    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 3, afterRows: 0, changedRows: 3, deletedRows: 3, beforeValues: { id: 3, name: 3 }, afterValues: { id: 0, name: 0, note: 0 } }]);
+    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 3, afterRows: 0, changedRows: 3, deletedRows: 3, beforeValues: { id: 3, name: 3 }, afterValues: { id: 0, name: 0, note: 0 }, clearedValues: { id: 0, name: 0 } }]);
     const changes = [];
     let after: string | undefined;
     do {

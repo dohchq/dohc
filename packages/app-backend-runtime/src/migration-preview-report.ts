@@ -10,8 +10,12 @@ export interface MigrationPreviewChange {
   before:Record<string,MigrationPreviewValue>|null;
   after:Record<string,MigrationPreviewValue>|null;
 }
-/** `beforeValues` and `afterValues` count each column's non-empty cells, so a review can say how many values a change deletes. */
-export interface MigrationPreviewTableSummary {table:string;beforeRows:number;afterRows:number;changedRows:number;deletedRows:number;beforeValues:Record<string,number>;afterValues:Record<string,number>}
+/**
+ * `beforeValues` and `afterValues` count each column's non-empty cells.
+ * `clearedValues` counts the cells a kept record lost, by column, so a review
+ * can say what a change deletes without counting deleted records twice.
+ */
+export interface MigrationPreviewTableSummary {table:string;beforeRows:number;afterRows:number;changedRows:number;deletedRows:number;beforeValues:Record<string,number>;afterValues:Record<string,number>;clearedValues:Record<string,number>}
 export interface MigrationPreviewReportPage {changes:MigrationPreviewChange[];nextCursor:string|null}
 const rowBytes=256*1024;
 const reportBytes=512*1024*1024;
@@ -82,8 +86,9 @@ export function createMigrationPreviewReport(input:{before:DatabaseSync;after:Da
       const getBefore=comparable?lookup(input.before,table,before):undefined;
       const getAfter=comparable?lookup(input.after,table,after):undefined;
       const counts=(info:Table|undefined)=>Object.fromEntries((info?.columns??[]).map(name=>[name,0]));
-      const summary:MigrationPreviewTableSummary={table,beforeRows:0,afterRows:0,changedRows:0,deletedRows:0,beforeValues:counts(before),afterValues:counts(after)};
-      const tally=(values:Record<string,number>,row:Row)=>{for(const name of Object.keys(values))if(row[name]!==null&&row[name]!=="")values[name]=(values[name]??0)+1;};
+      const summary:MigrationPreviewTableSummary={table,beforeRows:0,afterRows:0,changedRows:0,deletedRows:0,beforeValues:counts(before),afterValues:counts(after),clearedValues:counts(comparable?before:undefined)};
+      const filled=(value:SQLOutputValue|undefined)=>value!==undefined&&value!==null&&value!=="";
+      const tally=(values:Record<string,number>,row:Row,kept?:Row)=>{for(const name of Object.keys(values))if(filled(row[name])&&(!kept||!filled(kept[name])))values[name]=(values[name]??0)+1;};
       if(before)assertRowsBound(input.before,table,before);
       if(after)assertRowsBound(input.after,table,after);
       const append=(kind:MigrationPreviewChange["kind"],oldRow:Row|undefined,newRow:Row|undefined)=>{
@@ -99,7 +104,7 @@ export function createMigrationPreviewReport(input:{before:DatabaseSync;after:Da
         summary.beforeRows++;counted();tally(summary.beforeValues,row);
         const match=getAfter?find(getAfter,after!,row):undefined;
         if(!match)append("delete",row,undefined);
-        else if(before.columns.length!==after!.columns.length||before.columns.some(name=>!after!.columns.includes(name)||!equalValue(row[name],match[name])))append("update",row,match);
+        else if(before.columns.length!==after!.columns.length||before.columns.some(name=>!after!.columns.includes(name)||!equalValue(row[name],match[name]))){append("update",row,match);tally(summary.clearedValues,row,match);}
       }
       if(after)for(const row of statement(input.after,select(table,after)).iterate()) {
         summary.afterRows++;counted();tally(summary.afterValues,row);
