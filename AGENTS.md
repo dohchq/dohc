@@ -36,7 +36,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 ### The job
 
-An agent can build a small app in an afternoon. The hard part comes after. Each app needs these things:
+An agent can build a small app really quickly. The hard part comes after. Each app needs these things:
 
 - a place for its data;
 - an interface people already know;

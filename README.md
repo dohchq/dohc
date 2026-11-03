@@ -22,7 +22,7 @@ dohc is agent agnostic. It does not provide an agent or prescribe how agents sho
 
 Workspace apps are web apps whose source lives in the workspace. Collaborators can inspect and edit the source with their own tools and agents. Apps receive only the workspace data and capabilities their owner exposes.
 
-Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled, and a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
+Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled. It also requires a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
 
 Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
 
