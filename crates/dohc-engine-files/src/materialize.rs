@@ -5299,7 +5299,7 @@ fn open_secret_parent_windows(
 }
 
 #[cfg(windows)]
-fn open_existing_secret_parent_windows(
+pub(crate) fn open_existing_secret_parent_windows(
     root: &Path,
     relative_parent: &Path,
 ) -> Result<Option<Vec<std::fs::File>>, MaterializeError> {

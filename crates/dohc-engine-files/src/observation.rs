@@ -74,15 +74,19 @@ impl ObservedEntry {
     }
 }
 
-/// A file a walk read because its size and times can't show a later write
-/// yet. A filesystem's clock can give two writes in one tick the same times.
+/// What a walk learned by reading a file whose size and times can't show a
+/// later write yet. A filesystem's clock can give two writes in one tick the
+/// same times.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reread {
-    /// Whether the file's times were inside History's margin of the walk's
-    /// start, so the next walk reads it again to compare.
-    pub(crate) recent: bool,
-    /// The SHA-256 of its bytes, or `None` when the read failed.
-    pub(crate) sha256: Option<[u8; 32]>,
+pub(crate) enum Reread {
+    /// The SHA-256 of the bytes of the file the walk listed. `recent` says
+    /// whether its times were inside History's margin of the walk's start, so
+    /// the next walk reads it again to compare.
+    Read { recent: bool, sha256: [u8; 32] },
+    /// The read failed, the file changed or was replaced after the walk
+    /// listed it, or reading it would download it from a cloud provider. The
+    /// feed keeps the last bytes it read to compare with.
+    Unknown,
 }
 
 /// Metadata listing, with no hash workers or capture queue. It reads only
@@ -136,7 +140,18 @@ impl ObservationWalker {
         root: &std::path::Path,
         token: &crate::CancellationToken,
     ) -> Result<bool, crate::FilesError> {
-        let started_ms = crate::reconcile::now_ms();
+        self.observe_at(root, token, crate::reconcile::now_ms(), || {})
+    }
+
+    /// [`Self::observe`], with the walk's start given and `listed` run
+    /// between the listing and the reads, so tests can choose both.
+    fn observe_at(
+        &self,
+        root: &std::path::Path,
+        token: &crate::CancellationToken,
+        started_ms: i64,
+        listed: impl FnOnce(),
+    ) -> Result<bool, crate::FilesError> {
         let (previous_len, recent) = {
             let state = self
                 .feed
@@ -269,6 +284,7 @@ impl ObservationWalker {
             }
         }
         observe_visibility_policy(root, &mut listing, &mut failed);
+        listed();
         let Some(rereads) = self.reread(root, &listing, &recent, started_ms, token) else {
             return Ok(false);
         };
@@ -289,7 +305,7 @@ impl ObservationWalker {
         token: &crate::CancellationToken,
     ) -> Option<HashMap<String, Reread>> {
         let mut rereads = HashMap::new();
-        let mut buffer = Vec::new();
+        let mut reader = None;
         for entry in listing {
             let racy = crate::reconcile::recordable_mtime_ms(entry.newest_ms(), started_ms) == 0;
             if entry.symlink
@@ -301,41 +317,157 @@ impl ObservationWalker {
             if token.is_cancelled() {
                 return None;
             }
-            if buffer.is_empty() {
-                buffer.resize(self.bounds.read_buffer_bytes.get(), 0);
-            }
-            let sha256 = crate::reconcile::absolute_path(root, &entry.path)
-                .and_then(|path| file_sha256(&path, self.bounds.max_file_bytes, &mut buffer));
-            rereads.insert(
-                entry.path.clone(),
-                Reread {
+            let reader = reader
+                .get_or_insert_with(|| FileReader::new(root, self.bounds.read_buffer_bytes.get()));
+            let reread = match reader.sha256(entry, self.bounds.max_file_bytes) {
+                Some(sha256) => Reread::Read {
                     recent: racy,
                     sha256,
                 },
-            );
+                None => Reread::Unknown,
+            };
+            rereads.insert(entry.path.clone(), reread);
         }
         Some(rereads)
     }
 }
 
-/// The SHA-256 of the file at `path`, or `None` when it can't be read or
-/// holds more than `max_bytes`.
-fn file_sha256(path: &std::path::Path, max_bytes: u64, buffer: &mut [u8]) -> Option<[u8; 32]> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut bytes: u64 = 0;
-    loop {
-        let read = match file.read(buffer) {
-            Ok(0) => return Some(hasher.finalize().into()),
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        };
-        bytes = bytes.saturating_add(read as u64);
-        if bytes > max_bytes {
+/// Reads files a walk listed under one root. It never follows a link, in a
+/// file's place or a folder's, so a link swapped in after the listing can't
+/// take a read outside the root.
+struct FileReader {
+    #[cfg(unix)]
+    root: Option<rustix::fd::OwnedFd>,
+    #[cfg(windows)]
+    root: std::path::PathBuf,
+    buffer: Vec<u8>,
+}
+
+impl FileReader {
+    fn new(root: &std::path::Path, buffer_bytes: usize) -> Self {
+        Self {
+            #[cfg(unix)]
+            root: rustix::fs::open(
+                root,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .ok(),
+            #[cfg(windows)]
+            root: root.to_path_buf(),
+            buffer: vec![0; buffer_bytes],
+        }
+    }
+
+    /// The SHA-256 of `entry`'s bytes. `None` when the file can't be read,
+    /// holds more than `max_bytes`, or doesn't have the size and times the
+    /// walk listed, before and after the read. A write after the listing then
+    /// waits for the walk that lists it, so one write reads as one change.
+    fn sha256(&mut self, entry: &ObservedEntry, max_bytes: u64) -> Option<[u8; 32]> {
+        let mut file = self.open(&entry.path)?;
+        if !lists_as(entry, &file.metadata().ok()?) {
             return None;
         }
-        hasher.update(&buffer[..read]);
+        let mut hasher = Sha256::new();
+        let mut bytes: u64 = 0;
+        loop {
+            let read = match file.read(&mut self.buffer) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            };
+            bytes = bytes.saturating_add(read as u64);
+            if bytes > max_bytes {
+                return None;
+            }
+            hasher.update(&self.buffer[..read]);
+        }
+        lists_as(entry, &file.metadata().ok()?).then(|| hasher.finalize().into())
+    }
+
+    /// Opens `path` one folder at a time from the root, refusing a link at
+    /// every step.
+    #[cfg(unix)]
+    fn open(&self, path: &str) -> Option<std::fs::File> {
+        use rustix::fs::{Mode, OFlags};
+        let root = self.root.as_ref()?;
+        let (folders, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let mut folder: Option<rustix::fd::OwnedFd> = None;
+        for segment in folders.split('/').filter(|_| !folders.is_empty()) {
+            if !plain_name(segment) {
+                return None;
+            }
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let at = folder.as_ref().unwrap_or(root);
+            folder = Some(rustix::fs::openat(at, segment, flags, Mode::empty()).ok()?);
+        }
+        if !plain_name(name) {
+            return None;
+        }
+        let at = folder.as_ref().unwrap_or(root);
+        // Opening a file macOS marks dataless can download it, which would
+        // undo a cloud provider's eviction. Its flags can be read without that.
+        #[cfg(target_os = "macos")]
+        if rustix::fs::statat(at, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .ok()?
+            .st_flags
+            & crate::scan::SF_DATALESS
+            != 0
+        {
+            return None;
+        }
+        // Without O_NONBLOCK, a FIFO swapped in after the listing would block
+        // the walk until a writer opened it. Reading a regular file ignores it.
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let file = rustix::fs::openat(at, name, flags, Mode::empty()).ok()?;
+        Some(std::fs::File::from(file))
+    }
+
+    /// Opens `path` while holding its folders open, so none can be swapped
+    /// for a link until the file is open, and refuses a link at every step.
+    #[cfg(windows)]
+    fn open(&self, path: &str) -> Option<std::fs::File> {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let folders = path.rsplit_once('/').map_or("", |(folders, _)| folders);
+        let _held = crate::materialize::open_existing_secret_parent_windows(
+            &self.root,
+            std::path::Path::new(folders),
+        )
+        .ok()??;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(crate::reconcile::absolute_path(&self.root, path)?)
+            .ok()?;
+        let attributes = file.metadata().ok()?.file_attributes();
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0).then_some(file)
+    }
+}
+
+#[cfg(unix)]
+fn plain_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..")
+}
+
+/// Whether `metadata`, read from an open file, shows the regular file the
+/// walk listed as `entry`.
+fn lists_as(entry: &ObservedEntry, metadata: &std::fs::Metadata) -> bool {
+    let same = metadata.is_file()
+        && metadata.len() == entry.size
+        && metadata.modified().ok() == entry.modified;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        same && (metadata.ctime(), metadata.ctime_nsec()) == entry.changed
+    }
+    #[cfg(not(unix))]
+    {
+        same
     }
 }
 
@@ -422,8 +554,9 @@ struct Batch {
 
 struct State {
     listing: Vec<ObservedEntry>,
-    /// The SHA-256 of each file the last walk read while its times were
-    /// recent, by path. The next walk reads these files again to compare.
+    /// The last SHA-256 read of each file whose times were recent, by path,
+    /// until a walk reads it with its times settled. The next walk reads
+    /// these files again to compare.
     recent: HashMap<String, [u8; 32]>,
     listing_valid: bool,
     ready: bool,
@@ -558,6 +691,7 @@ impl ObservationFeed {
             return Ok(());
         }
         listing.sort_unstable_by(ObservedEntry::order);
+        let mut retained = Vec::new();
         if !failed.is_empty() {
             let observed_len = listing.len();
             let failures: BTreeSet<String> = failed
@@ -589,6 +723,7 @@ impl ObservationFeed {
                         self.resync();
                         return Ok(());
                     }
+                    retained.push(entry.path.clone());
                     listing.push(entry.clone());
                 }
             }
@@ -598,11 +733,10 @@ impl ObservationFeed {
         }
         listing.dedup_by(|a, b| a.order(b).is_eq());
         let rewritten = |entry: &ObservedEntry| {
-            state
-                .recent
-                .get(&entry.path)
-                .zip(rereads.get(&entry.path))
-                .is_some_and(|(before, now)| now.sha256.as_ref() != Some(before))
+            matches!(
+                (state.recent.get(&entry.path), rereads.get(&entry.path)),
+                (Some(before), Some(Reread::Read { sha256, .. })) if sha256 != before
+            )
         };
         let mut changes = BTreeMap::new();
         let mut bytes = 0;
@@ -640,11 +774,30 @@ impl ObservationFeed {
                 }
             }
         }
+        // A read the walk couldn't trust, and a file a failed folder hid, keep
+        // the last bytes read to compare the next read with.
+        let mut recent = HashMap::new();
+        for (path, reread) in rereads {
+            let sha256 = match reread {
+                Reread::Read {
+                    recent: true,
+                    sha256,
+                } => sha256,
+                Reread::Read { recent: false, .. } => continue,
+                Reread::Unknown => match state.recent.get(&path) {
+                    Some(&sha256) => sha256,
+                    None => continue,
+                },
+            };
+            recent.insert(path, sha256);
+        }
+        for path in retained {
+            if let Some(&sha256) = state.recent.get(&path) {
+                recent.insert(path, sha256);
+            }
+        }
         state.listing = listing;
-        state.recent = rereads
-            .into_iter()
-            .filter_map(|(path, reread)| Some((path, reread.sha256.filter(|_| reread.recent)?)))
-            .collect();
+        state.recent = recent;
         let baseline = !state.listing_valid;
         state.listing_valid = true;
         state.ready = true;
@@ -1150,8 +1303,10 @@ mod tests {
 
     /// A filesystem's clock can give a write made right after a walk the
     /// same times as the write before it (#2904). Restoring the modified time
-    /// makes that case on every platform. On Unix the change time moves only
-    /// when the clock ticked between the writes, so the test needs no wait.
+    /// makes that case on Windows. On Unix the change time still moves when
+    /// the clock ticked between the writes, so there the times alone can show
+    /// the write. `a_recent_file_is_compared_by_bytes_until_its_times_settle`
+    /// covers the byte comparison on every platform.
     #[test]
     fn a_write_that_keeps_size_and_times_reads_as_changed() {
         let f = Fixture::new();
@@ -1199,22 +1354,197 @@ mod tests {
                 .unwrap();
             feed.changes_since(Some(&cursor)).facts
         };
-        let read = |recent: bool, byte: Option<u8>| {
-            Some(Reread {
+        let read = |recent: bool, byte: u8| {
+            Some(Reread::Read {
                 recent,
-                sha256: byte.map(|byte| [byte; 32]),
+                sha256: [byte; 32],
             })
         };
         let changed = vec![fact("note.md", FileChangeKind::Changed)];
-        publish(read(true, Some(1)));
-        assert!(publish(read(true, Some(1))).is_empty());
-        assert_eq!(publish(read(true, Some(2))), changed);
-        assert_eq!(publish(read(true, None)), changed);
-        // A failed read leaves nothing to compare the next read with.
-        assert!(publish(read(true, Some(3))).is_empty());
-        assert_eq!(publish(read(false, Some(4))), changed);
+        publish(read(true, 1));
+        assert!(publish(read(true, 1)).is_empty());
+        assert_eq!(publish(read(true, 2)), changed);
+        // A read the walk can't trust changes nothing, and the next read
+        // compares with the last bytes read.
+        assert!(publish(Some(Reread::Unknown)).is_empty());
+        assert_eq!(publish(read(true, 3)), changed);
+        assert!(publish(Some(Reread::Unknown)).is_empty());
+        // The walk that finds the times settled compares once more.
+        assert_eq!(publish(read(false, 4)), changed);
         assert!(feed.state.lock().unwrap().recent.is_empty());
         assert!(publish(None).is_empty());
+    }
+
+    /// A folder the walk can't read keeps its files' last bytes, so a write
+    /// that keeps size and times still reads as changed once it can.
+    #[test]
+    fn a_failed_folder_keeps_the_last_bytes_read_of_its_files() {
+        let feed = ObservationFeed::new();
+        let entry = ObservedEntry {
+            path: "dir/a".to_owned(),
+            symlink: false,
+            size: 1,
+            modified: None,
+            #[cfg(unix)]
+            changed: (0, 0),
+            #[cfg(any(windows, target_vendor = "apple"))]
+            key: "dir/a".to_owned(),
+        };
+        let read = |byte: u8| {
+            HashMap::from([(
+                "dir/a".to_owned(),
+                Reread::Read {
+                    recent: true,
+                    sha256: [byte; 32],
+                },
+            )])
+        };
+        feed.publish(vec![entry.clone()], read(1), &[], 10, FOLDS)
+            .unwrap();
+        let cursor = feed.changes_since(None).cursor;
+        let failed = [FailedPath {
+            path: "dir".to_owned(),
+            kind: std::io::ErrorKind::PermissionDenied,
+        }];
+        feed.publish(vec![], HashMap::new(), &failed, 10, FOLDS)
+            .unwrap();
+        assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
+        feed.publish(vec![entry], read(2), &[], 10, FOLDS).unwrap();
+        assert_eq!(
+            feed.changes_since(Some(&cursor)).facts,
+            vec![fact("dir/a", FileChangeKind::Changed)]
+        );
+    }
+
+    /// A walk reads a file while its times are inside History's margin, and
+    /// once more after, then compares size and times alone.
+    #[test]
+    fn a_walk_reads_a_file_while_its_times_are_recent_and_once_after() {
+        let f = Fixture::new();
+        f.write("note.md", "a");
+        let written = crate::reconcile::now_ms();
+        let token = CancellationToken::new();
+        let walk = |started_ms: i64| {
+            f.scanner
+                .observe_at(f.root.path(), &token, started_ms, || {})
+                .unwrap();
+        };
+        // The files the next walk starting at `started_ms` reads.
+        let reads = |started_ms: i64| {
+            let state = f.feed.state.lock().unwrap();
+            let (listing, recent) = (state.listing.clone(), state.recent.clone());
+            drop(state);
+            let rereads = f
+                .scanner
+                .reread(f.root.path(), &listing, &recent, started_ms, &token);
+            let mut paths: Vec<_> = rereads.unwrap().into_keys().collect();
+            paths.sort();
+            paths
+        };
+        walk(written);
+        assert_eq!(reads(written), ["note.md"]);
+        // Ten seconds on, the times have settled. The walk reads the file a
+        // last time to compare, and the next walk doesn't read it.
+        let settled = written + 10_000;
+        assert_eq!(reads(settled), ["note.md"]);
+        walk(settled);
+        assert!(reads(settled).is_empty());
+    }
+
+    /// A write between a walk's listing and its read reads as one change.
+    /// The read sees times the listing didn't, so the walk that lists the
+    /// write reports it. On a disk that keeps the times, the read reports it.
+    #[test]
+    fn a_write_after_the_listing_reads_as_one_change() {
+        let f = Fixture::new();
+        f.write("note.md", "a");
+        let path = f.root.path().join("note.md");
+        let started_ms = crate::reconcile::now_ms();
+        let walk = |listed: Box<dyn FnOnce() + '_>| {
+            let cursor = f.cursor();
+            f.scanner
+                .observe_at(f.root.path(), &CancellationToken::new(), started_ms, listed)
+                .unwrap();
+            f.feed.changes_since(Some(&cursor)).facts
+        };
+        walk(Box::new(|| {}));
+        let changed = vec![fact("note.md", FileChangeKind::Changed)];
+        // A write that changes the size.
+        assert!(walk(Box::new(|| f.write("note.md", "bb"))).is_empty());
+        assert_eq!(walk(Box::new(|| {})), changed);
+        assert!(walk(Box::new(|| {})).is_empty());
+        // A write that keeps the size and the modified time.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut facts = walk(Box::new(|| {
+            f.write("note.md", "cc");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }));
+        facts.extend(walk(Box::new(|| {})));
+        assert_eq!(facts, changed);
+        assert!(walk(Box::new(|| {})).is_empty());
+    }
+
+    /// A walk reads only the regular file it listed. A link swapped in for
+    /// the file or a folder after the listing is refused, never followed.
+    #[test]
+    fn a_read_never_follows_a_link_swapped_in_after_the_listing() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-read-outside").unwrap();
+        std::fs::write(outside.path().join("note.md"), "a").unwrap();
+        f.write("note.md", "a");
+        f.write("dir/note.md", "a");
+        f.scan(&f.cursor());
+        let listed = f.feed.state.lock().unwrap().listing.clone();
+        let entry = |path: &str| listed.iter().find(|e| e.path == path).unwrap().clone();
+        let mut reader = FileReader::new(f.root.path(), 64);
+        assert!(reader.sha256(&entry("note.md"), 4).is_some());
+        assert!(reader.sha256(&entry("dir/note.md"), 4).is_some());
+        let root = f.root.path();
+        std::fs::remove_file(root.join("note.md")).unwrap();
+        std::fs::rename(root.join("dir"), root.join("moved")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path().join("note.md"), root.join("note.md"))
+                .unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("dir")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(
+                outside.path().join("note.md"),
+                root.join("note.md"),
+            )
+            .unwrap();
+            std::os::windows::fs::symlink_dir(outside.path(), root.join("dir")).unwrap();
+        }
+        assert!(reader.open("note.md").is_none());
+        assert!(reader.open("dir/note.md").is_none());
+        assert!(reader.open("moved/note.md").is_some());
+    }
+
+    /// A FIFO swapped in after the listing is refused at once. Opening it
+    /// for reading would otherwise wait for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_refuses_a_fifo_without_waiting() {
+        let f = Fixture::new();
+        f.write("note.md", "a");
+        f.scan(&f.cursor());
+        let listed = f.feed.state.lock().unwrap().listing.clone();
+        let entry = listed.iter().find(|e| e.path == "note.md").unwrap();
+        let path = f.root.path().join("note.md");
+        std::fs::remove_file(&path).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(FileReader::new(f.root.path(), 64).sha256(entry, 4), None);
     }
 
     #[test]
@@ -1533,13 +1863,27 @@ mod tests {
     #[ignore = "manual 10,000-file cost measurement"]
     fn observation_large_workspace_cost() {
         let f = Fixture::new();
+        let before = crate::reconcile::now_ms();
         for i in 0..10_000 {
             f.write(&format!("dir-{}/file-{i}.md", i / 100), "abc");
         }
-        // Every file is inside History's margin, so this walk reads them all.
-        let written = std::time::Instant::now();
-        f.scan(&f.cursor());
-        let recent_walk = written.elapsed();
+        let token = CancellationToken::new();
+        let walk = |started_ms: i64| {
+            let start = std::time::Instant::now();
+            f.scanner
+                .observe_at(f.root.path(), &token, started_ms, || {})
+                .unwrap();
+            let elapsed = start.elapsed();
+            (elapsed, f.feed.state.lock().unwrap().recent.len())
+        };
+        // A walk that starts as the first file is written finds every file's
+        // times inside History's margin, so it reads all of them.
+        let (recent_walk, recent) = walk(before);
+        assert_eq!(recent, 10_000);
+        // The first walk past the margin reads each file once more.
+        let settled = before + 3_600_000;
+        let (settling_walk, recent) = walk(settled);
+        assert_eq!(recent, 0);
         let baseline = Scanner::new(ScanBounds::default()).unwrap();
         let crate::ScanOutcome::Completed(listing) = baseline
             .scan(f.root.path(), &CancellationToken::new())
@@ -1557,12 +1901,8 @@ mod tests {
                 },
             )
         }));
-        // Measure walks that compare size and times alone. The first walk past
-        // the margin reads each file once more.
-        std::thread::sleep(
-            std::time::Duration::from_millis(2100).saturating_sub(written.elapsed()),
-        );
-        f.scan(&f.cursor());
+        // Settled walks compare size and times alone and read nothing. The
+        // baseline reuses every hash, because the scanner records raw times.
         let mut times = Vec::new();
         let mut baseline_times = Vec::new();
         for _ in 0..20 {
@@ -1571,11 +1911,9 @@ mod tests {
                 .scan_with_prior(f.root.path(), &prior, &CancellationToken::new())
                 .unwrap();
             baseline_times.push(start.elapsed());
-            let start = std::time::Instant::now();
-            f.scanner
-                .observe(f.root.path(), &CancellationToken::new())
-                .unwrap();
-            times.push(start.elapsed());
+            let (elapsed, recent) = walk(settled);
+            assert_eq!(recent, 0);
+            times.push(elapsed);
         }
         times.sort();
         baseline_times.sort();
@@ -1600,8 +1938,9 @@ mod tests {
                 .unwrap();
         }
         eprintln!(
-            "OBSERVATION_COST files=10000 recent_walk_ms={:.3} baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",
+            "OBSERVATION_COST files=10000 recent_walk_ms={:.3} settling_walk_ms={:.3} baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",
             recent_walk.as_secs_f64() * 1000.0,
+            settling_walk.as_secs_f64() * 1000.0,
             baseline_times[10].as_secs_f64() * 1000.0,
             times[10].as_secs_f64() * 1000.0,
             start.elapsed().as_secs_f64() * 10.0,

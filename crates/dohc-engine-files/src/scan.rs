@@ -679,21 +679,8 @@ impl Scanner {
         })
     }
 
-    /// Whether macOS marks the file dataless: its content lives only with a
-    /// cloud provider. Reading `st_flags` does not download it.
     fn evicted(&self, path: &str, metadata: &std::fs::Metadata) -> bool {
-        #[cfg(target_os = "macos")]
-        let dataless = {
-            use std::os::macos::fs::MetadataExt;
-            const SF_DATALESS: u32 = 0x4000_0000;
-            metadata.st_flags() & SF_DATALESS != 0
-        };
-        #[cfg(not(target_os = "macos"))]
-        let dataless = {
-            let _ = metadata;
-            false
-        };
-        dataless
+        dataless(metadata)
             || self
                 .io_faults
                 .as_ref()
@@ -757,6 +744,25 @@ enum EnumOutcome {
         failed: Vec<FailedPath>,
     },
     Cancelled,
+}
+
+/// The `st_flags` bit macOS sets on a dataless file.
+#[cfg(target_os = "macos")]
+pub(crate) const SF_DATALESS: u32 = 0x4000_0000;
+
+/// Whether macOS marks the file dataless: its content lives only with a
+/// cloud provider. Reading `st_flags` does not download it.
+pub(crate) fn dataless(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        metadata.st_flags() & SF_DATALESS != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 /// Resolve the root to a readable directory. Mirrors the kernel's
