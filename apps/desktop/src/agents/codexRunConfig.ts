@@ -144,8 +144,9 @@ function attempt<T>(read: () => T): T | null {
 // - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
 // - is .dohc under another name, such as a share;
 // - is inside the workspace, a temp folder or another folder dohc keeps, or
-//   is reached through a link in one, because the run can write there and
-//   swap it for a link that this run or the next one would follow;
+//   is reached through a link in one of them or in the folder itself, because
+//   the run can write there and swap it for a link that this run or the next
+//   one would follow;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
 function writableRootEntries(tables: readonly ConfigTable[], input: {
@@ -200,10 +201,10 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const written = path.resolve(path.dirname(setting.file), expanded);
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
-    const links = attempt(() => follow(written).holders);
+    const links = attempt(() => follow(written).holders.flatMap(above));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
-    if (real === null || id === null || links === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
-    listed.push({ id, real, above: [real, ...links].flatMap(above) });
+    if (real === null || id === null || links === null || links.includes(id) || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    listed.push({ id, real, above: [...above(real), ...links] });
   }
   // Codex may name the workspace by either path.
   const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));

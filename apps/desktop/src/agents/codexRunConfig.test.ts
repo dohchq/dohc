@@ -313,7 +313,7 @@ describe("a dohc Codex run", () => {
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("linux", [
         "/home/sam", "/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/srv/other/.dohc",
-        "/tmp/out", "/var/tmp/out", "/opt/a/b",
+        "/tmp/out", "/var/tmp/out", "/opt/a/b", "/opt/c",
       ], {
         links: {
           "/home/sam/ws": "/data/ws",
@@ -324,6 +324,8 @@ describe("a dohc Codex run", () => {
           // A link into the workspace, where an earlier run swapped the folder it names for a link into another workspace.
           "/home/sam/proj": "/data/ws/build",
           "/data/ws/build": "/srv/other/.dohc",
+          // A link inside the folder it names.
+          "/opt/c/self": ".",
         },
       }),
       env: { TMPDIR: "/srv/tmp/me" },
@@ -336,6 +338,8 @@ describe("a dohc Codex run", () => {
     expect(run([...roots, "/cache/build"])).toEqual({
       ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/cache/build": "write", "/opt/a": "write",
     });
+    expect(run(["/opt/c/self"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
+    expect(run(["/opt/c/self", "/opt/c"])).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/opt/c": "write" });
   });
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {
