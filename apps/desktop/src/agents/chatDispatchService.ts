@@ -862,7 +862,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     agentName: string | undefined,
     attemptCount?: number,
   ): Promise<{ lead: string; reason: string }> {
-    const posted = (await options.dispatchStoreFor(workspace)
+    const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
       .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
@@ -1685,20 +1685,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
     pending: Promise<readonly AgentDispatchRecord[]>,
   ): Promise<ChatDispatchFailedRun | null> {
-    let found = await stoppedRunForThread(workspace, threadId);
-    if (!found?.retryable) {
-      const dispatch = options.dispatchStoreFor(workspace);
-      const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId);
-      if (latest?.endedAtMs !== undefined) {
-        const outcome = savedRunOutcome(latest);
-        // Completed runs that posted are absent from the recovery list,
-        // but their failure still belongs under the message they answered.
-        if (outcome !== "exited" && isFailedOutcome(outcome) &&
-            outcome !== "quit" && outcome !== "restarted" &&
-            !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
-          const posted = (await dispatch.listRunMessages(workspace.workspaceId, latest.runId, durableDispatchRequest)).length > 0;
-          if (!canRepeatFailedRun(outcome, posted)) found = { run: latest, outcome, retryable: false };
-        }
+    const dispatch = options.dispatchStoreFor(workspace);
+    const [stopped, latest] = await Promise.all([
+      stoppedRunForThread(workspace, threadId),
+      dispatch.latestRunForThread(workspace.workspaceId, threadId),
+    ]);
+    let found = stopped;
+    if (!found?.retryable && latest?.endedAtMs !== undefined) {
+      const outcome = savedRunOutcome(latest);
+      // Completed runs that posted are absent from the recovery list,
+      // but their failure still belongs under the message they answered.
+      if (outcome !== "exited" && isFailedOutcome(outcome) &&
+          outcome !== "quit" && outcome !== "restarted" &&
+          !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
+        const posted = (await dispatch.listRunMessages(workspace.workspaceId, latest.runId, durableDispatchRequest)).length > 0;
+        if (!canRepeatFailedRun(outcome, posted)) found = { run: latest, outcome, retryable: false };
       }
     }
     if (!found) return null;
