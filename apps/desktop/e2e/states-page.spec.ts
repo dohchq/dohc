@@ -64,6 +64,8 @@ const PARTS = [
   "word-diff",
   "explorer-home",
   "chat-rows",
+  "change-card",
+  "change-review",
   "settings-frame",
   "theme-picker",
   "zoom-stepper",

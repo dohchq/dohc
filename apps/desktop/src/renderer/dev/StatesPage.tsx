@@ -24,7 +24,11 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
+import type { CollectionChangeProposal, CollectionChangeRow } from "../../workspaces/collectionChange";
+import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
+import { CollectionChangeCardView, collectionApplyFailure } from "../workbench/CollectionChangeCard";
+import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -928,6 +932,80 @@ function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryabl
     </div>
   );
 }
+
+// Claude Code asks Ada to apply a change to Volunteers, and its card draws in
+// each state. Ada made the Email rule earlier; the agent made the rest.
+const CHANGE_AT = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
+const VOLUNTEERS = "volunteers/dataset.json";
+const VOLUNTEERS_MIGRATION = "volunteers/migrations/004-due-date.sql";
+const byAgent = (path: string, minute = 41) => ({ path, author: { name: "Claude Code", agent: true }, atMs: CHANGE_AT(14, minute) });
+const CHANGE_ROWS: CollectionChangeRow[] = [
+  { kind: "field-added", key: "field:due-date", field: "Due date", type: "date", records: 12, empty: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "field-renamed", key: "field:status:name", from: "Status", to: "Stage", button: false, source: byAgent(VOLUNTEERS) },
+  { kind: "field-removed", key: "field:notes", field: "Notes", button: false, values: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "action-changed", key: "action:sign-up", action: "Sign up", source: byAgent("volunteers/backend.ts", 40) },
+  { kind: "field-unique", key: "field:email:unique", field: "Email", unique: true, values: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(13, 12) } },
+  { kind: "migration", key: "migration", file: VOLUNTEERS_MIGRATION, records: 12, source: byAgent(VOLUNTEERS_MIGRATION) },
+];
+const changeProposal = (rows: CollectionChangeRow[], files: string[], note: string | null): CollectionChangeProposal => ({
+  kind: "dohc-collection-change", version: 1, datasetId: "volunteers", name: "Volunteers", datasetPath: VOLUNTEERS, migrationPath: VOLUNTEERS_MIGRATION,
+  base: { revision: 3, revisionSha256: "a".repeat(64) }, revisionSha256: "b".repeat(64), changeSha256: "c".repeat(64), files, rows, note,
+});
+const CHANGE_PROPOSAL = changeProposal(CHANGE_ROWS, [VOLUNTEERS, "volunteers/schema.sql", "volunteers/backend.ts", VOLUNTEERS_MIGRATION],
+  "Checks the email address before it saves.");
+const RENAME_PROPOSAL = changeProposal([{ kind: "field-renamed", key: "field:stage:name", from: "Stage", to: "Phase", button: false, source: byAgent(VOLUNTEERS, 52) }],
+  [VOLUNTEERS], null);
+const CHANGE_AUTHORS = {
+  ada: { authorKind: "human", authorDisplayName: "Ada", presentation: SAMPLE_ADA },
+  agent: { authorKind: "agent", authorDisplayName: "Claude Code", presentation: neutralPresentation },
+} as const;
+const changeMessage = (id: string, by: keyof typeof CHANGE_AUTHORS, body: string, minute: number): ChatMessageRecord => ({
+  id, threadId: "change-dm", ...CHANGE_AUTHORS[by], body, createdAtMs: CHANGE_AT(14, minute),
+});
+const CHANGE_MESSAGE = changeMessage("change-ask", "agent", "Here's the change.", 41);
+const RENAME_MESSAGE = changeMessage("rename-ask", "agent", "Here's the rename of Stage to Phase that you asked for.", 52);
+const changeCard = (state: CollectionChangeState | null, proposal = CHANGE_PROPOSAL, message = CHANGE_MESSAGE): ComponentProps<typeof CollectionChangeCardView> => ({
+  message, proposal, change: state === null ? null : { proposal, rows: proposal.rows, state }, loadFailure: null, phase: { kind: "idle" }, notNow: false,
+  locked: false, onOpenPath: noop, onApply: noop, onUndo: noop, onReview: noop, onNotNow: noop, onUnfold: noop, onRetryLoad: noop, testIdPrefix: "states",
+});
+const WAITING = { kind: "waiting" } as const;
+const applyFailure = collectionApplyFailure("Volunteers");
+
+const DEFINITION_BEFORE = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text" },
+    { "id": "status", "name": "Status", "type": "select" },
+    { "id": "notes", "name": "Notes", "type": "text" }
+  ]
+}
+`;
+const DEFINITION_AFTER = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text", "unique": true },
+    { "id": "status", "name": "Stage", "type": "select" },
+    { "id": "due_date", "name": "Due date", "type": "date" }
+  ]
+}
+`;
+const CHANGE_REVIEW: CollectionChangeReview = {
+  change: { proposal: CHANGE_PROPOSAL, rows: CHANGE_ROWS, state: WAITING },
+  preparation: { preparationId: "states-preparation", revisionSha256: "b".repeat(64), approvalDigest: "d".repeat(64) },
+  files: [
+    { path: VOLUNTEERS, before: DEFINITION_BEFORE, after: DEFINITION_AFTER },
+    { path: "volunteers/schema.sql", before: "notes TEXT\n", after: "due_date TEXT\n" },
+    { path: "volunteers/backend.ts", before: "signUp(input)\n", after: "signUp(checkEmail(input))\n" },
+    { path: VOLUNTEERS_MIGRATION, before: "", after: "ALTER TABLE volunteers DROP COLUMN notes;\n" },
+  ],
+};
+const changeReview = (open: ReadonlySet<string>): ComponentProps<typeof CollectionChangeReviewCard> => ({
+  asked: CHANGE_REVIEW.change, load: { kind: "ready", review: CHANGE_REVIEW }, phase: { kind: "idle" }, open,
+  onToggle: noop, onApply: noop, onNotNow: noop, onRetry: noop, locked: false, testIdPrefix: "states",
+});
 
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
@@ -2533,6 +2611,56 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="stopped again after its second attempt">
           <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc quit during its run." posted retryable={false} />
+        </Specimen>
+      </Section>
+
+      <Section part="change-card" title="Collection change card">
+        <Specimen label="loading">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(null)} /></div>
+        </Specimen>
+        <Specimen label="waiting: it deletes values, Ada made one part, the agent's note sits under its code change">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} /></div>
+        </Specimen>
+        <Specimen label="applying">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "applying", words: "Applying…" }} /></div>
+        </Specimen>
+        <Specimen label="applied, which History can't undo; a later rename, applied, with Undo">
+          <div className="flex w-[740px] flex-col">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false })} appliedBy={changeMessage("change-applied", "ada", "Applied the change to Volunteers.", 47)} />
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} />
+          </div>
+        </Specimen>
+        <Specimen label="the rename, undone">
+          <div className="w-[740px]">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} undoneBy={changeMessage("rename-undone", "ada", "Undid the change to Volunteers.", 55)} />
+          </div>
+        </Specimen>
+        <Specimen label="failed, with Try again">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(null) }} /></div>
+        </Specimen>
+        <Specimen label="refused by the server that keeps it: no Try again">
+          <div className="w-[740px]">
+            <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
+          </div>
+        </Specimen>
+        <Specimen label="Not now">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
+        </Specimen>
+        <Specimen label="Ada changed its files after it was sent">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+        </Specimen>
+      </Section>
+
+      <Section part="change-review" title="Collection change review">
+        <Specimen label="ready, keyboard focus on the first row">
+          <div className={SHADOW_ROOM} data-force-state="focus focus-visible" data-force-target='[data-testid="states-change-review-row"]:first-child > button'>
+            <CollectionChangeReviewCard {...changeReview(new Set<string>())} />
+          </div>
+        </Specimen>
+        <Specimen label="the first row's file changes open">
+          <div className={SHADOW_ROOM}><CollectionChangeReviewCard {...changeReview(new Set([CHANGE_ROWS[0]!.key]))} /></div>
         </Specimen>
       </Section>
 
