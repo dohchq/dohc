@@ -7,10 +7,10 @@ import {
   createChatRunnerProcess,
   readRunnerNodeAvailable,
   tokenizeRunnerCommand,
+  type RunDohcTools,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
-import type { RunDohcTools } from "./runDohcTools";
 
 const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
   ? ["win32", "x64", "node.exe"] as const
