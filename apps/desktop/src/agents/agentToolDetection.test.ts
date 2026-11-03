@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { detectAgentTools, runProbe } from "./agentToolDetection";
+import { agentToolVersion, detectAgentTools, runProbe } from "./agentToolDetection";
 import * as toolProbe from "./agentToolProbe";
 import type { ProbeOutput } from "./agentToolProbe";
 
@@ -191,6 +191,36 @@ describe("agent detection filesystem", () => {
     expect(fallbackSpy).toHaveBeenCalledWith(unresolvedCandidate);
     expect(mocks.resolveSpawnCommand).toHaveBeenCalledTimes(2);
     expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(candidate, ["--version"], { cwd: homedir() });
+  });
+});
+
+describe("Claude Code version check", () => {
+  it("asks again unless it last found a supported version and Claude Code hasn't changed", async () => {
+    const executable = join(resources, "claude-version-check.exe");
+    writeFileSync(executable, "first build");
+    let reported: string | null = null;
+    mocks.spawn.mockImplementation(() => {
+      const probeChild = new FakeChild(4321);
+      queueMicrotask(() => {
+        if (reported) probeChild.stdout!.emit("data", `${reported} (Claude Code)`);
+        probeChild.drain(reported ? 0 : 1);
+      });
+      return probeChild;
+    });
+
+    expect(await agentToolVersion(executable, resources)).toBeNull();
+    // An update through a launcher that doesn't change takes effect.
+    reported = "2.1.294";
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.294");
+    reported = "2.1.317";
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
+    expect(mocks.spawn).toHaveBeenCalledTimes(3);
+
+    reported = "2.1.320";
+    writeFileSync(executable, "a different build");
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.320");
+    expect(mocks.spawn).toHaveBeenCalledTimes(4);
   });
 });
 
