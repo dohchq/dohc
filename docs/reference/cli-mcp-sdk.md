@@ -1204,7 +1204,7 @@ Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `hist
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
 - `changedRevisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset permissions`
 
@@ -1463,7 +1463,7 @@ Review the result, then approve it with approveMigration.
 - `fieldId`: `UUID`. Required.
 - `labelFieldId`: `UUID`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset create`
 
@@ -1516,7 +1516,21 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 - `expectedDatasetId`: `UUID`
 - `migrationPath`: `string`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+
+#### `dohc dataset askToApply`
+
+Write a prepared change to a file a person can apply from a chat.
+
+Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation. Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message. note is one sentence the person reads beside the change to the code.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `migrationPath`: `string`. Required.
+- `note`: `string`
+
+Returns `{ kind: "change-asked", path, changeSha256 }`.
 
 #### `dohc dataset migrationPreviewPage`
 
@@ -1542,7 +1556,7 @@ change.kind is one of renameCollection, renameTable, renameField, changeField, a
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset approveMigration`
 
@@ -1555,6 +1569,7 @@ Take revisionSha256 and approvalDigest from the preparation. Approval applies th
 - `preparationId`: `UUID`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `approvalDigest`: `SHA-256 hex`. Required.
+- `changeSha256`: `SHA-256 hex`
 
 Returns `{ kind: "migrated", revision, cursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest } }`.
 

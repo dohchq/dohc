@@ -1001,6 +1001,14 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Prepare new source and migration SQL for review.",
     notes: ["Read more changed records with migrationPreviewPage.", migrationApproval],
   },
+  askToApply: {
+    summary: "Write a prepared change to a file a person can apply from a chat.",
+    notes: [
+      "Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation.",
+      "Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message.",
+      "note is one sentence the person reads beside the change to the code.",
+    ],
+  },
   migrationPreviewPage: { summary: "Read more records a prepared migration changes." },
   prepareSchemaChange: {
     summary: "Prepare one field, table, or name change.",

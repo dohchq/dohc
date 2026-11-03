@@ -144,6 +144,7 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
   z.object({ ...pinned, action: z.literal("prepareHistoryRestore"), targetRevisionSha256: sha256, changedRevisionSha256: sha256 }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...selection, action: z.literal("askToApply"), migrationPath: z.string().min(1).max(1024), note: z.string().trim().min(1).max(500).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
   z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256,
@@ -254,6 +255,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetMigrationPreviewPage.extend({ kind: z.literal("migration-preview-page") }).strict(),
   z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),
   z.object({ kind: z.literal("migration-discarded") }).strict(),
+  z.object({ kind: z.literal("change-asked"), path: z.string().min(1).max(1024), changeSha256: sha256 }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;
 
@@ -288,6 +290,7 @@ export const DATASET_CAPABILITIES = {
   approve: "dataset.approve",
   discard: "dataset.discard",
   prepareMigration: "dataset.migration.prepare",
+  askToApply: "dataset.change.ask",
   migrationPreviewPage: "dataset.migration.preview",
   prepareSchemaChange: "dataset.schema.change.prepare",
   approveMigration: "dataset.migration.approve",

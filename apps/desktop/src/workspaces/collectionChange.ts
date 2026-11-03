@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { isDatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetFieldType, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
-import type { DatasetMigrationCandidate } from "@dohc/cli/dataset";
+import type { DatasetMigrationCandidate, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 
 /**
  * The rows a person reads before applying a change to a Collection's rules,
@@ -128,6 +128,37 @@ export function collectionChangeRows(input: { previous: DatasetRevision; next: D
     rows.push({ kind: "migration", key: "migration", file: input.migrationPath, records });
   }
   return rows.map((row, index) => ({ row, index })).sort((a, b) => rank[a.row.kind] - rank[b.row.kind] || a.index - b.index).map(({ row }) => row);
+}
+
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
+const filePath = z.string().min(1).max(1024);
+/** A change an agent asks a person to apply, as the file its chat message attaches. */
+export const CollectionChangeProposal = z.object({
+  kind: z.literal("dohc-collection-change"), version: z.literal(1),
+  datasetId: z.string().min(1).max(128), name, datasetPath: filePath, migrationPath: filePath,
+  base: z.object({ revision: z.number().int().positive(), revisionSha256: sha256 }).strict(),
+  revisionSha256: sha256, changeSha256: sha256,
+  files: z.array(filePath).min(1).max(4),
+  rows: z.array(CollectionChangeRow).min(1).max(500),
+  note: z.string().min(1).max(500).nullable(),
+}).strict();
+export type CollectionChangeProposal = z.infer<typeof CollectionChangeProposal>;
+
+/** What a prepared change applies, for the person an agent asks to apply it. */
+export function collectionChangeProposal(prepared: Pick<DatasetMigrationPreparation, "previousRevision" | "revision" | "operationSource" | "migrationSql" | "candidate">,
+  input: { datasetPath: string; migrationPath: string; note: string | null }): CollectionChangeProposal {
+  const { previousRevision: previous, revision: next } = prepared;
+  const rows = collectionChangeRows({ previous, next, operationSource: prepared.operationSource, migrationSql: prepared.migrationSql, migrationPath: input.migrationPath, counts: prepared.candidate.preview.tables });
+  if (rows.length === 0) throw new Error("These files match the Collection's rules. Change them, then ask again.");
+  const files = [
+    previous.definitionSha256 === next.definitionSha256 ? null : input.datasetPath,
+    previous.schemaSha256 === next.schemaSha256 ? null : next.definition.schemaPath,
+    previous.operationsSha256 === next.operationsSha256 ? null : next.definition.operationsPath,
+    RUNS_NOTHING.test(prepared.migrationSql) ? null : input.migrationPath,
+  ].filter(path => path !== null);
+  return CollectionChangeProposal.parse({ kind: "dohc-collection-change", version: 1, datasetId: next.datasetId, name: previous.definition.name,
+    datasetPath: input.datasetPath, migrationPath: input.migrationPath, base: { revision: previous.revision, revisionSha256: previous.revisionSha256 },
+    revisionSha256: next.revisionSha256, changeSha256: prepared.candidate.changeSha256, files, rows, note: input.note });
 }
 
 export interface CollectionChangeStep { definition: DatasetDefinition; author: CollectionChangeAuthor | null; atMs: number | null }
