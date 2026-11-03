@@ -31,7 +31,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       resourcesPath: () => platform === "win32" ? join(root, "resources") : join(root, "resources").replace(/^[a-z]:/iu, "").replaceAll("\\", "/"),
       arch,
       platform,
-      codexConfigFiles: () => ({ requirements: [], config: [] }),
+      codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
       runCodexCheck: async (command, args, options) => {
         checks.push({ command, args, cwd: options.cwd, env: options.env });
         return JSON.stringify([{ name: "dohc", enabled: true }]);
@@ -233,7 +233,7 @@ describe("chat runner process", () => {
   it("turns off each MCP server the person's Codex config names in a reply-only run, and none in an all-tools run", async () => {
     const home = await createTestScratch("dohc-codex-home-");
     writeFileSync(join(home, "config.toml"), "[mcp_servers.owner_a]\ncommand = 'a'\n[mcp_servers.owner-b]\ncommand = 'b'\n[mcp_servers.dohc]\ncommand = 'x'\n[mcp_servers.\"has.dot\"]\ncommand = 'c'\n");
-    const { calls, spawn } = await runnerFixture("linux", false, "x64", { codexConfigFiles: () => ({ requirements: [], config: [join(home, "config.toml")] }) });
+    const { calls, spawn } = await runnerFixture("linux", false, "x64", { codexConfigFiles: () => ({ requirements: [], config: [join(home, "config.toml")], managedPreferences: [] }) });
     await spawn("", () => undefined, { tool: "codex", executable: process.execPath }, "reply");
     await spawn("", () => undefined, { tool: "codex", executable: process.execPath }, "all");
     const [replyOnly, allTools] = calls.map((call) => call.args.filter((arg) => /^mcp_servers\.[^.]+\.enabled=/u.test(arg)));
@@ -387,7 +387,7 @@ describe("chat runner process", () => {
   it.each(["all", "reply"] as const)("refuses a Windows Codex run with %s dohc tools only when it is reply-only and the requirements rule out its sandbox", async (dohcTools) => {
     const requirements = join(await createTestScratch("dohc-codex-requirements-"), "requirements.toml");
     writeFileSync(requirements, "[windows]\nrequire_mxc = true\n");
-    const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [] }) });
+    const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [], managedPreferences: [] }) });
     const started = spawn("", undefined, { tool: "codex", executable: process.execPath }, dohcTools);
     if (dohcTools === "all") {
       await started;
@@ -481,7 +481,7 @@ describe("chat runner process", () => {
     const codex = join(root, "codex.cmd");
     writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
     const runner = createChatRunnerProcess(
-      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [] }),
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
         runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]) },
       () => undefined,
     );
@@ -525,7 +525,7 @@ describe("chat runner process", () => {
       appRoot: () => scratch,
       isPackaged: () => false,
       platform: "win32",
-      codexConfigFiles: () => ({ requirements: [], config: [config] }),
+      codexConfigFiles: () => ({ requirements: [], config: [config], managedPreferences: [] }),
       spawnRunner: (_command, args) => {
         started.push(args.join(" "));
         return { pid: 4_100, writeStdin: () => undefined, hasExited: () => false, onExit: () => undefined, onError: () => undefined };

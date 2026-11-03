@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
 
@@ -16,12 +16,15 @@ export interface CodexConfigFiles {
   // The system config, the user config, then on Unix the managed config.
   // Each wins over the ones before it.
   config: readonly string[];
+  // On macOS, where an organization's profile sets Codex's managed
+  // preferences, for this computer and then for this person.
+  managedPreferences: readonly string[];
 }
 
 // The person's own Codex files. Null when CODEX_HOME is relative, because
 // Codex resolves it against the workspace, and dohc never reads a
 // workspace's config.
-export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home = homedir()): CodexConfigFiles | null {
+export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home = homedir(), user?: string): CodexConfigFiles | null {
   const path = platform === "win32" ? win32 : posix;
   if (env.CODEX_HOME && !path.isAbsolute(env.CODEX_HOME)) return null;
   const codexHome = env.CODEX_HOME || path.join(home, ".codex");
@@ -32,6 +35,9 @@ export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platfo
       path.join(system, "config.toml"), path.join(codexHome, "config.toml"),
       ...(platform === "win32" ? [] : [path.join(system, "managed_config.toml")]),
     ],
+    managedPreferences: platform === "darwin"
+      ? ["", user ?? userInfo().username].map((folder) => path.join("/Library/Managed Preferences", folder, "com.openai.codex.plist"))
+      : [],
   };
 }
 
@@ -122,14 +128,23 @@ function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | 
 // Whether Codex may reach a model without the saved login that
 // `codex login status` reports: through CODEX_API_KEY, or through a model
 // provider other than OpenAI's. The system requirements' provider wins over
-// the config's. A file dohc can't read counts as maybe. dohc doesn't read
-// macOS managed preferences or a Windows policy that moves the requirements.
+// the config's. A file dohc can't read counts as maybe, and so do macOS
+// managed preferences for Codex, which dohc doesn't decode.
 export function codexMayRunWithoutLogin(
   env: NodeJS.ProcessEnv,
   files: CodexConfigFiles | null,
   read: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
   if (env.CODEX_API_KEY) return true;
+  const present = (file: string) => {
+    try {
+      read(file);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+  };
+  if (files?.managedPreferences.some(present)) return true;
   const tables = files && readConfigTables([...files.config, ...files.requirements], read);
   if (tables === null) return true;
   let provider = "openai";

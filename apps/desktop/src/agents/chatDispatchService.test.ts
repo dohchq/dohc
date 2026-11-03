@@ -676,7 +676,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     platform: options.platform ?? "linux",
     arch: options.arch,
     // Never this computer's own Codex config.
-    codexConfigFiles: () => ({ requirements: [], config: [] }),
+    codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
     // Never this computer's own Codex either. Its check finds only dohc's server.
     runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]),
     nowMs: () => now.value,
@@ -3988,7 +3988,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.default_tools_approval_mode='approve'",
-      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
+      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [], managedPreferences: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
           mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },
