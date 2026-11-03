@@ -78,6 +78,20 @@ async function ownerRecordHistory(page: Page, path: string) {
     return details.flatMap(result => result.moment === null ? [] : [result.moment]);
   }, { workspaceId: OWNER_ID, moments });
 }
+// Stop and restore doesn't remove a page that has live editing on (#3130). It
+// lists the page for review with these words, and removes it after the owner
+// stops live editing for it and runs Stop and restore again.
+const liveRefusal = (path: string) =>
+  `dohc can't restore "${path}" while it has live editing on\nIn Live documents, stop live editing for this page, then restore it again.`;
+function stopAndRestoreRecipient(page: Page) {
+  return page.evaluate(async workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({ workspaceId,
+    target: { kind: "person", userId: "e2e-recipient" } }), OWNER_ID);
+}
+async function stopLiveEditing(page: Page, path: string) {
+  expect(await page.evaluate(async ({ workspaceId, path }) =>
+    (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopOwnerLiveDocument({ workspaceId, path }),
+  { workspaceId: OWNER_ID, path })).toEqual({ keptEdits: "none" });
+}
 // Stop and restore removes a recipient's record only when every version that
 // changed it names the relay-confirmed recipient.
 async function expectOnlyRecipientChanged(page: Page, path: string) {
@@ -103,6 +117,7 @@ async function withSharedCollection(
     ownerText(path: string): Promise<string>;
     recipientText(path: string): Promise<string>;
     ownerLiveState(path: string): Record<string, unknown>;
+    ownerEngineRows(paths: string[]): Promise<Record<string, unknown>>;
   }) => Promise<void>,
   { ownerEnv = {}, refuse }: { ownerEnv?: Record<string, string>; refuse?(method: string, path: string): boolean } = {},
 ) {
@@ -183,6 +198,28 @@ async function withSharedCollection(
           };
         } finally { db.close(); }
       },
+      // Read only when a test fails: every engine row that shows where an owner edit went.
+      ownerEngineRows: async paths => {
+        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+        try {
+          const marks = (values: unknown[]) => values.map(() => "?").join(",");
+          const objects = db.prepare(`SELECT object_id FROM snapshots WHERE path IN (${marks(paths)})
+            UNION SELECT object_id FROM ydoc_docs WHERE path IN (${marks(paths)})`).all(...paths, ...paths).map(row => String(row.object_id));
+          const byObject = (table: string) => db.prepare(`SELECT * FROM ${table} WHERE object_id IN (${marks(objects)})`).all(...objects);
+          const byOutbox = (table: string) => db.prepare(`SELECT t.* FROM ${table} t JOIN owner_ydoc_outboxes o USING (outbox_id)
+            WHERE o.object_id IN (${marks(objects)})`).all(...objects);
+          return {
+            disk: Object.fromEntries(await Promise.all(paths.map(async path =>
+              [path, await readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "missing")]))),
+            snapshots: byObject("snapshots"), documents: byObject("ydoc_docs"), bindings: byObject("ydoc_owner_bindings"),
+            appliedFrames: byObject("ydoc_owner_applied_frames"), outboxes: byObject("owner_ydoc_outboxes"),
+            outboxEntries: byOutbox("owner_ydoc_outbox_entries"), outboxRefusals: byOutbox("owner_ydoc_outbox_refusals"),
+            pendingSettlements: byObject("owner_pending_settlements"), liveStops: byObject("owner_live_stops"),
+            moments: db.prepare(`SELECT moment_id,path,operation,sync_record_only,payload_after_blob_sha256 FROM moments
+              WHERE path IN (${marks(paths)}) ORDER BY moment_order DESC`).all(...paths),
+          };
+        } finally { db.close(); }
+      },
     });
     for (const app of launches) {
       expect(app.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
@@ -205,7 +242,7 @@ async function withSharedCollection(
   }
 }
 
-test("@two-client an Edit recipient's new record opens immediately, becomes editable, and Stop and restore removes it", async () => {
+test("@two-client an Edit recipient's new record opens immediately, becomes editable, and Stop and restore removes it once live editing stops", async () => {
   test.setTimeout(420_000);
   let release: (() => void) | undefined;
   const acknowledged = new Promise<void>(resolve => { release = resolve; });
@@ -271,8 +308,12 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       for (const moment of liveHistory) expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
       await test.info().attach("recipient-only restore state", {contentType: "application/json",
         body: JSON.stringify({live: fixture.ownerLiveState(created!.path), disk: await fixture.ownerText(created!.path)}, null, 2)});
-      const restored = await fixture.owner.page.evaluate(async workspaceId =>
-        (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({ workspaceId, target: { kind: "person", userId: "e2e-recipient" } }), OWNER_ID);
+      const refused = await stopAndRestoreRecipient(fixture.owner.page);
+      expect(refused).toMatchObject({ status: "restored", restored: [],
+        review: [{ path: created!.path, reason: "restore-refused", detail: liveRefusal(created!.path) }], unfinished: null });
+      expect(await fixture.ownerText(created!.path)).toContain("Task: Book the ferry");
+      await stopLiveEditing(fixture.owner.page, created!.path);
+      const restored = await stopAndRestoreRecipient(fixture.owner.page);
       await test.info().attach("recipient-only after restore state", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created!.path), null, 2)});
       expect(restored).toMatchObject({ status: "restored", restored: [{ path: created!.path, removed: true }], review: [], unfinished: null });
       await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(0);
@@ -308,12 +349,23 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
     const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
     await expect(status).toBeEnabled({ timeout: 120_000 });
+    // The Source button shows only on the engine's live document or an ended share's read-only copy. File editing shows Edit.
+    await expect(fixture.owner.page.getByTestId("markdown-source-toggle"), "the owner's record isn't in live editing before the owner types")
+      .toBeVisible({ timeout: 120_000 });
+    await expect(status, "the owner's record is read-only before the owner types").toBeEditable();
     await status.fill("Owner text KEEP");
     await expect(status).toHaveValue("Owner text KEEP");
-    await expect.poll(() => {
-      const documents = fixture.ownerLiveState(created[0]!.path).documents as {head_update_seq: number; settled_update_seq: number | null}[];
-      return documents.some(doc => doc.head_update_seq !== doc.settled_update_seq);
-    }, {timeout: 120_000}).toBe(true);
+    try {
+      await expect.poll(() => {
+        const documents = fixture.ownerLiveState(created[0]!.path).documents as {head_update_seq: number; settled_update_seq: number | null}[];
+        return documents.some(doc => doc.head_update_seq !== doc.settled_update_seq);
+      }, {message: "the owner's typing never showed as an unsettled live edit", timeout: 120_000}).toBe(true);
+    } catch (error) {
+      await test.info().attach("owner engine rows after the wait for unsettled typing failed", { contentType: "application/json",
+        body: await fixture.ownerEngineRows(created.map(record => record.path))
+          .then(rows => JSON.stringify(rows, null, 2), (dumpError: unknown) => `The engine rows couldn't be read: ${String(dumpError)}`) });
+      throw error;
+    }
     await expect(async () => {
       expect((await ownerRecordHistory(fixture.owner.page, created[0]!.path))
         .some(moment => moment.afterText?.includes("Owner text KEEP"))).toBe(false);
@@ -330,9 +382,16 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
       body: JSON.stringify(await Promise.all(created.map(record => readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))), null, 2) });
     // Owner settlement is held by the existing debounce seam. History still
     // attributes the file to the recipient when this destructive action runs.
-    const result = await fixture.owner.page.evaluate(async workspaceId =>
-      (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({ workspaceId,
-        target: { kind: "person", userId: "e2e-recipient" } }), OWNER_ID);
+    const refused = await stopAndRestoreRecipient(fixture.owner.page);
+    expect(refused).toMatchObject({ status: "restored", restored: [], unfinished: null });
+    const review = refused.status === "restored" ? refused.review : [];
+    expect(review.map(file => file.path).sort()).toEqual(created.map(record => record.path).sort());
+    expect(review.find(file => file.path === created[1]!.path))
+      .toMatchObject({ reason: "restore-refused", detail: liveRefusal(created[1]!.path) });
+    expect(review.find(file => file.path === created[0]!.path)?.reason).toMatch(/^(changed-since|restore-refused)$/);
+    expect(await fixture.ownerText(created[1]!.path)).toContain("Task: Recipient only");
+    await stopLiveEditing(fixture.owner.page, created[1]!.path);
+    const result = await stopAndRestoreRecipient(fixture.owner.page);
     expect(result).toMatchObject({ status: "restored", restored: [{ path: created[1]!.path, removed: true }],
       review: [{ path: created[0]!.path }], unfinished: null });
     expect(result.status === "restored" && result.review[0]?.reason).toMatch(/^(changed-since|restore-refused)$/);
