@@ -342,7 +342,7 @@ If any command connects, apply the Cloud Firewall to the Droplet at once, then c
 
 ## Accept the server
 
-The rehearsal does not test mail, snapshots, the heartbeat, the disk watch, a published app, or live editing.
+The rehearsal does not test mail, snapshots, the heartbeat, the disk watch, a published app or its entries, or live editing.
 After the first start, the operator tests each of them with the real providers.
 Do the checks in order. If a check fails, stop and report it.
 
@@ -393,6 +393,36 @@ The check passes when the app loads in the browser and the command shows status 
 The response must not show `cf-cache-status: HIT`.
 
 Record the command's output. Its `sed` step hides the cookie.
+
+### App entries
+
+A published app saves its visitors' entries in the owner's Collection, through the actions the owner approves.
+A form's link accepts entries from 1,000 different visitors, each able to submit more than once. The workspace's 2 GiB limit applies to the entries too.
+This check uses the form that the desktop creates for a Collection.
+
+1. **Operator:** On the desktop you connected in [Account email](#account-email), open a synced workspace.
+   Choose **New collection** in the command palette (Ctrl+K, or Cmd+K on a Mac). Name it `Drive entry check` and the UTC date and time, such as `Drive entry check 20260115-0130`, so each run gets new folders. Turn on **Require Name**.
+   If dohc says it doesn't know which computer keeps this workspace's Collections, choose **Use this computer**.
+2. **Operator:** Choose **Create form** in the Collection's toolbar. Keep the Name field and choose **Create form**.
+3. **Operator:** Choose **Review and open app**. Review its files and the access it requests, then choose **Approve and open**.
+4. **Operator:** Open the app's review and choose **Publish on a link**, then **Share app folder**.
+   Choose **Anyone with the link** and **View**, then **Create link**. Copy the link, and close sharing.
+5. **Operator:** Open the app's review again and choose **Publish on a link**. Select the new link and choose **Prepare app**.
+   In **Review app publication**, check that the link's actions are only the form's create action, and that the owner and helper actions are None.
+   Then choose **Publish this revision**.
+6. **Operator:** Open the link in a private browser window that is not signed in to Drive, and choose **Open app**.
+   Enter `drive-entry-check-<UTC time>` as the Name, and choose **Submit**.
+7. **Operator:** On the desktop, open the Collection and choose **Refresh**. Close the Collection and open it again.
+8. **Operator:** Open the app's review and choose **Publish on a link**. Choose **Unpublish**, then **Unpublish app**.
+   Choose **Share app folder**, then **End link**, and **End link** again.
+   In the Collection's toolbar, choose **Manage Collection**, then **Archive**, then **Archive Collection**. Archiving keeps the test record and its history.
+   Open the old link again. It must no longer open the app.
+
+The check passes when the browser shows `Response received.` on a host under `dohc.app`, the Collection shows exactly one record with that Name before and after it opens again, and the old link no longer opens the app.
+
+Record the times, the Name you entered, and the number of records before and after. Record nothing from the link.
+
+Drive leaves the relay's collection-create setting off. It would let apps save visitors' entries as Markdown files in a shared folder, which everyone with the link can read.
 
 ### Live edit
 
