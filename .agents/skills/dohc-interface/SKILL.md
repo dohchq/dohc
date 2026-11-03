@@ -150,7 +150,7 @@ A divider only separates a fixed header or footer from a list that scrolls.
 - The body states the one fact the title and buttons leave out, such as what stays or what cannot come back. Most dialogs need none.
 - If the fact is a set of things, show the names, the count, or the diff instead of a sentence about them.
 - Never explain how a feature works, what it cannot do in general, or its release stage.
-- If a limit changes what this action does, say what happens to the person's things: `2 files over 5 MiB stay as they are.`
+- If a limit changes what this action does, say what happens to the person's things: `2 files over 5 MB stay as they are.`
 
 ### Buttons
 
