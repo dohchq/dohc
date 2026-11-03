@@ -548,7 +548,8 @@ describe("electron updater actions", () => {
     updater.quitAndInstall.mockImplementationOnce(() => {
       updater.emit("error", new Error("quit failed"));
     });
-    const controller = await startWith(updater, { platform: "darwin" });
+    // Windows installs on the quit, and on macOS an error while ready is a failed staging.
+    const controller = await startWith(updater, { platform: "linux" });
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
@@ -594,21 +595,20 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("keeps the generic install failure for a Linux AppImage and on macOS", async () => {
-    for (const [platform, downloadedFile] of [["linux", "/home/sam/dohc-1.2.4-linux-x86_64.AppImage"], ["darwin", "/Users/sam/dohc-1.2.4-mac.zip"]] as const) {
-      const updater = fakeUpdater();
-      updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
-      const controller = await startWith(updater, { platform });
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4", downloadedFile });
-      controller!.downloadUpdate();
-      updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
+  it("keeps the generic install failure for a Linux AppImage", async () => {
+    const downloadedFile = "/home/sam/dohc-1.2.4-linux-x86_64.AppImage";
+    const updater = fakeUpdater();
+    updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
+    const controller = await startWith(updater, { platform: "linux" });
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4", downloadedFile });
+    controller!.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
 
-      const result = await controller!.installUpdate();
-      const cause = "Command pkexec exited with code 127";
-      expect(result, platform).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
-      expect(result.state.installCommand, platform).toBeUndefined();
-    }
+    const result = await controller!.installUpdate();
+    const cause = "Command pkexec exited with code 127";
+    expect(result).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
+    expect(result.state.installCommand).toBeUndefined();
   });
 
   it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
