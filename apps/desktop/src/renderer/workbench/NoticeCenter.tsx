@@ -746,6 +746,7 @@ export function WorkspaceErrorToast(props: {
     </button>
   ) : null;
   const message = retry ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
+  const actions = Boolean(props.onAction && (error.actionLabel || error.additionalActionLabels?.length)) || retry !== null;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -778,48 +779,53 @@ export function WorkspaceErrorToast(props: {
         testId="workspace-shell-toast"
       >
         {(text) => (
-          <div className="min-w-0 flex-1 select-text">
-            <div className="flex min-w-0">{text.title}</div>
-            {text.body}
-            {error.command ? (
-              <div className="mt-1 flex min-w-0 items-start gap-1">
-                <code data-testid="workspace-shell-toast-command" className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted">
-                  {error.command}
-                </code>
-                <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
-                  getText={() => error.command ?? ""} />
+          <div className="min-w-0 flex-1">
+            <div className="min-w-0 select-text">
+              <div className="flex min-w-0">{text.title}</div>
+              {text.body}
+              {error.command ? (
+                <div className="mt-1 flex min-w-0 items-start gap-1">
+                  <code data-testid="workspace-shell-toast-command" className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted">
+                    {error.command}
+                  </code>
+                  <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
+                    getText={() => error.command ?? ""} />
+                </div>
+              ) : null}
+            </div>
+            {/* Actions sit under the text, as on its row, so the text keeps the toast's width. */}
+            {actions ? (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {error.actionAfterRetry ? retry : null}
+                {error.actionLabel && props.onAction ? (
+                  <button
+                    type="button"
+                    data-testid="workspace-shell-error-action"
+                    onClick={() => props.onAction?.(error.id)}
+                    className={ACTION_CLASS}
+                  >
+                    {error.actionLabel}
+                  </button>
+                ) : null}
+                {props.onAction ? error.additionalActionLabels?.map((label, index) => (
+                  <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
+                    onClick={() => props.onAction?.(error.id, index + 1)}
+                    className={ACTION_CLASS}>
+                    {label}
+                  </button>
+                )) : null}
+                {error.actionAfterRetry ? null : retry}
               </div>
             ) : null}
             {/* A disabled control says why, where the keyboard can't miss it. */}
             {retry && error.retryBlocked !== undefined ? (
-              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-0.5 select-text text-[11px] leading-snug text-muted">
                 {error.retryBlocked}
               </p>
             ) : null}
           </div>
         )}
       </NoticeText>
-      {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
-      {error.actionAfterRetry ? retry : null}
-      {error.actionLabel && props.onAction ? (
-        <button
-          type="button"
-          data-testid="workspace-shell-error-action"
-          onClick={() => props.onAction?.(error.id)}
-          className={ACTION_CLASS}
-        >
-          {error.actionLabel}
-        </button>
-      ) : null}
-      {props.onAction ? error.additionalActionLabels?.map((label, index) => (
-        <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
-          onClick={() => props.onAction?.(error.id, index + 1)}
-          className={ACTION_CLASS}>
-          {label}
-        </button>
-      )) : null}
-      {error.actionAfterRetry ? null : retry}
-      </div> : null}
       {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
         key={error.id}
         iconOnly

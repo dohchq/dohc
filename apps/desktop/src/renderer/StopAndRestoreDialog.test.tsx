@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { PendingStopAndRestoresResult, StopAndRestoreResult, UndoStopAndRestorePayload, UndoStopAndRestoreResult } from "../ipc/bridgeContract";
+import { livePageBody, livePageTitle } from "../ipc/errorWords";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { enqueueCollectionFieldWrite, resetCollectionFieldWritesForTests, setCollectionFieldWriteAccess } from "./collections/recordFieldWrites";
@@ -93,6 +94,14 @@ it("shows that runs from a reviewed automations file were kept", async () => {
   fixture([{status: "restored", restored: [], review: [{path: "trip/automations.yaml", reason: "restore-refused", detail: "Changed on this device since the last saved version. Runs from this file's automations were kept."}], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: null}]);
   fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText(/Runs from this file's automations were kept\./)).toBeTruthy();
+});
+
+it("shows a refused file's detail as is, on as many lines as it has", async () => {
+  const detail = `${livePageTitle("trip/Tasks/Untitled.md", "restore")}\n${livePageBody("restore")}`;
+  fixture([{status: "restored", restored: [], review: [{path: "trip/Tasks/Untitled.md", reason: "restore-refused", detail}], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  const reason = await screen.findByText((_, element) => element?.tagName === "P" && element.textContent === detail);
+  expect(reason.className).toContain("whitespace-pre-line");
 });
 
 function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA | typeof LINK = ANA, recovered?: PendingStopAndRestoresResult) {
@@ -305,7 +314,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
   expect(f.props.onOpenFile).toHaveBeenCalledWith("trip/packing/automations.yaml");
   expect(screen.getByText("Another author changed it after ana@example.com.")).toBeTruthy();
   expect(screen.getByText("This Collection holds files someone else added.")).toBeTruthy();
-  expect(screen.getByText("dohc could not restore it. This action is unavailable for shared live files.")).toBeTruthy();
+  expect(screen.getByText("This action is unavailable for shared live files.")).toBeTruthy();
 
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 1 file as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
@@ -328,13 +337,13 @@ it("lists Undo refusals and retries only the files not put back", async () => {
   fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
   fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 2 files as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
-  expect(screen.getByText("dohc could not restore it. This history moment is no longer available.")).toBeTruthy();
+  expect(screen.getByText("This history moment is no longer available.")).toBeTruthy();
   expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([{ path: "notes/middle.md", restoredMomentId: "middle" }]);
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 3 files as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
   expect(f.undoStopAndRestore).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE, target: ANA.target, reviewPaths: [], restoredMomentIds: ["middle"] });
   expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([]);
-  expect(screen.queryByText("dohc could not restore it. This history moment is no longer available.")).toBeNull();
+  expect(screen.queryByText("This history moment is no longer available.")).toBeNull();
 });
 
 it("names the rules file it can't read on the file's row, from a restore and from Undo", async () => {

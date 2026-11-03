@@ -18,6 +18,20 @@ it("offers Discard as a separate toast action without dismissing the Notice",()=
   expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
 });
 
+it("puts a toast's actions in a row under its text, outside the selectable text, before Copy and close", () => {
+  render(<WorkspaceErrorToast error={{ id: "paused", title: "History paused", message: "Changes are not recorded.", details: "History paused", atMs: 0,
+    canRetry: true, seen: false, actionLabel: "Open History", additionalActionLabels: ["Turn History off"] }}
+    onAction={vi.fn()} onRetry={vi.fn()} onHide={vi.fn()} />);
+  const toast = screen.getByTestId("workspace-shell-error");
+  const row = screen.getByTestId("workspace-shell-error-action").parentElement!;
+  const text = within(toast).getByText("Changes are not recorded.").closest(".select-text")!;
+  expect(row.parentElement).toBe(text.parentElement);
+  expect(text.contains(row)).toBe(false);
+  expect(text.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(toast).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent))
+    .toEqual(["Open History", "Turn History off", "Try again", "Copy error details", "Dismiss workspace error"]);
+});
+
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {});
 });
