@@ -142,7 +142,7 @@ Show what the action will change, and write only what the person needs to decide
 
 ### The card
 
-Use `ConfirmDialog` for a dialog with one action: a title, at most one line of body, then the buttons.
+Use `ConfirmDialog` for a dialog with one action: a title, at most one short sentence of body, then the buttons.
 The card's `p-6` and `gap-6` separate them, so add no dividers.
 A divider only separates a fixed header or footer from a list that scrolls.
 
@@ -191,14 +191,14 @@ The Words rules apply, and these too:
 - Use no em or en dashes. End the sentence, or use a comma.
 - Cut `please`, `simply`, `just`, `note that`, `make sure`, `currently`, `for now`, and `at the moment`.
 - If dohc knows the answer, do not hedge with `may` or `might`.
-- Do not start a sentence with a name in lowercase. Put the name later: `Main gets every change from version-1`.
+- Do not start a sentence with a name in lowercase. Put the name later: `You can keep working in version-1.`
 - Check every claim in the code before you write it. The merge dialog said versions cover only text files, but binary files merge too.
 
 ### Before and after: the merge dialog
 
 | Before | After |
 | --- | --- |
-| `Everything version-1 changed will be brought into Main. version-1 stays as it is, so you can keep working in it. Your unsaved changes are saved first.` | `Main gets every change from version-1, and version-1 stays as it is.` |
+| `Everything version-1 changed will be brought into Main. version-1 stays as it is, so you can keep working in it. Your unsaved changes are saved first.` | `You can keep working in version-1.` The title already says Main gets the changes. |
 | A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the clash step shows itself when it comes. |
 | A `Merging version-1 into Main…` paragraph | The primary reads `Merging…` |
 
