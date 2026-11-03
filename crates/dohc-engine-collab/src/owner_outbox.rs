@@ -23,6 +23,7 @@ mod native_source;
 pub mod publication;
 mod recovery;
 pub mod release;
+pub mod retirement;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
@@ -2280,7 +2281,9 @@ pub(crate) fn retry_in_tx(
     if parent.observed_binding.is_some()
         || matches!(
             parent.quarantine_reason.as_deref(),
-            Some("stale-binding" | "restore-fenced" | "binding-changed")
+            Some(
+                "stale-binding" | "restore-fenced" | "binding-changed" | retirement::RETIRED_REASON
+            )
         )
     {
         return Err(OwnerOutboxError::ParentMismatch);
