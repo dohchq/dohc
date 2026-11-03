@@ -135,6 +135,23 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(lossy.result.current).toBe("lossy"));
   });
 
+  // A teammate's update brings no new head, so the source it records is checked from the document.
+  it("checks again when a session with no file head records another source", async () => {
+    const doc = seeded();
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: null }));
+    await waitFor(() => expect(result.current).toBe("lossy"));
+    const source = "Title\n=====\n\n* one\n";
+    const imported = markdownToYDoc(source);
+    act(() => doc.transact(() => {
+      const meta = doc.getMap("meta");
+      meta.set("dohcMarkdownSource", source);
+      meta.set("dohcMarkdownSourceSha256", sha(source));
+      meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(imported)));
+    }));
+    imported.destroy();
+    await waitFor(() => expect(result.current).toBe("clear"));
+  });
+
   describe("after a clear verdict", () => {
     const source = "Title\n=====\n\n* one\n";
     async function checkedClear() {
@@ -156,21 +173,62 @@ describe("useBoundNoteCheck", () => {
       expect(view.result.current).toBe("clear");
     });
 
-    it("checks again when the file becomes a lossy source", async () => {
-      const { doc, view } = await checkedClear();
-      // A change outside dohc resyncs into the same document. Its witness can
-      // arrive before its head.
+  });
+
+  // A change outside dohc resyncs a lossy source into the same document. Its
+  // state comes with its head; a source that arrives without one reads as an
+  // unknown head until the pair does.
+  it.each(["before the new head arrives", "after the new source is answered"])(
+    "waits for the head of a new lossy source, and ignores an older answer that lands %s",
+    async (when) => {
+      const posted: Array<{ id: number; headSha256: string | null }> = [];
+      let reply!: (id: number, lossy: boolean) => void;
+      vi.stubGlobal("Worker", class {
+        onmessage: ((event: { data: { id: number; lossy: boolean } }) => void) | null = null;
+        onerror = null;
+        constructor() {
+          reply = (id, lossy) => this.onmessage?.({ data: { id, lossy } });
+        }
+        postMessage(message: { id: number; headSha256: string | null }) {
+          posted.push(message);
+        }
+        terminate() {}
+      });
+      const source = "Title\n=====\n\n* one\n";
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const initialProps: { headSha256?: string | null } = { headSha256: sha(source) };
+      const view = renderHook((props: { headSha256?: string | null }) =>
+        useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }), { initialProps });
+      expect(posted).toEqual([expect.objectContaining({ headSha256: sha(source) })]);
+      expect(view.result.current).toBe("checking");
+
       act(() => {
         doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
         doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
         doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(LOSSY))));
+        view.rerender({ headSha256: undefined });
       });
       expect(view.result.current).toBe("checking");
+      expect(posted).toHaveLength(1);
+      if (when === "before the new head arrives") {
+        await act(async () => reply(posted[0]!.id, false));
+        expect(view.result.current).toBe("checking");
+      }
+
       view.rerender({ headSha256: sha(LOSSY) });
       expect(view.result.current).toBe("checking");
-      await waitFor(() => expect(view.result.current).toBe("lossy"));
-    });
-  });
+      expect(posted.at(-1)).toMatchObject({ headSha256: sha(LOSSY) });
+      await act(async () => reply(posted.at(-1)!.id, true));
+      expect(view.result.current).toBe("lossy");
+      if (when === "after the new source is answered") {
+        await act(async () => reply(posted[0]!.id, false));
+      }
+      expect(view.result.current).toBe("lossy");
+    },
+  );
 
   it("reads the document as it was when the check ran", async () => {
     // The note renders with a lossy source; sync then records a source that

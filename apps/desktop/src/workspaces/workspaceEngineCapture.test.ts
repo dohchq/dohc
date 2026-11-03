@@ -49,6 +49,7 @@ import {
   type JsonValue,
   type Request,
   type Response,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -1986,6 +1987,45 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(rendererDoc.getText("content").toString()).toBe("base+remote");
     expect(forwarded).toEqual([bufferedUpdate]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("forgets the renderer's head when a generation comes back with its head unknown and nothing new", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "seed" });
+    const seed = new Y.Doc();
+    seed.getText("plainText").insert(0, "seed");
+    const state = Y.encodeStateAsUpdate(seed);
+    const opened: EngineYdocProviderSessionOptions[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        opened.push(options);
+        const doc = new Y.Doc();
+        Y.applyUpdate(doc, state);
+        return {
+          doc, initialUpdate: state, contentKind: "plaintext", path: options.path,
+          head: "present", lineage: "existing", unsettled: false,
+          headSha256: opened.length === 1 ? "a".repeat(64) : undefined,
+          evict: async () => undefined, applyLocalUpdate: async () => undefined,
+          settleNow: async () => undefined, close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const delivered: { update: Uint8Array; head?: YdocDeliveredHead }[] = [];
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: (update, head) => delivered.push({ update, head }),
+    });
+    opened[0]?.onSessionError?.(Object.assign(new Error("daemon exited"), { code: "transport-error" }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    expect(opened).toHaveLength(2);
+    expect(
+      delivered,
+      "return undefined from `installedHead` for an unknown head -> the renderer keeps the old generation's head",
+    ).toEqual([{ update: new Uint8Array([0, 0]), head: {} }]);
     await session.close({ settle: false });
     await engine.stop();
   });

@@ -15,6 +15,7 @@ import {
   type EngineTransport,
   type LargeSeedReading,
   type YdocAdapterSession,
+  type YdocDeliveredHead,
 } from "./ydocLiveAdapter";
 import type {
   YdocContentKind,
@@ -84,14 +85,14 @@ export interface EngineYdocProviderSessionOptions {
   seedAbsentLineage?: boolean;
   // Forwarded to the adapter: reads a seed past the in-band cap as a blob.
   largeSeed?: LargeSeedReading;
-  onRemoteUpdate: (update: Uint8Array) => void;
-  onHeadChanged?: (headSha256: string | null) => void;
+  // `head` comes with a resync's state and with this session's own settle.
+  onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onLocalUpdateAcknowledged?: (idempotencyKey: string, lane: "journal" | "owner-outbox") => void;
   onLocalUpdateRefused?: (idempotencyKey: string, error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
-  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
+  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
   onSessionError?: (error: unknown) => void;
   // Complete a durable set-aside handoff before a terminal release drops unsent state.
   preserveUnsentState?: (doc: Y.Doc) => Promise<void>;
@@ -374,13 +375,11 @@ export async function openEngineYdocProviderSession(
     return journaled;
   }
 
-  const unsubscribeRemote = session.onRemoteUpdate((update) => {
+  const unsubscribeRemote = session.onRemoteUpdate((update, head) => {
     if (closed) return;
-    options.onRemoteUpdate(update);
-    requestSettle();
-  });
-  const unsubscribeHead = session.onHeadChanged(head => {
-    if (!closed) options.onHeadChanged?.(head);
+    options.onRemoteUpdate(update, head);
+    // A head with no change is nothing to save.
+    if (update.byteLength > 2) requestSettle();
   });
   const unsubscribeRemoteError = session.onRemoteApplyError((error) => {
     noteDocumentChange();
@@ -391,12 +390,12 @@ export async function openEngineYdocProviderSession(
     options.onResyncNeeded?.(error);
   });
   const unsubscribeReplacement = session.onLineageReplaced(
-    (replacement, recoveredPaths) => {
+    (replacement, recoveredPaths, head) => {
       observedDoc.off("update", noteDocumentChange);
       observedDoc = replacement;
       observedDoc.on("update", noteDocumentChange);
       noteDocumentChange();
-      options.onLineageReplaced?.(replacement, recoveredPaths);
+      options.onLineageReplaced?.(replacement, recoveredPaths, head);
     },
   );
   const unsubscribeSessionError = session.onSessionError((error) => {
@@ -423,7 +422,6 @@ export async function openEngineYdocProviderSession(
     cancelSettle?.();
     cancelSettle = null;
     unsubscribeRemote();
-    unsubscribeHead();
     unsubscribeRemoteError();
     unsubscribeResync();
     unsubscribeReplacement();

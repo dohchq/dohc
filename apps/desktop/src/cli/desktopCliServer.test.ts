@@ -758,7 +758,7 @@ describe("desktop CLI workspace context", () => {
       session.getMap("meta").set("dohcMarkdownSource", lossy);
       session.getMap("meta").set("dohcMarkdownSourceSha256", sha(lossy));
       session.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(session)));
-      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true })).rejects.toThrow(
+      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true, headSha256: sha(lossy) })).rejects.toThrow(
         "dohc can't change readme.md without also changing parts it can't show",
       );
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
@@ -790,6 +790,11 @@ describe("desktop CLI workspace context", () => {
       }
       const converted = await guarded.change(state, { keepBlocks: true, headSha256: sha("converted head") });
       expect(converted).toBeInstanceOf(Uint8Array);
+      // Until the head arrives, the source the note records can't show that
+      // the edit is safe, so the agent hears to try again.
+      await expect(guarded.change(state, { keepBlocks: true })).rejects.toThrow(
+        "dohc is still checking readme.md for parts it can't show, so nothing changed. Try again in a moment.",
+      );
 
       await context.documents!.edit({ ...edit, allowLossySourceSha256: sha(source) });
       const [consented] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[1]!;
@@ -819,6 +824,9 @@ describe("desktop CLI workspace context", () => {
     const current = markdownToYDoc("Draft plan.");
     Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!);
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
+    // A note that records no source takes the edit while its head is unknown.
+    expect(await input.change(Y.encodeStateAsUpdate(markdownToYDoc("Draft plan.")), { keepBlocks: true }))
+      .toBeInstanceOf(Uint8Array);
     // A refusal from the projection reaches the caller.
     await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true, headSha256: null }))
       .rejects.toThrow("not in the document");

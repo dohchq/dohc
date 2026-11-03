@@ -84,6 +84,7 @@ import {
   type RetainedCopiesSummary,
   type RetainedCopy,
   type YdocContentKind,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
@@ -608,9 +609,10 @@ export interface WorkspaceEngineCapture {
     allowLossySourceSha256?: string;
     path: string;
     assertRecordWritable?: () => void;
-    onRemoteUpdate: (update: Uint8Array) => void;
-    onHeadChanged?: (headSha256: string | null) => void;
-    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
+    // `head` is the file head this state was read with, when the engine sent
+    // one. An update with a head may be empty.
+    onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
+    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
@@ -2384,9 +2386,8 @@ export function createWorkspaceEngineCapture(
     onAlive: () => void;
     onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
-    onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
-    onHeadChanged?: (headSha256: string | null) => void;
-    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
+    onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead, localAcknowledgement?: boolean) => void;
+    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
       result: {
@@ -2470,7 +2471,7 @@ export function createWorkspaceEngineCapture(
       retireCheckpointIfDurable();
       notifyDurable(record);
       if (!record.editorVisible) {
-        try { input.onRemoteUpdate(record.update, true); }
+        try { input.onRemoteUpdate(record.update, undefined, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
       }
     };
@@ -2551,9 +2552,9 @@ export function createWorkspaceEngineCapture(
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
     let localGeneration = 0;
-    const announceReplacement = (update: Uint8Array, recoveredPaths: string[]): void => {
+    const announceReplacement = (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead): void => {
       localGeneration += 1;
-      input.onLineageReplaced(update, recoveredPaths);
+      input.onLineageReplaced(update, recoveredPaths, head);
     };
     // Across IPC, renderer and main need separate ownership. Main retains at
     // most 32 MiB and 4096 originals, including queued IPC calls.
@@ -2633,8 +2634,12 @@ export function createWorkspaceEngineCapture(
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
       EngineYdocProviderSession,
-      { updates: Uint8Array[]; installed: boolean }
+      { updates: { update: Uint8Array; head?: YdocDeliveredHead }[]; installed: boolean }
     >();
+    // The head a generation's state was opened or last installed with, or `{}`
+    // when that head is unknown, so the renderer forgets the head it held.
+    const installedHead = (session: EngineYdocProviderSession): YdocDeliveredHead =>
+      session.headSha256 === undefined ? {} : { sha256: session.headSha256 };
 
     const append = <T>(operation: () => Promise<T>): Promise<T> => {
       const pending = operationChain.then(operation);
@@ -2759,7 +2764,7 @@ export function createWorkspaceEngineCapture(
           }
           let opened: EngineYdocProviderSession | null = null;
           let refusedEditorVisible: boolean | null = null;
-          const opening = { updates: [] as Uint8Array[], installed: false };
+          const opening = { updates: [] as { update: Uint8Array; head?: YdocDeliveredHead }[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
               opened === null ||
@@ -2799,21 +2804,19 @@ export function createWorkspaceEngineCapture(
             // A note the WYSIWYG editor opens can seed past the in-band cap.
             // A larger one keeps its read preview and edits its file directly.
             largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
-            onRemoteUpdate: (update) => {
+            onRemoteUpdate: (update, head) => {
               if (current !== opened || canonicalDoc === null) {
-                if (!opening.installed) opening.updates.push(update);
+                if (!opening.installed) opening.updates.push({ update, ...(head ? { head } : {}) });
                 return;
               }
               Y.applyUpdate(canonicalDoc, update);
               Y.applyUpdate(recordedDoc, update);
               recordedStateVector = Y.encodeStateVector(recordedDoc);
-              updatesCounted += 1;
-              input.onRemoteUpdate(update);
+              // A head alone changes nothing a settle must carry.
+              if (update.byteLength > 2) updatesCounted += 1;
+              input.onRemoteUpdate(update, head);
             },
-            onHeadChanged: head => {
-              if (!closed && current === opened) input.onHeadChanged?.(head);
-            },
-            onLineageReplaced: (replacement, recoveredPaths) => {
+            onLineageReplaced: (replacement, recoveredPaths, head) => {
               const editorVisible = refusedEditorVisible;
               refusedEditorVisible = null;
               if (current !== opened || canonicalDoc === null) return;
@@ -2831,6 +2834,7 @@ export function createWorkspaceEngineCapture(
                 announceReplacement(
                   Y.encodeStateAsUpdate(replacement),
                   recoveredPaths,
+                  head,
                 );
               }
               retired.destroy();
@@ -2956,6 +2960,7 @@ export function createWorkspaceEngineCapture(
           announceReplacement(
             Y.encodeStateAsUpdate(replacement.doc),
             [],
+            installedHead(replacement),
           );
           doc.destroy();
           markAlive();
@@ -2968,11 +2973,11 @@ export function createWorkspaceEngineCapture(
           replacement.doc,
           Y.encodeStateVector(doc),
         );
-        if (remoteDelta.byteLength > 2) {
-          Y.applyUpdate(doc, remoteDelta);
-          Y.applyUpdate(recordedDoc, remoteDelta);
-          input.onRemoteUpdate(remoteDelta);
-        }
+        // The generation's head, read with its state, goes even when the
+        // state adds nothing.
+        Y.applyUpdate(doc, remoteDelta);
+        Y.applyUpdate(recordedDoc, remoteDelta);
+        input.onRemoteUpdate(remoteDelta, installedHead(replacement));
         if (!claimCoversRecordedHistory(replacement.doc, recordedStateVector)) {
           // The daemon only admits a neutral seed into an absent lineage.
           // Refuse an incomplete existing lineage rather than crediting old
@@ -3053,12 +3058,12 @@ export function createWorkspaceEngineCapture(
         if (opening) {
           opening.installed = true;
           openingRemoteUpdates.delete(replacement);
-          for (const update of opening.updates.slice(
+          for (const { update, head } of opening.updates.slice(
             updatesIncludedInRemoteDelta,
           )) {
             Y.applyUpdate(doc, update);
             Y.applyUpdate(recordedDoc, update);
-            input.onRemoteUpdate(update);
+            input.onRemoteUpdate(update, head);
           }
         }
         canonicalLineageClaimId = replacementClaimId;
@@ -3354,8 +3359,8 @@ export function createWorkspaceEngineCapture(
     if (initialOpening) {
       initialOpening.installed = true;
       openingRemoteUpdates.delete(current);
-      for (const update of initialOpening.updates) {
-        input.onRemoteUpdate(update);
+      for (const { update, head } of initialOpening.updates) {
+        input.onRemoteUpdate(update, head);
       }
     }
     // A daemon update can arrive after the provider has encoded its initial
@@ -4923,14 +4928,13 @@ export function createWorkspaceEngineCapture(
               // Observer boundary, like the save-state hook.
             }
           },
-          onRemoteUpdate: (update, localAcknowledgement) => {
-            if (!localAcknowledgement) noteUpdate();
-            input.onRemoteUpdate(update);
+          onRemoteUpdate: (update, updateHead, localAcknowledgement) => {
+            if (!localAcknowledgement && update.byteLength > 2) noteUpdate();
+            input.onRemoteUpdate(update, updateHead);
           },
-          onHeadChanged: input.onHeadChanged,
-          onLineageReplaced: (update, recoveredPaths) => {
+          onLineageReplaced: (update, recoveredPaths, replacementHead) => {
             noteUpdate();
-            input.onLineageReplaced?.(update, recoveredPaths);
+            input.onLineageReplaced?.(update, recoveredPaths, replacementHead);
             reportSaveState("settling", 0, "status");
             enqueue(`ydoc replacement settle of ${input.path}`, async () => {
               if (entry !== null && liveYDocSessions.get(input.path) === entry && entry.status === "live") settleOnOpen();
@@ -5287,7 +5291,7 @@ export function createWorkspaceEngineCapture(
                 onDead: () => undefined,
                 onAlive: () => undefined,
                 onObjectChanged: () => undefined,
-                onRemoteUpdate: () => {
+                onRemoteUpdate: (update) => {
                   // An update the settle did not carry is not covered by
                   // it. The close below cancels this update's debounce and
                   // sends settle: false, and a replicated lineage compacts
@@ -5296,7 +5300,8 @@ export function createWorkspaceEngineCapture(
                   // that never reached Markdown. Bumping the sequence is
                   // the whole record: whether it outran a settle is
                   // decided by comparing it to what that settle covers.
-                  updateSeq += 1;
+                  // A head alone carries no change.
+                  if (update.byteLength > 2) updateSeq += 1;
                 },
                 onLineageReplaced: () => {
                   updateSeq += 1;

@@ -115,7 +115,8 @@ export function createNamedDesktopLiveCapture(options: {
       catch (error) { unsubscribe(); credentials.signal.removeEventListener("abort", abort); transport.close(); throw error; }
       active = true;
       let localTransaction = false;
-      const update = (bytes: Uint8Array) => { if (!localTransaction && !closed) input.onRemoteUpdate(bytes); };
+      // Each update keeps the head null too, so a teammate's change to the source is judged, not left unknown.
+      const update = (bytes: Uint8Array) => { if (!localTransaction && !closed) input.onRemoteUpdate(bytes, {sha256: null}); };
       session.doc.on("update", update);
       const provider: EngineYDocSessionProvider = {
         doc: session.doc, initialUpdate: Y.encodeStateAsUpdate(session.doc), contentKind: "richdoc", path: input.path,

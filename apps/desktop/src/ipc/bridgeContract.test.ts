@@ -2747,6 +2747,20 @@ describe("engine Y.Doc event boundaries", () => {
     expect(parsed).not.toHaveProperty("evil");
   });
 
+  it("carry the head an update's state was read with, or an empty head when it is unknown", () => {
+    const update = new Uint8Array([0, 0]);
+    for (const head of [{ sha256: "a".repeat(64) }, { sha256: null }, { sha256: "b".repeat(64), committed: true }, {}]) {
+      expect(EngineYDocRemoteUpdateEvent.parse({ sessionId: "s", update, head, lineageGeneration: 1 }).head).toEqual(head);
+    }
+    for (const head of [{ sha256: "" }, { sha256: "a", committed: false }, { sha256: "a", extra: 1 }, { extra: 1 },
+      { committed: true }, { sha256: null, committed: true }]) {
+      expect(EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, head, lineageGeneration: 1 }).success).toBe(false);
+    }
+    expect(AcknowledgeEngineYDocLineageReplacementResult.parse({
+      accepted: true, updates: [{ update, head: { sha256: null } }, { update }],
+    })).toEqual({ accepted: true, updates: [{ update, head: { sha256: null } }, { update }] });
+  });
+
   it("reject a missing field, a bad sessionId, and a non-Uint8Array update", () => {
     const update = new Uint8Array([1]);
     for (const bad of [

@@ -51,6 +51,32 @@ export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.engineDeliveredOrigin",
 );
 
+/**
+ * The file head a remote update was read with: a resync's head, or a settle's
+ * head when `committed` says this session's own save wrote it. A head with no
+ * `sha256` installs state whose head is unknown until a resync pairs one with
+ * it. An update without a head is a delta the engine sent with none.
+ */
+export interface YdocDeliveredHead {
+  sha256?: string | null;
+  committed?: true;
+}
+
+// A delivery that changed nothing in the document but still carries a head.
+const EMPTY_UPDATE = new Uint8Array([0, 0]);
+
+const WITNESS_KEYS = ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256"] as const;
+
+// The saved source the document records, which a lossy-note check reads with the head.
+function sourceWitness(doc: Y.Doc): unknown[] {
+  const meta = doc.getMap("meta");
+  return WITNESS_KEYS.map(key => meta.get(key));
+}
+
+function sameWitness(left: unknown[], right: unknown[]): boolean {
+  return left.every((value, index) => value === right[index]);
+}
+
 
 export interface EngineTransport extends DaemonRequesterClient {
   onEvent(handler: (event: Event) => void): () => void;
@@ -645,7 +671,9 @@ export class YdocAdapterSession {
   // Set by openSession; read by the open consumer, which owns the
   // create-or-refuse decision.
   head: "present" | "absent" = "present";
-  headSha256: string | null = null;
+  // The file head the document's state was installed with. Undefined from a
+  // delta that changed the source witness until a resync pairs them again.
+  headSha256: string | null | undefined = null;
   // Whether the daemon resumed durable CRDT state for this object. Read with
   // `head`, never instead of it: a crash-orphaned draft the daemon resurrects
   // is lineage-existing and head-absent, and its CRDT rows are the only copy
@@ -674,15 +702,25 @@ export class YdocAdapterSession {
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocAdapterError | null = null;
   private resyncPending: Promise<Uint8Array> | null = null;
-  private droppedWhileStale = false;
+  // The resync in flight read its state too early and must run once more.
+  private resyncAgain = false;
+  // Counts state installs, so a settle can tell one landed while it ran.
+  private installs = 0;
+  // Settles in flight. State installed meanwhile goes without its head, and
+  // the settle reads the pair again once it returns.
+  private settling = 0;
+  // A settle whose receipt that state held back: the head it wrote and the
+  // source it wrote over, for the paired read to confirm.
+  private settled: { sha256: string; witness: unknown[] } | null = null;
+  // The head of the resync state being applied, until a listener receives it.
+  private pairedHead: YdocDeliveredHead | null = null;
   private generation: DocumentGeneration = {};
   private nextLocalUpdateSeq = 1;
   private readonly pendingRecords = new Set<LocalUpdateRecord>();
   private acknowledgedDoc = new Y.Doc();
   private pendingRecordBytes = 0;
   ownerDraft: YdocOwnerDraft | undefined;
-  private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
-  private readonly headChangedListeners = new Set<(headSha256: string | null) => void>();
+  private readonly remoteUpdateListeners = new Set<(update: Uint8Array, head?: YdocDeliveredHead) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
   private readonly settlementWantedListeners = new Set<() => void>();
   private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
@@ -696,7 +734,7 @@ export class YdocAdapterSession {
   >();
   private readonly sessionErrorListeners = new Set<(error: unknown) => void>();
   private readonly lineageReplacementListeners = new Set<
-    (doc: Y.Doc, recoveredPaths: string[]) => void
+    (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void
   >();
   private readonly retiredDocs = new Set<Y.Doc>();
 
@@ -1103,8 +1141,7 @@ export class YdocAdapterSession {
     if ([...acknowledgedVector].some(([client, clock]) => (durableVector.get(client) ?? 0) < clock)) {
       await this.requestRecoveryBase(Y.encodeStateAsUpdate(this.acknowledgedDoc));
     }
-    Y.applyUpdate(this.acknowledgedDoc, durableState.update);
-    Y.applyUpdate(this.doc, durableState.update, ENGINE_DELIVERED_ORIGIN);
+    this.installState(durableState.update, this.pairableHead(durableState.headSha256));
   }
 
   private async recoverCanonicalState(
@@ -1154,36 +1191,61 @@ export class YdocAdapterSession {
       ...(options?.allowLossySourceSha256 ? { allowLossySourceSha256: options.allowLossySourceSha256 } : {}),
     };
     let raw: Response["result"];
+    const installsAtStart = this.installs;
+    let installs = installsAtStart;
+    let witness = sourceWitness(this.doc);
+    let answered = false;
+    this.settling += 1;
     try {
-      raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
-    } catch (error) {
-      // Remote edits were drained under this session's lease: this doc is
-      // behind the durable lineage. Resync (which returns the full drained
-      // state) and settle exactly once more — the daemon refuses rather
-      // than materializing content this editor never saw.
-      //
-      // One retry, never a loop: a second refusal means peers are still
-      // outrunning this session, and that wants a backoff rather than a tight
-      // retry. It reaches the caller unchanged, and the caller's ladder owns
-      // it — as TRANSIENT, which only the typed discriminator says, because
-      // the wire code alone reads terminal.
-      if (isYdocRemoteUpdatesPendingRefusal(error)) {
-        await this.resync();
-        try {
-          raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
-        } catch (retryError) {
-          if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
-          throw retryError;
+      try {
+        raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+      } catch (error) {
+        // Remote edits were drained under this session's lease: this doc is
+        // behind the durable lineage. Resync (which returns the full drained
+        // state) and settle exactly once more — the daemon refuses rather
+        // than materializing content this editor never saw.
+        //
+        // One retry, never a loop: a second refusal means peers are still
+        // outrunning this session, and that wants a backoff rather than a tight
+        // retry. It reaches the caller unchanged, and the caller's ladder owns
+        // it — as TRANSIENT, which only the typed discriminator says, because
+        // the wire code alone reads terminal.
+        if (isYdocRemoteUpdatesPendingRefusal(error)) {
+          await this.resync();
+          installs = this.installs;
+          witness = sourceWitness(this.doc);
+          try {
+            raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+          } catch (retryError) {
+            if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
+            throw retryError;
+          }
+        } else {
+          if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
+          throw error;
         }
-      } else {
-        if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
-        throw error;
       }
+      answered = true;
+    } finally {
+      this.settling -= 1;
+      // A failed settle sends no head, so state installed while it ran needs
+      // its own paired read.
+      if (!answered && this.installs !== installsAtStart && !this.closed) this.requestPairedResync();
     }
     const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
-    this.headSha256 = result.sha256;
-    this.notifyListeners(this.headChangedListeners, this.headSha256);
+    if (this.closed) return result;
+    if (this.installs !== installs || this.resyncPending !== null) {
+      // State that arrived while this settle ran may be older or newer than
+      // its head, so neither pairs with it. A resync reads both again, and
+      // confirms this settle if the file still holds what it wrote.
+      this.settled = { sha256: result.sha256, witness };
+      this.requestPairedResync();
+    } else {
+      this.settled = null;
+      this.headSha256 = result.sha256;
+      this.deliver(EMPTY_UPDATE, { sha256: result.sha256, committed: true });
+    }
     return result;
   }
 
@@ -1191,14 +1253,13 @@ export class YdocAdapterSession {
     return this.lastSettledSha === sha256;
   }
 
-  onRemoteUpdate(handler: (update: Uint8Array) => void): () => void {
+  /**
+   * Updates the engine delivered, in order. A resync's update carries the
+   * head read with it, and a settle's head arrives as an empty update.
+   */
+  onRemoteUpdate(handler: (update: Uint8Array, head?: YdocDeliveredHead) => void): () => void {
     this.remoteUpdateListeners.add(handler);
     return () => this.remoteUpdateListeners.delete(handler);
-  }
-
-  onHeadChanged(handler: (headSha256: string | null) => void): () => void {
-    this.headChangedListeners.add(handler);
-    return () => this.headChangedListeners.delete(handler);
   }
 
   onDurableLocalChange(handler: () => void): () => void {
@@ -1241,7 +1302,7 @@ export class YdocAdapterSession {
   }
 
   onLineageReplaced(
-    handler: (doc: Y.Doc, recoveredPaths: string[]) => void,
+    handler: (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void,
   ): () => void {
     this.lineageReplacementListeners.add(handler);
     return () => this.lineageReplacementListeners.delete(handler);
@@ -1263,12 +1324,20 @@ export class YdocAdapterSession {
       // resync state. Dropping it silently would leave the doc permanently
       // behind (the reset baseline hides the gap) — remember it happened so
       // the current resync pass runs once more when it lands.
-      this.droppedWhileStale = true;
+      this.resyncAgain = true;
       return;
     }
+    const witness = sourceWitness(this.doc);
     try {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
       Y.applyUpdate(this.acknowledgedDoc, update);
+      if (!sameWitness(sourceWitness(this.doc), witness)) {
+        // A new source came without its head. Pairing it with the old head
+        // would make a lossy note look editable.
+        this.installs += 1;
+        this.headSha256 = undefined;
+        this.requestPairedResync();
+      }
     } catch (cause) {
       const error = new RemoteYdocApplyError({
         attemptedUpdate: update,
@@ -1286,11 +1355,7 @@ export class YdocAdapterSession {
       // event whose update this doc missed — the in-flight resync must run
       // one more pass rather than resetting the baseline past it. With no
       // resync in flight, the last one failed, and this request retries it.
-      if (this.resyncPending === null) {
-        void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
-      } else {
-        this.droppedWhileStale = true;
-      }
+      this.requestPairedResync();
       return;
     }
     this.staleError = error;
@@ -1308,6 +1373,60 @@ export class YdocAdapterSession {
     return this.resyncPending;
   }
 
+  // Reads state and head again, once more if a resync is already reading.
+  private requestPairedResync(): void {
+    if (this.resyncPending !== null) this.resyncAgain = true;
+    else void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+  }
+
+  // A resync's head pairs with its state only if nothing passed that state:
+  // no update waits for another pass, and no settle runs.
+  private pairableHead(headSha256: string | null): string | null | undefined {
+    return this.resyncAgain || this.settling > 0 ? undefined : headSha256;
+  }
+
+  // Installs durable state and the head read with it as one delivery. State
+  // without a pairable head installs with the head unknown, which the
+  // delivery says even when the state changes nothing.
+  private installState(update: Uint8Array, headSha256: string | null | undefined): void {
+    Y.applyUpdate(this.acknowledgedDoc, update);
+    this.installs += 1;
+    this.headSha256 = headSha256;
+    let head: YdocDeliveredHead = {};
+    if (headSha256 !== undefined) {
+      head = this.confirmsSettle(headSha256) ? { sha256: headSha256, committed: true } : { sha256: headSha256 };
+      this.settled = null;
+    }
+    this.pairedHead = head;
+    try {
+      Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    } finally {
+      if (this.pairedHead === head) {
+        this.pairedHead = null;
+        this.deliver(EMPTY_UPDATE, head);
+      }
+    }
+  }
+
+  // Whether the file still holds what a held-back settle wrote, with the
+  // source it wrote over or none, once the engine clears that source.
+  private confirmsSettle(headSha256: string | null): boolean {
+    const settled = this.settled;
+    if (settled === null || headSha256 !== settled.sha256) return false;
+    const witness = sourceWitness(this.acknowledgedDoc);
+    return sameWitness(witness, settled.witness) || witness.every(value => value === undefined);
+  }
+
+  private deliver(update: Uint8Array, head?: YdocDeliveredHead): void {
+    for (const listener of this.remoteUpdateListeners) {
+      try {
+        listener(update, head);
+      } catch (error) {
+        this.surfaceSessionError(error);
+      }
+    }
+  }
+
   private async readResyncState(): Promise<Uint8Array> {
     try {
       while (true) {
@@ -1321,6 +1440,7 @@ export class YdocAdapterSession {
         const result = await this.requestResyncState();
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
+        const head = this.pairableHead(result.headSha256);
         // A refused generation is replaced even if this read shows its claim:
         // its records never reach the engine again.
         if (this.generation.refusal !== undefined || !this.continuesLineage(result)) {
@@ -1347,12 +1467,14 @@ export class YdocAdapterSession {
           this.lineageOriginatedHere = result.lineageOriginatedHere;
           this.initialUpdate = update;
           this.activeArtifactAssets = result.artifactAssets;
+          this.installs += 1;
+          this.headSha256 = head;
+          this.settled = null;
           for (const listener of this.lineageReplacementListeners) {
-            listener(replacement, result.recoveredPaths);
+            listener(replacement, result.recoveredPaths, head === undefined ? undefined : { sha256: head });
           }
         } else {
-          Y.applyUpdate(this.acknowledgedDoc, update);
-          Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+          this.installState(update, head);
         }
         // The event baseline is preserved across resync: transport event seqs
         // stay monotone within a session generation, and clearing the position
@@ -1360,18 +1482,17 @@ export class YdocAdapterSession {
         // would be accepted as a fresh baseline). Positions recorded during the
         // stale window keep the continuity; a genuine gap after this resync
         // marks stale again and converges through one more pass.
-        if (this.droppedWhileStale) {
+        if (this.resyncAgain) {
           // An update arrived after the engine produced this resync state but
           // before it was applied here; its content is durable engine-side, so
           // one more pass folds it in. The stale guard stays SET across the
           // next pass: clearing it first would open an await-window where
           // local edits journal against a baseline the second pass immediately
           // advances past.
-          this.droppedWhileStale = false;
+          this.resyncAgain = false;
           continue;
         }
         this.staleError = null;
-        this.notifyListeners(this.headChangedListeners, this.headSha256);
         if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);
         return update;
       }
@@ -1408,6 +1529,7 @@ export class YdocAdapterSession {
 
   private async requestResyncState(): Promise<{
     update: Uint8Array;
+    headSha256: string | null;
     lineageClaimId: string | null;
     lineageOriginatedHere: boolean;
     recoveredPaths: string[];
@@ -1421,9 +1543,9 @@ export class YdocAdapterSession {
     const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
     if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     this.ownerDraft = result.ownerDraft;
-    this.headSha256 = result.headSha256;
     return {
       update: delivery.bytes,
+      headSha256: result.headSha256,
       lineageClaimId: result.lineageClaimId,
       lineageOriginatedHere: result.lineageOriginatedHere,
       recoveredPaths: result.recoveredPaths,
@@ -1495,7 +1617,9 @@ export class YdocAdapterSession {
     try {
       if (this.closed) return;
       if (origin === ENGINE_DELIVERED_ORIGIN) {
-        this.notifyListeners(this.remoteUpdateListeners, update);
+        const head = this.pairedHead ?? undefined;
+        this.pairedHead = null;
+        this.deliver(update, head);
         return;
       }
       if (origin !== LOCAL_EDITOR_ORIGIN) return;

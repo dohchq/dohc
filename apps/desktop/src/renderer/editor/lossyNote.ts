@@ -188,7 +188,11 @@ export function useLossyNote(input: {
   return {state: input.waiting ? 'clear' : 'checking', checkedHash: null};
 }
 
-/** Checks the saved source's meaning and the authoritative file head, including after edits. */
+/**
+ * Checks the saved source's meaning and the file head the document's state
+ * was installed with, including after edits. An undefined head is not known
+ * yet, as when a new source arrives before its head, so the check waits.
+ */
 export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; headSha256?: string | null}): LossyNoteCheck {
   const [metaRevision, setMetaRevision] = useState(0);
   useEffect(() => {
@@ -204,22 +208,19 @@ export function useBoundNoteCheck(input: {open: string; doc: Y.Doc | null; headS
   const hasWitness = meta && ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'].some(key => meta.has(key));
   const projection = meta?.get('dohcMarkdownSourceProjectionSha256');
   // As isLossyDocument decides, a file head other than the witnessed source
-  // is clear, so a save that moves the head never takes the editor away. Only
-  // a witness this open already checked counts: a change outside dohc can
-  // deliver its new witness before its new head.
-  const checked = useRef<{open: string; doc: Y.Doc; sha: unknown; projection: unknown} | null>(null);
-  const last = checked.current;
-  const headLeftSource = typeof input.headSha256 === 'string' && input.headSha256 !== sha
-    && last?.open === input.open && last.doc === input.doc && last.sha === sha && last.projection === projection;
-  const key = input.doc && hasWitness && !headLeftSource ? `session:${docId(input.doc)}:${metaRevision}:${sha}:${projection}:${input.headSha256}` : null;
+  // is clear, so a save that moves the head never takes the editor away. The
+  // head always arrives with the state it was read with.
+  const headLeftSource = typeof input.headSha256 === 'string' && input.headSha256 !== sha;
+  const asks = Boolean(hasWitness) && !headLeftSource;
+  const key = asks && input.doc && input.headSha256 !== undefined
+    ? `session:${docId(input.doc)}:${metaRevision}:${sha}:${projection}:${input.headSha256}` : null;
   const doc = useRef(input.doc);
   doc.current = input.doc;
   const verdict = useVerdict(input.open, key, undefined, () => {
     if (!doc.current || input.headSha256 === undefined) return Promise.resolve(true);
     return ask({state: Y.encodeStateAsUpdate(doc.current), headSha256: input.headSha256}).then(answer => answer.lossy);
   });
-  if (verdict !== undefined && input.doc) checked.current = {open: input.open, doc: input.doc, sha, projection};
-  if (key === null) return 'clear';
+  if (!asks) return 'clear';
   return verdict === undefined ? 'checking' : verdict ? 'lossy' : 'clear';
 }
 

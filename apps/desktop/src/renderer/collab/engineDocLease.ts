@@ -145,7 +145,12 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
+      // The file head `doc`'s state was installed with. Undefined while the
+      // head is unknown.
       headSha256?: string | null;
+      lastSave: EngineYDocBinding["lastSave"];
+      // Counts states main installed other than this session's own saves.
+      pairedInstalls: number;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -262,7 +267,7 @@ function makeTransport(
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update, event.lineageGeneration);
+        listener(event.update, event.lineageGeneration, event.head);
       });
     },
     onLineageReplacement(listener) {
@@ -273,6 +278,7 @@ function makeTransport(
           update: event.update,
           recoveredPaths: event.recoveredPaths,
           artifactAssets: event.artifactAssets,
+          ...(event.head ? { head: event.head } : {}),
           lineageGeneration: event.lineageGeneration,
         });
       });
@@ -445,7 +451,6 @@ function createEngineDocSession(
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
-  let currentHeadSha256: string | null | undefined;
   const recoveryIdentity = (bytes: Uint8Array, objectId: string | null = binding?.objectId ?? null) =>
     objectId ? {objectId, updateBase64: bytesToBase64(bytes)} : undefined;
   let retiredBinding: EngineYDocBinding | null = null;
@@ -543,7 +548,9 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
-    headSha256: currentHeadSha256 === undefined ? bound.headSha256 : currentHeadSha256,
+    headSha256: bound.headSha256,
+    lastSave: bound.lastSave,
+    pairedInstalls: bound.pairedInstalls,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -1040,11 +1047,6 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
-    if (event.headSha256 !== undefined) {
-      currentHeadSha256 = event.headSha256;
-      publish(current => ({ ...current, outcome: current.outcome?.kind === "bound"
-        ? { ...current.outcome, headSha256: event.headSha256 } : current.outcome }));
-    }
     refusedDoc = event.editRefusal !== undefined ? (binding?.doc ?? null) : null;
     if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {
@@ -1461,6 +1463,15 @@ function createEngineDocSession(
             if (checkedState) onSaveState(checkedState);
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
+          });
+          // The head changes in the task that applied its state, so a check
+          // never reads one without the other.
+          bound.onHeadChanged(() => {
+            if (disposed) return;
+            publish(current => current.outcome?.kind === "bound" && current.outcome.doc === bound.doc
+              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, lastSave: bound.lastSave,
+                pairedInstalls: bound.pairedInstalls } }
+              : current);
           });
           // An edit is unsaved the instant it happens. Only main's settle
           // report may clear it — nothing here guesses "saved". The seed apply

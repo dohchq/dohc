@@ -8,7 +8,7 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import type { DohcDesktopBridge } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, EngineYDocLineageReplacementEvent } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 import { knownLossyNoteVerdict } from "./editor/lossyNote";
 import { captureHeldLiveMessage } from "../ipc/errorWords";
@@ -52,17 +52,36 @@ const WRITTEN = `${yDocToMarkdown(markdownToYDoc("# Plan\n\n- [ ] Book flights\n
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
-// An engine session seeded from LOSSY, with the witness the engine records.
-function lossySession() {
-  const doc = markdownToYDoc(LOSSY);
-  doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
-  doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
-  doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 };
+// Records `source` as the document's saved source, as the engine does.
+function witness(doc: Y.Doc, source: string): Y.Doc {
+  doc.getMap("meta").set("dohcMarkdownSource", source);
+  doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+  doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(source))));
+  return doc;
+}
+
+// An engine session seeded from LOSSY, with the witness and head the engine records.
+function lossySession(doc = witness(markdownToYDoc(LOSSY), LOSSY)) {
+  return { available: true as const, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1, headSha256: sha(LOSSY) };
+}
+
+type EngineHead = { sha256?: string | null; committed?: true };
+type RemoteUpdateListener = (event: { sessionId: string; update: Uint8Array; head?: EngineHead; lineageGeneration: number }) => void;
+const remoteUpdateListeners = new Set<RemoteUpdateListener>();
+const lineageReplacementListeners = new Set<(event: EngineYDocLineageReplacementEvent) => void>();
+const EMPTY_UPDATE = new Uint8Array([0, 0]);
+
+// What `edit` changes in the engine's document, as main forwards it.
+function change(doc: Y.Doc, edit: () => void): Uint8Array {
+  const before = Y.encodeStateVector(doc);
+  edit();
+  return Y.encodeStateAsUpdate(doc, before);
 }
 
 function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
   let read = 0;
+  remoteUpdateListeners.clear();
+  lineageReplacementListeners.clear();
   const bridgeMock = {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -82,17 +101,28 @@ function bridgeFor(reads: Array<{ text: string; contentHash: string }>) {
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
-    openEngineYDocSession: vi.fn(async (): Promise<{ available: true; initialUpdate: Uint8Array; lineageGeneration: number; headSha256?: string }> => ({
+    openEngineYDocSession: vi.fn(async (_payload: { sessionId: string; allowLossySourceSha256?: string }): Promise<{ available: true; initialUpdate: Uint8Array; lineageGeneration: number; headSha256?: string }> => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(WRITTEN)),
       lineageGeneration: 1,
     })),
     applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     closeEngineYDocSession: vi.fn(async () => undefined),
-    onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocRemoteUpdate: vi.fn((listener: RemoteUpdateListener) => {
+      remoteUpdateListeners.add(listener);
+      return () => {
+        remoteUpdateListeners.delete(listener);
+      };
+    }),
     onEngineYDocOwnerHandoff: () => () => undefined,
     prepareEngineYDocOwnerHandoff: async () => undefined,
-    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+    onEngineYDocLineageReplacement: vi.fn((listener: (event: EngineYDocLineageReplacementEvent) => void) => {
+      lineageReplacementListeners.add(listener);
+      return () => {
+        lineageReplacementListeners.delete(listener);
+      };
+    }),
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ accepted: true as const, updates: [] })),
     onEngineYDocSaveState: vi.fn(() => () => undefined),
   };
   vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -373,6 +403,205 @@ describe("a lossy note", () => {
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.queryByTestId("lossy-note-notice")).toBeNull());
   });
+});
+
+describe("Edit anyway", () => {
+  const OUTSIDE = LOSSY.replace("Hidden.", "Changed outside dohc.");
+  // The head of the file the converting save writes.
+  const CONVERTED = sha(WRITTEN);
+
+  // Main forwards each update with the head its state was read with, all
+  // before React renders.
+  function deliverAll(bridge: ReturnType<typeof bridgeFor>, deliveries: Array<{ update: Uint8Array; head?: EngineHead }>) {
+    const sessionId = bridge.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
+    act(() => {
+      for (const { update, head } of deliveries) {
+        for (const listener of [...remoteUpdateListeners]) listener({ sessionId, update, ...(head ? { head } : {}), lineageGeneration: 1 });
+      }
+    });
+  }
+
+  function deliver(bridge: ReturnType<typeof bridgeFor>, update: Uint8Array, head?: EngineHead) {
+    deliverAll(bridge, [{ update, ...(head ? { head } : {}) }]);
+  }
+
+  // The engine clears the source a converted note recorded once the file holds what dohc wrote.
+  function clearWitness(doc: Y.Doc) {
+    for (const key of ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256"]) doc.getMap("meta").delete(key);
+  }
+
+  function expectEditing(editor: HTMLElement, title: HTMLTextAreaElement) {
+    expect(screen.getByTestId("markdown-editor")).toBe(editor);
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("page-title")).toBe(title);
+    expect(document.activeElement).toBe(title);
+    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
+  }
+
+  // The person accepts Edit anyway and types, which sends the converting save.
+  // `reread` is what the file holds when the note reads it again.
+  async function editAnyway(reread = OUTSIDE) {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: sha(LOSSY) }, { text: reread, contentHash: sha(reread) }]);
+    const engineDoc = witness(markdownToYDoc(LOSSY), LOSSY);
+    bridge.openEngineYDocSession.mockResolvedValue(lossySession(engineDoc));
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    await user.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledWith(expect.objectContaining({ allowLossySourceSha256: sha(LOSSY) }));
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
+    await user.type(title, " one");
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    return { bridge, engineDoc, user, title, editor: screen.getByTestId("markdown-editor") };
+  }
+
+  it("keeps the editor and its focus through the converting save and the next, and takes typing with no click", async () => {
+    const { bridge, engineDoc, user, title, editor } = await editAnyway();
+    const stillEditing = () => expectEditing(editor, title);
+
+    // The converting save commits.
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
+    stillEditing();
+    // The engine then clears the source the note recorded, which leaves the
+    // head unknown until main reads the pair again.
+    deliver(bridge, change(engineDoc, () => clearWitness(engineDoc)));
+    stillEditing();
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED });
+    stillEditing();
+
+    const saves = bridge.applyEngineYDocUpdate.mock.calls.length;
+    await user.keyboard(" two");
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate.mock.calls.length).toBeGreaterThan(saves));
+    stillEditing();
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha("second save"), committed: true });
+    stillEditing();
+    // A resync that changed nothing reads the second save's head again.
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha("second save") });
+    stillEditing();
+    await user.keyboard(" three");
+    stillEditing();
+    expect(title.value).toContain("one two three");
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the editor when the engine clears the source before a paired read confirms the converting save", async () => {
+    const { bridge, engineDoc, user, title, editor } = await editAnyway();
+    // State that landed during the save held its receipt back. The engine's
+    // clear arrives with the head unknown, then the paired read confirms the save.
+    deliver(bridge, change(engineDoc, () => clearWitness(engineDoc)));
+    expectEditing(editor, title);
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
+    expectEditing(editor, title);
+    await user.keyboard(" two");
+    expectEditing(editor, title);
+    expect(title.value).toContain("one two");
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps the editor when the converting save's receipt, a read of the head it wrote and the next save's receipt land before one render", async () => {
+    const { bridge, user, title, editor } = await editAnyway();
+    deliverAll(bridge, [
+      { update: EMPTY_UPDATE, head: { sha256: CONVERTED, committed: true } },
+      { update: EMPTY_UPDATE, head: { sha256: CONVERTED } },
+      { update: EMPTY_UPDATE, head: { sha256: sha("second save"), committed: true } },
+    ]);
+    expectEditing(editor, title);
+    await user.keyboard(" two");
+    expectEditing(editor, title);
+    expect(title.value).toContain("one two");
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("asks again when a restore lands after the converting save's receipt, before one render", async () => {
+    const { bridge } = await editAnyway(LOSSY);
+    deliverAll(bridge, [
+      { update: EMPTY_UPDATE, head: { sha256: CONVERTED, committed: true } },
+      { update: EMPTY_UPDATE, head: { sha256: sha(LOSSY) } },
+    ]);
+
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(screen.queryByTestId("markdown-editor")).toBeNull());
+    expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+  });
+
+  it("asks again for a replacement of the same bytes that installs before the session's first render", async () => {
+    const bridge = bridgeFor([{ text: LOSSY, contentHash: sha(LOSSY) }]);
+    let open!: (opened: ReturnType<typeof lossySession>) => void;
+    bridge.openEngineYDocSession.mockImplementation(() => new Promise(resolve => {
+      open = resolve;
+    }));
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    await user.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledWith(
+      expect.objectContaining({ allowLossySourceSha256: sha(LOSSY) })));
+    const sessionId = bridge.openEngineYDocSession.mock.calls[0]![0].sessionId;
+    const winner = witness(markdownToYDoc(LOSSY), LOSSY);
+    // Main replaces the session's document with the same bytes and head while
+    // the open is still out, and React renders only once both are in.
+    await act(async () => {
+      for (const listener of [...lineageReplacementListeners]) {
+        listener({ sessionId, update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [],
+          head: { sha256: sha(LOSSY) }, lineageGeneration: 2 });
+      }
+      open(lossySession());
+      await vi.waitFor(() => expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalled());
+    });
+
+    // The note hides Edit anyway while consent holds, so it shows again only
+    // once the note asks again.
+    await screen.findByTestId("lossy-note-edit-anyway");
+    expect(screen.getByTestId("lossy-note-notice")).toBeTruthy();
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+  });
+
+  it("checks a restore of the accepted source that lands while the converting save is pending, and asks again once its head arrives", async () => {
+    const { bridge } = await editAnyway(LOSSY);
+    // The restore installs while the save runs, so its head is unknown.
+    deliver(bridge, EMPTY_UPDATE, {});
+    expect(screen.queryByTestId("markdown-editor")?.getAttribute("contenteditable")).not.toBe("true");
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha(LOSSY) });
+
+    await screen.findByTestId("lossy-note-edit-anyway");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+  });
+
+  it("asks again after a restore to the same bytes while the converting save is pending, even when that save's success arrives late", async () => {
+    const { bridge } = await editAnyway(LOSSY);
+    // The restore installs the bytes the person accepted, with the same head.
+    deliver(bridge, EMPTY_UPDATE, { sha256: sha(LOSSY) });
+    deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
+
+    await screen.findByTestId("lossy-note-notice");
+    await waitFor(() => expect(screen.queryByTestId("markdown-editor")).toBeNull());
+    expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+  });
+
+  it.each(["before", "after"] as const)(
+    "asks again for a lossy change outside dohc that lands %s the converting save commits",
+    async (order) => {
+      const { bridge, engineDoc } = await editAnyway();
+      const outside = () => deliver(bridge, change(engineDoc, () => witness(engineDoc, OUTSIDE)), { sha256: sha(OUTSIDE) });
+      if (order === "before") {
+        outside();
+        // The save that ran across it sends no head; main reads the pair again.
+        deliver(bridge, EMPTY_UPDATE, { sha256: sha(OUTSIDE) });
+      } else {
+        deliver(bridge, EMPTY_UPDATE, { sha256: CONVERTED, committed: true });
+        outside();
+      }
+
+      await screen.findByTestId("lossy-note-notice");
+      await waitFor(() => expect(screen.queryByTestId("markdown-editor")).toBeNull());
+      expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
+      expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe("a note dohc wrote", () => {
