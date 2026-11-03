@@ -54,12 +54,17 @@ export const AGENT_TOOLS = [
 
 // runArguments holds what one run adds: the dohc MCP server it replies
 // through and, for Codex, its sandbox and trust (codexRunConfig.ts).
-export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
+// A read-only Claude Code run has only the built-in tools that read and only
+// the run's dohc server; a read-only Codex run gets that from codexRunConfig.
+export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   // mcp__dohc allows every tool the run's dohc server offers.
+  const claudeTools = readOnly
+    ? ["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
     : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
 }
 

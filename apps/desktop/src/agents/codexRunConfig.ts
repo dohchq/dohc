@@ -248,7 +248,8 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
 // it leaves unchanged.
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
 //   name is new for each run, because Codex merges a profile of the same name
-//   from the person's config into it.
+//   from the person's config into it. A read-only run uses Codex's built-in
+//   read-only profile instead; Codex refuses an unknown built-in name.
 // - Mark the folder untrusted so Codex doesn't trust it on its own or load
 //   its .codex config.
 // - Codex runs Windows commands only in a sandbox the person or their
@@ -259,6 +260,7 @@ export function codexRunConfig(input: {
   runId: string;
   platform: NodeJS.Platform;
   files: CodexConfigFiles | null;
+  readOnly?: boolean;
   readConfig?: (path: string) => string;
   realPath?: (path: string) => string;
   readLink?: (path: string) => string | null;
@@ -297,8 +299,9 @@ export function codexRunConfig(input: {
   const projects = codexTrustKeys(input.rootPath, input.platform, input.realPath)
     .map((key) => `${tomlKey(key)}={trust_level='untrusted'}`);
   return [
-    `permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`,
-    `default_permissions='${profile}'`,
+    ...(input.readOnly
+      ? ["default_permissions=':read-only'"]
+      : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
     `projects={${projects.join(",")}}`,
     ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
   ].flatMap((entry) => ["--config", entry]);

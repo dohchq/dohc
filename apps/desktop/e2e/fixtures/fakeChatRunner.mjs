@@ -75,12 +75,14 @@ function tomlStrings(value) {
 // run's permissions profile and folder trust follow the server's entries, and
 // on Windows so does the unelevated sandbox when no config chose one
 // (codexRunConfig.ts). The profile is named for the run and keeps .dohc
-// read-only. Every name Codex looks the workspace up by is untrusted.
+// read-only; a read-only run uses Codex's built-in read-only profile. Every
+// name Codex looks the workspace up by is untrusted.
 function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
+  const readOnly = config.get("default_permissions") === "':read-only'";
   const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
   const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
@@ -88,8 +90,8 @@ function codexReplyServer(args) {
   const rootKey = process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
   if (args.length !== 1 + 2 * keys.length + 3 ||
     !command || cwd !== dirname(command) ||
-    !/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "") ||
-    config.get("default_permissions") !== `'${profile}'` ||
+    (!readOnly && (!/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "") ||
+      config.get("default_permissions") !== `'${profile}'`)) ||
     config.get("projects") !== `{${trust.map(([entry]) => entry).join(",")}}` ||
     !tomlStrings(trust.map(([, key]) => key).join(",")).includes(rootKey) ||
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
@@ -100,17 +102,21 @@ function codexReplyServer(args) {
     config.get("mcp_servers.dohc.default_tools_approval_mode") !== "'approve'") {
     return null;
   }
-  return { command, args: tomlStrings(config.get("mcp_servers.dohc.args") ?? ""), cwd };
+  return { command, args: tomlStrings(config.get("mcp_servers.dohc.args") ?? ""), cwd, readOnly };
 }
 
 // The dohc MCP server a Claude Code launch names, after checking the launch.
 // Claude Code starts its servers in its own working directory.
 function claudeReplyServer(args) {
-  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
+  const readOnly = args.includes("--strict-mcp-config");
+  const tools = readOnly
+    ? ["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
+  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], ...tools];
   if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
   const servers = JSON.parse(readFileSync(args[7], "utf8")).mcpServers;
   return Object.keys(servers).join() === "dohc" && servers.dohc.type === "stdio"
-    ? { command: servers.dohc.command, args: servers.dohc.args, cwd: process.cwd() }
+    ? { command: servers.dohc.command, args: servers.dohc.args, cwd: process.cwd(), readOnly }
     : null;
 }
 
@@ -137,10 +143,11 @@ function replyThroughMcp(args, body) {
         send({ id: 2, method: "tools/list" });
       } else if (message.id === 2) {
         // A self-test's server offers the reply tool and nothing else. A
-        // run's offers it alone or with every other dohc tool, as its launch says.
+        // run's offers it alone or with every other dohc tool, as its launch
+        // says, and only a run with every tool may write.
         const names = message.result?.tools?.map((tool) => tool.name) ?? [];
         const replyOnly = launch.args.includes("--tool");
-        if ((selfTestMarker && !replyOnly) ||
+        if ((selfTestMarker && !replyOnly) || launch.readOnly !== replyOnly ||
           !names.includes("dohc_reply_to_chat") ||
           replyOnly !== (names.length === 1)) {
           console.error("Unexpected dohc tools", JSON.stringify(message));
