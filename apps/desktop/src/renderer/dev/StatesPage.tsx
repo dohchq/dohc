@@ -2666,22 +2666,22 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The Explorer's Home, at the sidebar's narrowest. */}
       <Section part="explorer-home" title="Explorer Home" menusAtRest>
-        <Specimen label="pinned, recent, pages in folders, Collections, apps, other files; a page open; a row hovered">
+        <Specimen label="open editors, pinned, pages in folders, Collections, apps, other files; a page open; a row hovered">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
             data-force-target='[data-section="pages"]:nth-of-type(1)'>
             <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="a new workspace: Pages, Collections and Apps each say they have nothing">
+        <Specimen label="a new workspace: no open editors, and Pages, Collections and Apps each say they have nothing">
           <div className="w-60 rounded-lg border border-line bg-panel">
-            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={HOME_NO_APPS}
+            <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[]} folders={[]} pinned={[]} apps={HOME_NO_APPS}
               appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
           </div>
         </Specimen>
-        <Specimen label="a share view holding one app: only Apps shows">
+        <Specimen label="a share view holding one app: Open editors, then only Apps">
           <div className="w-60 rounded-lg border border-line bg-panel">
-            <Explorer {...HOME_SPECIMEN} files={[{ path: "trip-planner/index.html", kind: "file" }]} folders={["trip-planner"]} pinned={[]}
-              recentFiles={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
+            <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[{ path: "trip-planner/index.html", kind: "file" }]}
+              folders={["trip-planner"]} pinned={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
               shareView={{ granterEmail: "sam@example.com" }} />
           </div>
         </Specimen>
@@ -3958,6 +3958,9 @@ const HOME_NO_APPS: ExplorerApps = { ...HOME_APPS, state: { status: "ready", wor
 // A share that holds one app and nothing else.
 const HOME_SHARED_APP: ExplorerApps = { ...HOME_NO_APPS, state: { status: "ready", workspaceId: "states", apps: [SHELF_APP] } };
 
+// One editor group with nothing open in it.
+const HOME_NO_EDITORS: ExplorerProps["editorGroups"] = [{ id: "primary", tabs: [], activeTab: null, size: 1 }];
+
 const HOME_FILES = [
   "Trip plan.md", "Packing list.md", "Budget.md",
   "Days/Day 1 - Lisbon.md", "Days/Day 2 - Sintra.md", "Days/Day 3 - Porto.md",
@@ -3972,7 +3975,6 @@ const HOME_SPECIMEN: ExplorerProps = {
   mode: "home",
   onModeChange: noop,
   listed: true,
-  recentFiles: ["Days/Day 2 - Sintra.md", "itinerary.csv", "Budget.md"],
   files: HOME_FILES,
   folders: ["Days", "Research", "trip-planner", "notes", "notes/reading-list", "guests", "receipts", "photos"],
   editorGroups: [{ id: "primary", tabs: [{ path: "Days/Day 2 - Sintra.md" }], activeTab: "Days/Day 2 - Sintra.md", size: 1 }],
