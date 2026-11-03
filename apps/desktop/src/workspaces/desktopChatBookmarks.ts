@@ -16,7 +16,7 @@ export interface DesktopChatBookmarkProjectionState {
 }
 
 type BookmarkWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol };
-type BookmarkCapture = Pick<WorkspaceEngineCapture, "writeGeneratedTextFile" | "archiveGeneratedTextFile">;
+type BookmarkCapture = Pick<WorkspaceEngineCapture, "writeGeneratedTextFile" | "archiveGeneratedTextFile" | "checkGeneratedTextArchive">;
 
 export function chatBookmarkDestination(title: string, targetId: string): string {
   const stem = title
@@ -281,6 +281,8 @@ export function createDesktopChatBookmarks<
             bookmarkId,
           });
           if (!bookmark) throw new Error("That bookmark no longer exists.");
+          // A page with live editing on keeps its bookmark and its place.
+          if (bookmark.state === "active") await capture.checkGeneratedTextArchive(bookmark.destinationPath);
           return store.archiveBookmark({
             workspaceId: workspace.workspaceId,
             ownerUserId,

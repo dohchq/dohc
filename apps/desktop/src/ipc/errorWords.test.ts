@@ -389,6 +389,14 @@ describe("error words", () => {
       `dohc can't rename "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then rename it again.",
     ]);
+    expect([livePageTitle("docs/a.md", "replace"), livePageBody("replace")]).toEqual([
+      `dohc can't replace "docs/a.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again.",
+    ]);
+    const archive = acrossIpc(new LivePageOwnedError([livePageTitle("Bookmarks/Chats/a.md", "archive"), livePageBody("archive")].join(String.fromCharCode(10))),
+      "desktop:archive-chat-bookmark");
+    expect(readError(archive)).toMatchObject({ title: `dohc can't archive "Bookmarks/Chats/a.md" while it has live editing on`,
+      words: "In Live documents, stop live editing for this page, then archive it again." });
     expect(isLivePageOwnedRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(false);
   });
 

@@ -572,13 +572,18 @@ export function isLivePageOwnedRefusal(error: unknown): boolean {
   return parse(error).name === "LivePageOwnedError";
 }
 
-export type LivePageAction = "move" | "rename" | "delete" | "restore";
+/** "replace" is a move or rename onto a page that the move would replace. */
+export type LivePageAction = "move" | "rename" | "delete" | "restore" | "replace" | "archive";
 
 export function livePageTitle(path: string, action: LivePageAction): string {
   return `dohc can't ${action} "${path}" while it has live editing on`;
 }
 
+/** The body for an Undo, and for a move that would replace the page. */
+export const LIVE_PAGE_TRY_AGAIN_BODY = "In Live documents, stop live editing for this page, then try again.";
+
 export function livePageBody(action: LivePageAction): string {
+  if (action === "replace") return LIVE_PAGE_TRY_AGAIN_BODY;
   return `In Live documents, stop live editing for this page, then ${action} it again.`;
 }
 
@@ -588,8 +593,6 @@ export type LivePageUndone = "renaming" | "moving" | "creating";
 export function livePageUndoTitle(path: string, undone: LivePageUndone): string {
   return `dohc can't undo ${undone} "${path}" while it has live editing on`;
 }
-
-export const LIVE_PAGE_UNDO_BODY = "In Live documents, stop live editing for this page, then try again.";
 
 // Without capture, dohc can't check a page or folder for live editing.
 export function historyOffTitle(path: string, action: "move" | "rename" | "delete"): string {

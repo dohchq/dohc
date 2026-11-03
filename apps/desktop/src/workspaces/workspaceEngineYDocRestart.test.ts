@@ -409,6 +409,57 @@ it("refuses an authored folder move, as the CLI and MCP send it, with the folder
   await capture.stop();
 });
 
+const MOVE_AUTHOR = { kind: "human" as const, humanId: "local-person" };
+const MOVE_OPERATION = "dohc-operation:44444444-4444-4444-8444-444444444444";
+
+it("refuses a move that would replace an owned page or a folder that holds one, before anything closes or moves", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-move-destination-");
+  await mkdir(join(rootPath, "notes"));
+  await mkdir(join(rootPath, "box"));
+  await writeFile(join(rootPath, "notes/page.md"), "source");
+  await writeFile(join(rootPath, "notes/target.md"), "owned");
+  await writeFile(join(rootPath, "box/page.md"), "owned in a folder");
+  state.ownedPage = "notes/target.md";
+  state.ownedUnder = "box/page.md";
+  const session = await capture.openYDocSession({ path: "notes/target.md", onRemoteUpdate: () => undefined });
+  const work = vi.fn(async () => "moved");
+  const replace = (to: string) => capture.changePathsAs(["notes/page.md", to], { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
+    work, () => []).catch((error: unknown) => error);
+  expect(await replace("notes/target.md")).toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't replace "notes/target.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again."].join(String.fromCharCode(10)) });
+  expect(await replace("box")).toMatchObject({ name: "LiveFolderError",
+    message: [`dohc can't replace "box" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then try again."].join(String.fromCharCode(10)) });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("source");
+  expect(await readFile(join(rootPath, "notes/target.md"), "utf8")).toBe("owned");
+  expect(await readFile(join(rootPath, "box/page.md"), "utf8")).toBe("owned in a folder");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
+it("refuses archiving an owned generated page with the archive words, before its session closes", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-generated-archive-");
+  await mkdir(join(rootPath, "Bookmarks/Chats"), { recursive: true });
+  await writeFile(join(rootPath, "Bookmarks/Chats/launch.md"), "owned");
+  state.ownedPage = "Bookmarks/Chats/launch.md";
+  const session = await capture.openYDocSession({ path: "Bookmarks/Chats/launch.md", onRemoteUpdate: () => undefined });
+  const words = [`dohc can't archive "Bookmarks/Chats/launch.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10));
+  await expect(capture.checkGeneratedTextArchive("Bookmarks/Chats/launch.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: words });
+  await expect(capture.archiveGeneratedTextFile({ fromPath: "Bookmarks/Chats/launch.md", toPath: "Bookmarks/Chats/Archived/launch.md",
+    expectedObjectId: "launch" })).rejects.toMatchObject({ name: "LivePageOwnedError", message: words });
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "Bookmarks/Chats/launch.md"), "utf8")).toBe("owned");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
 async function failRendererUpdate(
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>,
 ): Promise<void> {

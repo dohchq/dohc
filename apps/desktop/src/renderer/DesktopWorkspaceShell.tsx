@@ -975,6 +975,16 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
+  // Chats' failures. An archive refused for live editing opens Live documents.
+  const reportChatsError = useCallback(
+    (message: string, cause?: unknown, retry?: () => void) => {
+      if (!isLivePageOwnedRefusal(cause)) return reportFailureMessage(message, cause, retry);
+      const id = workspaceId, { title, words } = readError(cause);
+      reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id); } } });
+    },
+    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+  );
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -5389,7 +5399,7 @@ export function DesktopWorkspaceShell(props: {
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: reportFailureMessage,
+    onError: reportChatsError,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
@@ -5425,7 +5435,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: reportFailureMessage,
+    onError: reportChatsError,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,

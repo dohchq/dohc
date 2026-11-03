@@ -3833,16 +3833,10 @@ it.skipIf(engine.missing)("refuses renaming an owner-bound live page, keeps its 
   }
 }, 300_000);
 
-// dohc refuses to delete a page whose owner native owner delivery has bound,
-// so its workspace keeps publishing. Each case removes A, creates B and saves
-// a change to the file C; each observation prints as one `REPRO-OBS` line.
-// "bound" deletes in Explorer, "restore" restores A to before its creation,
-// and "unbound" never binds A. "stop-then-delete" stops live editing first;
-// "deferred-stop" leaves an unsent edit that Stop keeps. "file-manager"
-// deletes A's file outside dohc while it runs. In "file-manager-capture" A
-// starts as a file saved outside dohc and is bound with no live edit, so
-// capture owns A's head.
-type DeleteReproCase = "bound" | "unbound" | "restore" | "stop-then-delete" | "deferred-stop" | "file-manager" | "file-manager-capture";
+// dohc refuses to delete a page that native owner delivery has bound, so its workspace keeps
+// publishing. Each case removes A, then creates B and saves C; each observation prints as one `REPRO-OBS` line.
+type DeleteReproCase = "bound" | "unbound" | "restore" | "stop-then-delete" | "deferred-stop" | "file-manager" | "file-manager-capture"
+  | "file-manager-restore";
 const ownedDeleteRefusal = (action: "delete" | "restore") => `LivePageOwnedError: dohc can't ${action} "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then ${action} it again.`;
 
@@ -4193,6 +4187,27 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
       await writePage(newPage, "# B\n");
       await saveFile(existing, savedC);
     };
+    // A's head and the origin that wrote it, or null once nothing heads A.
+    const headOfA = () => {
+      const db = new DatabaseSync(ownerDb, { readOnly: true });
+      try {
+        const row = db.prepare("SELECT path, metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?").get(workspaceId, objectIdA);
+        return row === undefined ? null : { path: String(row.path), origin: String(row.origin) };
+      } finally { db.close(); }
+    };
+    // Stop live editing on A's row, then wait until the server retired A and no retirement is owed.
+    const stopAndRetire = async () => {
+      const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA })
+        .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
+      expect(stopped.ok, `${kind}: Stop live editing is accepted`).toBe(true);
+      let row: Awaited<ReturnType<typeof liveRowOfA>> = null;
+      await expect.poll(async () => {
+        if (await owedStopsOfA() > 0) await syncPass();
+        row = await liveRowOfA();
+        return row?.status === "retired" && await owedStopsOfA() === 0;
+      }, { timeout: 120_000, interval: 500 }).toBe(true).catch(error => { throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error }); });
+      return { stopped, row };
+    };
 
     if (kind === "stop-then-delete" || kind === "deferred-stop") {
       // Step 2: Stop live editing on A's row. "deferred-stop" first leaves more
@@ -4236,22 +4251,50 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         // A refused delete leaves A's file in place.
         expect(await onDisk(), "A stays on the owner's disk").toBe(true);
         await newAndChanged();
-        // Whether B and C publish is recorded, not asserted.
-        const published = await settle(6, relay => relay.a && relay.b && relay.cChanged);
-        observe({ bAndCPublished: published.relay.b && published.relay.cChanged && published.pending?.length === 0 });
+        expectPublished("after a deferred Stop and a refused delete", await settle(6, relay => relay.a && relay.b && relay.cChanged), true);
       }
       return;
     }
 
+    if (kind === "file-manager-restore") {
+      // Step 2: A's file goes from disk outside dohc, and capture leaves the delivered head.
+      step = "2-file-manager-delete";
+      const headBefore = headOfA();
+      await unlink(join(rootA, oldPath));
+      pages.observeFileEvents([{ path: oldPath, operation: "delete" }]);
+      await pages.flush();
+      observe({ headBefore, deletesOfA: await deletesOfA(), headAfter: headOfA(), onDisk: await onDisk(), ownerA: ownerRowsOfA() });
+      expect({ headBefore: headBefore?.origin, deletesOfA: await deletesOfA() }, "capture leaves a head it did not write")
+        .toEqual({ headBefore: "sync", deletesOfA: 0 });
+
+      // Step 3: History's Restore of A's earlier version. Its file is gone, so the restore first records that delete.
+      step = "3-restore";
+      const moments = (await pages.listMoments({ limit: 1_000 })).moments
+        .filter(moment => moment.objectId === objectIdA).sort((left, right) => left.recordedAtMs - right.recordedAtMs);
+      const latest = moments.at(-1);
+      if (!latest || moments.length < 2) throw new Error(`${oldPath} has no earlier version: ${JSON.stringify(moments)}`);
+      const restore = () => pages.restoreFileToBeforeMoment(latest.id, { kind: "human", humanId: "local-person" })
+        .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error),
+          code: error instanceof Error && error.cause instanceof DaemonRefusalError ? error.cause.message : null }));
+      const restored = await restore();
+      observe({ restored, latest: { id: latest.id, operation: latest.operation }, moments: moments.length, head: headOfA(),
+        deletesOfA: await deletesOfA(), onDisk: await onDisk(), refusalLines, ownerA: ownerRowsOfA() });
+      expect(restored, "the restore is refused with the restore words").toEqual({ ok: false, code: "live-page-owned", error: ownedDeleteRefusal("restore") });
+      expect({ head: headOfA(), bound: ownerRowsOfA().ownerBindings.length > 0, deletesOfA: await deletesOfA() },
+        "A keeps its head and its owner binding, with no delete").toEqual({ head: headBefore, bound: true, deletesOfA: 0 });
+      await newAndChanged();
+      expectPublished("after a refused restore", await settle(6, relay => relay.a && relay.b && relay.cChanged), true);
+
+      // Step 4: after Stop, the same restore goes through.
+      step = "4-stop-then-restore";
+      const { stopped, row } = await stopAndRetire();
+      const again = await restore();
+      observe({ stopped, liveRow: row, again, head: headOfA(), deletesOfA: await deletesOfA(), onDisk: await onDisk(), ownerA: ownerRowsOfA() });
+      expect({ ok: again.ok, onDisk: await onDisk() }, "after Stop, the restore goes through").toEqual({ ok: true, onDisk: true });
+      return;
+    }
+
     if (kind === "file-manager" || kind === "file-manager-capture") {
-      // A's head and the origin that wrote it, or null once nothing heads A.
-      const headOfA = () => {
-        const db = new DatabaseSync(ownerDb, { readOnly: true });
-        try {
-          const row = db.prepare("SELECT path, metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?").get(workspaceId, objectIdA);
-          return row === undefined ? null : { path: String(row.path), origin: String(row.origin) };
-        } finally { db.close(); }
-      };
       // Step 2: A's file goes from disk outside dohc. The engine's own watcher
       // captures it; the desktop's watcher feeds the same event to capture
       // (workspaceActivity.ts:508). No dohc delete, move or restore runs.
@@ -4287,9 +4330,10 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         expect({ headBefore: headBefore?.origin, deletesOfA: await deletesOfA() }, "capture leaves a head it did not write")
           .toEqual({ headBefore: "sync", deletesOfA: 0 });
       } else {
-        // Whatever capture does with a head it may retire, it does it once.
+        // Capture retires the head it wrote once, and no pass repeats a refusal.
         expect(headBefore?.origin, "capture wrote A's head").toBe("capture");
-        expect(await deletesOfA(), "capture retires A at most once").toBeLessThanOrEqual(1);
+        expect({ deletesOfA: await deletesOfA(), refusalsPerPass: perPass.map(entry => entry.refusalLines) }, "capture retires A once, with no refusal")
+          .toEqual({ deletesOfA: 1, refusalsPerPass: perPass.map(() => 0) });
       }
       return;
     }
@@ -4360,3 +4404,5 @@ it.skipIf(engine.missing)("leaves an owner-bound live page deleted outside dohc 
   () => runDeleteRepros(["file-manager"]), 300_000);
 it.skipIf(engine.missing)("records an owner-bound live page that capture wrote and that is deleted outside dohc, with no refusal (file-manager-capture)",
   () => runDeleteRepros(["file-manager-capture"]), 300_000);
+it.skipIf(engine.missing)("refuses restoring an owner-bound live page deleted outside dohc, and restores it after Stop (file-manager-restore)",
+  () => runDeleteRepros(["file-manager-restore"]), 300_000);

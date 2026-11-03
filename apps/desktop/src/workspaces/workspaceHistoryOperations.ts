@@ -1,6 +1,6 @@
 import { caseOnlyMoveReason, linkUndoRefusal, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { placeBack } from "./workspaceFileMoves";
-import { LIVE_PAGE_UNDO_BODY, livePageUndoTitle, type LivePageUndone } from "../ipc/errorWords";
+import { LIVE_PAGE_TRY_AGAIN_BODY, livePageUndoTitle, type LivePageUndone } from "../ipc/errorWords";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { posix, join } from "node:path";
@@ -226,7 +226,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         catch (error) {
           // The engine refuses while this computer owns the page live.
           if (undone && error instanceof Error && error.message === "live-page-owned") {
-            throw new Error(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_UNDO_BODY}`, { cause: error });
+            throw new Error(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_TRY_AGAIN_BODY}`, { cause: error });
           }
           const refusal = linkUndoRefusal(error);
           // These reasons name the operation; the other Undo refusals name workspace paths.

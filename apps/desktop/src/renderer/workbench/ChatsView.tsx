@@ -120,7 +120,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
-import { withErrorWords } from "../../ipc/errorWords";
+import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
@@ -1515,6 +1515,8 @@ export function ChatsView(props: {
           props.onError(
             ipcErrorMessage(error, "Could not update this bookmark."),
             error,
+            // An archive refused for live editing can run again after Stop.
+            isLivePageOwnedRefusal(error) ? () => void toggleBookmark(input) : undefined,
           );
         }
       } finally {
