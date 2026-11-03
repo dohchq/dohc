@@ -177,7 +177,9 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     }
   };
   // The folder a path names, found one link at a time, and every folder looked
-  // in on the way, where a link could be. Throws on a loop.
+  // in on the way, where a link could be. Throws on a loop, and on a link that
+  // readlink doesn't report, such as a junction to a volume path, because the
+  // folders it passes through would go unchecked.
   const follow = (at: string, hops = { left: 40 }): { path: string; through: string[] } => {
     const parent = path.dirname(at);
     if (parent === at) return { path: at, through: [] };
@@ -185,7 +187,10 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const here = path.join(up.path, path.basename(at));
     const through = [...up.through, up.path];
     const target = input.readLink(here);
-    if (target === null) return { path: here, through };
+    if (target === null) {
+      if (input.fileId(path.dirname(input.realPath(here))) !== input.fileId(up.path)) throw new Error("Unreported link");
+      return { path: here, through };
+    }
     if (--hops.left < 0) throw new Error("Too many links");
     const next = follow(path.resolve(up.path, target), hops);
     return { path: next.path, through: [...through, ...next.through] };
@@ -203,8 +208,7 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
     const reached = attempt(() => follow(written));
-    // The id of the folder follow reaches, then of each folder it looks in,
-    // which also holds any link that readlink can't read.
+    // The id of the folder follow reaches, then of each folder it looks in.
     const ids = reached === null ? [] : [reached.path, ...reached.through].map((folder) => attempt(() => input.fileId(folder)));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
     if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;

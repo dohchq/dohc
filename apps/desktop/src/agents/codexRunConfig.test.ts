@@ -18,11 +18,12 @@ const WORKSPACE = "C:\\Users\\Sam\\dohc\\personal";
 const OUTSIDE = ["C:\\other", "C:\\two words", "C:\\o'brien", "C:\\a\u007fb", "C:\\last"];
 
 // A disk with these folders and every folder above them. A link at a path
-// names another path, which the disk follows name by name, applying a `..`
-// after the link before it. A hidden link is one that readlink doesn't report,
-// such as a Windows junction to a volume path. An alias is another spelling of
-// a folder, such as its letter case or short name. A share reaches the files
-// of the local path it maps to, as their file ids show.
+// names another path, which the disk follows name by name. A `..` after a link
+// applies to the link's target, as on Linux and macOS. Windows applies it as
+// text, and no Windows case here has one. A hidden link is one that readlink
+// doesn't report, such as a Windows junction to a volume path. An alias is
+// another spelling of a folder, such as its letter case or short name. A share
+// reaches the files of the local path it maps to, as their file ids show.
 function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases = {}, shares = {}, links = {}, hidden = {} }: {
   aliases?: Record<string, string>;
   shares?: Record<string, string>;
@@ -357,13 +358,19 @@ describe("a dohc Codex run", () => {
   it("drops writable folders reached through a junction readlink doesn't report", () => {
     const other = "C:\\Users\\Sam\\dohc\\other\\.dohc";
     const run = (roots: string[]) => filesystem(windowsRun({ [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n` }, undefined,
-      disk("win32", [WORKSPACE, other, "C:\\opt\\c"], {
-        links: { "C:\\proj": `${WORKSPACE}\\out` },
-        // Junctions to volume paths, which readlink refuses and a run can make.
-        hidden: { [`${WORKSPACE}\\out`]: other, "C:\\opt\\c\\self": "C:\\opt\\c" },
+      disk("win32", [WORKSPACE, `${WORKSPACE}\\sub`, other, "C:\\opt\\c", "C:\\outside", "C:\\Users\\Sam\\.ssh"], {
+        links: { "C:\\proj": `${WORKSPACE}\\out`, [`${WORKSPACE}\\sub\\out`]: "C:\\outside", [`${WORKSPACE}\\keys`]: "C:\\Users\\Sam\\.ssh" },
+        // Junctions to volume paths, which readlink refuses. A run can make one
+        // in the workspace, and the person can make one anywhere.
+        hidden: {
+          [`${WORKSPACE}\\out`]: other, "C:\\opt\\c\\self": "C:\\opt\\c",
+          "C:\\alias": `${WORKSPACE}\\sub`, "C:\\keys": `${WORKSPACE}\\keys`,
+        },
       })));
-    expect(run(["C:\\proj", "C:\\opt\\c\\self"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
-    expect(run(["C:\\opt\\c\\self", "C:\\opt\\c"])).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\opt\\c": "write" });
+    expect(run(["C:\\proj", "C:\\opt\\c\\self", "C:\\alias\\out", "C:\\keys"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
+    expect(run(["C:\\opt\\c\\self", "C:\\opt\\c", "C:\\outside"])).toEqual({
+      ":workspace_roots": { ".dohc": "read" }, "C:\\opt\\c": "write", "C:\\outside": "write",
+    });
   });
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {
