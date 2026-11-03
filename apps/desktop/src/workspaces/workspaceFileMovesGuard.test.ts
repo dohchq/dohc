@@ -6,7 +6,7 @@ import { deferred } from "../testing/deferred";
 import { createMoveAcceptedEditsGuard, type LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { LiveFolderError } from "./workspaceEngineCapture";
+import { LiveFolderError, LivePageOwnedError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
 // #3089: every route that renames or moves a live page waits for the move
@@ -68,16 +68,17 @@ it.skipIf(process.platform === "linux")("the guard sees the stored spelling when
   expect(f.order).toContain("before Notes/Page.md");
 });
 
+// History off refuses a page that can have live editing, so this moves a file that can't.
 it("the app's move without a capture still waits for the guard before the disk changes", async () => {
-  const f = await workspace(["Notes/Page.md"]);
-  const moving = moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person,
+  const f = await workspace(["Notes/Photo.png"]);
+  const moving = moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Photo.png", toPath: "Notes/Renamed.png" }, person,
     { capture: null, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined, beforeMove: f.beforeMove });
-  await vi.waitFor(() => expect(f.order).toContain("before Notes/Page.md"));
+  await vi.waitFor(() => expect(f.order).toContain("before Notes/Photo.png"));
   await f.lockIsFree();
-  expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(true);
+  expect(existsSync(join(f.rootPath, "Notes/Photo.png"))).toBe(true);
   f.gate.resolve();
   await moving;
-  expect(existsSync(join(f.rootPath, "Notes/Renamed.md"))).toBe(true);
+  expect(existsSync(join(f.rootPath, "Notes/Renamed.png"))).toBe(true);
 });
 
 it.each([
@@ -98,25 +99,26 @@ it.each([
 });
 
 // The timeout path: the guard gives up, reports nothing, and the move lands.
+// With no capture, a file that can't have live editing, as History off refuses a page.
 it.each([
   { name: "the owner sync never answers", owner: () => new Promise<boolean>(() => {}), relay: async () => undefined },
   { name: "the guard's pull hangs, then rejects", owner: async () => true,
     relay: (_id: string, signal: AbortSignal) => new Promise<void>((_resolve, reject) =>
       signal.addEventListener("abort", () => setImmediate(() => reject(new Error("relay unavailable"))), { once: true })) },
 ])("a move goes ahead when $name", async ({ owner, relay }) => {
-  const f = await workspace(["Notes/Page.md"]);
+  const f = await workspace(["Notes/Photo.png"]);
   const relayCatchUp = vi.fn(relay);
-  const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "Notes/Page.md", objectId: "page" }], offline: () => false,
+  const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "Notes/Photo.png", objectId: "page" }], offline: () => false,
     ownerCatchUp: owner, relayCatchUp, waitMs: 50 });
   const unhandled = vi.fn();
   process.on("unhandledRejection", unhandled);
   try {
-    const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Page.md", toPath: "Notes/Renamed.md" }, person,
+    const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "Notes/Photo.png", toPath: "Notes/Renamed.png" }, person,
       { capture: null, requestId: "request", trashItem: async () => undefined, markDeleted: () => undefined,
         beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) });
-    expect(moved.path).toBe("Notes/Renamed.md");
-    expect(existsSync(join(f.rootPath, "Notes/Renamed.md"))).toBe(true);
-    expect(existsSync(join(f.rootPath, "Notes/Page.md"))).toBe(false);
+    expect(moved.path).toBe("Notes/Renamed.png");
+    expect(existsSync(join(f.rootPath, "Notes/Renamed.png"))).toBe(true);
+    expect(existsSync(join(f.rootPath, "Notes/Photo.png"))).toBe(false);
     if (relayCatchUp.mock.calls.length) await vi.waitFor(() => expect(relayCatchUp.mock.results[0]!.value).rejects.toThrow("relay unavailable"));
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(unhandled).not.toHaveBeenCalled();
@@ -150,34 +152,38 @@ it.each([
   expect(calls[2]).toBeGreaterThan(calls[0]!);
 });
 
-// A folder move refused for a page live on this computer catches nothing up,
-// and that refusal is the move's answer: it never reaches the capture, whose
-// own check might pass once the page stops. A folder whose listed page is live
-// only elsewhere, a folder whose check failed for another reason, and a single
-// page still wait for the guard, then reach the capture.
+// A move of a folder over a page live on this computer, or of a page this
+// computer owns live, catches nothing up, and that refusal is the move's answer:
+// it never reaches the capture, whose own check might pass once the page stops.
+// A folder or page whose check passes, and a folder whose check failed for
+// another reason, still wait for the guard, then reach the capture.
 it.each([
   { route: "app", move: (f: MoveFixture, options: Guarded, from: string, to: string) =>
     moveWorkspacePathByHand(f.operation, { fromPath: from, toPath: to }, person, { ...base(f), ...options }) },
   { route: "agent", move: async (f: MoveFixture, options: Guarded, from: string, to: string) => (await prepareMoveWorkspacePathAs(f.operation,
     { fromPath: from, toPath: to }, { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId }, { ...base(f), ...options }))() },
-])("an $route folder move over a page live here catches nothing up and is refused; other moves still catch up", async ({ route, move }) => {
-  const refusal = new LiveFolderError("refused for a page live here");
-  for (const { from, to, check, checked } of [
-    { from: "Notes", to: "Archive", check: refusal, checked: true },
-    { from: "Notes", to: "Archive", check: null, checked: true },
-    { from: "Notes", to: "Archive", check: new Error("engine read failed"), checked: true },
-    { from: "Notes/Page.md", to: "Notes/Renamed.md", check: refusal, checked: false },
+])("an $route move of a folder or page live here catches nothing up and is refused; other moves still catch up", async ({ route, move }) => {
+  const folderRefusal = new LiveFolderError("refused for a page live here");
+  const pageRefusal = new LivePageOwnedError("refused for a page this computer owns live");
+  for (const { from, to, check, folder } of [
+    { from: "Notes", to: "Archive", check: folderRefusal, folder: true },
+    { from: "Notes", to: "Archive", check: null, folder: true },
+    { from: "Notes", to: "Archive", check: new Error("engine read failed"), folder: true },
+    { from: "Notes/Page.md", to: "Notes/Renamed.md", check: pageRefusal, folder: false },
+    { from: "Notes/Page.md", to: "Notes/Renamed.md", check: null, folder: false },
   ]) {
     const f = await workspace(["Notes/Page.md"]);
-    const checkFolderMove = vi.fn(async () => { if (check) throw check; });
+    const checkFolderMove = vi.fn(async () => { if (check && folder) throw check; });
+    const checkPageMove = vi.fn(async () => { if (check && !folder) throw check; });
     const ownerCatchUp = vi.fn(async () => true);
     const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "Notes/Page.md", objectId: "page" }], offline: () => false,
       ownerCatchUp, relayCatchUp: async () => undefined });
-    Object.assign(f.capture, { checkFolderMove });
+    Object.assign(f.capture, { checkFolderMove, checkPageMove });
     const outcome = await move(f, { beforeMove: storedSpelling => guard.beforeMove("workspace", storedSpelling) }, from, to)
       .then(result => result, (error: unknown) => error);
-    expect(checkFolderMove.mock.calls).toEqual(checked ? [[from]] : []);
-    const refused = checked && check === refusal;
+    expect(checkFolderMove.mock.calls).toEqual(folder ? [[from]] : []);
+    expect(checkPageMove.mock.calls).toEqual(folder ? [] : [[from]]);
+    const refusal = folder ? folderRefusal : pageRefusal, refused = check === refusal;
     expect(ownerCatchUp.mock.calls).toEqual(refused ? [] : [["workspace", ["page"], expect.any(AbortSignal)]]);
     expect(f.order).toEqual(refused ? [] : ["capture"]);
     // The app throws the refusal. The agent gets it as the move's failure.

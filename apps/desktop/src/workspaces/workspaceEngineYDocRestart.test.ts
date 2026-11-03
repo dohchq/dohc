@@ -366,6 +366,21 @@ it("checks a folder move ahead of the move, with the folder words, and passes a 
 const PAGE_REFUSAL = `dohc can't move "notes/page.md" while it has live editing on
 In Live documents, stop live editing for this page, then move it again.`;
 
+// A move checks this before it catches a page up, so the refusal comes first.
+// It gives the move words and changes nothing.
+it("checks a page move ahead of the move, with the move words, and passes a page this computer doesn't own", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-page-move-check-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedPage = "notes/page.md";
+  await expect(capture.checkPageMove("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: PAGE_REFUSAL });
+  await expect(capture.checkPageMove("notes/other.md")).resolves.toBeUndefined();
+  expect(state.checkedFolders).toEqual([{ path: "notes/page.md", folder: false }, { path: "notes/other.md", folder: false }]);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
 it("refuses a move of an owned page with the move words, before anything moves", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-page-move-");
   await mkdir(join(rootPath, "notes"));
