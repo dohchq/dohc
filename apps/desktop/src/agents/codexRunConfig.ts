@@ -323,7 +323,7 @@ export function codexRunConfig(input: {
 // reply. Codex refuses a name it doesn't know.
 export const READ_ONLY_DISABLED_FEATURES = [
   "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host", "token_budget",
 ] as const;
 
 // A reply-only run also turns off the shell and view_image.
