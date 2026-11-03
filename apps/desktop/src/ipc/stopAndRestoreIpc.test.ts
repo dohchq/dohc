@@ -14,7 +14,7 @@ import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@do
 import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
 import { CollectionAutomations, type KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
-import { SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle } from "./errorWords";
+import { SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreDetail, sharedLiveRestoreTitle } from "./errorWords";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
@@ -37,6 +37,8 @@ const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 type Pass = { undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null };
 const NOTHING: Pass = { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
 const SCHEMA = "trip/packing/collection.yaml";
+// A 2,004-character path: its words would pass the 2,000 characters a refused file's detail may have.
+const LONG_PATH = `${`${"a".repeat(199)}/`.repeat(10)}a.md`;
 const OWNER: LocalPersonAuthor = { kind: "human", humanId: "user_owner" };
 
 function grant(overrides: Record<string, unknown>) {
@@ -381,6 +383,15 @@ describe("stop and restore in main", () => {
     await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
       files: [{momentId: "back-schema", kind: "refused", detail: `${sharedLiveRestoreTitle(SCHEMA)}
 ${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
+    });
+  });
+
+  it("shortens a long shared live path in a refused Undo's words", async () => {
+    const {store, target, rootPath} = await pendingFileUndo();
+    const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})], moment: {...schemaMoment, path: LONG_PATH},
+      restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files."), undoRunsOf: async () => NOTHING});
+    await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
+      files: [{momentId: "back-schema", kind: "refused", detail: sharedLiveRestoreDetail(LONG_PATH)}], errorMessage: null,
     });
   });
 
@@ -1364,6 +1375,13 @@ ${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
     await expect(live.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       review: [{ path: SCHEMA, reason: "restore-refused", detail: `${sharedLiveRestoreTitle(SCHEMA)}
 ${SHARED_LIVE_RESTORE_BODY}` }],
+      unfinished: null,
+    });
+    const long = fixture({ restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files."),
+      moment: { ...schemaMoment, path: LONG_PATH },
+      ledger: { "grant-edit": [{ writes: [{ committedAtMs: 2, files: [{ path: LONG_PATH, objectId: "o-schema", momentId: "m-schema", created: false }] }], nextAfterOriginSeq: null }] } });
+    await expect(long.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      review: [{ path: LONG_PATH, reason: "restore-refused", detail: sharedLiveRestoreDetail(LONG_PATH) }],
       unfinished: null,
     });
     const down = fixture({ restoreError: new Error("The workspace engine is not running.") });
