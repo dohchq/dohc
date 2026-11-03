@@ -4694,6 +4694,39 @@ describe("a refused delete of a page this computer owns live", () => {
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
     expect((await navigator.clipboard.readText()).split("\n")).toEqual(expect.arrayContaining(["File: a.md", "File: c.md"]));
   });
+
+  it("takes a selection's notice back once one of its pages is deleted, after the sidebar was hidden", async () => {
+    const SEVERAL = `dohc can't delete "a.md" and "c.md" while they have live editing on`;
+    const refusal = (path: string) => new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${path}" while it has live editing on\n${BODY}`);
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath !== "b.md") throw refusal(relativePath);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map(path => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("a.md"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("c.md"));
+    await user.keyboard("{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await screen.findByText(SEVERAL);
+    // Hiding the sidebar unmounts Explorer, and its notice stays in Notices.
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await waitFor(() => expect(screen.queryByTestId("side-panel")).toBeNull());
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await screen.findByTestId("side-panel");
+    deleteWorkspacePath.mockResolvedValue(undefined);
+    await user.click(await row("a.md"));
+    await user.keyboard("{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ relativePath: "a.md" })));
+    await waitFor(() => expect(screen.queryByText(SEVERAL)).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(SEVERAL)).toBeNull();
+  });
 });
 
 describe("a refused drag of a page this computer owns live", () => {

@@ -211,7 +211,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, sourcePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -968,10 +968,15 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
+  // Each Explorer notice that names several refused paths, by its identity.
+  // The shell keeps them with Notices, which outlive a hidden sidebar.
+  const refusedBatchesRef = useRef(new Map<string, ReadonlySet<string>>());
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused,
+      refusedPaths?: readonly string[]) => {
+      if (refusedPaths && identity !== undefined) refusedBatchesRef.current.set(identity, new Set(refusedPaths));
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage && "path" in livePage ? livePage.path : null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
@@ -3907,6 +3912,12 @@ export function DesktopWorkspaceShell(props: {
       for (const change of changes) {
         if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
+      }
+      // A notice naming several refused paths goes once one of them changes.
+      for (const [batch, paths] of refusedBatchesRef.current) {
+        if (!changes.some((change) => paths.has(sourcePath(change)))) continue;
+        refusedBatchesRef.current.delete(batch);
+        clearIdentity(batch);
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the

@@ -42,6 +42,7 @@ import {
   deleteRefusalIdentity,
   moveRefusalIdentity,
   pendingTreeMoveSettled,
+  sourcePath,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
@@ -183,7 +184,10 @@ export interface ExplorerProps {
   // failed move names itself, so its Try again runs it again and a later
   // success of the same move clears it. `livePage` names a page whose change
   // was refused because it has live editing on.
-  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => void;
+  // A notice that names several refused paths also gets them, so a later
+  // change to one of them can take it back.
+  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused,
+    refusedPaths?: readonly string[]) => void;
   onChangeSucceeded?: (identity: string) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
@@ -245,11 +249,6 @@ function ancestorsOf(path: string): string[] {
     out.push(segments.slice(0, i).join("/"));
   }
   return out;
-}
-
-// The path a change starts from.
-function sourcePath(change: PendingTreeChange): string {
-  return "path" in change ? change.path : change.fromPath;
 }
 
 // The rows from one key to another, both included, in `order`'s order.
@@ -589,8 +588,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
-  // Each notice that names several refused paths, by its identity.
-  const refusedBatches = useRef(new Map<string, ReadonlySet<string>>());
   // Keep the actual drag-origin element mounted while Chromium owns the
   // gesture. A virtualized source that disappears during auto-scroll does not
   // receive dragend, which can otherwise leave a stale internal move armed.
@@ -955,12 +952,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             failed.push({ change, cause, ...(livePage ? { livePage } : {}), ...(again ? { again } : {}), ...(reported ? { identity: reported } : {}) });
           }
         }
-        // A notice naming several refused paths goes once one of them changes.
-        for (const [batch, paths] of refusedBatches.current) {
-          if (!succeeded.some((change) => paths.has(sourcePath(change)))) continue;
-          refusedBatches.current.delete(batch);
-          onChangeSucceeded?.(batch);
-        }
         // Pages live editing refused report together, with the way to Live
         // documents, and any other failures report together apart from them.
         const live = failed.filter(({ livePage }) => livePage?.action === "delete" || livePage?.action === "move");
@@ -975,7 +966,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           const names = group.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : sourcePath(change)));
           const retried = group.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
           const identity = `refused:${JSON.stringify([workspaceId, verb, [...names].sort()])}`;
-          refusedBatches.current.set(identity, new Set(names));
           // The reason, when every failure gives the same one.
           const reasons = new Set(group.map(({ cause }) => ipcErrorMessage(cause, "")));
           const reason = reasons.size === 1 ? [...reasons][0]! : "";
@@ -985,6 +975,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             retried.length > 0 ? () => void runChangesOnce(retried, run, undefined, action) : undefined,
             identity,
             group === live ? { paths: names, action: verb } : undefined,
+            names,
           );
         }
         const changedExistingPath = succeeded.some(

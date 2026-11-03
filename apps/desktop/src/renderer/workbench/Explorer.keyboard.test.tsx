@@ -347,9 +347,8 @@ describe("selecting several rows in Files", () => {
     vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
     const onError = vi.fn();
     const onPathsChanged = vi.fn();
-    const onChangeSucceeded = vi.fn();
     const user = userEvent.setup();
-    render(<Fixture {...many({ onError, onPathsChanged, onChangeSucceeded })} />);
+    render(<Fixture {...many({ onError, onPathsChanged })} />);
     await user.click(row("b.md"));
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
     await user.click(screen.getByTestId("confirm-delete"));
@@ -358,8 +357,10 @@ describe("selecting several rows in Files", () => {
     expect(deleteWorkspacePath).toHaveBeenCalledTimes(3);
     expect(onPathsChanged.mock.calls[0]![0]).toEqual([expect.objectContaining({ kind: "delete-file", path: "c.md" })]);
     expect(onError).toHaveBeenCalledTimes(1);
-    const [, , retry, identity, livePage] = onError.mock.calls[0]!;
+    const [, , retry, identity, livePage, refusedPaths] = onError.mock.calls[0]!;
     expect(livePage).toEqual({ paths: ["b.md", "d.md"], action: "delete" });
+    // The shell takes the notice back once one of these paths changes.
+    expect(refusedPaths).toEqual(["b.md", "d.md"]);
 
     // Try again deletes the two refused pages again, and reports under the same identity.
     deleteWorkspacePath.mockClear();
@@ -367,14 +368,7 @@ describe("selecting several rows in Files", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "d.md"]);
     expect(onError.mock.calls[1]![3]).toBe(identity);
-    expect(onChangeSucceeded).not.toHaveBeenCalledWith(identity);
-
-    // Deleting one of them later, by hand, takes the notice back.
-    deleteWorkspacePath.mockResolvedValue(undefined);
-    await user.click(row("b.md"));
-    await user.keyboard("{Delete}");
-    await user.click(screen.getByTestId("confirm-delete"));
-    await waitFor(() => expect(onChangeSucceeded).toHaveBeenCalledWith(identity));
+    expect(onError.mock.calls[1]![5]).toEqual(["b.md", "d.md"]);
   });
 
   it("reports a live editing refusal apart from another failure in the same delete", async () => {
