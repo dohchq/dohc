@@ -1476,9 +1476,12 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         // A different local resolution is a new decision, even if it kept a reviewed side.
         disposition = ImportedHeadDisposition::Diverged;
     }
-    if disposition == ImportedHeadDisposition::ReviewedSide
-        && reviewed_note_moved_here(tx, payload, &live)?
-    {
+    let moved = if disposition == ImportedHeadDisposition::ReviewedSide {
+        reviewed_note_moved_here(tx, payload, &live)?
+    } else {
+        None
+    };
+    if moved.is_some() {
         // Taking the result up would give the note a second path here.
         disposition = ImportedHeadDisposition::Diverged;
     }
@@ -1627,7 +1630,19 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            let (review_conflict_id, inserted) = open_divergent_result_review(tx, payload, &live)?;
+            // A note this machine moved is reviewed at the path it has now.
+            let moved_review = moved
+                .map(|path| {
+                    let mut review = payload.clone();
+                    let path_ref = intern_path(&mut review.paths, &path);
+                    imported_live_head(tx, &review, path_ref).map(|head| (review, head))
+                })
+                .transpose()?;
+            let (review_payload, review_live) = moved_review
+                .as_ref()
+                .map_or((payload, &live), |(review, head)| (review, head));
+            let (review_conflict_id, inserted) =
+                open_divergent_result_review(tx, review_payload, review_live)?;
             preserve_unreviewed_local_text(tx, payload, key.as_ref(), envelope, search_policy)?;
             archive_conflicting_successor(
                 tx,
@@ -2037,22 +2052,23 @@ fn classify_imported_head(
     ))
 }
 
-/// Whether this machine holds the reviewed note at another path: its reviewed
-/// path here is free, but the note still has a path in the version.
+/// The path this machine holds the reviewed note at when its reviewed path
+/// here is free: this machine moved the note after the review.
 fn reviewed_note_moved_here(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
     live: &HeadV1,
-) -> Result<bool, SyncError> {
+) -> Result<Option<String>, SyncError> {
     let (None, Some(result)) = (live.present(), payload.result.present()) else {
-        return Ok(false);
+        return Ok(None);
     };
     tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM path_aliases \
-           WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+        "SELECT path FROM path_aliases \
+           WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1",
         params![payload.workspace_id, payload.target_version_id, result.object_id],
         |row| row.get(0),
     )
+    .optional()
     .map_err(SyncError::corrupt)
 }
 
