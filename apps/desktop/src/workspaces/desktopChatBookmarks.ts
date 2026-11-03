@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ChatBookmark } from "@dohc/workspace-contracts/engine";
+import { isLivePageOwnedRefusal } from "../ipc/errorWords";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import type { WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
@@ -44,7 +45,7 @@ export function createDesktopChatBookmarks<
   canonicalWorkspaceFor(lease: WorkspaceAuthorityLease<Workspace, State>): Workspace;
   linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore,
     "findBookmark" | "listThreads" | "listMessages" | "listChannels" |
-    "markBookmarkReady" | "markBookmarkFailed" | "listPendingBookmarks" | "archiveBookmark">;
+    "markBookmarkReady" | "markBookmarkFailed" | "listPendingBookmarks" | "archiveBookmark" | "markBookmarkPending">;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   sharedViewOf(workspaceId: string): unknown;
@@ -214,6 +215,8 @@ export function createDesktopChatBookmarks<
             failureReason:
               error instanceof Error ? error.message : "Projection failed",
           });
+          // A page with live editing on keeps its refusal, so Chats can offer Try again and Live documents.
+          if (isLivePageOwnedRefusal(error)) throw error;
           throw new Error(
             failed.bookmark.failureReason ?? "Could not save chat bookmark.",
           );
@@ -281,8 +284,12 @@ export function createDesktopChatBookmarks<
             bookmarkId,
           });
           if (!bookmark) throw new Error("That bookmark no longer exists.");
+          // An archive whose page did not move. Only a person archiving again
+          // queues it again: the worker never picks up a failed projection.
+          const unmoved = bookmark.state === "archived" && bookmark.projectionState === "failed";
           // A page with live editing on keeps its bookmark and its place.
-          if (bookmark.state === "active") await capture.checkGeneratedTextArchive(bookmark.destinationPath);
+          if (bookmark.state === "active" || unmoved) await capture.checkGeneratedTextArchive(bookmark.destinationPath);
+          if (unmoved) return store.markBookmarkPending({ workspaceId: workspace.workspaceId, ownerUserId, bookmarkId });
           return store.archiveBookmark({
             workspaceId: workspace.workspaceId,
             ownerUserId,

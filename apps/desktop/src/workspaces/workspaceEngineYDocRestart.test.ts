@@ -441,6 +441,31 @@ it("refuses a move that would replace an owned page or a folder that holds one, 
   await capture.stop();
 });
 
+it("refuses a move onto an owned page whose file is gone, and checks a destination with no page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-absent-destination-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "source");
+  // The head of notes/gone.md survives; its file was deleted outside dohc.
+  state.ownedPage = "notes/gone.md";
+  const work = vi.fn(async () => "moved");
+  const move = (to: string) => capture.changePathsAs(["notes/page.md", to], { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
+    work, () => []).catch((error: unknown) => error);
+  expect(await move("notes/gone.md")).toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't replace "notes/gone.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again."].join(String.fromCharCode(10)) });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("source");
+  // A destination with no page passes its check. This harness cannot hold
+  // capture, so the move stops later, and not for live editing.
+  state.checkedFolders.length = 0;
+  const free = await move("notes/free.md");
+  expect(state.checkedFolders).toContainEqual({ path: "notes/free.md", folder: false });
+  expect(free).not.toMatchObject({ name: "LivePageOwnedError" });
+  expect(free).not.toMatchObject({ name: "LiveFolderError" });
+  await capture.stop();
+});
+
 it("refuses archiving an owned generated page with the archive words, before its session closes", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-generated-archive-");
   await mkdir(join(rootPath, "Bookmarks/Chats"), { recursive: true });

@@ -322,6 +322,11 @@ import { ipcErrorMessage } from "./ipcError";
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// One Notices row per bookmark page an archive refused.
+function archiveRefusalIdentity(workspaceId: string, path: string): string {
+  return `chat-archive-refused:${workspaceId}:${path}`;
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -975,16 +980,20 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
-  // Chats' failures. An archive refused for live editing opens Live documents.
+  // Chats' failures. An archive refused for live editing opens Live documents
+  // at the page's row, and the page's archive takes the refusal back.
   const reportChatsError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void) => {
+    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => {
       if (!isLivePageOwnedRefusal(cause)) return reportFailureMessage(message, cause, retry);
       const id = workspaceId, { title, words } = readError(cause);
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
-        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id); } } });
+        ...(refusedPage !== undefined ? { identity: archiveRefusalIdentity(id, refusedPage) } : {}),
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, refusedPage ?? null); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
+  const onChatBookmarkArchived = useCallback((path: string) => clearIdentity(archiveRefusalIdentity(workspaceId, path)),
+    [clearIdentity, workspaceId]);
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -5400,6 +5409,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
@@ -5436,6 +5446,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,

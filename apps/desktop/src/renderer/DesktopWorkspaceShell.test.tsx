@@ -2548,3 +2548,90 @@ describe("workbench render cost", () => {
     }
   });
 });
+
+describe("a chat page archive refused for live editing", () => {
+  const PAGE = "Bookmarks/Chats/Team-update--thread-team.md";
+  const TITLE = `dohc can't archive "${PAGE}" while it has live editing on`;
+  const bookmark = {
+    bookmarkId: "bookmark-team", targetKind: "thread" as const, targetId: "thread-team", threadId: "thread-team",
+    mode: "live" as const, destinationPath: PAGE, state: "active" as const, projectionState: "ready" as const,
+    generation: 1, createdAtMs: 1, updatedAtMs: 1,
+  };
+  function chatsBridge() {
+    const bridge = Object.assign(
+      makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
+      {
+        listChatChannels: vi.fn(async () => ({
+          channels: [{ id: "channel-team", name: "team", slug: "team", kind: "channel" as const,
+            createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "channel-team" }],
+          fileThreads: [],
+        })),
+        listChatChannelShares: vi.fn(async () => ({
+          joined: [{ channelWireId: "channel-team", joined: null }],
+          sessionKey: "session-a",
+          relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+        })),
+        listChannelThreads: vi.fn(async () => ({
+          threads: [{
+            id: "thread-team", title: "Team update", createdAtMs: 1, updatedAtMs: 1, channelId: "channel-team",
+            messageCount: 1, lastReadSequence: 1, unreadCount: 0,
+            openingMessage: { presentation: { group: "fixture", hue: null, self: false }, id: "message-team",
+              authorKind: "human" as const, authorDisplayName: "Alice", bodySnippet: "A settled update",
+              createdAtMs: 1, reactions: [] },
+          }],
+          viewerAuthorId: "you",
+        })),
+        listChatBookmarks: vi.fn(async () => ({ bookmarks: [bookmark] })),
+        archiveChatBookmark: vi.fn(async (_input: { workspaceId: string; bookmarkId: string }) =>
+          ({ bookmark: { ...bookmark, state: "archived" as const } })),
+      },
+    );
+    bridge.archiveChatBookmark.mockRejectedValueOnce(Object.assign(new Error([TITLE,
+      "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10))), { name: "LivePageOwnedError" }));
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null,
+      documents: [{ path: "other.md", objectId: "object-other", status: "ready" as const, canResume: false },
+        { path: PAGE, objectId: "object-page", status: "ready" as const, canResume: false }] }));
+    return bridge;
+  }
+  async function refuse(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    await user.click(saved);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    return { saved, toast };
+  }
+  async function expectNoRefusal(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(TITLE)).toBeNull();
+  }
+
+  it("opens Live documents at the page's row, and Try again after Stop archives it and clears the notice", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsBridge();
+    renderShell(bridge);
+    const { toast } = await refuse(user);
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await within(dialog).findByRole("button", { name: `Stop live editing for ${PAGE}` });
+    expect(within(dialog).getByTestId(`live-document-row-${PAGE}`).getAttribute("aria-current")).toBe("true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await expectNoRefusal(user);
+  });
+
+  it("clears the notice when the bookmark's own control archives the page", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsBridge();
+    renderShell(bridge);
+    const { saved } = await refuse(user);
+    await user.click(saved);
+    await waitFor(() => expect(bridge.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await expectNoRefusal(user);
+  });
+});

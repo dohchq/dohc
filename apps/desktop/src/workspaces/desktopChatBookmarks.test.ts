@@ -54,6 +54,10 @@ function fixture() {
       row = { ...row, state: "archived", generation: row.generation + 1, projectionState: "pending" };
       return row;
     }),
+    markBookmarkPending: vi.fn(async () => {
+      row = { ...row, generation: row.generation + 1, projectionState: "pending", failureReason: undefined };
+      return row;
+    }),
   };
   const capture = {
     writeGeneratedTextFile: vi.fn(async (input: WriteInput) => ({
@@ -174,6 +178,32 @@ describe("desktop chat bookmarks", () => {
     await test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark");
     expect(test.store.archiveBookmark).toHaveBeenCalledTimes(1);
     expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an archive refused after its first check for a person to try again, with no retry by itself", async () => {
+    const test = fixture();
+    // Live editing starts between the first check and the page's move.
+    const refused = Object.assign(new Error("dohc can't archive the page while it has live editing on"), { name: "LivePageOwnedError" });
+    test.capture.archiveGeneratedTextFile.mockRejectedValueOnce(refused);
+    await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark")).rejects.toBe(refused);
+    const failed = await test.store.findBookmark();
+    expect(failed).toMatchObject({ state: "archived", projectionState: "failed" });
+    // The worker and its timer never move the page again by themselves.
+    test.owner.start();
+    test.owner.queueChatBookmarkProjection("workspace");
+    await vi.advanceTimersByTimeAsync(90_000);
+    test.owner.stop();
+    expect(test.store.listPendingBookmarks).toHaveBeenCalled();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledOnce();
+    expect(test.store.markBookmarkPending).not.toHaveBeenCalled();
+    expect(await test.store.findBookmark()).toMatchObject({ state: "archived", projectionState: "failed" });
+    // Try again after Stop checks the page again, then archives it.
+    await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark"))
+      .resolves.toMatchObject({ state: "archived", projectionState: "ready" });
+    expect(test.capture.checkGeneratedTextArchive).toHaveBeenCalledTimes(2);
+    expect(test.store.markBookmarkPending).toHaveBeenCalledOnce();
+    expect(test.store.archiveBookmark).toHaveBeenCalledOnce();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(2);
   });
 
   it("waits for the persisted identity before querying pending bookmarks after a relay pull", async () => {

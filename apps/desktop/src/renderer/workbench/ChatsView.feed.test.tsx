@@ -1119,17 +1119,43 @@ describe("ChatsView hybrid feed", () => {
     const refused = Object.assign(new Error([`dohc can't archive "Bookmarks/Chats/Friday--thread-1.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10))), { name: "LivePageOwnedError" });
     bridgeMock.archiveChatBookmark.mockRejectedValueOnce(refused);
-    renderView(vi.fn(), onError);
+    const onBookmarkArchived = vi.fn();
+    renderView(vi.fn(), onError, { onBookmarkArchived });
 
     await userEvent.click(await screen.findByTestId("chats-channel"));
     const saved = await screen.findByTestId("chats-post-bookmark");
     await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
     await userEvent.click(saved);
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(String), refused, expect.any(Function)));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(String), refused, expect.any(Function),
+      "Bookmarks/Chats/Friday--thread-1.md"));
     // The bookmark stays saved, and Try again archives it again.
     expect(saved.getAttribute("aria-pressed")).toBe("true");
+    expect(onBookmarkArchived).not.toHaveBeenCalled();
     await act(async () => { onError.mock.calls[0]![2](); });
     await waitFor(() => expect(bridgeMock.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onBookmarkArchived).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md"));
+    expect(saved.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps a post saved when its archive did not move the page, so its own control archives it", async () => {
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [{
+        bookmarkId: "bookmark-thread-1", targetKind: "thread", targetId: "thread-1", threadId: "thread-1", mode: "live",
+        destinationPath: "Bookmarks/Chats/Friday--thread-1.md", state: "archived", projectionState: "failed", generation: 2,
+        createdAtMs: NOW, updatedAtMs: NOW,
+      }],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()], viewerAuthorId: "author-you" });
+    const onBookmarkArchived = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onBookmarkArchived });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(saved);
+    expect(bridgeMock.archiveChatBookmark).toHaveBeenCalledWith({ workspaceId: "workspace-a", bookmarkId: "bookmark-thread-1" });
+    await waitFor(() => expect(onBookmarkArchived).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md"));
+    expect(saved.getAttribute("aria-pressed")).toBe("false");
   });
 });
 

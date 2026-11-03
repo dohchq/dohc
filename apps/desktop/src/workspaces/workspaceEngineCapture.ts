@@ -6449,9 +6449,10 @@ export function createWorkspaceEngineCapture(
               throw (moving ? moveRefusal(error, path, folder) : liveDocumentMutationRefusal(error, path, authored.operation)) ?? error;
             }
           }
-          // A move onto an existing entry deletes it, so it is checked as a delete.
+          // A move replaces what its destination records, even a page whose
+          // file is gone from disk, so the destination is checked as a delete.
           const destination = authored.operation === "move" ? paths[1] : undefined;
-          if (destination !== undefined && await lstat(join(rootPath, destination)).then(() => true, () => false)) {
+          if (destination !== undefined) {
             try {
               await engine.checkMove({ workspaceId, versionId, path: destination, change: "delete" });
             } catch (error) {
