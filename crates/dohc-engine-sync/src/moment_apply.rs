@@ -1135,23 +1135,12 @@ fn apply_moment_append(
                 )?;
             }
         }
-        tx.execute(
-            "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
-             VALUES (?1,?2,?3,?4) \
-             ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET object_id=excluded.object_id",
-            params![
-                envelope.workspace_id,
-                payload.version_id,
-                payload.payload_after_path,
-                payload.object_id
-            ],
-        )
-        .map_err(SyncError::persist)?;
-        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+        bind_path_alias(
             tx,
             &envelope.workspace_id,
             &payload.version_id,
             &payload.payload_after_path,
+            &payload.object_id,
         )?;
         let byte_length = match after_kind {
             ContentKind::Text => after_text
@@ -1745,6 +1734,14 @@ pub(crate) fn adopt_conflict_parent_text_result_in_tx(
             Some(&before),
         )?;
     }
+    // Deleting the note here removed its path, and the kept copy needs it back.
+    bind_path_alias(
+        tx,
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.payload_after_path,
+        &payload.object_id,
+    )?;
     upsert_snapshot(
         tx,
         &envelope.workspace_id,
@@ -2782,6 +2779,25 @@ fn insert_moment(
         workspace_id,
         order,
     )?;
+    Ok(())
+}
+
+/// Bind `path` to `object_id`, as a written file's head needs.
+fn bind_path_alias(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    version: &str,
+    path: &str,
+    object_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+         VALUES (?1,?2,?3,?4) \
+         ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET object_id=excluded.object_id",
+        params![workspace, version, path, object_id],
+    )
+    .map_err(SyncError::persist)?;
+    dohc_engine_storage::capture_file_holds::clear_orphaned_in(tx, workspace, version, path)?;
     Ok(())
 }
 
