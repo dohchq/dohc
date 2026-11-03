@@ -222,6 +222,29 @@ describe("Claude Code version check", () => {
     expect(await agentToolVersion(executable, resources)).toBe("2.1.320");
     expect(mocks.spawn).toHaveBeenCalledTimes(4);
   });
+
+  it("doesn't keep a version from a Claude Code swapped in while it was checked", async () => {
+    const executable = join(resources, "claude-swapped.exe");
+    const putBack = () => {
+      writeFileSync(executable, "old build");
+      fs.utimesSync(executable, 1_700_000_000, 1_700_000_000);
+    };
+    putBack();
+    let reported = "2.1.317";
+    mocks.spawn.mockImplementation(() => {
+      const probeChild = new FakeChild(4321);
+      const output = reported;
+      if (output === "2.1.317") writeFileSync(executable, "a newer build");
+      queueMicrotask(() => { probeChild.stdout!.emit("data", `${output} (Claude Code)`); probeChild.drain(0); });
+      return probeChild;
+    });
+
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
+    putBack();
+    reported = "2.1.294";
+    expect(await agentToolVersion(executable, resources)).toBe("2.1.294");
+    expect(mocks.spawn).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Windows agent probe owner", () => {
