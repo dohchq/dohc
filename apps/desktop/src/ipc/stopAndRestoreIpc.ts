@@ -31,7 +31,7 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
-import { isSharedLiveFileRefusal, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle } from "./errorWords";
+import { isSharedLiveFileRefusal, readError, sharedLiveRestoreDetail } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 
 // A refused file's reason, as the person reads it. A file History no longer
@@ -703,8 +703,7 @@ export function registerStopAndRestoreIpc<
             error instanceof RestoreHeadChangedError || error instanceof RestoreLocalChangesError || error instanceof RestoreFolderInUseError)) throw error;
           await receipts.add(error instanceof RestorePolicyRefusalError && error.reason === "policy-unreadable"
             ? { momentId, kind: "rules-unreadable", unreadable: [...error.unreadable] }
-            : { momentId, kind: "refused", detail: path && isSharedLiveFileRefusal(error) ? `${sharedLiveRestoreTitle(path)}
-${SHARED_LIVE_RESTORE_BODY}` : refusalDetail(error).slice(0, 500), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) });
+            : { momentId, kind: "refused", detail: path && isSharedLiveFileRefusal(error) ? sharedLiveRestoreDetail(path) : refusalDetail(error).slice(0, 500), ...(error instanceof SyncedDeletionRevivalError ? {refusal: "synced-deletion" as const} : {}) });
         }
       }
       await receipts.flush();
