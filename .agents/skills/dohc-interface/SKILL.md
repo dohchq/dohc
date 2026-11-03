@@ -227,7 +227,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
-- A toast's actions sit in a row under its text, as on its Notices row, so the text keeps the toast's full width.
+- A toast's worded actions sit in a row under its text, as on its Notices row. This keeps the text wide. Keep the toast's close × at the top right.
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
 - If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. It comes last on the actions line, on the toast and the row.
