@@ -2534,7 +2534,9 @@ async fn a_reopen_finishes_an_interrupted_first_import_under_its_id() {
 /// deadline, so startup can't finish it and only the live ticks can. The
 /// unreadable file is a share-locked handle, as in
 /// `a_quarantined_path_keeps_capture_flush_unsettled`, so this test is
-/// Windows-only.
+/// Windows-only. It appears once the import is under way: an unreadable file
+/// in the opening scan makes startup wait for its full barrier, with no
+/// deadline to run past.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_quarantined_file_lets_the_first_import_finish() {
@@ -2542,6 +2544,9 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
     let mut lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -2552,9 +2557,6 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
     lock.write_all(b"unreadable through the import")
         .expect("locked write");
     lock.flush().expect("locked flush");
-    let probe = CaptureApplyProbe::default();
-    probe.use_manual_initial_settle_deadline();
-    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
     probe.expire_initial_settle_deadline();
     wait_for_initial_settled_event(&mut events).await;
     probe.release_import_commit();
