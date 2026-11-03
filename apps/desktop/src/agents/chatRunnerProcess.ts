@@ -6,9 +6,12 @@ import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 import { type CodexConfigFiles, codexConfigFiles, codexRunConfig } from "./codexRunConfig";
-import type { RunDohcTools } from "./runDohcTools";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
+
+// The dohc MCP tools a profile's run gets: every tool dohc-mcp offers a local
+// workspace, or only the reply tool, as for the runner self-test.
+export type RunDohcTools = "all" | "reply";
 
 export const APP_QUIT_KILL_GRACE_MS = 1_500;
 
@@ -165,7 +168,7 @@ function tomlString(value: string): string {
 // A run replies through the dohc MCP server, which its agent starts outside
 // any sandbox; Codex's sandbox cannot connect to the desktop app, and Claude
 // Code's Bash needs Git Bash on Windows. The server offers the run's dohc
-// tools (runDohcTools.ts), and they run without approval.
+// tools, and they run without approval.
 // Packaged launchers use dohc's own Node. Codex starts the server in cli-bin;
 // Claude Code starts it in the workspace. Keep the workspace executable-search
 // protections for the agent and its other commands.
