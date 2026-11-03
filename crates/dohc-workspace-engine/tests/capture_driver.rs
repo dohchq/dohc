@@ -2563,7 +2563,8 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
 
     // Each flush drives up to MAX_FLUSH_CYCLES passes, so live ticks record
     // the rest of the import, the controller quarantines the locked file, and
-    // then reports nothing dirty.
+    // then reports nothing dirty. The quarantined file keeps every flush
+    // unsettled.
     for id in 2..5 {
         let flush = transport
             .call(
@@ -2573,6 +2574,7 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
             .await
             .expect("flush");
         assert_eq!(flush.result["degraded"], json!(true));
+        assert_eq!(flush.result["settled"], json!(false));
     }
 
     write_file(scratch.path(), "live.md", b"after the import");
@@ -2592,9 +2594,9 @@ async fn a_quarantined_file_lets_the_first_import_finish() {
 }
 
 /// The same, for a file that is already unreadable when the workspace opens.
-/// The opening scan is then degraded, so startup waits for its full barrier
-/// instead of an early import. Once the controller quarantines the file, the
-/// import finishes and a file created afterwards is a live change.
+/// With one other file, startup takes its full barrier, and its retries
+/// quarantine the locked file. The import then finishes, and a file created
+/// afterwards is a live change.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_file_unreadable_at_open_lets_the_first_import_finish() {
@@ -2620,7 +2622,8 @@ async fn a_file_unreadable_at_open_lets_the_first_import_finish() {
     wait_for_text(&transport, &handle, "healthy.md", Some("imported")).await;
 
     // Each flush drives up to MAX_FLUSH_CYCLES passes, so the controller
-    // quarantines the locked file and then reports nothing dirty.
+    // quarantines the locked file and then reports nothing dirty. The
+    // quarantined file keeps every flush unsettled.
     for id in 2..5 {
         let flush = transport
             .call(
@@ -2630,6 +2633,7 @@ async fn a_file_unreadable_at_open_lets_the_first_import_finish() {
             .await
             .expect("flush");
         assert_eq!(flush.result["degraded"], json!(true));
+        assert_eq!(flush.result["settled"], json!(false));
     }
 
     write_file(scratch.path(), "live.md", b"after the import");
