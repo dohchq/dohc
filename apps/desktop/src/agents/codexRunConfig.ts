@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
@@ -143,9 +143,9 @@ function attempt<T>(read: () => T): T | null {
 // drops a folder that
 // - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
 // - is .dohc under another name, such as a share;
-// - is inside the workspace, a temp folder or another folder dohc keeps, as
-//   written or resolved, because the run can write there and swap it for a
-//   link that this run or the next one would follow;
+// - is inside the workspace, a temp folder or another folder dohc keeps, or
+//   is reached through a link in one, because the run can write there and
+//   swap it for a link that this run or the next one would follow;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
 function writableRootEntries(tables: readonly ConfigTable[], input: {
@@ -154,6 +154,7 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
   env: NodeJS.ProcessEnv;
   home: string;
   realPath: (path: string) => string;
+  readLink: (path: string) => string | null;
   fileId: (path: string) => string;
 }): string[] {
   let setting: { file: string; roots: string[] } | undefined;
@@ -174,6 +175,19 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
       if (path.dirname(at) === at) return ids;
     }
   };
+  // The folders holding each link on the way from a path to the folder it
+  // names, one link at a time. Throws on a loop.
+  const follow = (at: string, hops = { left: 40 }): { path: string; holders: string[] } => {
+    const parent = path.dirname(at);
+    if (parent === at) return { path: at, holders: [] };
+    const up = follow(parent, hops);
+    const here = path.join(up.path, path.basename(at));
+    const target = input.readLink(here);
+    if (target === null) return { path: here, holders: up.holders };
+    if (--hops.left < 0) throw new Error("Too many links");
+    const next = follow(path.resolve(up.path, target), hops);
+    return { path: next.path, holders: [...up.holders, up.path, ...next.holders] };
+  };
   const writable = new Set([
     workspace, attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
     ...[input.env.TMPDIR, input.env.TEMP, input.env.TMP, ...(input.platform === "win32" ? [] : ["/tmp", "/var/tmp"])]
@@ -186,9 +200,10 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const written = path.resolve(path.dirname(setting.file), expanded);
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
+    const links = attempt(() => follow(written).holders);
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
-    if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
-    listed.push({ id, real, above: [...above(written), ...above(real)] });
+    if (real === null || id === null || links === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    listed.push({ id, real, above: [real, ...links].flatMap(above) });
   }
   // Codex may name the workspace by either path.
   const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));
@@ -218,6 +233,7 @@ export function codexRunConfig(input: {
   files: CodexConfigFiles | null;
   readConfig?: (path: string) => string;
   realPath?: (path: string) => string;
+  readLink?: (path: string) => string | null;
   fileId?: (path: string) => string;
   env?: NodeJS.ProcessEnv;
   home?: string;
@@ -229,6 +245,7 @@ export function codexRunConfig(input: {
     env: input.env ?? process.env,
     home: input.home ?? homedir(),
     realPath: input.realPath ?? realpathSync.native,
+    readLink: input.readLink ?? ((path: string) => lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null),
     fileId: input.fileId ?? ((path: string) => {
       const { dev, ino } = statSync(path, { bigint: true });
       return `${dev}:${ino}`;

@@ -17,21 +17,39 @@ function missing(path: string): never {
 const WORKSPACE = "C:\\Users\\Sam\\dohc\\personal";
 const OUTSIDE = ["C:\\other", "C:\\two words", "C:\\o'brien", "C:\\a\u007fb", "C:\\last"];
 
-// A disk with these folders and every folder above them. A link leads to the
-// folder it names, and a share reaches the files of the local path it maps to,
-// as their file ids show.
-function disk(platform: NodeJS.Platform, folders: readonly string[], links: Record<string, string> = {}, shares: Record<string, string> = {}) {
+// A disk with these folders and every folder above them. A link at a path
+// names another path, which the disk follows one link at a time. An alias is
+// another spelling of a folder, such as its letter case or short name. A share
+// reaches the files of the local path it maps to, as their file ids show.
+function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases = {}, shares = {}, links = {} }: {
+  aliases?: Record<string, string>;
+  shares?: Record<string, string>;
+  links?: Record<string, string>;
+} = {}) {
   const path = platform === "win32" ? win32 : posix;
   const known = new Set<string>();
   for (const folder of folders) for (let at = folder; !known.has(at); at = path.dirname(at)) known.add(at);
   const share = (value: string) => Object.keys(shares).find((prefix) => value.startsWith(prefix));
-  const realPath = (value: string): string => links[value] ?? (known.has(value) || share(value) ? value : missing(value));
+  const follow = (value: string): string => {
+    let at = value;
+    for (let hops = 0; hops < 40; hops += 1) {
+      const link = Object.keys(links).filter((from) => at === from || at.startsWith(`${from}${path.sep}`)).sort((a, b) => b.length - a.length)[0];
+      if (link === undefined) return at;
+      at = `${path.resolve(path.dirname(link), links[link]!)}${at.slice(link.length)}`;
+    }
+    throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
+  };
+  const realPath = (value: string): string => {
+    const real = follow(aliases[value] ?? value);
+    return known.has(real) || share(value) ? real : missing(value);
+  };
   const fileId = (value: string): string => {
     const prefix = share(value);
     const local = prefix ? path.resolve(`${shares[prefix]!}${value.slice(prefix.length)}`) : realPath(value);
     return known.has(local) ? local : missing(value);
   };
-  return { realPath, fileId, env: {}, home: platform === "win32" ? "C:\\Users\\Sam" : "/home/sam" };
+  const readLink = (value: string): string | null => links[value] ?? null;
+  return { realPath, readLink, fileId, env: {}, home: platform === "win32" ? "C:\\Users\\Sam" : "/home/sam" };
 }
 
 // The run's entries on Windows, with the person's config files as given.
@@ -158,7 +176,7 @@ describe("a dohc Codex run", () => {
 
   it("carries the person's writable folders into the run's profile by their real paths, with quoted keys", () => {
     const roots = ["C:\\other", "C:\\two words", "C:\\o'brien", "C:\\a\u007fb", "C:\\other", "c:\\OTHER", "C:\\missing"];
-    const folders = disk("win32", [WORKSPACE, ...OUTSIDE], { "c:\\OTHER": "C:\\other" });
+    const folders = disk("win32", [WORKSPACE, ...OUTSIDE], { aliases: { "c:\\OTHER": "C:\\other" } });
     expect(filesystem(windowsRun({ [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots).replace(/\u007f/gu, "\\u007f")}\n` }, undefined, folders))).toEqual({
       ":workspace_roots": { ".dohc": "read" },
       "C:\\other": "write",
@@ -200,12 +218,15 @@ describe("a dohc Codex run", () => {
       "C:\\other",
     ];
     const folders = disk("win32", [`${WORKSPACE}\\notes`, `${dohc}\\engine`, "C:\\other"], {
-      [`${WORKSPACE}\\.DOHC\\engine`]: `${dohc}\\engine`,
-      [`\\\\?\\${dohc}\\engine`]: `${dohc}\\engine`,
-      [`\\\\.\\${dohc}`]: dohc,
-      "C:\\Users\\SAMSMI~1\\dohc\\personal\\.dohc\\engine": `${dohc}\\engine`,
-      "C:\\junction": `${dohc}\\engine`,
-    }, { "\\\\localhost\\C$\\": "C:\\" });
+      aliases: {
+        [`${WORKSPACE}\\.DOHC\\engine`]: `${dohc}\\engine`,
+        [`\\\\?\\${dohc}\\engine`]: `${dohc}\\engine`,
+        [`\\\\.\\${dohc}`]: dohc,
+        "C:\\Users\\SAMSMI~1\\dohc\\personal\\.dohc\\engine": `${dohc}\\engine`,
+      },
+      links: { "C:\\junction": `${dohc}\\engine` },
+      shares: { "\\\\localhost\\C$\\": "C:\\" },
+    });
     expect(filesystem(windowsRun({ [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n` }, undefined, folders))).toEqual({
       ":workspace_roots": { ".dohc": "read" },
       "C:\\other": "write",
@@ -264,9 +285,12 @@ describe("a dohc Codex run", () => {
       rootPath: `${share}\\ws`, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("win32", [`${share}\\ws\\.dohc\\engine`, `${share}\\other`], {
-        "\\\\SERVER\\SHARE\\ws\\.DOHC": `${share}\\ws\\.dohc`,
-        "\\\\?\\UNC\\server\\share\\ws\\.dohc\\engine": `${share}\\ws\\.dohc\\engine`,
-      }, { "\\\\localhost\\d": `${share}\\ws\\.dohc` }),
+        aliases: {
+          "\\\\SERVER\\SHARE\\ws\\.DOHC": `${share}\\ws\\.dohc`,
+          "\\\\?\\UNC\\server\\share\\ws\\.dohc\\engine": `${share}\\ws\\.dohc\\engine`,
+        },
+        shares: { "\\\\localhost\\d": `${share}\\ws\\.dohc` },
+      }),
     });
     expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, [`${share}\\other`]: "write" });
   });
@@ -287,18 +311,26 @@ describe("a dohc Codex run", () => {
     const run = (roots: string[]) => filesystem(codexRunConfig({
       rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
-      ...disk("linux", ["/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/tmp/out", "/var/tmp/out", "/opt/a/b"], {
-        "/home/sam/ws": "/data/ws",
-        "/home/sam/notes": "/data/notes",
-        "/home/sam/dohc": "/data/ws/.dohc",
-        "/home/sam/ws/out": "/cache/build",
-        "/opt/a/link": "/srv/elsewhere",
+      ...disk("linux", [
+        "/home/sam", "/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/srv/other/.dohc",
+        "/tmp/out", "/var/tmp/out", "/opt/a/b",
+      ], {
+        links: {
+          "/home/sam/ws": "/data/ws",
+          "/home/sam/notes": "/data/notes",
+          "/home/sam/dohc": "/data/ws/.dohc",
+          "/data/ws/out": "/cache/build",
+          "/opt/a/link": "/srv/elsewhere",
+          // A link into the workspace, where an earlier run swapped the folder it names for a link into another workspace.
+          "/home/sam/proj": "/data/ws/build",
+          "/data/ws/build": "/srv/other/.dohc",
+        },
       }),
       env: { TMPDIR: "/srv/tmp/me" },
     }));
     const roots = [
       "/home/sam/notes", "/home/sam/dohc", "/data", "/home/sam/ws/out", "/srv/tmp/me/out", "/tmp/out", "/var/tmp/out",
-      "/opt/a", "/opt/a/b", "/opt/a/link",
+      "/opt/a", "/opt/a/b", "/opt/a/link", "/home/sam/proj",
     ];
     expect(run(roots)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/opt/a": "write" });
     expect(run([...roots, "/cache/build"])).toEqual({
@@ -311,9 +343,8 @@ describe("a dohc Codex run", () => {
       rootPath: "/Users/sam/ws", runId: "run_1", platform: "darwin", files: { requirements: [], config: ["/Users/sam/.codex/config.toml"] },
       readConfig: () => "[sandbox_workspace_write]\nwritable_roots = ['/var/other', '/Users/sam/WS/.DOHC/engine', '/var/link']\n",
       ...disk("darwin", ["/Users/sam/ws/.dohc/engine", "/private/var/other"], {
-        "/var/other": "/private/var/other",
-        "/Users/sam/WS/.DOHC/engine": "/Users/sam/ws/.dohc/engine",
-        "/var/link": "/Users/sam/ws/.dohc",
+        aliases: { "/Users/sam/WS/.DOHC/engine": "/Users/sam/ws/.dohc/engine" },
+        links: { "/var": "/private/var", "/private/var/link": "/Users/sam/ws/.dohc" },
       }),
     });
     expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/private/var/other": "write" });
