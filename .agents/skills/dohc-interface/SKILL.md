@@ -173,6 +173,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### While the action runs
 
 - The primary says what is happening, `Merging…`, and stays disabled. Add no status line.
+- If closing doesn't stop the action, the secondary reads **Close** and takes focus.
 - If the person can see the result, close the dialog.
 - If they cannot, the title becomes the result, `Merged 4 files into Main`, above one `Done`.
 - A failure shows in the dialog, as [Where messages go](#where-messages-go) says.
