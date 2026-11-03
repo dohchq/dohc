@@ -1,5 +1,10 @@
 import type { ChatAttachmentRecord, ChatFileReferenceInput } from "../../ipc/bridgeContract";
-import { codeCover } from "@dohc/workspace-contracts/chat-mentions";
+import {
+  codeCover,
+  findMentions,
+  scanMentionTokens,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 
 function encodeReferenceComponent(value: string): string {
   // Keep ordinary paths human-readable while escaping the token grammar's
@@ -86,6 +91,38 @@ export function extractChatFileReferenceTokens(body: string): ChatFileReferenceT
     start = next;
   }
   return tokens;
+}
+
+// Chat reads an @ name outside code and outside file links. A file link owns
+// its whole range, so a name inside a file's name names no one. The send
+// reads names with chatMentionTokens and chat views with chatMentions, so
+// the agents a message wakes are the mentions it shows.
+export function chatMentionTokens(
+  body: string,
+  fileTokens: readonly ChatFileReferenceToken[] = extractChatFileReferenceTokens(body),
+) {
+  return outsideFileLinks(scanMentionTokens(body, { ignoreCode: true }), fileTokens);
+}
+
+export function chatMentions(
+  body: string,
+  candidates: readonly MentionCandidate[],
+  fileTokens: readonly ChatFileReferenceToken[] = extractChatFileReferenceTokens(body),
+) {
+  return outsideFileLinks(findMentions(body, candidates, { ignoreCode: true }), fileTokens);
+}
+
+// Mentions and file links both come in source order, so one walk drops
+// each mention that overlaps a link.
+function outsideFileLinks<Mention extends { start: number; end: number }>(
+  mentions: Mention[],
+  fileTokens: readonly ChatFileReferenceToken[],
+): Mention[] {
+  let link = 0;
+  return mentions.filter(({ start, end }) => {
+    while (link < fileTokens.length && fileTokens[link]!.end <= start) link++;
+    return !(link < fileTokens.length && fileTokens[link]!.start < end);
+  });
 }
 
 export function extractChatFileReferences(body: string): ChatFileReferenceInput[] {

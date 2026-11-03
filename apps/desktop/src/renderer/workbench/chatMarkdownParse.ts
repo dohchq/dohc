@@ -4,9 +4,10 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
-import { findMentions, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import {
+  chatMentions,
   extractChatFileReferenceTokens,
   fileReferenceKey,
   resolveFileMentionNavigationTargets,
@@ -51,15 +52,12 @@ export function chatChips(
   if (!body.includes("@")) return [];
   const fileTokens = extractChatFileReferenceTokens(body);
   const targets = resolveFileMentionNavigationTargets(fileTokens, attachments);
-  const mentions = findMentions(body, candidates, { ignoreCode: true });
-  // Both lists are in source order; merge them in one walk. A file token owns
-  // its whole range, so a handle inside a filename is not a mention.
+  const mentions = chatMentions(body, candidates, fileTokens);
+  // Both lists are in source order and never overlap; merge them in one walk.
   const chips: Chip[] = [];
   let file = 0;
   for (const mention of mentions) {
     while (file < fileTokens.length && fileTokens[file]!.end <= mention.start) chips.push(fileChip(fileTokens[file++]!));
-    const token = fileTokens[file];
-    if (token && token.start < mention.end) continue;
     chips.push({ kind: "mention", start: mention.start, end: mention.end, mentionKind: mention.candidate.kind });
   }
   while (file < fileTokens.length) chips.push(fileChip(fileTokens[file++]!));
