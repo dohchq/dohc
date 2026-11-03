@@ -1271,7 +1271,7 @@ export class RestoreFolderInUseError extends Error {
 // Its message is the failure's own, for Copy details.
 export class MergeStoppedPartwayError extends Error {
   constructor(cause: unknown) {
-    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause));
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
     this.name = "MergeStoppedPartwayError";
   }
 }

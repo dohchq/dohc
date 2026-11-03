@@ -581,12 +581,12 @@ export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
 }
 
-/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
 /** A merge failed after some of the version's files were already in Main. */
 export function isMergeStoppedPartway(error: unknown): boolean {
   return parse(error).name === "MergeStoppedPartwayError";
 }
 
+/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
 export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
   const { name, code } = parse(error);
   if (name !== "VersionedTextStoreError") return null;
