@@ -612,6 +612,8 @@ export function VersionMenu(props: {
         </>
       ),
       checked: version.id === snapshot.activeVersionId,
+      // With only Main, one line under it says what a version is for.
+      ...(snapshot.versions.length === 1 ? { description: "Try changes without touching Main." } : {}),
       testId: "version-item",
       data: { "data-version-id": version.id, "data-version-name": version.name },
       onSelect: () => {
@@ -622,7 +624,8 @@ export function VersionMenu(props: {
     newName === null
       ? {
           id: "new",
-          label: "New version…",
+          // No ellipsis: it opens a field in place, not a dialog.
+          label: "New version",
           icon: <Plus size={14} aria-hidden />,
           testId: "version-new",
           onSelect: () => {
@@ -1902,18 +1905,19 @@ export function VersionComparePage(props: {
       data-testid="version-compare-page"
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
-      {/* The tab says Compare with Main, so the header names the version
-          and counts the files that differ; the empty state says when none do. */}
+      {/* The tab says Compare with Main, so the header names the version and
+          what the list is, the words the Versions page counts, and counts the
+          files that differ. The empty state says when none do. */}
       <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-2">
         <Layers size={14} aria-hidden className="shrink-0 text-subtle" />
-        <h2 className="m-0 min-w-0 truncate text-[14px] font-semibold text-ink">
+        <h2 className="m-0 flex min-w-0 items-baseline gap-2 text-[14px] font-semibold text-ink">
           {state.status === "ready" ? (
             <>
-              {state.versionName}{" "}
-              <span className="sr-only">compared with Main</span>
+              <span className="min-w-0 truncate">{state.versionName}</span>{" "}
+              <span data-testid="version-compare-subject" className="shrink-0 text-[12px] font-normal text-muted">Differences with Main</span>
             </>
           ) : (
-            "Comparing with Main"
+            <span className="min-w-0 truncate">Comparing with Main</span>
           )}
         </h2>
         {state.status === "ready" && state.files.length > 0 ? (

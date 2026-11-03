@@ -1306,7 +1306,7 @@ function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width
 const radioMenuItems: MenuEntry[] = [
   { id: "main", label: "Main", checked: false, onSelect: noop },
   { id: "draft", label: "Draft two", checked: true, onSelect: noop },
-  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "new", label: "New version", icon: <Plus size={14} aria-hidden />, onSelect: noop },
   MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
   {

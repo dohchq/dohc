@@ -200,6 +200,15 @@ describe("VersionMenu", () => {
     expect(screen.queryByTestId("version-menu")).toBeNull();
   });
 
+  it("says under Main what a version is for while only Main exists, and still ends with All versions", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
+    renderMenu({ onShareVersion: () => {}, onOpenAllVersions: () => {} });
+    await openOn(userEvent.setup(), "Main");
+    expect(rows()).toEqual(["Main", "version-new", "separator", "version-share", "separator", "version-all"]);
+    expect(descriptionOf(screen.getByRole("menuitemradio", { name: "Main" }))).toBe("Try changes without touching Main.");
+    expect(screen.getByTestId("version-new").textContent).toBe("New version");
+  });
+
   it("shows the chip's dot beside each version's name, and keeps its space on Main", async () => {
     renderMenu();
     await openOn(userEvent.setup(), "Draft");

@@ -616,12 +616,12 @@ describe("VersionComparePage paging", () => {
 
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-2" />);
     await settle();
-    screen.getByRole("heading", { name: "Second compared with Main" });
+    screen.getByRole("heading", { name: "Second Differences with Main" });
 
     resolveFirst({ files: [compareRow("first.md")], nextAfterPath: null });
     await settle();
 
-    screen.getByRole("heading", { name: "Second compared with Main" });
+    screen.getByRole("heading", { name: "Second Differences with Main" });
     expect(
       screen.getByTestId("version-compare-file").dataset.comparePath,
       "omit the response guard's cleanup invalidation. The first comparison replaces the second version's heading and file here.",

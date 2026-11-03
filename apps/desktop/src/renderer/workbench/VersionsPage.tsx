@@ -1,4 +1,3 @@
-import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { Check, Layers, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
@@ -22,10 +21,10 @@ interface Clashes { count: number; more: boolean }
 // a count shows as a lower bound.
 const CLASH_PAGES_MAX = 5;
 const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
-// The engine's caps: text files up to 10 MB and other files up to 5 MB have
-// versions. Larger files stay as they are on disk.
-const LARGE_FILES =
-  `Text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)} and other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)}`;
+// What a version leaves alone. The sizes are the engine's capture caps:
+// larger files stay as they are on disk.
+const SAME_IN_EVERY_VERSION =
+  `Chats, text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} and files History doesn't track stay the same in every version.`;
 
 // The Versions tab: every version in the workspace, the one you're in, how
 // each differs from Main, and the actions the titlebar menu offers for the
@@ -253,7 +252,7 @@ export function VersionsPage(props: {
     body = (
       <EmptyState icon={Layers} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
         {newVersion}
-        <SameInEveryVersion />
+        <p data-testid="versions-page-same" className="m-0 max-w-sm text-[12px] text-muted">{SAME_IN_EVERY_VERSION}</p>
       </EmptyState>
     );
   } else {
@@ -293,23 +292,6 @@ export function VersionsPage(props: {
         {body}
       </div>
     </div>
-  );
-}
-
-// What a version leaves alone, with the sizes behind "large files".
-function SameInEveryVersion() {
-  const tooltip = useTooltip();
-  return (
-    <p data-testid="versions-page-same" className="m-0 max-w-sm text-[12px] text-muted">
-      Chats and{" "}
-      <span {...tooltip.hoverProps} className="relative inline-block">
-        <span {...tooltip.focusProps} tabIndex={0} className="rounded underline decoration-dotted underline-offset-2">
-          large files
-        </span>
-        <Tooltip {...tooltip.tooltipProps}>{LARGE_FILES}</Tooltip>
-      </span>{" "}
-      stay the same in every version.
-    </p>
   );
 }
 
