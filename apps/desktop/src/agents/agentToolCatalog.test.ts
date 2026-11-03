@@ -25,10 +25,10 @@ describe("agent launch profiles", () => {
   });
   it("uses stdin, the run's own sandbox, no Git requirement, and no persistent Codex session", () => {
     const profile = { tool: "codex", executable: "C:\\Program Files\\Codex\\codex.exe" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--skip-git-repo-check", "--ephemeral", "-"]);
-    expect(agentProfileArguments(profile, ["--config", "x=1"])).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--skip-git-repo-check", "--ephemeral", "--json", "-"]);
+    expect(agentProfileArguments(profile, ["--config", "x=1"])).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--skip-git-repo-check", "--ephemeral", "--json", "-"]);
     // A reply-only run loads none of the person's saved command rules.
-    expect(agentProfileArguments(profile, ["--config", "x=1"], true)).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--ignore-rules", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile, ["--config", "x=1"], true)).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--ignore-rules", "--skip-git-repo-check", "--ephemeral", "--json", "-"]);
     expect(launchCommand(profile)).toBe('"C:\\Program Files\\Codex\\codex.exe"');
     expect(AgentLaunch.parse(profile)).toEqual(profile);
   });
@@ -41,7 +41,7 @@ describe("agent launch profiles", () => {
   it("puts the person's own flags once, after the subcommand and before dohc's", () => {
     const run = ["--config", "mcp_servers.dohc.required=true"];
     expect(agentProfileArguments({ tool: "codex", executable: "/bin/codex", arguments: ["--model", "o3"] }, run)).toEqual(
-      ["exec", "--model", "o3", "--config=approval_policy=never", "--config", "approval_policy=never", ...run, "--skip-git-repo-check", "--ephemeral", "-"],
+      ["exec", "--model", "o3", "--config=approval_policy=never", "--config", "approval_policy=never", ...run, "--skip-git-repo-check", "--ephemeral", "--json", "-"],
     );
     const claude = agentProfileArguments({ tool: "claude", executable: "/bin/claude", arguments: ["--model", "opus"] }, ["--mcp-config", "/x.json"]);
     expect(claude.slice(0, 5)).toEqual(["-p", "--model", "opus", "--setting-sources=user", "--permission-prompts"]);
