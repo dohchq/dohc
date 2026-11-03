@@ -7,14 +7,17 @@ import { ask, proposalPath, world, type World } from "../collections/collectionC
 import { formatClock } from "../time";
 import { CollectionChangeCard } from "./CollectionChangeCard";
 
-const message: ChatMessageRecord = { id: "message-1", threadId: "thread-1", presentation: { group: "agent", hue: null, self: false },
+const posted: ChatMessageRecord = { id: "message-1", threadId: "thread-1", presentation: { group: "agent", hue: null, self: false },
   authorKind: "agent", authorDisplayName: "Claude Code", body: "Here's the due date you asked for.", createdAtMs: 3_000 };
 const onReply = vi.fn(async (_input: { body: string; resolves: boolean }) => undefined);
 const onError = vi.fn();
 let place: World;
+// Cards remember what they showed for the session, so each test posts its own message.
+let message = posted, posts = 0;
 
 beforeEach(() => {
   place = world();
+  message = { ...posted, id: `message-${++posts}` };
   vi.stubGlobal("dohcDesktop", place.api);
   localStorage.clear();
   onReply.mockClear();
@@ -33,6 +36,44 @@ it("shows a collaborator's unapplied edit as its own row with its author", async
   // Rows the message's author made name nobody.
   expect(within(row("Adds the field Due date")).queryByText(/Claude Code/u)).toBeNull();
   expect(screen.getByText("History can't undo this change.")).toBeTruthy();
+});
+
+it("draws its frame and heading from the attached file, with one quiet line until the rows arrive", async () => {
+  ask(place);
+  let open!: () => void;
+  const history = new Promise<void>(resolve => { open = resolve; });
+  const list = place.api.listFileChats;
+  vi.spyOn(place.api, "listFileChats").mockImplementation(async input => { await history; return list(input); });
+  card();
+  const loading = await screen.findByTestId("lane-change-loading");
+  expect(loading.textContent).toContain("Change to Volunteers");
+  expect(within(loading).getByRole("status").textContent).toBe("Loading the change to Volunteers");
+  expect(within(loading).queryByRole("button", { name: "Try again" })).toBeNull();
+  open();
+  await screen.findByTestId("lane-change-card");
+  expect(screen.queryByTestId("lane-change-loading")).toBeNull();
+  expect(screen.getAllByRole("listitem")).toHaveLength(4);
+});
+
+it("keeps its frame when the Collection can't be read, and offers Try again there", async () => {
+  ask(place);
+  vi.mocked(place.api.dataset).mockRejectedValueOnce(new Error("dohc couldn't open Volunteers."));
+  card();
+  const failed = await screen.findByTestId("lane-change-load-failed");
+  expect(screen.getByTestId("lane-change-loading").textContent).toContain("Change to Volunteers");
+  expect(failed.textContent).toContain("dohc couldn't open Volunteers.");
+  fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
+  await screen.findByTestId("lane-change-card");
+});
+
+it("draws in full at once when the chat list shows it again", async () => {
+  ask(place);
+  const first = card();
+  await screen.findByTestId("lane-change-card");
+  first.unmount();
+  card();
+  expect(screen.getByTestId("lane-change-card")).toBeTruthy();
+  expect(screen.queryByTestId("lane-change-loading")).toBeNull();
 });
 
 it("applies the rows it showed and answers the message as the person who clicked", async () => {

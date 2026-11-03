@@ -5,16 +5,18 @@ import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { isDatasetServerNotFound } from "../../ipc/errorWords";
 import {
   collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, describeCollectionChangeRow, historyCanUndoCollectionChange,
-  type CollectionChangeRow,
+  type CollectionChangeProposal, type CollectionChangeRow,
 } from "../../workspaces/collectionChange";
 import { bridge } from "../bridge";
 import {
-  applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, undoCollectionChange, type CollectionChange, type CollectionChangeState,
+  applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, readCollectionChangeProposal, undoCollectionChange,
+  type CollectionChange, type CollectionChangeState,
 } from "../collections/collectionChangeFlow";
 import { ipcErrorMessage } from "../ipcError";
 import { formatClock } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { DangerButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { CHANGE_ICONS, CHANGE_LOSS, CollectionChangeReviewDialog } from "./CollectionChangeReviewDialog";
 /** Not now is one person's choice on one device. It posts nothing. */
 const notNowKey = (workspaceId: string, messageId: string) => `dohc:change-card:not-now:${workspaceId}:${messageId}`;
@@ -26,6 +28,16 @@ const applyFailure = (name: string) => (error: unknown) => isDatasetServerNotFou
   : { words: ipcErrorMessage(error, "dohc couldn't apply this change."), retry: true };
 
 type Phase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
+
+// The last change each card showed this session, so a card the chat list
+// draws again, as it scrolls back into view, keeps its height from the start.
+const shownChanges = new Map<string, CollectionChange>();
+const remember = (key: string, change: CollectionChange | null) => {
+  shownChanges.delete(key);
+  if (change === null) return;
+  shownChanges.set(key, change);
+  if (shownChanges.size > 200) shownChanges.delete(shownChanges.keys().next().value!);
+};
 
 /**
  * A message's attached change to a Collection's rules: what applying it does
@@ -48,7 +60,10 @@ export function CollectionChangeCard(props: {
   testIdPrefix: string;
 }) {
   const { workspaceId, message, path } = props;
-  const [change, setChange] = useState<CollectionChange | null>(null);
+  const shownKey = `${workspaceId}\n${message.id}\n${path}`;
+  // The attached file names the Collection, so the card's frame and heading draw once it answers.
+  const [proposal, setProposal] = useState<CollectionChangeProposal | null>(() => shownChanges.get(shownKey)?.proposal ?? null);
+  const [change, setChange] = useState<CollectionChange | null>(() => shownChanges.get(shownKey) ?? null);
   const [loadFailure, setLoadFailure] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const key = notNowKey(workspaceId, message.id);
@@ -64,12 +79,21 @@ export function CollectionChangeCard(props: {
   useEffect(() => {
     let current = true;
     setLoadFailure(null);
-    loadCollectionChange(bridge(), { workspaceId, path, postedAtMs: message.createdAtMs }).then(
-      loaded => { if (current) setChange(loaded); },
-      (error: unknown) => { if (current) setLoadFailure(ipcErrorMessage(error, "dohc couldn't read this change.")); },
-    );
+    const api = bridge();
+    void (async () => {
+      const read = await readCollectionChangeProposal(api, workspaceId, path);
+      if (!current) return;
+      setProposal(read);
+      if (read === null) { remember(shownKey, null); setChange(null); return; }
+      try {
+        const loaded = await loadCollectionChange(api, { workspaceId, proposal: read, postedAtMs: message.createdAtMs });
+        if (!current) return;
+        remember(shownKey, loaded);
+        setChange(loaded);
+      } catch (error) { if (current) setLoadFailure(ipcErrorMessage(error, "dohc couldn't read this change.")); }
+    })();
     return () => { current = false; };
-  }, [workspaceId, path, message.createdAtMs, reload, props.appliedBy?.id, props.undoneBy?.id]);
+  }, [workspaceId, path, shownKey, message.createdAtMs, reload, props.appliedBy?.id, props.undoneBy?.id]);
 
   // A failure stays on the card while it shows, and goes to the shell's toasts once the chat closed.
   const fail = (failure: { words: string; retry: boolean }, error: unknown) => {
@@ -100,26 +124,41 @@ export function CollectionChangeCard(props: {
   };
 
   const testId = (part: string) => `${props.testIdPrefix}-change-${part}`;
-  if (loadFailure && !change) {
-    return <div data-testid={testId("load-failed")} className="mt-2 flex w-full max-w-[740px] items-start gap-2 rounded-lg border border-line bg-panel px-3.5 py-2.5 text-[12px] text-ink">
-      <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
-      <span className="min-w-0">{loadFailure}</span>
-      <SecondaryButton size="row" className="ml-auto shrink-0" onClick={() => setReload(value => value + 1)}>Try again</SecondaryButton>
-    </div>;
-  }
-  if (!change) return null;
-  const { proposal, rows } = change;
-  const state: CollectionChangeState = stale && change.state.kind === "waiting" ? { kind: "edited", by: null, atMs: null } : change.state;
-  const undone = state.kind === "applied" && !state.current && props.undoneBy;
-  const waiting = state.kind !== "applied";
+  if (proposal === null) return null;
+  const state: CollectionChangeState | null = change === null ? null
+    : stale && change.state.kind === "waiting" ? { kind: "edited", by: null, atMs: null } : change.state;
   const busy = phase.kind === "applying";
-  if (waiting && notNow && !busy) {
+  // Folded until it's known to be applied. Its line says Waiting once that's known.
+  if (notNow && !busy && state?.kind !== "applied") {
     return <button type="button" data-testid={testId("not-now")} onClick={() => { try { localStorage.removeItem(key); } catch { /* Not now lasts only as long as storage does. */ } setNotNow(false); }}
       className="mt-2 flex h-[38px] w-full max-w-[740px] items-center gap-2 rounded-lg border border-line bg-panel px-3.5 text-left text-[13px] text-muted transition-colors hover:bg-panel-2">
       <ChevronRight size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
-      <span className="font-medium text-ink">Waiting</span><span className="min-w-0 truncate">· Change to {proposal.name}</span>
+      {state ? <><span className="font-medium text-ink">Waiting</span><span className="min-w-0 truncate">· Change to {proposal.name}</span></>
+        : <span className="min-w-0 truncate">Change to {proposal.name}</span>}
     </button>;
   }
+  const heading = (status?: ReactNode) => <div className="flex min-h-11 items-center gap-2.5 border-b border-line px-3.5 py-2.5">
+    <span className="font-semibold text-ink">Change to {props.onOpenPath
+      ? <button type="button" onClick={() => props.onOpenPath?.(proposal.datasetPath)} className="font-semibold text-ink underline decoration-subtle underline-offset-[3px]">{proposal.name}</button>
+      : proposal.name}</span>
+    {status}
+  </div>;
+  if (change === null || state === null) {
+    // The rows wait for History and the Collection. Only a failed read offers Try again.
+    return <div data-testid={testId("loading")} className="mt-2 w-full max-w-[740px] overflow-hidden rounded-lg border border-line bg-panel">
+      {heading()}
+      {loadFailure ? <div data-testid={testId("load-failed")} className="flex items-start gap-2 px-3.5 py-2.5 text-[12px] text-ink">
+        <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="mt-px shrink-0 text-danger" />
+        <span className="min-w-0">{loadFailure}</span>
+        <CopyButton iconOnly label="Copy" pinName getText={() => loadFailure} />
+        <SecondaryButton size="row" className="ml-auto shrink-0" onClick={() => setReload(value => value + 1)}>Try again</SecondaryButton>
+      </div> : <div className="flex min-h-8 items-center py-1.5 pl-10 pr-3.5">
+        <SkeletonRows rows={1} className="w-full" label={`Loading the change to ${proposal.name}`} />
+      </div>}
+    </div>;
+  }
+  const { rows } = change;
+  const undone = state.kind === "applied" && !state.current && props.undoneBy;
   const deletes = collectionChangeDeletes(rows);
   const undoable = historyCanUndoCollectionChange(rows);
   const applyLabel = collectionApplyLabel(deletes);
@@ -156,17 +195,12 @@ export function CollectionChangeCard(props: {
 
   return <div data-testid={testId("card")} data-state={undone ? "undone" : busy ? "applying" : phase.kind === "failed" ? "failed" : state.kind}
     className="mt-2 w-full max-w-[740px] overflow-hidden rounded-lg border border-line bg-panel">
-    <div className="flex min-h-11 items-center gap-2.5 border-b border-line px-3.5 py-2.5">
-      <span className="font-semibold text-ink">Change to {props.onOpenPath
-        ? <button type="button" onClick={() => props.onOpenPath?.(proposal.datasetPath)} className="font-semibold text-ink underline decoration-subtle underline-offset-[3px]">{proposal.name}</button>
-        : proposal.name}</span>
-      {status ? <span className="ml-auto flex items-center gap-2 text-[12px] text-muted">
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[11px] text-ink">
-          <span className={`size-1.5 rounded-full ${status.dot}`} aria-hidden />{status.label}
-        </span>
-        {status.reply ? <span>by {by(status.reply.authorDisplayName, status.reply.createdAtMs)}</span> : null}
-      </span> : null}
-    </div>
+    {heading(status ? <span className="ml-auto flex items-center gap-2 text-[12px] text-muted">
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[11px] text-ink">
+        <span className={`size-1.5 rounded-full ${status.dot}`} aria-hidden />{status.label}
+      </span>
+      {status.reply ? <span>by {by(status.reply.authorDisplayName, status.reply.createdAtMs)}</span> : null}
+    </span> : null)}
     <ul className="py-1">
       {rows.map((row, index) => <ChangeRow key={row.key} row={row} tense={tense} note={index === noteAt ? note : null} message={message} />)}
     </ul>

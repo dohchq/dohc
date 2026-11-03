@@ -2,11 +2,14 @@ import { expect, it } from "vitest";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { describeCollectionChangeRow } from "../../workspaces/collectionChange";
-import { applyCollectionChange, collectionChangeDigest, loadCollectionChange } from "./collectionChangeFlow";
+import { applyCollectionChange, collectionChangeDigest, loadCollectionChange, readCollectionChangeProposal } from "./collectionChangeFlow";
 import { ask, asked, base, claude, fixtureSources, ice, id, proposalPath, world, type World } from "./collectionChangeFlow.testHarness";
 
 const { schemaSql, operationSource, migrationSql } = fixtureSources;
-const load = (place: World) => loadCollectionChange(place.api, { workspaceId: "w", path: proposalPath, postedAtMs: 3_000 });
+const load = async (place: World) => {
+  const proposal = await readCollectionChangeProposal(place.api, "w", proposalPath);
+  return proposal && loadCollectionChange(place.api, { workspaceId: "w", proposal, postedAtMs: 3_000 });
+};
 
 it("computes the digest the server checks", async () => {
   const next = describeDatasetRevision({ definition: asked, revision: 4, schemaSql, operationSource });
@@ -23,6 +26,23 @@ it("shows a collaborator's unapplied edit as its own row with its author", async
     ["Removes the field Notes", "Claude Code", 2_000],
     ["Makes Email unique", "Ice", 1_000],
     ["Runs a migration on the 12 existing records", "Claude Code", 2_100],
+  ]);
+});
+
+it("names each row's author as History does, and nobody where History names only where a change came from", async () => {
+  const place = world(); ask(place);
+  // History names an Edit link's write by its holder, calls an agent that gave no name "Agent",
+  // and credits a change written straight to disk to nobody.
+  const link = { kind: "link" as const, grantId: "grant-1", grantGeneration: 1, principalId: "3f9a2c1b7d" };
+  place.moments[1] = place.moment(2, "volunteers/dataset.json", 1_000, { linkAuthor: link }, place.moments[1]!.afterText);
+  place.moments[2] = place.moment(3, "volunteers/dataset.json", 2_000, { agentAuthorName: "Agent" }, JSON.stringify(asked));
+  place.moments[3] = place.moment(4, place.moments[3]!.path, 2_100, {}, migrationSql);
+  const change = (await load(place))!;
+  expect(change.rows.map(row => [describeCollectionChangeRow(row, "present").text, row.source?.author ?? null])).toEqual([
+    ["Adds the field Due date", { name: "Agent", agent: true }],
+    ["Removes the field Notes", { name: "Agent", agent: true }],
+    ["Makes Email unique", { name: "Edit link · holder 3f9a2c1b", agent: false }],
+    ["Runs a migration on the 12 existing records", null],
   ]);
 });
 

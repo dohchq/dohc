@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetMigrationCandidate, DatasetRequest } from "@dohc/cli/dataset";
+import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { collectionChangeProposal, type CollectionChangeProposal } from "../../workspaces/collectionChange";
 import type { CollectionChangeApi } from "./collectionChangeFlow";
 
@@ -34,8 +35,9 @@ export const ice = { name: "Ice", agent: false }, claude = { name: "Claude Code"
 export function world() {
   const files: Record<string, string> = { "volunteers/dataset.json": JSON.stringify(asked, null, 2), [volunteers.schemaPath]: schemaSql,
     [volunteers.operationsPath]: operationSource, [migrationPath]: migrationSql };
-  const moment = (n: number, path: string, recordedAtMs: number, author: { agentAuthorName: string } | { personAuthorName: string }, afterText: string) =>
-    ({ id: `m${n}`, path, recordedAtMs, operation: "write" as const, ...author, afterText });
+  // A file edit and the author History names it by, if any.
+  const moment = (n: number, path: string, recordedAtMs: number, author: Pick<EngineMomentRecord, "agentAuthorName" | "personAuthorName" | "linkAuthor">, afterText: string) =>
+    ({ id: `m${n}`, path, recordedAtMs, operation: "write" as const, origin: "local-file" as const, ...author, afterText });
   const moments = [
     moment(1, "volunteers/dataset.json", 500, { personAuthorName: "Ice" }, JSON.stringify(volunteers)),
     moment(2, "volunteers/dataset.json", 1_000, { personAuthorName: "Ice" }, JSON.stringify(iceEdit)),

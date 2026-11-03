@@ -4,6 +4,7 @@ import {
   attributeCollectionChangeRows, collectionChangeProposal, CollectionChangeProposal, sameCollectionChange,
   type CollectionChangeAuthor, type CollectionChangeRow, type CollectionChangeStep,
 } from "../../workspaces/collectionChange";
+import { engineMomentAuthorName } from "../workbench/EngineHistory";
 
 export type CollectionChangeApi = Pick<DohcDesktopBridge, "dataset" | "readWorkspaceText" | "listFileChats" | "listEngineMoments" | "readEngineMoment">;
 type Api = CollectionChangeApi;
@@ -32,11 +33,10 @@ export async function collectionChangeDigest(input: { definition: unknown; revis
   return sha256(JSON.stringify(["dohc-dataset-change-v1", revisionSha256, migrationSha256]));
 }
 
-/** Who History says made a saved version of a file. */
-export function momentAuthor(moment: Pick<EngineMomentRecord, "agentAuthorName" | "personAuthorName" | "namedAuthor" | "liveAuthorName">): CollectionChangeAuthor | null {
-  if (moment.agentAuthorName !== undefined) return { name: moment.agentAuthorName, agent: true };
-  const name = moment.personAuthorName ?? moment.namedAuthor?.label ?? moment.liveAuthorName;
-  return name === undefined ? null : { name, agent: false };
+/** Who made a saved version of a file, by the name its History row shows. */
+export function momentAuthor(moment: EngineMomentRecord): CollectionChangeAuthor | null {
+  const name = engineMomentAuthorName(moment);
+  return name === undefined ? null : { name, agent: moment.agentAuthorName !== undefined };
 }
 
 async function readText(api: Api, workspaceId: string, relativePath: string): Promise<string | null> {
@@ -93,16 +93,16 @@ async function attribute(api: Api, workspaceId: string, proposal: CollectionChan
   return { rows, paths, history };
 }
 
-/**
- * The change a message's attached file asks a person to apply, with who made
- * each part and whether it still waits. Null when the file isn't one.
- */
-export async function loadCollectionChange(api: Api, input: { workspaceId: string; path: string; postedAtMs: number }): Promise<CollectionChange | null> {
-  const { workspaceId, postedAtMs } = input;
-  const text = await readText(api, workspaceId, input.path);
+/** A message's attached change file, which names its Collection. Null when the file isn't one. */
+export async function readCollectionChangeProposal(api: Api, workspaceId: string, path: string): Promise<CollectionChangeProposal | null> {
+  const text = await readText(api, workspaceId, path);
   if (text === null) return null;
-  let proposal: CollectionChangeProposal;
-  try { proposal = CollectionChangeProposal.parse(JSON.parse(text)); } catch { return null; }
+  try { return CollectionChangeProposal.parse(JSON.parse(text)); } catch { return null; }
+}
+
+/** What applying a change file does, with who made each part and whether it still waits. */
+export async function loadCollectionChange(api: Api, input: { workspaceId: string; proposal: CollectionChangeProposal; postedAtMs: number }): Promise<CollectionChange> {
+  const { workspaceId, proposal, postedAtMs } = input;
   const selection = { workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId };
   const described = await api.dataset({ ...selection, action: "describe" });
   const saved = await api.dataset({ ...selection, action: "historyRevision", revisionSha256: proposal.base.revisionSha256 });

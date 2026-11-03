@@ -495,6 +495,7 @@ export function ChatLane(props: {
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
     return <>
       {changeFile !== undefined ? <CollectionChangeCard
+        key={`${workspaceId}:${message.id}:${changeFile}`}
         workspaceId={workspaceId}
         message={message}
         path={changeFile}
