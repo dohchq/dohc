@@ -1032,7 +1032,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
       }
-      const child = spawnConfiguredRunner({
+      const child = await spawnConfiguredRunner({
         rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
         runId: claim.run.runId,
@@ -1041,7 +1041,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         profile,
         dohcTools,
         prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, profile?.tool, dohcTools),
-        assertMayStart,
+        // A reply-only Codex run checks its servers first, and dohc can start
+        // quitting meanwhile.
+        assertMayStart: () => {
+          if (stopped) throw new Error("dohc is quitting before the runner can start.");
+          assertMayStart();
+        },
       });
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
@@ -1866,7 +1871,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           depth: 0,
           dispatch: "self-test",
         });
-        const child = spawnConfiguredRunner({
+        const child = await spawnConfiguredRunner({
           rootPath: workspace.rootPath,
           threadId,
           runId,
@@ -1876,7 +1881,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           // The self-test checks only that the reply arrives.
           dohcTools: "reply",
           prompt,
-          assertMayStart,
+          assertMayStart: () => {
+            if (shuttingDown) throw new Error("Agent dispatch is stopping.");
+            assertMayStart();
+          },
         });
         return await new Promise<RunnerSelfTestResult>((resolveResult) => {
           const complete = async (result: RunnerSelfTestResult) => {

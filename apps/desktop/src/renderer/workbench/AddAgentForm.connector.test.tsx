@@ -79,9 +79,9 @@ it("keeps the form open while saving and checking", async () => {
 });
 
 it("requires an update before selecting an older Claude profile", async () => {
-  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.294" } : tool) })));
+  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.315" } : tool) })));
   render(<AddAgentForm {...f.props} />);
-  await screen.findByText("Update Claude Code to 2.1.295 or later to use this profile.");
+  await screen.findByText("Update Claude Code to 2.1.316 or later to use this profile.");
   expect(screen.getByRole("button", { name: "Claude Code" }).hasAttribute("disabled")).toBe(true);
 });
 

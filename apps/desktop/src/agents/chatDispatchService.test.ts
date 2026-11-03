@@ -677,6 +677,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     arch: options.arch,
     // Never this computer's own Codex config.
     codexConfigFiles: () => ({ requirements: [], config: [] }),
+    // Never this computer's own Codex either. Its check finds only dohc's server.
+    runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]),
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -1275,14 +1277,14 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
   });
 
-  it.each(["2.1.294", null])("doesn't start Claude Code that reports %s, which may not hold a run to its tools", async (claudeVersion) => {
+  it.each(["2.1.315", null])("doesn't start Claude Code that reports %s", async (claudeVersion) => {
     const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } }, claudeVersion });
     const trigger = await createAgentThread(fixture, { body: "Plan the trip." });
     await activate(fixture);
 
     await vi.waitFor(() => expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({
       state: "failed",
-      failureReason: "runner failed to start: update Claude Code to 2.1.295 or later to use this agent",
+      failureReason: "runner failed to start: update Claude Code to 2.1.316 or later to use this agent",
     }));
     expect(fixture.spawnCalls).toEqual([]);
   });
@@ -3819,10 +3821,13 @@ describe("chatDispatchService", () => {
       : call.args.join(" ");
     expect(serverArgs).toContain("dohc_reply_to_chat");
     if (tool === "claude") {
-      expect(call.args.slice(-5)).toEqual(["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
+      expect(call.args.slice(-7)).toEqual(["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
       expect(call.args).not.toContain("Edit(/**)");
     } else {
       expect(call.args).toContain("default_permissions=':read-only'");
+      expect(call.args).toContain("--ignore-rules");
+      expect(call.args).toContain("notify=[]");
+      expect(call.args.filter((_, index) => call.args[index - 1] === "--disable")).toEqual(expect.arrayContaining(["shell_tool", "unified_exec", "view_image"]));
       expect(call.args.some((arg) => arg.startsWith("permissions."))).toBe(false);
     }
     const prompt = call.process.stdinText;
@@ -3883,7 +3888,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.default_tools_approval_mode='approve'",
-      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] }, readOnly: true })) : ["--mcp-config", configPath], true));
+      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
           mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },

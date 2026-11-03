@@ -242,7 +242,7 @@ it("says what each tool needs before it can be added", async () => {
   bridgeMock.detectAgentTools.mockResolvedValueOnce({
     workingDirectory: "C:\\Work",
     tools: [
-      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.300", auth: "signed-out", probe: "detected" },
+      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-out", probe: "detected" },
       { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
     ],
   });

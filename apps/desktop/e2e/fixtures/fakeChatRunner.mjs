@@ -28,6 +28,28 @@ if (profileTool && ["auth", "login", "status"].includes(process.argv[3])) {
 }
 const threadId = process.env.DOHC_CHAT_THREAD;
 const runId = process.env.DOHC_RUN_ID;
+// A reply-only Codex run also turns off each MCP server the person's config
+// names, web search, the command run after each turn, and these features
+// (codexRunConfig.ts), and loads no saved command rules (agentToolCatalog.ts).
+// A reply-only run also turns off the shell and view_image.
+const READ_ONLY_DISABLED_FEATURES = [
+  "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
+  "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+];
+const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"];
+const CODEX_TAIL = ["--skip-git-repo-check", "--ephemeral", "-"];
+// Before a reply-only run, dohc asks Codex which MCP servers the run's own
+// arguments start (chatRunnerProcess.ts). Codex reads no stdin for it.
+if (profileTool === "codex" && process.argv[3] === "mcp") {
+  const args = process.argv.slice(3);
+  const run = ["exec", "--config", "approval_policy=never", ...args.slice(3), "--ignore-rules", ...CODEX_TAIL];
+  if (args[1] !== "list" || args[2] !== "--json" || !codexReplyServer(run)?.readOnly) {
+    console.error("Unexpected Codex server check", args);
+    process.exit(2);
+  }
+  console.log(JSON.stringify([{ name: "dohc", enabled: true }]));
+  process.exit(0);
+}
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -81,14 +103,23 @@ function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
   const readOnly = config.get("default_permissions") === "':read-only'";
+  const disabled = args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : []);
+  const replyOnly = tomlStrings(config.get("mcp_servers.dohc.args") ?? "").includes("--tool");
+  const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
+  const tail = readOnly ? ["--ignore-rules", ...CODEX_TAIL] : CODEX_TAIL;
   const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", ...(readOnly ? [...owners, "web_search", "notify"] : []), "projects", ...sandbox];
+  if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
+    owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
+    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]"))) {
+    return null;
+  }
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
   const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
   const root = realpathSync.native(process.cwd());
   const rootKey = process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
-  if (args.length !== 1 + 2 * keys.length + 3 ||
+  if (args.length !== 1 + 2 * keys.length + 2 * disabled.length + tail.length ||
     !command || cwd !== dirname(command) ||
     (!readOnly && (!/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "") ||
       config.get("default_permissions") !== `'${profile}'`)) ||
@@ -97,7 +128,7 @@ function codexReplyServer(args) {
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
-    JSON.stringify(args.slice(-3)) !== JSON.stringify(["--skip-git-repo-check", "--ephemeral", "-"]) ||
+    JSON.stringify(args.slice(-tail.length)) !== JSON.stringify(tail) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
     config.get("mcp_servers.dohc.default_tools_approval_mode") !== "'approve'") {
     return null;
@@ -110,7 +141,7 @@ function codexReplyServer(args) {
 function claudeReplyServer(args) {
   const readOnly = args.includes("--strict-mcp-config");
   const tools = readOnly
-    ? ["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
     : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], ...tools];
   if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
