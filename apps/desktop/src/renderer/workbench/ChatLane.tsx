@@ -389,8 +389,8 @@ export function ChatLane(props: {
   }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages]);
 
   // Applying or undoing a change answers in the change's own place, as the person who clicked.
-  // Apply answers the message's question. Undo attaches the change file again.
-  const replyToChange = useCallback(async (asked: ChatMessageRecord, path: string, input: { body: string; resolves: boolean }) => {
+  // Apply answers the message's question, attaching the change a review applied instead. Undo attaches the change file again.
+  const replyToChange = useCallback(async (asked: ChatMessageRecord, path: string, input: { body: string; resolves: boolean; attach?: string }) => {
     const post = asked.threadId !== threadId ? asked.threadId : undefined;
     const target = post ?? threadId;
     if (!target) throw new Error("dohc couldn't find this chat.");
@@ -399,7 +399,8 @@ export function ChatLane(props: {
     const result = await bridge().sendChatMessage({
       workspaceId, threadId: target, body: input.body,
       ...(parentMessageId ? { parentMessageId } : {}),
-      ...(input.resolves ? { resolves: { messageId: asked.id } } : { fileReferences: [{ path }] }),
+      ...(input.resolves ? { resolves: { messageId: asked.id } } : {}),
+      ...(input.attach || !input.resolves ? { fileReferences: [{ path: input.attach ?? path }] } : {}),
     });
     if (current !== token.current) return;
     loadSequence.current += 1;
@@ -489,13 +490,15 @@ export function ChatLane(props: {
   // Under a message: its poll, and why the agent didn't answer it.
   const renderFooter = useCallback((message: ChatMessageRecord) => {
     const decision = decisionsByMessage.get(message.id);
-    const changeFile = decision ? changeFileOf(message) : undefined;
-    const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) =>
-      reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
+    const asked = decision ? changeFileOf(message) : undefined;
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
+    // The change a review applied, when it wasn't the one asked.
+    const changeFile = asked === undefined ? undefined : (appliedBy && changeFileOf(appliedBy)) ?? asked;
+    const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) => reply.id !== appliedBy?.id &&
+      reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
     return <>
       {changeFile !== undefined ? <CollectionChangeCard
-        key={`${workspaceId}:${message.id}:${changeFile}`}
+        key={`${workspaceId}:${message.id}:${asked}`}
         workspaceId={workspaceId}
         message={message}
         path={changeFile}

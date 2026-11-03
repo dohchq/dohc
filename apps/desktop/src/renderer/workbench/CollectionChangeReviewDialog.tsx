@@ -84,8 +84,9 @@ export function CollectionChangeReviewDialog(props: {
       await props.onApply(review);
       props.onClose();
     } catch (error) {
-      if (closed.current) void discardCollectionChangeReview(bridge(), workspaceId, review).catch(() => undefined);
-      else held.current = review;
+      // Main spends a preparation when it starts to apply it, so Try again applies a fresh one, shown first.
+      void discardCollectionChangeReview(bridge(), workspaceId, review).catch(() => undefined);
+      if (!closed.current) setAttempt(value => value + 1);
       setPhase({ kind: "failed", ...props.failure(error) });
     }
   };

@@ -29,8 +29,9 @@ export const ice = { name: "Ice", agent: false }, claude = { name: "Claude Code"
 
 /**
  * A workspace and its Collection as the bridge answers for them. Preparing
- * reads the files as they are now, as main does. `refuse` makes the next
- * approval throw that error instead.
+ * reads the files as they are now, and approving spends the preparation
+ * first, as main does. `refuse` makes the next approval throw that error
+ * instead.
  */
 export function world() {
   const files: Record<string, string> = { "volunteers/dataset.json": JSON.stringify(asked, null, 2), [volunteers.schemaPath]: schemaSql,
@@ -49,15 +50,21 @@ export function world() {
   const calls: DatasetRequest[] = [];
   const reads: string[] = [];
   const control = { refuse: null as unknown };
+  let preparations = 0;
   const prepare = () => {
     const revision = describeDatasetRevision({ definition: JSON.parse(files["volunteers/dataset.json"]!), revision: head.revision + 1, schemaSql: files[volunteers.schemaPath]!, operationSource: files[volunteers.operationsPath]! });
     const migration = files[migrationPath]!;
     const candidate = { changeSha256: datasetChangeDigest({ revisionSha256: revision.revisionSha256, migrationSql: migration }), preview: { tables: counts } } as unknown as DatasetMigrationCandidate;
-    return { kind: "migration-prepared" as const, preparationId: id(60), previousRevision: head, revision, schemaSql: files[volunteers.schemaPath]!,
+    return { kind: "migration-prepared" as const, preparationId: id(60 + ++preparations), previousRevision: head, revision, schemaSql: files[volunteers.schemaPath]!,
       operationSource: files[volunteers.operationsPath]!, migrationSql: migration, approvalDigest: "a".repeat(64), candidate };
   };
   let prepared: ReturnType<typeof prepare> | null = null;
   const api = {
+    createWorkspaceFile: async ({ relativePath, initialText }: { relativePath: string; initialText: string }) => {
+      if (files[relativePath] !== undefined) throw new Error("This file already exists.");
+      files[relativePath] = initialText;
+      return { path: relativePath };
+    },
     readWorkspaceText: async ({ relativePath }: { relativePath: string }) => {
       reads.push(relativePath);
       const text = files[relativePath];
@@ -76,11 +83,17 @@ export function world() {
         return { kind: "history-revision", revision, schemaSql, operationSource };
       }
       if (request.action === "prepareMigration") return prepared = prepare();
-      if (request.action === "discardMigration") { prepared = null; return { kind: "migration-discarded" }; }
+      if (request.action === "discardMigration") {
+        if (prepared?.preparationId === request.preparationId) prepared = null;
+        return { kind: "migration-discarded" };
+      }
       if (request.action === "approveMigration") {
-        if (control.refuse !== null) throw control.refuse;
-        if (!prepared || request.changeSha256 !== prepared.candidate.changeSha256) throw new Error("This change differs from the one you were asked to apply.");
-        head = prepared.revision; saved.set(head.revisionSha256, head); prepared = null;
+        const spent = prepared?.preparationId === request.preparationId ? prepared : null;
+        prepared = null;
+        if (control.refuse !== null) { const refused = control.refuse; control.refuse = null; throw refused; }
+        if (!spent) throw new Error("This Collection review expired. Prepare the change again.");
+        if (request.changeSha256 !== spent.candidate.changeSha256) throw new Error("This change differs from the one you were asked to apply.");
+        head = spent.revision; saved.set(head.revisionSha256, head);
         return { kind: "migrated" };
       }
       throw new Error(`Unexpected ${request.action}`);

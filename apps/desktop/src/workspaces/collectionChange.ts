@@ -127,7 +127,22 @@ export function collectionChangeRows(input: { previous: DatasetRevision; next: D
     const records = input.counts ? input.counts.reduce((total, table) => total + table.beforeRows, 0) : null;
     rows.push({ kind: "migration", key: "migration", file: input.migrationPath, records });
   }
-  return rows.map((row, index) => ({ row, index })).sort((a, b) => rank[a.row.kind] - rank[b.row.kind] || a.index - b.index).map(({ row }) => row);
+  return ordered(rows);
+}
+
+const ordered = <Row extends Draft>(rows: readonly Row[]): Row[] =>
+  rows.map((row, index) => ({ row, index })).sort((a, b) => rank[a.row.kind] - rank[b.row.kind] || a.index - b.index).map(({ row }) => row);
+
+/**
+ * The rows the review lists. Action rows stand for a code change and field
+ * rows for a schema change, so the review adds a row for each changed file
+ * no row shows. Every changed file's changes then open from a row.
+ */
+export function collectionReviewRows(rows: readonly Draft[], input: { files: readonly string[]; schemaPath: string; operationsPath: string }): Draft[] {
+  const added: Draft[] = [];
+  if (input.files.includes(input.operationsPath) && !rows.some(row => row.kind === "code-changed")) added.push({ kind: "code-changed", key: "code" });
+  if (input.files.includes(input.schemaPath) && !rows.some(row => row.kind === "schema-changed")) added.push({ kind: "schema-changed", key: "schema", file: input.schemaPath });
+  return added.length ? ordered([...rows, ...added]) : [...rows];
 }
 
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);

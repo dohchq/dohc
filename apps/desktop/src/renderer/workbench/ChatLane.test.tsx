@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type { SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
-import { ask, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
+import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
+import { ask, proposalPath, volunteers, world } from "../collections/collectionChangeFlow.testHarness";
 
 vi.mock("./chatFileMentions", { spy: true });
 
@@ -698,6 +699,43 @@ describe("ChatLane", () => {
       workspaceId: "workspace-a", threadId: "thread-1", body: "Applied the change to Volunteers.", resolves: { messageId: "asks" },
     }));
     expect(screen.queryByTestId("chats-lane-decision-open")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("attaches the change a review applied to its reply, and the asking message shows that change applied", async () => {
+    const place = world();
+    ask(place);
+    // Ada edits the schema after the message, so the review applies another change than the one asked.
+    place.files[volunteers.schemaPath] = "CREATE TABLE volunteers (id TEXT PRIMARY KEY, due TEXT);";
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, ...place.api });
+    const attachment = (messageId: string, pathHint: string, createdAtMs: number) =>
+      ({ attachmentId: `attachment-${messageId}`, threadId: "thread-1", messageId, targetKind: "file" as const, pathHint, createdAtMs });
+    const asks = message({ id: "asks", body: "Here's the due date.", authorKind: "agent", authorDisplayName: "Claude Code", createdAtMs: 3_000, attachments: [attachment("asks", proposalPath, 3_000)] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [asks] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "asks", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockImplementation(async (input: SendChatMessagePayload) => {
+      const reply = message({ id: "applied", body: input.body, createdAtMs: 4_000, attachments: (input.fileReferences ?? []).map(reference => attachment("applied", reference.path, 4_000)) });
+      const resolved = { threadId: "thread-1", messageId: "asks", state: "resolved" as const, resolvedByMessageId: "applied", atMs: 4_000 };
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [asks, reply] });
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
+      return { message: reply, resolved };
+    });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-change-review-button"));
+    const dialog = await screen.findByTestId("chats-lane-change-review-dialog");
+    const apply = within(dialog).getByTestId("chats-lane-change-review-apply");
+    await waitFor(() => expect((apply as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(apply);
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce());
+    const sent = bridgeMock.sendChatMessage.mock.calls[0]![0];
+    expect(sent.resolves).toEqual({ messageId: "asks" });
+    const recorded = sent.fileReferences?.[0]?.path ?? "";
+    expect(recorded).toMatch(COLLECTION_CHANGE_FILE);
+    expect(recorded).not.toBe(proposalPath);
+    expect(JSON.parse(place.files[recorded]!).revisionSha256).toBe(place.head().revisionSha256);
+    expect(await screen.findByText("Applied")).toBeTruthy();
+    expect(screen.queryByTestId("chats-lane-change-edited")).toBeNull();
+    expect(screen.queryByText("Undone")).toBeNull();
     expect(onError).not.toHaveBeenCalled();
   });
 

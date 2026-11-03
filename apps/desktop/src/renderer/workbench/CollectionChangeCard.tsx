@@ -9,7 +9,7 @@ import {
 } from "../../workspaces/collectionChange";
 import { bridge } from "../bridge";
 import {
-  applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, readCollectionChangeProposal, undoCollectionChange,
+  applyCollectionChange, applyCollectionChangeReview, loadCollectionChange, readCollectionChangeProposal, recordCollectionChange, undoCollectionChange,
   type CollectionChange,
 } from "../collections/collectionChangeFlow";
 import { ipcErrorMessage } from "../ipcError";
@@ -47,6 +47,7 @@ const remember = (key: string, change: CollectionChange | null) => {
 export function CollectionChangeCard(props: {
   workspaceId: string;
   message: ChatMessageRecord;
+  /** The message's change file, or the one the reply that applied it attached when a review applied another change. */
   path: string;
   /** The reply that answered the message, which applied the change. */
   appliedBy?: ChatMessageRecord;
@@ -54,8 +55,8 @@ export function CollectionChangeCard(props: {
   undoneBy?: ChatMessageRecord;
   locked: boolean;
   onOpenPath?: (path: string) => void;
-  /** Posts the reply that applying or undoing the change makes. Resolves once it posts. */
-  onReply: (input: { body: string; resolves: boolean }) => Promise<void>;
+  /** Posts the reply that applying or undoing the change makes, attaching `attach` when given. Resolves once it posts. */
+  onReply: (input: { body: string; resolves: boolean; attach?: string }) => Promise<void>;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
   testIdPrefix: string;
 }) {
@@ -100,7 +101,7 @@ export function CollectionChangeCard(props: {
     if (mounted.current) setPhase({ kind: "failed", ...failure });
     else props.onError(failure.words, error);
   };
-  const posted = (body: string, resolves: boolean, words: string) => props.onReply({ body, resolves })
+  const posted = (body: string, resolves: boolean, words: string, attach?: string) => props.onReply({ body, resolves, ...(attach ? { attach } : {}) })
     .catch((error: unknown) => props.onError(ipcErrorMessage(error, words), error));
   const settled = () => { if (mounted.current) { setPhase({ kind: "idle" }); setReload(value => value + 1); } };
 
@@ -141,7 +142,14 @@ export function CollectionChangeCard(props: {
           if (!mounted.current) props.onError(failure(error).words, error);
           throw error;
         }
-        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.");
+        // A review can apply another change than the one asked. The reply attaches a file that records it, so the card shows it.
+        const applied = review.change.proposal;
+        const attach = applied.changeSha256 === reviewing.proposal.changeSha256 ? undefined
+          : await recordCollectionChange(bridge(), workspaceId, applied).catch((error: unknown) => {
+            props.onError(ipcErrorMessage(error, "dohc applied the change but couldn't save which change it applied."), error);
+            return undefined;
+          });
+        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", attach);
         if (mounted.current) setStale(false);
         settled();
       }} />, document.body) : null}

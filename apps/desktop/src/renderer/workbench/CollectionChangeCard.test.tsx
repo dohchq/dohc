@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
-import { ask, proposalPath, world, type World } from "../collections/collectionChangeFlow.testHarness";
+import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
 import { formatClock } from "../time";
 import { CollectionChangeCard } from "./CollectionChangeCard";
 
@@ -115,6 +115,38 @@ it("reviews the change the files make now and applies that preparation", async (
   expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
   expect(place.actions().filter(action => action !== "describe" && action !== "historyRevision"))
     .toEqual(["prepareMigration", "approveMigration"]);
+});
+
+it("lists a changed file that other rows stand for, with who changed it and its changes", async () => {
+  ask(place);
+  // Ada edits the schema after the message. On the card, the field rows stand for that file.
+  const schemaSql = "CREATE TABLE volunteers (id TEXT PRIMARY KEY, due TEXT);";
+  place.files[volunteers.schemaPath] = schemaSql;
+  place.moments.push(place.moment(5, volunteers.schemaPath, 4_000, { personAuthorName: "Ada" }, schemaSql));
+  card();
+  fireEvent.click(await screen.findByTestId("lane-change-review-button"));
+  const dialog = await screen.findByTestId("lane-change-review-dialog");
+  const schema = (await within(dialog).findByText("Changes the schema")).closest("li")!;
+  expect(within(schema).getByText("Ada")).toBeTruthy();
+  fireEvent.click(within(schema).getByRole("button"));
+  expect(within(schema).getByTestId("lane-change-review-diff").textContent).toContain("due TEXT");
+});
+
+it("prepares the change again after a failed Apply, so Try again applies the review it shows", async () => {
+  ask(place); card();
+  fireEvent.click(await screen.findByTestId("lane-change-review"));
+  const dialog = await screen.findByTestId("lane-change-review-dialog");
+  await waitFor(() => expect(within(dialog).getAllByTestId("lane-change-review-row")).toHaveLength(4));
+  place.control.refuse = new Error("dohc lost its connection to the engine.");
+  fireEvent.click(within(dialog).getByTestId("lane-change-review-apply"));
+  expect((await within(dialog).findByTestId("lane-change-review-failed")).textContent).toContain("dohc lost its connection to the engine.");
+  await waitFor(() => expect(place.actions().filter(action => action === "prepareMigration")).toHaveLength(2));
+  const retry = within(dialog).getByTestId("lane-change-review-apply");
+  await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+  expect(retry.textContent).toBe("Try again");
+  fireEvent.click(retry);
+  await waitFor(() => expect(screen.queryByTestId("lane-change-review-dialog")).toBeNull());
+  expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
 });
 
 it("discards the review's preparation when Not now closes it, and folds the card on this device", async () => {

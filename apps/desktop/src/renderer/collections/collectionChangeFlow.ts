@@ -1,12 +1,12 @@
 import { datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../../ipc/bridgeContract";
 import {
-  attributeCollectionChangeRows, collectionChangeProposal, CollectionChangeProposal, sameCollectionChange,
+  attributeCollectionChangeRows, collectionChangeProposal, CollectionChangeProposal, collectionReviewRows, sameCollectionChange,
   type CollectionChangeAuthor, type CollectionChangeRow, type CollectionChangeStep,
 } from "../../workspaces/collectionChange";
 import { engineMomentAuthorName } from "../workbench/EngineHistory";
 
-export type CollectionChangeApi = Pick<DohcDesktopBridge, "dataset" | "readWorkspaceText" | "listFileChats" | "listEngineMoments" | "readEngineMoment">;
+export type CollectionChangeApi = Pick<DohcDesktopBridge, "dataset" | "readWorkspaceText" | "listFileChats" | "listEngineMoments" | "readEngineMoment" | "createWorkspaceFile">;
 type Api = CollectionChangeApi;
 
 /** A file `dohc dataset askToApply` writes beside a Collection's dataset.json. */
@@ -199,12 +199,14 @@ export async function prepareCollectionChangeReview(api: Api, workspaceId: strin
     const proposal = collectionChangeProposal(prepared, { datasetPath: asked.datasetPath, migrationPath: asked.migrationPath, note: asked.note });
     const saved = await api.dataset({ ...selection, action: "historyRevision", revisionSha256: prepared.previousRevision.revisionSha256 });
     if (saved.kind !== "history-revision") throw new Error(`dohc couldn't read ${asked.name}. Try again.`);
-    const { rows } = await attribute(api, workspaceId, proposal, saved.revision.definition, Number.MAX_SAFE_INTEGER);
+    const { schemaPath, operationsPath } = prepared.revision.definition;
+    const listed = { ...proposal, rows: collectionReviewRows(proposal.rows, { files: proposal.files, schemaPath, operationsPath }) };
+    const { rows } = await attribute(api, workspaceId, listed, saved.revision.definition, Number.MAX_SAFE_INTEGER);
     const definition = (value: DatasetDefinition) => `${JSON.stringify(value, null, 2)}\n`;
     const sides: Record<string, { before: string; after: string }> = {
       [asked.datasetPath]: { before: definition(prepared.previousRevision.definition), after: definition(prepared.revision.definition) },
-      [prepared.revision.definition.schemaPath]: { before: saved.schemaSql, after: prepared.schemaSql },
-      [prepared.revision.definition.operationsPath]: { before: saved.operationSource, after: prepared.operationSource },
+      [schemaPath]: { before: saved.schemaSql, after: prepared.schemaSql },
+      [operationsPath]: { before: saved.operationSource, after: prepared.operationSource },
       [asked.migrationPath]: { before: "", after: prepared.migrationSql },
     };
     return { change: { proposal, rows, state: { kind: "waiting" } },
@@ -220,6 +222,17 @@ export async function prepareCollectionChangeReview(api: Api, workspaceId: strin
 export async function applyCollectionChangeReview(api: Pick<Api, "dataset">, workspaceId: string, review: CollectionChangeReview): Promise<void> {
   const result = await api.dataset({ workspaceId, action: "approveMigration", ...review.preparation, changeSha256: review.change.proposal.changeSha256 });
   if (result.kind !== "migrated") throw new Error("dohc couldn't confirm this change. Refresh the Collection.");
+}
+
+/**
+ * Saves a reviewed change that differs from the one asked, as a change file
+ * beside the Collection's, so the reply that applied it can attach it.
+ */
+export async function recordCollectionChange(api: Pick<Api, "createWorkspaceFile">, workspaceId: string, proposal: CollectionChangeProposal): Promise<string> {
+  const folder = proposal.datasetPath.includes("/") ? proposal.datasetPath.slice(0, proposal.datasetPath.lastIndexOf("/") + 1) : "";
+  const created = await api.createWorkspaceFile({ workspaceId, relativePath: `${folder}changes/${crypto.randomUUID()}.json`,
+    initialText: `${JSON.stringify(proposal, null, 2)}\n`, exclusive: true });
+  return created.path;
 }
 
 export async function discardCollectionChangeReview(api: Pick<Api, "dataset">, workspaceId: string, review: CollectionChangeReview): Promise<void> {
