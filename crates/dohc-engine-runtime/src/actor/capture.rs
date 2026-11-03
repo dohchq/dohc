@@ -1091,12 +1091,16 @@ fn select_released_switch_jobs(
         .filter(|path| path.released_hold)
         .map(|path| path_collision_key(&path.path))
         .collect();
+    // A write above a released path waits for the folder the hold kept.
     for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
         let target = path_collision_key(&target);
         if released.iter().any(|path| {
             target == *path
                 || target
                     .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+                || path
+                    .strip_prefix(target.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
         }) {
             selected.insert(id);

@@ -612,6 +612,16 @@ pub(super) fn rollback_job_matches_active(
     .map(Some)
 }
 
+/// The folders above the path keyed `key`, nearest first.
+fn ancestor_keys(key: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(key.rsplit_once('/').map(|(parent, _)| parent), |path| {
+        path.rsplit_once('/').map(|(parent, _)| parent)
+    })
+}
+
+/// Switch deletes that must clear the way for a switch write run first: a
+/// file where a write needs a folder, and a file inside a folder a write
+/// replaces with a file.
 fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<MaterializationJob> {
     if !jobs.iter().any(|job| {
         job.operation == MaterializationOperation::Delete
@@ -619,31 +629,112 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     }) {
         return jobs;
     }
+    let mut writes = HashSet::new();
     let mut ancestors = HashSet::new();
     for job in &jobs {
         if job.operation == MaterializationOperation::Write
             && job.job_id.starts_with("version-switch-")
         {
             let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
-            let mut path = path.as_str();
-            while let Some((parent, _)) = path.rsplit_once('/') {
-                ancestors.insert(parent.to_owned());
-                path = parent;
-            }
+            ancestors.extend(ancestor_keys(&path).map(str::to_owned));
+            writes.insert(path);
         }
     }
-    if ancestors.is_empty() {
+    if writes.is_empty() {
         return jobs;
     }
-    let (mut parents, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
-        job.operation == MaterializationOperation::Delete
-            && job.job_id.starts_with("version-switch-")
-            && ancestors.contains(&dohc_engine_files::floor::path_collision_key(
-                &job.target_path,
-            ))
+    let (mut first, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
+        if job.operation != MaterializationOperation::Delete
+            || !job.job_id.starts_with("version-switch-")
+        {
+            return false;
+        }
+        let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
+        ancestors.contains(&path) || ancestor_keys(&path).any(|folder| writes.contains(folder))
     });
-    parents.extend(others);
-    parents
+    first.extend(others);
+    first
+}
+
+/// Whether a switch write meets a real folder at its path that stays. The
+/// folder gives way when no path `holds` holds lies inside it and it holds
+/// nothing but folders and files the OS writes, which go first, deepest
+/// first. The planner queues such a write only for a folder the switch
+/// clears, so anything else in it came in since.
+fn switch_folder_stays(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
+    job: &MaterializationJob,
+) -> bool {
+    if job.operation != MaterializationOperation::Write
+        || !matches!(job.preimage, dohc_engine_storage::Preimage::Absent)
+        || !std::fs::symlink_metadata(root_dir.join(&job.target_path))
+            .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return false;
+    }
+    let folder = job.target_path.as_str();
+    holds.is_some_and(|holds| {
+        holds
+            .entries()
+            .any(|(held, _)| dohc_engine_files::path_is_held(folder, held))
+    }) || !(folder_tree_clears(store, root_dir, folder, &|_| false, false)
+        && folder_tree_clears(store, root_dir, folder, &|_| false, true))
+}
+
+/// Whether the folder removal deletes the file named `name` itself.
+#[cfg(target_vendor = "apple")]
+fn removal_deletes(name: &str) -> bool {
+    dohc_engine_files::floor::is_finder_metadata_file(&dohc_engine_files::floor::normalize_segment(
+        name,
+    ))
+}
+
+/// Elsewhere the folder removal deletes only empty folders.
+#[cfg(not(target_vendor = "apple"))]
+fn removal_deletes(_name: &str) -> bool {
+    false
+}
+
+/// Whether every entry in the folder at `rel`, at any depth, is a folder or a
+/// regular file that goes: one whose path `cleared` accepts, or one the
+/// folder removal deletes itself, which is Finder's files such as
+/// `.DS_Store` on macOS and none elsewhere. With `remove`, also remove the
+/// folder and the folders inside it, deepest first, and say whether it is
+/// gone.
+pub(super) fn folder_tree_clears(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    rel: &str,
+    cleared: &dyn Fn(&str) -> bool,
+    remove: bool,
+) -> bool {
+    let Ok(entries) = std::fs::read_dir(root_dir.join(rel))
+        .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+    else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(name) = entry.file_name().into_string() else {
+            return false;
+        };
+        let path = format!("{rel}/{name}");
+        let kind = entry.file_type().ok();
+        let clears = if kind.is_some_and(|kind| kind.is_dir()) {
+            folder_tree_clears(store, root_dir, &path, cleared, remove)
+        } else {
+            kind.is_some_and(|kind| kind.is_file()) && (cleared(&path) || removal_deletes(&name))
+        };
+        if !clears {
+            return false;
+        }
+    }
+    !remove
+        || matches!(
+            dohc_engine_files::remove_empty_directory_target(store, root_dir, rel),
+            Ok(true)
+        )
 }
 
 pub(super) fn replay_pending_materializations(
@@ -933,6 +1024,18 @@ fn replay_materializations(
                     }
                     continue;
                 }
+                // A secret write never waits for a folder. One that stays
+                // keeps what came into it, as a file edited since planning
+                // keeps its edit.
+                if switch_secret && switch_folder_stays(store, root_dir, None, &job) {
+                    store.mark_materialization_conflict(&job.job_id, now_ms)?;
+                    if scope.file_outcomes_settled {
+                        summary.completed += 1;
+                    } else {
+                        summary.failed += 1;
+                    }
+                    continue;
+                }
                 if secret_key.is_none() {
                     let Ok(Some(key)) = load_key_file(super::store_folder(store.database_path()))
                     else {
@@ -1047,6 +1150,12 @@ fn replay_materializations(
                         summary.failed += 1;
                     }
                 }
+                continue;
+            }
+            if job.job_id.starts_with("version-switch-mat_")
+                && switch_folder_stays(store, root_dir, Some(holds), &job)
+            {
+                summary.parked += 1;
                 continue;
             }
             if matches!(

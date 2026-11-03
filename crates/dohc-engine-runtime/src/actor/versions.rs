@@ -330,6 +330,62 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
     std::fs::symlink_metadata(root_dir.join(path)).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Whether a switch writing a file at `path` may replace a real folder there:
+/// one of the `previous` paths lies inside that folder.
+/// [`keep_folder_writes_the_switch_clears`] then decides.
+fn replaces_folder<'a>(
+    root_dir: &std::path::Path,
+    path: &str,
+    previous: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if !is_folder(root_dir, path) {
+        return false;
+    }
+    let folder = path_key(path);
+    previous
+        .into_iter()
+        .any(|inner| is_inside(&path_key(inner), &folder))
+}
+
+/// Keep a switch write that replaces a real folder only when the switch
+/// clears that folder: every file in it is one the switch deletes or, for a
+/// plaintext write, a held file, which the write then waits for. Folders and
+/// files the OS writes go with it. Anything else keeps the folder, and the
+/// file is not written, as for any path with untracked content.
+fn keep_folder_writes_the_switch_clears(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    holds: &PlacementHolds,
+    projections: &mut Vec<SwitchProjection>,
+) {
+    // Exact spelling: on a disk that tells `trip.md` from `TRIP.md`, a delete
+    // of one does not clear the other.
+    let deleted: HashSet<String> = projections
+        .iter()
+        .filter(|projection| projection.operation == MaterializationOperation::Delete)
+        .map(|projection| projection.spec.target_path.clone())
+        .collect();
+    projections.retain(|projection| {
+        let path = projection.spec.target_path.as_str();
+        if projection.operation != MaterializationOperation::Write
+            || !matches!(projection.spec.preimage, Preimage::Absent)
+            || holds.get(path).is_some()
+            || !is_folder(root_dir, path)
+        {
+            return true;
+        }
+        let secret = projection
+            .spec
+            .job_id
+            .starts_with("version-switch-secret-mat_");
+        // Only a file this switch deletes clears. A plaintext write may then
+        // wait on a held file's delete, but any hold that replay would match
+        // keeps a secret write out.
+        let cleared = |inner: &str| deleted.contains(inner) && (!secret || !holds.blocks(inner));
+        super::materialization::folder_tree_clears(store, root_dir, path, &cleared, false)
+    });
+}
+
 /// Remove each folder above `path` that is empty, nearest first, through
 /// `top` in any case, or to the root when `top` is `None`. Walks past a
 /// folder already gone, which an interrupted pass removed, and stops at the
@@ -778,6 +834,14 @@ fn plan_plaintext_switch(
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
                 .or_else(|| projection_preimage(&state))
+                .or_else(|| {
+                    replaces_folder(
+                        root_dir,
+                        &snapshot.path,
+                        previous_paths.iter().map(|(path, _)| path.as_str()),
+                    )
+                    .then_some(Preimage::Absent)
+                })
             else {
                 continue;
             };
@@ -944,6 +1008,14 @@ fn plan_secret_switch(
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
             .or_else(|| projection_preimage(&state))
+            .or_else(|| {
+                replaces_folder(
+                    root_dir,
+                    &stat.path,
+                    previous.iter().map(|file| file.path.as_str()),
+                )
+                .then_some(Preimage::Absent)
+            })
         else {
             continue;
         };
@@ -1061,6 +1133,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         token,
         &holds,
     )?;
+    keep_folder_writes_the_switch_clears(store, root_dir, &holds, &mut projections);
     if projections.is_empty() && holds.is_empty() {
         return Ok(());
     }
@@ -1174,6 +1247,7 @@ pub(super) fn switch_active_version_on_store(
         &mut secret_key,
         &holds,
     )?);
+    keep_folder_writes_the_switch_clears(store, root_dir, &holds, &mut projections);
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
