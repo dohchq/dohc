@@ -74,6 +74,8 @@ import { MOVE_ACCEPTED_EDITS_WAIT_MS } from "./moveAcceptedEditsGuard";
 import {openLiveFolderMoveFixture} from "../testing/liveFolderMoveFixture";
 import { ipcWireError } from "../ipc/errorWords";
 import { openLiveMoveFixture, recordGuardTimings, type GuardPull, type GuardTiming, type LiveMoveFixture, type MoveDevice } from "../testing/liveMoveFixture";
+import {moveWorkspacePathByHand} from "./workspaceFileMoves";
+import {readLocalStateFrom, type LocalStateBindings} from "./workspaceLocalState";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -3384,3 +3386,463 @@ describe("the move guard over a real relay and live host", () => {
     }
   }, 600_000);
 });
+// Checks whether renaming a page whose owner native owner delivery has bound
+// stops all outbound publication from the owner's workspace. Each workspace
+// renames A, creates B and saves a change to the file C, then tries one
+// recovery from that state. "unbound" edits A live but never binds its owner,
+// for comparison. Every observation prints as one `REPRO-OBS` JSON line; the
+// soft expectations hold the correct behavior, so the case fails only where
+// publication stays stopped.
+type RenameReproCase = "wait" | "stop" | "workaround" | "restart" | "unbound";
+type RenameReproDocument = ReturnType<typeof readyOwnerDeliveryDocuments>[number];
+type RenameReproPush = Awaited<ReturnType<EngineRelayWorkspaceClient["push"]>>;
+const renameRepro = { oldPath: "docs/a.md", newPath: "docs/a-renamed.md", newPage: "notes/b.md", existing: "notes/c.md" } as const;
+const reproErrorText = (error: unknown) => error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+
+async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<typeof mintLocalhostCa>>,
+  trustEnv: Record<string, string>, localStates: Map<string, LocalStateBindings>): Promise<void> {
+  const { oldPath, newPath, newPage, existing } = renameRepro;
+  const workspaceId = `repro-rename-${kind}-${randomUUID().slice(0, 8)}`;
+  const bound = kind !== "unbound";
+  const rootA = await createTestScratch("dohc-repro-rename-owner-");
+  const rootB = await createTestScratch("dohc-repro-rename-peer-");
+  const relayRoot = await createTestScratch("dohc-repro-rename-relay-");
+  const ownerDb = join(rootA, SECRET_FILE_STORE_RELATIVE_PATH);
+  const proxy = await startServerProxy(ca);
+  const token = `test:${workspaceId}`, connection = { baseUrl: proxy.origin, token };
+  const profile = selfHostLiveProfile(), nativeConfigPath = join(rootA, "owner-ingress.json");
+  let step = "setup";
+  const observe = (entry: Record<string, unknown>) =>
+    console.log(`REPRO-OBS ${JSON.stringify({ case: kind, workspaceId, step, ...entry })}`);
+  let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>> | undefined;
+  let peer: LiveDaemonCapture | undefined;
+  async function openOwner() {
+    const opened = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
+      allowInsecureLoopbackForTests: false, privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient } });
+    localStates.set(rootA, opened.sessions);
+    try {
+      const relay = opened.relay.bind({ ...opened.workspace, relay: connection });
+      const adapter = await opened.sessions.run(opened.workspace, async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
+      const pages = createWorkspaceEngineCapture({ ...opened.workspace, rustEngineSessions: opened.sessions, settleDebounceMs: 60_000 });
+      return { opened, relay, adapter, pages, refusals: new OwnerKnownRefusals() };
+    } catch (error) { await opened.close(); throw error; }
+  }
+  let current: Awaited<ReturnType<typeof openOwner>> | undefined;
+  const closeOwner = async () => {
+    const closing = current;
+    current = undefined;
+    if (!closing) return;
+    try { await closing.pages.stop().catch(() => undefined); } finally { await closing.opened.close(); }
+  };
+  const owner = () => {
+    if (!current) throw new Error("The owner's engine is closed.");
+    return current;
+  };
+  const call = (endpoint: string, body?: unknown) => fetch(`${proxy.origin}${endpoint}`, { method: body === undefined ? "GET" : "POST",
+    headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  let discoveryPayload: unknown;
+  const ready = async (): Promise<RenameReproDocument[]> => {
+    if (!bound) return [];
+    const response = await call(`/sync/${workspaceId}/live-host`);
+    if (response.status !== 200) throw new Error(`Live-host discovery answered ${response.status}: ${await response.text()}`);
+    discoveryPayload = await response.json();
+    return readyOwnerDeliveryDocuments(discoveryPayload, workspaceId);
+  };
+  const diagnostics = () => JSON.stringify({ discoveryPayload, diagnostics: relayServer?.diagnostics() });
+  const hostStore = async () => {
+    const stores = join(relayRoot, "relay-deployment", "live-host");
+    const store = (await readdir(stores).catch(() => [])).find(entry => /^[0-9a-f]{64}$/u.test(entry));
+    return store === undefined ? undefined : join(stores, store);
+  };
+  const readOwnerDb = <T,>(query: (db: DatabaseSync) => T): T => {
+    const db = new DatabaseSync(ownerDb, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  // The rows the engine's publication proof reads to decide whether A is bound,
+  // and A's owner activations, which the app's rename check reads.
+  const bindingOf = (objectId: string) => readOwnerDb(db => ({
+    ownerBindings: db.prepare(`SELECT json_extract(binding_json,'$.currentPath') AS currentPath, binding_revision AS revision,
+      accepted_cursor AS acceptedCursor FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?`).all(workspaceId, objectId),
+    deviceBindings: db.prepare("SELECT current_path AS currentPath, available FROM live_device_application_bindings WHERE workspace_id=? AND object_id=?")
+      .all(workspaceId, objectId),
+    activations: db.prepare(`SELECT json_extract(binding_json,'$.currentPath') AS currentPath, released_at_ms AS releasedAtMs
+      FROM live_owner_activations WHERE workspace_id=? AND object_id=?`).all(workspaceId, objectId),
+  }));
+  const deliveryPass = async (document: RenameReproDocument, documents: RenameReproDocument[]) => {
+    const o = owner();
+    return o.opened.sessions.run(o.opened.workspace, async ({ workspace }) => runNativeOwnerDeliveryPass({
+      client: o.opened.nativeClient(), workspaceHandle: workspace, document,
+      config: { ...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents },
+      refusals: o.refusals, signal: AbortSignal.timeout(60_000), bearer: token, accountId: workspaceId, assertCurrent() {} }));
+  };
+  const retire = async (binding: { currentPath: string; restoreFenceGeneration?: number }, signal: AbortSignal) => {
+    const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, { method: "DELETE", signal,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration }) });
+    const retired = await response.json() as { acceptedCursor?: number };
+    return response.ok && typeof retired.acceptedCursor === "number" ? retired.acceptedCursor : null;
+  };
+  // One pass of what the desktop runs: its owner delivery pass (Stop
+  // reconciliation, then a delivery of each ready page), then its relay sync
+  // pass (push until the engine has no more, then pull).
+  const syncPass = async () => {
+    const o = owner();
+    const stops = await o.opened.sessions.run(o.opened.workspace, async ({ workspace }) => reconcileOwnerLiveStops({
+      client: o.opened.nativeClient(), workspaceHandle: workspace, workspaceId, signal: AbortSignal.timeout(60_000),
+      assertCurrent() {}, retire })).then(() => "ok", reproErrorText);
+    const delivery: Array<{ path: string; result: string }> = [];
+    const documents = await ready().catch((error: unknown) => { delivery.push({ path: "*", result: reproErrorText(error) }); return []; });
+    for (const document of documents) {
+      delivery.push({ path: document.binding.currentPath, result: await deliveryPass(document, documents).then(String, reproErrorText) });
+    }
+    const pushes: Array<Pick<RenameReproPush, "pushed" | "hasMore" | "ownerAdmissionPending" | "sharingDeclined"> | { error: string }> = [];
+    let pending: RenameReproPush["ownerAdmissionPending"] | undefined;
+    for (let index = 0; index < 20; index++) {
+      try {
+        const result = await o.relay.push();
+        pushes.push({ pushed: result.pushed, hasMore: result.hasMore,
+          ownerAdmissionPending: result.ownerAdmissionPending, sharingDeclined: result.sharingDeclined });
+        pending = result.ownerAdmissionPending;
+        if (!result.hasMore) break;
+      } catch (error) { pushes.push({ error: reproErrorText(error) }); pending = undefined; break; }
+    }
+    const pull = await o.pages.runRelaySync(page => o.relay.pull(page))
+      .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
+    // The desktop sync engine keeps the last push's list as its ownerAdmissionPending, which Notices shows.
+    return { stops, delivery, pushes, noticesPending: pending, firstPending: pending?.[0] ?? null, pull };
+  };
+  // What reached the relay, as the owner's second device pulls it.
+  const relayHas = async () => {
+    const device = peer;
+    if (!device) throw new Error("The second device is not open.");
+    const pulled = await device.capture.runRelaySync(page => device.relay.pull(page))
+      .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
+    const text = (path: string) => readFile(join(rootB, path), "utf8").catch(() => null);
+    const [aOld, aNew, b, c] = await Promise.all([text(oldPath), text(newPath), text(newPage), text(existing)]);
+    return { pulled, aOld: aOld?.includes("# A") === true, aNew: aNew?.includes("# A") === true, b: b?.includes("# B") === true,
+      cChanged: c?.includes("C changed.") === true, bText: b, cText: c };
+  };
+  // B and C as they are on the owner's device.
+  const ownerFiles = async () => {
+    const text = (path: string) => readFile(join(rootA, path), "utf8").catch(() => null);
+    const [b, c] = await Promise.all([text(newPage), text(existing)]);
+    return { b, c };
+  };
+  type Relay = Awaited<ReturnType<typeof relayHas>>;
+  type Observed = { relay: Relay; pending: RenameReproPush["ownerAdmissionPending"] | undefined; owner: Awaited<ReturnType<typeof ownerFiles>> };
+  let objectIdA = "";
+  // Passes until `done` holds with nothing pending, or `maxPasses` ran. Each pass is one line.
+  const settle = async (maxPasses: number, done: (relay: Relay) => boolean): Promise<Observed> => {
+    let last: Observed | undefined;
+    for (let pass = 1; pass <= maxPasses; pass++) {
+      const sync = await syncPass();
+      const relay = await relayHas();
+      const files = await ownerFiles();
+      observe({ pass, ...sync, relay, ownerFiles: files, ownerA: objectIdA ? bindingOf(objectIdA) : null });
+      last = { relay, pending: sync.noticesPending, owner: files };
+      if (done(relay) && sync.noticesPending?.length === 0) break;
+    }
+    return last!;
+  };
+  // A is where the owner last renamed it: its new path, or after a rename back its old one.
+  const reachedAll = (at: "aNew" | "aOld") => (relay: Relay) => relay[at] && relay.b && relay.cChanged;
+  const savedC = "# C\n\nC changed.\n";
+  // B and C stay intact on the owner's device, whatever publication does.
+  const expectOwnerIntact = (label: string, observed: Observed) => {
+    expect.soft(observed.owner.b ?? "", `${kind} ${label}: B is intact on the owner's device`).toContain("# B");
+    expect.soft(observed.owner.c, `${kind} ${label}: C is intact on the owner's device`).toBe(savedC);
+  };
+  const expectPublished = (label: string, observed: Observed, at: "aNew" | "aOld" = "aNew") => {
+    expect.soft(observed.relay, `${kind} ${label}: the relay has A at ${at === "aNew" ? "its new" : "its old"} path, B and C's change`)
+      .toMatchObject({ [at]: true, b: true, cChanged: true });
+    expect.soft(observed.pending, `${kind} ${label}: no owner admission is left pending`).toEqual([]);
+    expect.soft({ b: observed.relay.bText, c: observed.relay.cText }, `${kind} ${label}: the relay's B and C match the owner's bytes`)
+      .toEqual(observed.owner);
+  };
+  // Explorer's Rename, through the same move the desktop's rename operation runs.
+  const appRename = async (fromPath: string, toPath: string) => {
+    const o = owner();
+    const operation = { workspace: { ...o.opened.workspace, readOnly: false, shareView: undefined }, assertCurrent() {} };
+    return moveWorkspacePathByHand(operation, { fromPath, toPath }, { kind: "human", humanId: "local-person" }, {
+      capture: o.pages, requestId: randomUUID(),
+      trashItem: async () => { throw new Error("This test trashes nothing."); }, markDeleted: () => undefined })
+      .then(result => ({ ok: true as const, path: result.path }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
+  };
+  // An ordinary save of a file, as an editor outside dohc saves it, which capture records.
+  const saveFile = async (path: string, text: string) => {
+    const pages = owner().pages;
+    const before = (await pages.listMoments({ limit: 1_000 })).moments.filter(moment => moment.path === path).length;
+    await writeFile(join(rootA, path), text);
+    pages.observeFileEvents([{ path, operation: "update" }]);
+    await waitForPathMoments(pages, path, before + 1);
+  };
+  // An edit in the page's editor. A live page leaves it unsettled for delivery.
+  const editPage = async (path: string, note: string, settleIt: boolean) => {
+    const session = await owner().pages.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try {
+      await session.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {
+          Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+          const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["note", note]]));
+          return Y.encodeStateAsUpdate(scratch, before);
+        } finally { scratch.destroy(); }
+      }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: `repro-${note}` });
+      if (settleIt) await session.settleNow();
+    } finally { await session.close(settleIt ? undefined : { settle: false }); }
+  };
+  const writePage = async (path: string, text: string) => {
+    const o = owner();
+    await o.adapter.writeTextFile({ workspaceId, versionId: "main", path, text, publish: true, metadata: { origin: "api" },
+      author: { kind: "human", humanId: "local-person" } });
+    const session = await o.pages.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try { await session.settleNow(); } finally { await session.close(); }
+  };
+  // Stop live editing as the page's Stop does: the desktop's Stop operation,
+  // reached through its operation table and relay share handlers.
+  const stopViaApp = async (input: { path: string; objectId?: string }) => {
+    const source = owner().opened;
+    const handlers = new Map<string, (event: {sender: {id: number}}, payload: unknown) => unknown>();
+    const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token};
+    const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
+    const ownerHandlers = createRelaySharesIpcHandlers({
+      remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
+      currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
+      relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
+        const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${token}`, "content-type": "application/json"}});
+        if (!response.ok) {
+          const text = await response.text();
+          let data: unknown = null;
+          try {data = JSON.parse(text);} catch {/* Not JSON: fail below with the relay's answer. */}
+          throw liveStopRelayError(data) ?? new Error(`${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${text}`);
+        }
+        return await response.json() as R;
+      }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
+      ownerLiveStop: (_workspace, action, _stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
+        const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
+        if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
+        if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
+        return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+          : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+      }), liveDocument: async (_workspace, target) => {
+        const resolved = await source.sessions.run(source.workspace, async ({client, workspace}) =>
+          new VersionedLiveAdapter(client, workspace, {workspaceId}).resolveFiles({workspaceId, targets: [target]}));
+        const [file] = resolved.results;
+        return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+      }, pushRecorded: async () => {}, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+      sendRendererActivity: () => {},
+      sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+    });
+    registerOperations({
+      handle: (channel, handler) => {handlers.set(channel, handler);},
+      assertTrustedSender() {},
+      withActiveWorkspace: async (_event: {sender: {id: number}}, _id, _message, work) => work({workspace: source.workspace, assertCurrent() {}}),
+    }, relayShareOperations, ownerHandlers);
+    return Promise.resolve(handlers.get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, ...input}));
+  };
+  // The server's Live documents row for A, which the dialog labels Stopped once its status is retired.
+  const serverRowOfA = async () => {
+    const response = await call(`/sync/${workspaceId}/live-host`);
+    if (response.status !== 200) return { error: `${response.status}` };
+    const payload = await response.json() as { documents?: Array<{ objectId?: string; path?: string; status?: string; reason?: string }> };
+    return payload.documents?.find(row => row.objectId === objectIdA) ?? null;
+  };
+  // This computer's Stops for A that still owe the server a retirement.
+  const owedStopsOfA = async () => {
+    const source = owner().opened;
+    const rows = await source.sessions.run(source.workspace, async ({ workspace }) =>
+      source.nativeClient().ownerYDocStopList({ id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS }));
+    return rows.filter(row => row.document.objectId === objectIdA && row.retirementOwed).length;
+  };
+  // The relay's session host control: the self-host live service runs in "service" mode.
+  const hostControl = () => {
+    const db = new DatabaseSync(join(relayRoot, "relay", "relay.sqlite"), { readOnly: true });
+    try { return db.prepare("SELECT configured_mode AS mode, admission_state AS admission FROM sync_relay_session_host_control").all(); }
+    finally { db.close(); }
+  };
+  // Stop, then whether the session host still lists a ready page.
+  const tryStop = async (input: { path: string; objectId?: string }) => {
+    const stopped = await stopViaApp(input)
+      .then(result => ({ ok: true, result }), (error: unknown) => ({ ok: false, error: reproErrorText(error) }));
+    const stillLive = !stopped.ok ? "not waited: Stop refused" : await expect.poll(async () => (await ready()).map(document => document.binding.currentPath),
+      { timeout: 60_000 }).toEqual([]).then(() => null, () => discoveryPayload);
+    observe({ stopInput: input, stopped, stillLiveAfterStop: stillLive, ownerA: bindingOf(objectIdA) });
+  };
+  try {
+    relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
+      editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+      linkBoundary: { linkKey: "repro-rename-link-key-".repeat(2), relayExchangeKey: "repro-rename-exchange-".repeat(2),
+        publicViewerOrigin: proxy.origin } });
+    proxy.routeRelayTo(relayServer.baseUrl);
+    await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+    current = await openOwner();
+    await current.relay.claim();
+    await current.opened.chats.ensureGeneralChannel({ workspaceId });
+    await pushUntilDrained(current.relay);
+    await current.adapter.ensureMainVersion({ workspaceId });
+
+    // Step 1: A and C exist and reach the owner's second device. The owner
+    // then edits A live; with a session host, native owner delivery binds it.
+    step = "1-synced";
+    await writePage(oldPath, "# A\n");
+    await writePage(existing, "# C\n");
+    await pushUntilDrained(current.relay);
+    peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+    const fileA = (await current.adapter.resolveFiles({ workspaceId, versionId: "main", targets: [{ path: oldPath }] })).results[0];
+    if (fileA?.status !== "found") throw new Error(`${oldPath} has no object.`);
+    objectIdA = fileA.objectId;
+    await settle(3, relay => relay.aOld);
+    step = "1-live";
+    if (bound) {
+      const share = await call(`/sync/${workspaceId}/shares`, { recipientEmail: "repro-recipient@dohc.test", paths: ["docs"], access: "edit" });
+      expect(share.status).toBe(200);
+      const enrollment = await call(`/sync/${workspaceId}/live-host`, { shareId: (await share.json() as { shareId: string }).shareId });
+      expect([200, 202]).toContain(enrollment.status);
+      await expect.poll(async () => (await ready()).map(document => document.binding.currentPath), { timeout: 120_000 })
+        .toEqual([oldPath]).catch(error => { throw new Error(diagnostics(), { cause: error }); });
+      const document = (await ready())[0]!;
+      expect(document.binding.objectId).toBe(objectIdA);
+      const control = hostControl();
+      observe({ hostControl: control });
+      expect.soft(control, `${kind}: the relay's session host runs in the self-host default mode`).toMatchObject([{ mode: "service" }]);
+      // The owner edits A in its editor, and delivery carries the edit to the session host.
+      await editPage(oldPath, "a-live", false);
+      await expect.poll(async () => {
+        await deliveryPass(document, [document]);
+        await owner().pages.runRelaySync(page => owner().relay.pull(page));
+        const store = await hostStore();
+        return store === undefined ? "" : readFile(join(store, oldPath), "utf8").catch(() => "");
+      }, { timeout: 120_000 }).toContain("note: a-live");
+      // The owner's file holds the accepted edit before the rename.
+      const fileMatches = await expect.poll(async () => {
+        await owner().pages.flush();
+        await owner().pages.runRelaySync(page => owner().relay.pull(page));
+        return readFile(join(rootA, oldPath), "utf8");
+      }, { timeout: 60_000 }).toContain("note: a-live").then(() => true, () => false);
+      observe({ ownerFileHasAcceptedEdit: fileMatches, ownerFile: await readFile(join(rootA, oldPath), "utf8") });
+    } else {
+      // The same live edit with no session host: nothing binds A's owner.
+      await editPage(oldPath, "a-live", true);
+    }
+    owner().pages.start();
+    // Native owner delivery enrolled A's owner: its observed binding, at A's
+    // old path, with no current adopted activation (which refuses a rename).
+    const binding = bindingOf(objectIdA);
+    const preconditions = {
+      ownerBoundAtOldPath: binding.ownerBindings.some(row => row.currentPath === oldPath),
+      anyBinding: binding.ownerBindings.length + binding.deviceBindings.length > 0,
+      currentActivation: binding.activations.some(row => row.releasedAtMs === null),
+    };
+    observe({ binding, preconditions });
+    expect(preconditions, `${kind}: before the rename, A's owner binding`)
+      .toEqual({ ownerBoundAtOldPath: bound, anyBinding: bound, currentActivation: false });
+    await settle(3, relay => relay.aOld);
+
+    // Step 2: with A's tab closed, the owner renames A in Explorer. A refusal
+    // is recorded, and A is then renamed on disk under the capture hold, as
+    // another program or an agent renames a file.
+    step = "2-rename";
+    const o = owner();
+    const renamed = await appRename(oldPath, newPath);
+    let route = "app";
+    if (!renamed.ok) {
+      route = "disk-under-hold";
+      const { holdId } = await o.adapter.holdCapture();
+      try { observe({ renamed, moved: await o.adapter.moveFileUnderHold({ holdId, fromPath: oldPath, toPath: newPath }) }); }
+      finally { await o.adapter.releaseCapture(holdId); }
+      await o.adapter.reconcileCapture();
+    }
+    const onDisk = (path: string) => stat(join(rootA, path)).then(() => true, () => false);
+    observe({ renamed, route, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) } });
+    await settle(3, relay => relay.aNew);
+
+    // Step 3: a new page B, and an ordinary saved change to the file C, which
+    // synced before step 1 and is not enrolled for live delivery.
+    step = "3-new-and-changed";
+    await writePage(newPage, "# B\n");
+    await saveFile(existing, savedC);
+    const blocked = await settle(4, reachedAll("aNew"));
+    expectOwnerIntact("after B and C", blocked);
+    expectPublished("after B and C", blocked);
+    if (kind === "unbound") return;
+
+    // Each recovery starts from the state step 3 left.
+    step = `recovery-${kind}`;
+    // Stop live editing on the Live documents row, which names the server's
+    // path for A (still its old one) and A's object.
+    if (kind === "stop") await tryStop({ path: oldPath, objectId: objectIdA });
+    // The workaround: rename A back in Explorer, Stop live editing on its
+    // row, wait until the row is Stopped, rename A to its new path again, sync.
+    if (kind === "workaround") {
+      const renamedBack = await appRename(newPath, oldPath);
+      observe({ renamedBack, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) } });
+      step = "recovery-workaround:1-renamed-back";
+      await settle(3, reachedAll("aOld"));
+      step = "recovery-workaround:2-stop";
+      await tryStop({ path: oldPath, objectId: objectIdA });
+      let row: Awaited<ReturnType<typeof serverRowOfA>> = null;
+      let owed = -1;
+      const stopped = await expect.poll(async () => {
+        row = await serverRowOfA();
+        owed = await owedStopsOfA();
+        return row !== null && "status" in row && row.status === "retired" && owed === 0;
+      }, { timeout: 120_000 }).toBe(true).then(() => true, () => false);
+      observe({ stoppedState: stopped, serverRow: row, owedStops: owed, ownerA: bindingOf(objectIdA) });
+      expect.soft(stopped, `${kind}: A's Live documents row reaches Stopped`).toBe(true);
+      const afterStop = await settle(4, reachedAll("aOld"));
+      expectOwnerIntact("after rename back and Stop", afterStop);
+      expectPublished("after rename back and Stop", afterStop, "aOld");
+      step = "recovery-workaround:3-renamed-again";
+      const renamedAgain = await appRename(oldPath, newPath);
+      observe({ renamedAgain, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) }, serverRow: await serverRowOfA() });
+    }
+    if (kind === "restart") {
+      await closeOwner();
+      current = await openOwner();
+      current.pages.start();
+      observe({ restarted: true });
+    }
+    const recovered = await settle(6, reachedAll("aNew"));
+    observe({ serverRow: bound ? await serverRowOfA() : null });
+    expectOwnerIntact(`after recovery ${kind}`, recovered);
+    expectPublished(`after recovery ${kind}`, recovered);
+  } catch (error) {
+    observe({ failed: reproErrorText(error), diagnostics: diagnostics() });
+    throw error;
+  } finally {
+    await peer?.close().catch(() => undefined);
+    try { await closeOwner(); } finally {
+      localStates.delete(rootA);
+      try { await relayServer?.stop(); } finally { await proxy.close(); }
+    }
+  }
+}
+
+it.skipIf(engine.missing)("renaming an owner-bound live page keeps its workspace publishing (wait, stop, workaround, restart, unbound)", async () => {
+  const ca = await mintLocalhostCa(await createTestScratch("dohc-repro-rename-ca-"));
+  const previousRoots = getCACertificates("default");
+  setDefaultCACertificates([...previousRoots, ca.ca]);
+  const trustEnv = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+    DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" };
+  for (const [name, value] of Object.entries(trustEnv)) vi.stubEnv(name, value);
+  const localStates = new Map<string, LocalStateBindings>();
+  readLocalStateFrom({
+    currentBinding: workspace => localStates.get(workspace.rootPath)?.currentBinding(workspace) ?? null,
+    openInProgress: workspace => localStates.get(workspace.rootPath)?.openInProgress?.(workspace) ?? null,
+    localStateOpenAt: rootPath => localStates.get(rootPath)?.localStateOpenAt(rootPath) ?? Promise.resolve(null),
+  });
+  try {
+    // The five workspaces run side by side so the case fits its time.
+    const cases: RenameReproCase[] = ["wait", "stop", "workaround", "restart", "unbound"];
+    const outcomes = await Promise.allSettled(cases.map(kind => runRenameRepro(kind, ca, trustEnv, localStates)));
+    const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [`${cases[index]}: ${reproErrorText(outcome.reason)}`] : []);
+    expect(failed, "every workspace reached the end of its steps").toEqual([]);
+  } finally {
+    readLocalStateFrom(null);
+    setDefaultCACertificates(previousRoots);
+    vi.unstubAllEnvs();
+  }
+}, 360_000);
