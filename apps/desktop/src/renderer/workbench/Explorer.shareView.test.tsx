@@ -83,7 +83,7 @@ describe("the delete confirmation states where the file goes", () => {
     const text = confirmText("one");
     expect(text).toContain("system trash");
     expect(text).toContain(".dohc/local/trash");
-    expect(text).toContain("restored from there");
+    expect(text).toContain("You can restore it from either.");
     // The fallback fires on any trash rejection, not only a drive without one
     // — `deletePath` catches every `trashItem` error, and copy.md names this
     // dialog as the place the narrower claim shipped.
@@ -91,7 +91,15 @@ describe("the delete confirmation states where the file goes", () => {
       text,
       "the stated condition is narrower than the one deletePath actually falls back on",
     ).not.toContain("drives without one");
-    expect(text).toContain("whenever the system trash refuses");
+    expect(text).toContain("if the system trash refuses it");
+  });
+
+  it("names both recovery locations for several items", () => {
+    render(<Explorer {...explorerProps()} />);
+    const text = confirmText("two");
+    expect(text).toContain(
+      "They move to the system trash, or to .dohc/local/trash in this workspace if the system trash refuses them. You can restore them from either.",
+    );
   });
 
   it("states the local delete is irreversible, and names who still has the file", () => {
@@ -103,7 +111,7 @@ describe("the delete confirmation states where the file goes", () => {
       "a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
     ).not.toContain("system trash");
     expect(text).not.toContain(".dohc/local/trash");
-    expect(text).not.toContain("restored from there");
+    expect(text).not.toContain("restore it from either");
     // And the irreversibility is stated, before the change runs. An
     // irreversible change the user is told about afterwards is the product
     // invariant this dialog exists to satisfy.

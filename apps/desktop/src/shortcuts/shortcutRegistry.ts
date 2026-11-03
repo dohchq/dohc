@@ -153,6 +153,11 @@ export function shortcutTitle(id: ShortcutId, platform: string | undefined): str
   return shortcutKeys(id, platform).join(platform === "darwin" ? "" : "+");
 }
 
+// One key inside a tooltip, such as Esc, for a key the registry has no row for.
+export function keyTitle(accelerator: string, platform: string | undefined): string {
+  return acceleratorKeys(accelerator, platform).join(platform === "darwin" ? "" : "+");
+}
+
 // The platform's command modifier, held alone: Command on macOS and Control
 // elsewhere. macOS keeps Control chords for text editing, such as ⌃A and ⌃K.
 export function hasPrimaryModifier(event: { metaKey: boolean; ctrlKey: boolean }, platform: string | undefined): boolean {

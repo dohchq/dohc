@@ -36,6 +36,8 @@ import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
+import { clear, extendBy, selectAll, selectOne, selectRange, toggle, type ExplorerSelection } from "./explorerSelection";
+import { SelectionBar } from "./SelectionBar";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
@@ -74,6 +76,7 @@ export type TreeChangeOperation = {
 };
 
 export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" };
+
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -308,6 +311,8 @@ const TREE_ROW_HEIGHT = 28;
 const TREE_VIRTUALIZATION_THRESHOLD = 200;
 const TREE_VIRTUAL_OVERSCAN = 12;
 const TREE_INITIAL_WINDOW_SIZE = 64;
+// A selected row's fill: the selection blue, with no hover change.
+const SELECTED_ROW_FILL = "bg-[var(--dohc-selection)] text-ink";
 
 function viewportOpenEditorsCap(): number {
   return Math.round(window.innerHeight * OPEN_EDITORS_VIEWPORT_FRACTION);
@@ -332,6 +337,9 @@ export const TreeRow = memo(function TreeRow(props: {
   // the folder glyph's place, and says so as data-app.
   app: boolean;
   selected: boolean;
+  // The row wears the selection fill: it is selected, unless it is the one
+  // selected row and also the open one, which keeps the open row's look.
+  selectionFill: boolean;
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
@@ -386,24 +394,15 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // One selected fill and a weight (VS Code list semantics): the
-        // ACTIVE-tab row and selected-not-active rows share the selected
-        // fill (Delete/drag act on the whole selection), and the active row
-        // alone is medium weight so it still reads inside a multi-selection
-        // once the tree loses focus. An attenuated fill for the
-        // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the row's 1px
-        // accent line inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
-        // Background style).
+        // The selection fill, the open row's fill and weight, or a drop preview, which wins.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
-            : props.active
-              ? "bg-selected font-medium text-ink"
-              : props.selected
-                ? "bg-selected text-ink"
+            : props.selectionFill
+              ? `${SELECTED_ROW_FILL}${props.active ? " font-medium" : ""}`
+              : props.active
+                ? "bg-selected font-medium text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
@@ -513,6 +512,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   selectionRef.current = selection;
   const anchorPathRef = useRef(anchorPath);
   anchorPathRef.current = anchorPath;
+  const focusedPathRef = useRef(focusedPath);
+  focusedPathRef.current = focusedPath;
   // Same ref-mirror idiom: rows keep their memoized callbacks when the
   // collection set refreshes.
   const collectionFoldersRef = useRef(props.collectionFolders);
@@ -675,6 +676,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // the click callback's identity.
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+  // Select-all and Shift-arrows run over every row in the expanded tree,
+  // mounted or not.
+  const rowKeys = useMemo(() => rows.map((row) => row.fullPath), [rows]);
 
   const renderItems = useMemo<TreeRenderItem[]>(() => {
     const items: TreeRenderItem[] = [];
@@ -713,6 +717,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
     return renderIndexByPath.keys().next().value ?? null;
   }, [focusedPath, renderIndexByPath, selection]);
+  const tabbablePathRef = useRef(tabbablePath);
+  tabbablePathRef.current = tabbablePath;
 
   const virtualized = renderItems.length > TREE_VIRTUALIZATION_THRESHOLD;
 
@@ -1058,12 +1064,32 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // ---- selection + clicks ----
 
+  const currentSelection = useCallback((): ExplorerSelection => ({
+    selected: selectionRef.current,
+    anchor: anchorPathRef.current,
+    focus: focusedPathRef.current,
+  }), []);
+  // The selected rows and the anchor. The caller moves the focus.
+  const setSelected = useCallback((next: ExplorerSelection) => {
+    setSelection(next.selected);
+    setAnchorPath(next.anchor);
+  }, []);
+  const applySelection = useCallback((next: ExplorerSelection) => {
+    setSelected(next);
+    setFocusedPath(next.focus);
+  }, [setSelected]);
+
   const selectSingle = useCallback((path: string) => {
     pendingFocusPath.current = null;
-    setSelection(new Set([path]));
-    setAnchorPath(path);
-    setFocusedPath(path);
-  }, []);
+    applySelection(selectOne(path));
+  }, [applySelection]);
+
+  // The selection bar's Clear selection: focus goes back to the tree.
+  const clearSelection = useCallback(() => {
+    setSelected(clear(currentSelection()));
+    const path = focusedPathRef.current ?? tabbablePathRef.current;
+    if (path) focusRow(path);
+  }, [currentSelection, focusRow, setSelected]);
 
   // A selection belongs to the view it was made in.
   const [selectionMode, setSelectionMode] = useState(props.mode);
@@ -1122,27 +1148,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const isFolder =
         rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
       if (hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
-        setSelection((current) => {
-          const next = new Set(current);
-          if (next.has(path)) next.delete(path);
-          else next.add(path);
-          return next;
-        });
-        setAnchorPath(path);
-        setFocusedPath(path);
+        applySelection(toggle(currentSelection(), path));
         return;
       }
-      const anchor = anchorPathRef.current;
-      if (event.shiftKey && anchor) {
-        const order = rowList.map((row) => row.fullPath);
-        const from = order.indexOf(anchor);
-        const to = order.indexOf(path);
-        if (from !== -1 && to !== -1) {
-          const [lo, hi] = from < to ? [from, to] : [to, from];
-          setSelection(new Set(order.slice(lo, hi + 1)));
-          setFocusedPath(path);
-          return;
-        }
+      const range = event.shiftKey ? selectRange(currentSelection(), rowList.map((row) => row.fullPath), path) : null;
+      if (range) {
+        applySelection(range);
+        return;
       }
       selectSingle(path);
       if (!isFolder) {
@@ -1154,7 +1166,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         onToggleFolder(path);
       }
     },
-    [selectSingle, onToggleFolder, onOpenFile, onOpenCollection],
+    [applySelection, currentSelection, selectSingle, onToggleFolder, onOpenFile, onOpenCollection],
   );
 
   const onRowChevronClick = useCallback(
@@ -1484,6 +1496,30 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (targets.length > 0) setConfirmDelete(targets);
         return;
       }
+      const state = { selected: selection, anchor: anchorPath, focus: focusedPath };
+      if (event.key === "Escape") {
+        // Only a row or the tree itself gets here: a menu, a dialog and the
+        // name field take their own Escape.
+        if (selection.size === 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setSelected(clear(state));
+        return;
+      }
+      if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelected(selectAll(state, rowKeys));
+        return;
+      }
+      if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+        const next = extendBy(state, rowKeys, event.key === "ArrowUp" ? -1 : 1);
+        if (next?.focus) {
+          event.preventDefault();
+          setSelected(next);
+          focusRow(next.focus);
+          return;
+        }
+      }
       const action = navigateTree(rows, focusedPath, event.key);
       if (!action) return;
       event.preventDefault();
@@ -1513,8 +1549,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [
       editing,
       rows,
+      rowKeys,
       focusedPath,
+      anchorPath,
       selection,
+      setSelected,
       beginRename,
       isFolderPath,
       focusRow,
@@ -1705,6 +1744,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
+          selectionFill={selection.has(row.fullPath) && !(selection.size === 1 && activeTab === row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewFor(row.fullPath)}
@@ -2039,6 +2079,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   ref={workspaceTreeRef}
                   role="tree"
                   aria-label="Workspace files"
+                  aria-multiselectable="true"
                   className="m-0 list-none p-0"
                 >
                   {renderedRows}
@@ -2050,6 +2091,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         </>
         )}
       </nav>
+      {home ? null : <SelectionBar count={selection.size} onClear={clearSelection} />}
 
       {confirmDelete ? (
         <ConfirmDialog
@@ -2072,7 +2114,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 } from. ${
                   props.shareView.granterEmail ?? "The person who shared it"
                 } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-              : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
+              : confirmDelete.length === 1
+                ? "It moves to the system trash, or to .dohc/local/trash in this workspace if the system trash refuses it. You can restore it from either."
+                : "They move to the system trash, or to .dohc/local/trash in this workspace if the system trash refuses them. You can restore them from either."}
           </p>
           {confirmDelete.length > 1 ? (
             <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
