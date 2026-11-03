@@ -165,11 +165,11 @@ describe("chat runner process", () => {
       else expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{extends=':workspace',/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       expect(args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : [])).toEqual(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES] : []);
       expect(args.includes("web_search='disabled'")).toBe(readOnly);
-      expect(args.slice(-4)).toEqual([readOnly ? "--ignore-rules" : expect.anything(), "--skip-git-repo-check", "--ephemeral", "-"]);
+      expect(args.slice(-5)).toEqual([readOnly ? "--ignore-rules" : expect.anything(), "--skip-git-repo-check", "--ephemeral", "--json", "-"]);
       // A reply-only run asks Codex first which servers these same arguments
       // start. `codex mcp list` takes no --ignore-rules.
       expect(checks.map((check) => [check.command, check.args, check.cwd])).toEqual(readOnly
-        ? [[process.execPath, ["mcp", "list", "--json", ...args.slice(3, -4)], root]]
+        ? [[process.execPath, ["mcp", "list", "--json", ...args.slice(3, -5)], root]]
         : []);
       if (readOnly) expect(checks[0]!.env).toBe(calls[0]!.options.env);
     }

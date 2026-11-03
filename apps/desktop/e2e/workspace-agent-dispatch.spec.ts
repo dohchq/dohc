@@ -1,7 +1,7 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
@@ -47,6 +47,13 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
+
+    // The Codex run's log starts with the thread's id, not with its prompt,
+    // which holds the whole chat.
+    await page.getByTestId("chats-message").filter({ hasText: REPORT }).getByTestId("chats-run-chip").click();
+    const log = await readFile((await page.getByTestId("chats-run-log-path").textContent())!, "utf8");
+    expect(log).toContain('"type":"thread.started"');
+    expect(log).not.toContain("check the exports");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
