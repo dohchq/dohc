@@ -4199,7 +4199,8 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
     const stopAndRetire = async () => {
       const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA })
         .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
-      expect(stopped.ok, `${kind}: Stop live editing is accepted`).toBe(true);
+      if (!stopped.ok) observe({ stopped, liveRow: await liveRowOfA(), ownerA: ownerRowsOfA(), head: headOfA() });
+      expect(stopped, `${kind}: Stop live editing is accepted`).toMatchObject({ ok: true });
       let row: Awaited<ReturnType<typeof liveRowOfA>> = null;
       await expect.poll(async () => {
         if (await owedStopsOfA() > 0) await syncPass();

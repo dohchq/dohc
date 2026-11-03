@@ -1459,7 +1459,8 @@ fn refuse_owned_restore(
     version_id: &str,
     path: &str,
 ) -> Result<(), RuntimeError> {
-    match dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, workspace_id, version_id, path) {
+    match dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, workspace_id, version_id, path)
+    {
         Ok(()) => refuse_owned_page(conn, workspace_id, version_id, path),
         Err(dohc_engine_sync::SyncError::LiveDocumentBindingActive) => Ok(()),
         Err(error) => Err(error.into()),
@@ -6546,7 +6547,10 @@ mod owned_page_delete_tests {
         }
         std::fs::remove_file(root.join("gone.md")).unwrap();
         let error = delete(&mut store, root, "gone.md", None, true).unwrap_err();
-        assert!(matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)), "{error:?}");
+        assert!(
+            matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
+            "{error:?}"
+        );
         assert!(head(&store, "gone.md"));
         std::fs::remove_file(root.join("plain.md")).unwrap();
         delete(&mut store, root, "plain.md", None, true).unwrap();
@@ -6610,14 +6614,21 @@ mod owned_page_delete_tests {
         page(&mut store, root, "plain.md", "plain");
         page(&mut store, root, "other.md", "other");
         bind(&mut store, "a");
-        let checked = WriteConditions { create_only: false, expected_sha256: Some(hex_sha256(b"Owned\n")) };
+        let checked = WriteConditions {
+            create_only: false,
+            expected_sha256: Some(hex_sha256(b"Owned\n")),
+        };
         for conditions in [None, Some(&checked)] {
-            let error = write_binary(&mut store, root, "a.md", "a", "restore", conditions).unwrap_err();
+            let error =
+                write_binary(&mut store, root, "a.md", "a", "restore", conditions).unwrap_err();
             assert!(
                 matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
                 "{conditions:?}: {error:?}"
             );
-            assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "Owned\n");
+            assert_eq!(
+                std::fs::read_to_string(root.join("a.md")).unwrap(),
+                "Owned\n"
+            );
         }
         write_binary(&mut store, root, "plain.md", "plain", "restore", None).unwrap();
         assert_eq!(std::fs::read(root.join("plain.md")).unwrap(), b"\0earlier");
