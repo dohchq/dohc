@@ -31,8 +31,8 @@ function sameFile(a: FileStamp, b: FileStamp): boolean {
   return a.path === b.path && a.size === b.size && a.mtimeMs === b.mtimeMs;
 }
 
-// The version an installed tool reports, or null when it reports none.
-export async function agentToolVersion(executable: string, resourcesRoot: string): Promise<string | null> {
+// The version Claude Code reports, or null when it reports none.
+export async function claudeCodeVersion(executable: string, resourcesRoot: string): Promise<string | null> {
   const before = await fileStamp(executable);
   const kept = before && reportedVersions.get(before.path);
   if (before && kept && sameFile(kept, before)) return kept.version;

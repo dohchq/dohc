@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentToolVersion, detectAgentTools, runProbe } from "./agentToolDetection";
+import { claudeCodeVersion, detectAgentTools, runProbe } from "./agentToolDetection";
 import * as toolProbe from "./agentToolProbe";
 import type { ProbeOutput } from "./agentToolProbe";
 
@@ -208,18 +208,18 @@ describe("Claude Code version check", () => {
       return probeChild;
     });
 
-    expect(await agentToolVersion(executable, resources)).toBeNull();
+    expect(await claudeCodeVersion(executable, resources)).toBeNull();
     // An update through a launcher that doesn't change takes effect.
     reported = "2.1.294";
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.294");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.294");
     reported = "2.1.317";
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.317");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.317");
     expect(mocks.spawn).toHaveBeenCalledTimes(3);
 
     reported = "2.1.320";
     writeFileSync(executable, "a different build");
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.320");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.320");
     expect(mocks.spawn).toHaveBeenCalledTimes(4);
   });
 
@@ -239,10 +239,10 @@ describe("Claude Code version check", () => {
       return probeChild;
     });
 
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.317");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.317");
     putBack();
     reported = "2.1.294";
-    expect(await agentToolVersion(executable, resources)).toBe("2.1.294");
+    expect(await claudeCodeVersion(executable, resources)).toBe("2.1.294");
     expect(mocks.spawn).toHaveBeenCalledTimes(2);
   });
 });
