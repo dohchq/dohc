@@ -18,26 +18,33 @@ const WORKSPACE = "C:\\Users\\Sam\\dohc\\personal";
 const OUTSIDE = ["C:\\other", "C:\\two words", "C:\\o'brien", "C:\\a\u007fb", "C:\\last"];
 
 // A disk with these folders and every folder above them. A link at a path
-// names another path, which the disk follows one link at a time. An alias is
-// another spelling of a folder, such as its letter case or short name. A share
-// reaches the files of the local path it maps to, as their file ids show.
-function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases = {}, shares = {}, links = {} }: {
+// names another path, which the disk follows name by name, applying a `..`
+// after the link before it. A hidden link is one that readlink doesn't report,
+// such as a Windows junction to a volume path. An alias is another spelling of
+// a folder, such as its letter case or short name. A share reaches the files
+// of the local path it maps to, as their file ids show.
+function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases = {}, shares = {}, links = {}, hidden = {} }: {
   aliases?: Record<string, string>;
   shares?: Record<string, string>;
   links?: Record<string, string>;
+  hidden?: Record<string, string>;
 } = {}) {
   const path = platform === "win32" ? win32 : posix;
   const known = new Set<string>();
   for (const folder of folders) for (let at = folder; !known.has(at); at = path.dirname(at)) known.add(at);
   const share = (value: string) => Object.keys(shares).find((prefix) => value.startsWith(prefix));
-  const follow = (value: string): string => {
-    let at = value;
-    for (let hops = 0; hops < 40; hops += 1) {
-      const link = Object.keys(links).filter((from) => at === from || at.startsWith(`${from}${path.sep}`)).sort((a, b) => b.length - a.length)[0];
-      if (link === undefined) return at;
-      at = `${path.resolve(path.dirname(link), links[link]!)}${at.slice(link.length)}`;
+  const follow = (value: string, hops = { left: 40 }): string => {
+    const { root } = path.parse(value);
+    let at = root;
+    for (const name of value.slice(root.length).split(platform === "win32" ? /[\\/]/u : /\//u)) {
+      if (name === "" || name === ".") continue;
+      at = name === ".." ? path.dirname(at) : path.join(at, name);
+      const target = links[at] ?? hidden[at];
+      if (target === undefined) continue;
+      if (--hops.left < 0) throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
+      at = follow(path.isAbsolute(target) ? target : `${path.dirname(at)}${path.sep}${target}`, hops);
     }
-    throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
+    return at;
   };
   const realPath = (value: string): string => {
     const real = follow(aliases[value] ?? value);
@@ -313,7 +320,7 @@ describe("a dohc Codex run", () => {
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("linux", [
         "/home/sam", "/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/srv/other/.dohc",
-        "/tmp/out", "/var/tmp/out", "/opt/a/b", "/opt/c",
+        "/tmp/out", "/var/tmp/out", "/opt/a/b", "/opt/c", "/data/ws/x/y",
       ], {
         links: {
           "/home/sam/ws": "/data/ws",
@@ -326,13 +333,18 @@ describe("a dohc Codex run", () => {
           "/data/ws/build": "/srv/other/.dohc",
           // A link inside the folder it names.
           "/opt/c/self": ".",
+          // A link whose `..` comes after a link, where a run turned ws/cache into a
+          // link deeper in the workspace and ws/lib into a link into another workspace.
+          "/home/sam/up": "ws/cache/../../lib",
+          "/data/ws/cache": "/data/ws/x/y",
+          "/data/ws/lib": "/srv/other/.dohc",
         },
       }),
       env: { TMPDIR: "/srv/tmp/me" },
     }));
     const roots = [
       "/home/sam/notes", "/home/sam/dohc", "/data", "/home/sam/ws/out", "/srv/tmp/me/out", "/tmp/out", "/var/tmp/out",
-      "/opt/a", "/opt/a/b", "/opt/a/link", "/home/sam/proj",
+      "/opt/a", "/opt/a/b", "/opt/a/link", "/home/sam/proj", "/home/sam/up",
     ];
     expect(run(roots)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/opt/a": "write" });
     expect(run([...roots, "/cache/build"])).toEqual({
@@ -340,6 +352,18 @@ describe("a dohc Codex run", () => {
     });
     expect(run(["/opt/c/self"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
     expect(run(["/opt/c/self", "/opt/c"])).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/opt/c": "write" });
+  });
+
+  it("drops writable folders reached through a junction readlink doesn't report", () => {
+    const other = "C:\\Users\\Sam\\dohc\\other\\.dohc";
+    const run = (roots: string[]) => filesystem(windowsRun({ [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n` }, undefined,
+      disk("win32", [WORKSPACE, other, "C:\\opt\\c"], {
+        links: { "C:\\proj": `${WORKSPACE}\\out` },
+        // Junctions to volume paths, which readlink refuses and a run can make.
+        hidden: { [`${WORKSPACE}\\out`]: other, "C:\\opt\\c\\self": "C:\\opt\\c" },
+      })));
+    expect(run(["C:\\proj", "C:\\opt\\c\\self"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
+    expect(run(["C:\\opt\\c\\self", "C:\\opt\\c"])).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\opt\\c": "write" });
   });
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {

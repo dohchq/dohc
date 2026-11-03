@@ -144,9 +144,9 @@ function attempt<T>(read: () => T): T | null {
 // - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
 // - is .dohc under another name, such as a share;
 // - is inside the workspace, a temp folder or another folder dohc keeps, or
-//   is reached through a link in one of them or in the folder itself, because
-//   the run can write there and swap it for a link that this run or the next
-//   one would follow;
+//   is reached through one of them or through the folder itself, because the
+//   run can write there and swap it for a link that this run or the next one
+//   would follow;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
 function writableRootEntries(tables: readonly ConfigTable[], input: {
@@ -176,18 +176,19 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
       if (path.dirname(at) === at) return ids;
     }
   };
-  // The folders holding each link on the way from a path to the folder it
-  // names, one link at a time. Throws on a loop.
-  const follow = (at: string, hops = { left: 40 }): { path: string; holders: string[] } => {
+  // The folder a path names, found one link at a time, and every folder looked
+  // in on the way, where a link could be. Throws on a loop.
+  const follow = (at: string, hops = { left: 40 }): { path: string; through: string[] } => {
     const parent = path.dirname(at);
-    if (parent === at) return { path: at, holders: [] };
+    if (parent === at) return { path: at, through: [] };
     const up = follow(parent, hops);
     const here = path.join(up.path, path.basename(at));
+    const through = [...up.through, up.path];
     const target = input.readLink(here);
-    if (target === null) return { path: here, holders: up.holders };
+    if (target === null) return { path: here, through };
     if (--hops.left < 0) throw new Error("Too many links");
     const next = follow(path.resolve(up.path, target), hops);
-    return { path: next.path, holders: [...up.holders, up.path, ...next.holders] };
+    return { path: next.path, through: [...through, ...next.through] };
   };
   const writable = new Set([
     workspace, attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
@@ -201,10 +202,16 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const written = path.resolve(path.dirname(setting.file), expanded);
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
-    const links = attempt(() => follow(written).holders.flatMap(above));
+    const reached = attempt(() => follow(written));
+    // The id of the folder follow reaches, then of each folder it looks in,
+    // which also holds any link that readlink can't read.
+    const ids = reached === null ? [] : [reached.path, ...reached.through].map((folder) => attempt(() => input.fileId(folder)));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
-    if (real === null || id === null || links === null || links.includes(id) || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
-    listed.push({ id, real, above: [...above(real), ...links] });
+    if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    // A `..` after a link can take Codex somewhere follow didn't go, and a
+    // link inside the folder itself lets the run point it elsewhere.
+    if (ids[0] !== id || ids.includes(id, 1)) continue;
+    listed.push({ id, real, above: [...above(real), ...ids.filter((each): each is string => each !== null)] });
   }
   // Codex may name the workspace by either path.
   const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));
