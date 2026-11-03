@@ -385,13 +385,14 @@ export function ChatLane(props: {
       if (result.resolveFailure) stayedOpen(result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
-      // Nothing posted, so Try again sends the choice again. The change it
-      // makes reloads the conversation.
-      const again = () => void bridge().sendChatMessage(input).then((result) => {
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(input.workspaceId);
-        if (result.resolveFailure) stayedOpen(result.resolveFailure);
-      }, (retryError: unknown) => onError("dohc could not send your choice.", retryError, again));
-      onError("dohc could not send your choice.", error, again);
+      // A send can fail after main saved the choice, so sending it again could
+      // post it twice, and the conversation reloads instead. A question that
+      // now shows this choice answered needs no message.
+      const now = await bridge().listChatThreadDecisions({ workspaceId, threadId: decision.threadId }).catch(() => null);
+      if (current !== token.current) return;
+      const landed = now?.decisions.some(entry =>
+        entry.messageId === decision.messageId && entry.state === "resolved" && entry.chosenOption === option);
+      if (!landed) onError("dohc could not tell whether your choice was sent.", error);
     } finally {
       if (current === token.current) {
         setSending(false);

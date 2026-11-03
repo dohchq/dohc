@@ -414,37 +414,55 @@ describe("ChatLane", () => {
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
-  it("says a choice that did not send, and Try again sends it again", async () => {
+  // A send can fail after main saved the choice, so no failure offers to
+  // send it again.
+  describe("a choice whose send failed", () => {
     const decision = { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Friday", "Monday"] };
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
-    const input = {
-      workspaceId: "workspace-a", threadId: "thread-1", body: "Monday",
-      resolves: { messageId: "message-1", chosenOption: "Monday" },
-    };
-    bridgeMock.sendChatMessage
-      .mockRejectedValueOnce(new Error("The engine stopped."))
-      .mockRejectedValueOnce(new Error("The engine stopped."))
-      .mockResolvedValueOnce({
-        message: message({ id: "answer", body: "Monday" }),
-        resolveFailure: "Error: Your server session changed. Try again.",
-        waitsForTrust: true,
+    async function choose(afterFailure: () => void) {
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
+        afterFailure();
+        throw new Error("Your server session changed. Try again.");
       });
-    render(lane());
-    fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not send your choice.", expect.any(Error), expect.any(Function)));
-    const tryAgain = onError.mock.lastCall?.[2] as () => void;
-    onError.mockClear();
-    tryAgain();
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not send your choice.", expect.any(Error), expect.any(Function)));
-    const tryOnceMore = onError.mock.lastCall?.[2] as () => void;
-    onError.mockClear();
-    tryOnceMore();
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "Sent your choice. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
-    expect(onError.mock.lastCall?.[2]).toBeUndefined();
-    expect(onAgentWaitsForTrust).toHaveBeenCalledWith("workspace-a");
-    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(3);
-    for (const call of bridgeMock.sendChatMessage.mock.calls) expect(call[0]).toEqual(input);
+      render(lane());
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(onError).toHaveBeenCalled());
+    }
+
+    it("says dohc can't tell whether it was sent, with no Try again, while the question stays open", async () => {
+      await choose(() => undefined);
+      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    });
+
+    it("says dohc can't tell whether it was sent when the question can't be read either", async () => {
+      await choose(() => {
+        bridgeMock.listChatThreadDecisions.mockRejectedValueOnce(new Error("The engine stopped."));
+      });
+      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
+    });
+
+    it("says nothing when the question now shows the choice answered", async () => {
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+      bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
+        bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
+          { ...decision, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" }] });
+        throw new Error("Your server session changed. Try again.");
+      });
+      render(lane());
+      fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+      await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
+      expect(onError).not.toHaveBeenCalled();
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
+    });
+
+    it("still says it can't tell when someone else answered with another choice", async () => {
+      await choose(() => {
+        bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [
+          { ...decision, state: "resolved", chosenOption: "Friday", resolvedByMessageId: "other" }] });
+      });
+      expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not tell whether your choice was sent.", expect.any(Error));
+    });
   });
 
   function openPoll() {
